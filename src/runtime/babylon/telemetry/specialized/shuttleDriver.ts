@@ -778,7 +778,9 @@ export class ShuttleTelemetryDriver {
     const cargo = this.state.shuttleCargoMeshes.get(state.cargoKey);
     if (!cargo) return;
 
-    this.host.syncGeneratedCargoVisual(cargo, 'shuttle', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'shuttle', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     const targetPosition = state.cargoBoundToFork || !state.cargoHoldPosition
       ? this.getShuttleForkCargoPosition(model)
       : state.cargoHoldPosition;

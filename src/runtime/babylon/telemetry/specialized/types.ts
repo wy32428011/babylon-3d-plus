@@ -187,6 +187,8 @@ export type GeneratedCargoRuntimeEntry = {
   fallback: GeneratedCargoFallbackRuntimeEntry | null;
   /** 货箱模板来源生成器实体 ID；null 表示内置几何体回退。 */
   generatorEntityId: string | null;
+  /** 当前承运该货物的宿主设备实体 ID；跨设备接管时随驱动刷新，供点击事件回溯宿主资产编号。 */
+  hostEntityId?: string;
   /** 跨设备接管时的视觉过渡；null 表示无交接插值。 */
   handoff: CargoHandoffState | null;
   /** conveyor 专用：按模板 target 签名缓存的实测沿行走轴长度（米），避免每帧重测包围盒。 */
@@ -577,11 +579,13 @@ export interface SpecializedTelemetryHost {
     component: ModelGeneratorComponent,
     snapshot: DeviceTelemetrySnapshot,
   ): GeneratedOutputOwnerRuntimeEntry;
+  /** hostEntityId 为本帧承运该货物的宿主设备实体，写入 cargo 供生成器产物点击事件回溯。 */
   syncGeneratedCargoVisual(
     cargo: GeneratedCargoRuntimeEntry,
     kind: GeneratedCargoKind,
     snapshot: DeviceTelemetrySnapshot,
     generator: ModelGeneratorRuntimeEntry | null,
+    hostEntityId: string,
   ): void;
   setGeneratedCargoRootPose(cargo: GeneratedCargoRuntimeEntry, position: Vector3, rotation: Quaternion, scaling?: Vector3 | null): void;
   disposeGeneratedCargo(cargo: GeneratedCargoRuntimeEntry): void;

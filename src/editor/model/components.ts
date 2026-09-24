@@ -197,8 +197,22 @@ export type ModelGeneratorMeshTarget = {
   materialColor: string;
 };
 
+/**
+ * 模型生成器的组合资源库引用目标：只存 libraryId + revision（拖入时钉死版本），
+ * 组合定义与成员参数固化在组合包 composition.json 中，运行时经 loadComposition IPC 现取。
+ */
+export type ModelGeneratorCompositionTarget = {
+  kind: 'composition';
+  libraryId: string;
+  revision: string;
+  displayName: string;
+  thumbnailUrl?: string;
+  /** 拖入时组合的成员数量，仅作 Inspector 摘要展示。 */
+  memberCount?: number;
+};
+
 /** 模型生成器可生成的目标类型集合。 */
-export type ModelGeneratorTarget = ModelGeneratorModelTarget | ModelGeneratorMeshTarget;
+export type ModelGeneratorTarget = ModelGeneratorModelTarget | ModelGeneratorMeshTarget | ModelGeneratorCompositionTarget;
 
 /** 模型生成器规则，根据属性名和值选择一个生成目标。 */
 export type ModelGeneratorRule = {

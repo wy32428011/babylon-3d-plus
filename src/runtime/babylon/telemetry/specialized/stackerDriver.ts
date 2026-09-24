@@ -988,7 +988,9 @@ export class StackerTelemetryDriver {
     const holdRotation = side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation;
     const holdScaling = side === 'front' ? state.frontCargoHoldScaling : state.backCargoHoldScaling;
 
-    this.host.syncGeneratedCargoVisual(cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'stacker', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     let targetPosition: Vector3;
     if (bound || !holdPosition) {
       const forkPosition = this.getStackerForkCargoPosition(model, side);

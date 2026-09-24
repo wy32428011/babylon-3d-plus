@@ -5,6 +5,7 @@ import {
   decodeModelAssetDragPayload,
   MODEL_ASSET_DRAG_MIME_TYPE,
 } from '../assets/AssetDatabase';
+import { COMPOSITION_DRAG, parseCompositionDragPayload } from '../composition/composition';
 import type {
   ModelGeneratorComponent,
   ModelGeneratorRule,
@@ -14,6 +15,7 @@ import {
   MODEL_GENERATOR_MAX_RULES,
   createMeshModelGeneratorTarget,
   createModelGeneratorTargetFromAsset,
+  createModelGeneratorTargetFromComposition,
 } from '../model/modelGenerator';
 import { useEditorStore } from '../store/editorStore';
 import { createId } from '../../shared/ids';
@@ -34,7 +36,8 @@ const BUILT_IN_MODEL_NAMES = {
 /** 判断拖拽事件是否包含模型库可用于生成槽位的载荷。 */
 function hasModelGeneratorTargetPayload(event: DragEvent<HTMLElement>): boolean {
   return event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE)
-    || event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
+    || event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE)
+    || event.dataTransfer.types.includes(COMPOSITION_DRAG);
 }
 
 /** 从模型库拖拽数据读取合法目标，只接受普通模型和内置基础网格。 */
@@ -53,6 +56,32 @@ function readModelGeneratorTargetFromDrop(event: DragEvent<HTMLElement>): ModelG
     builtInAsset.meshKind,
     BUILT_IN_MODEL_NAMES[builtInAsset.meshKind],
   );
+}
+
+/** 组合卡片拖入：异步加载组合库条目确认存在并钉死当前 revision，失败只记日志不写目标。 */
+function readCompositionTargetFromDrop(
+  event: DragEvent<HTMLElement>,
+  onTargetChange: (target: ModelGeneratorTarget | null) => void,
+): boolean {
+  const rawPayload = event.dataTransfer.getData(COMPOSITION_DRAG);
+  if (!rawPayload) return false;
+
+  const pushLog = useEditorStore.getState().pushLog;
+  let payload: { id: string; revision?: string };
+  try {
+    payload = parseCompositionDragPayload(rawPayload);
+  } catch (error) {
+    pushLog(String(error));
+    return true;
+  }
+
+  void window.editorApi.loadComposition(payload.id, payload.revision).then((entry) => {
+    if (!entry) throw new Error('组合卡片已不存在，请刷新资源库。');
+    onTargetChange(createModelGeneratorTargetFromComposition(entry));
+  }).catch((error) => {
+    pushLog(`组合模板加载失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+  return true;
 }
 
 /** 渲染并编辑模型生成器的共享模板与条件规则；设备侧绑定在遥测绑定面板、定位线框侧绑定在 Fetch 数据驱动中配置。 */
@@ -114,6 +143,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     event.stopPropagation();
     setActiveDropZone(null);
 
+    if (readCompositionTargetFromDrop(event, onTargetChange)) return;
     const target = readModelGeneratorTargetFromDrop(event);
     if (target) onTargetChange(target);
   }
@@ -135,7 +165,18 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     const className = activeDropZone === dropZoneId
       ? 'model-generator-target-slot model-generator-target-slot-active'
       : 'model-generator-target-slot';
-    const title = target?.kind === 'model' ? target.modelAsset.sourcePath : target?.displayName;
+    const title = target?.kind === 'model'
+      ? target.modelAsset.sourcePath
+      : target?.kind === 'composition'
+        ? `组合模型（revision ${target.revision}）`
+        : target?.displayName;
+    const thumbnailUrl = (target?.kind === 'model' || target?.kind === 'composition') ? target.thumbnailUrl : undefined;
+    const badgeText = target?.kind === 'mesh' ? 'Mesh' : target?.kind === 'composition' ? 'Comp' : 'Model';
+    const subtitle = target?.kind === 'mesh'
+      ? '内置基础网格'
+      : target?.kind === 'composition'
+        ? `组合模型 · revision ${target.revision}${target.memberCount !== undefined ? ` · ${target.memberCount} 个成员` : ''}`
+        : '项目模型';
 
     return (
       <div className="model-generator-target-row">
@@ -155,20 +196,27 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
             setActiveDropZone(dropZoneId);
           }}
           onDrop={(event) => handleTargetDrop(event, dropZoneId, onTargetChange)}
-          title={title || '从模型库拖入普通模型或内置基础网格'}
+          title={title || '从模型库拖入普通模型或内置基础网格，或从组合库拖入组合模型'}
         >
           {target ? (
             <>
               <span className="model-generator-target-preview" aria-hidden="true">
-                {target.kind === 'model' && target.thumbnailUrl ? (
-                  <img alt="" src={target.thumbnailUrl} />
+                {thumbnailUrl ? (
+                  <img
+                    alt=""
+                    onError={(event) => {
+                      // 组合/模型缩略图为 editor-asset://local/ 引用，跨环境打开场景时可能失效，隐藏回退徽标
+                      event.currentTarget.style.display = 'none';
+                    }}
+                    src={thumbnailUrl}
+                  />
                 ) : (
-                  <span>{target.kind === 'mesh' ? 'Mesh' : 'Model'}</span>
+                  <span>{badgeText}</span>
                 )}
               </span>
               <span className="model-generator-target-text">
                 <strong>{target.displayName}</strong>
-                <small>{target.kind === 'mesh' ? '内置基础网格' : '项目模型'}</small>
+                <small>{subtitle}</small>
               </span>
               <button
                 aria-label={'清空' + label}

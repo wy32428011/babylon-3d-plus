@@ -1,8 +1,10 @@
 import {
   buildClickEventAssetClickedPayload,
   resolveClickEventBindingClick,
+  resolveGeneratedUnitClick,
   type ClickEventAssetClickedPayload,
   type ClickEventBindingPickedCell,
+  type GeneratedUnitClickHit,
 } from '../editor/model/clickEventBinding';
 import type { SceneDocument } from '../editor/model/SceneDocument';
 import type { DigitalTwinSlotCoordinate } from '../shared/digitalTwinSlotCodes';
@@ -21,16 +23,18 @@ type ViewerModelClickEffects = {
   showScreen?: (screen: { projectId: string; screenId: string }) => void;
 };
 
-/** 鼠标拾取与搜索共用点击绑定；搜索已完成聚焦，可跳过事件中的二次相机移动。 */
+/** 鼠标拾取与搜索共用点击绑定；搜索已完成聚焦，可跳过事件中的二次相机移动。generatedUnit 为生成器产物命中，优先于按设备类型匹配的常规点击。 */
 export function createViewerModelClickHandler(scene: SceneDocument, effects: ViewerModelClickEffects) {
   return (
     targetEntityId: string | null,
     pickedCell: ClickEventBindingPickedCell | null = null,
-    options: { focus?: boolean } = {},
+    options: { focus?: boolean; generatedUnit?: GeneratedUnitClickHit | null } = {},
   ): void => {
     const entityId = (targetEntityId && scene.entities[targetEntityId]?.components.locator?.builtInBinding?.hostEntityId)
       || targetEntityId;
-    const resolution = resolveClickEventBindingClick(scene, entityId, pickedCell);
+    // 命中生成产物时按产物自身的绑定决策；生成器未配置点击事件则回落到常规点击。
+    const resolution = (options.generatedUnit ? resolveGeneratedUnitClick(scene, options.generatedUnit) : null)
+      ?? resolveClickEventBindingClick(scene, entityId, pickedCell);
     if (resolution.kind !== 'ignore') effects.beginSelection?.();
     const assetClickedPayload = buildClickEventAssetClickedPayload(scene, resolution);
     if (assetClickedPayload) effects.emitAssetClicked?.(assetClickedPayload);

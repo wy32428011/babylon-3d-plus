@@ -60,6 +60,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 点击事件高亮与固定轨道
 
+- 点击事件绑定有两种挂载，共用同一 `ClickEventBindingComponent`（序列化零新增字段）：**POI 标记**（`deviceSlots` 按 `modelAsset.sourceUrl` 全场匹配设备类型）与**生成器自带**（`deviceSlots` 恒空，作用域是本生成器的产物，见第 9 章）。
 - 点击事件绑定的「高亮选中」效果支持「忽略固定轨道」参数（`ClickEventBindingEvent.highlight.excludeFixedTrack`）：命中 stacker/RGV 时轨道子树网格不参与描边，只描设备本体。
 - 轨道识别与遥测驱动同一套语义（`fixedTrackHighlightNodes.ts`）：`dataDriven.fixedNodes` 声明优先，缺失按 capable 标志回退（stacker 固定名 / RGV A37~A46 正则）。modelArrayBatch 薄实例批次路径无法按实体剔除网格，该参数不生效。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
@@ -102,7 +103,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 仅货物平移，**本体滚筒/链条不驱动**（:98）。每帧 `cargoTravelOffset += direction × forwardSign × speed × dt`（:342-346），`getConveyorCargoPosition`(:1182-1190) = 中心 + surfaceLift + 轴向偏移。
 
 ### 时序
-无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1116-1124)。端点容差 1e-3（:51）。自驱续行在 movement 归 0 后接管(:331-341)。
+无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1116-1124)。实测半长按生成器输出类型取世界包围盒在行走轴投影；**组合输出的阵列批次网格必须走 `getThinInstanceMeshWorldBounds` 逐实例矩阵测量**——批次几何保留成员原始坐标（单位换算烘在逐实例矩阵内、网格自身世界矩阵不含缩放），走 `getMeshWorldBounds` 的几何×网格世界矩阵路径会按原始单位放大长度（如厘米箱测出 18m），行程半径被压到下限、货物冻结在输送线中心。端点容差 1e-3（:51）。自驱续行在 movement 归 0 后接管(:331-341)。
 
 ### 状态机（ConveyorModelTelemetryState, types.ts:290-329）
 `cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/订阅(:227-296)；mode=2+双光电空→销毁(:207-222)；交付 settle(:663-699)。
@@ -367,7 +368,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 1. `beginTelemetryPreview`：SceneRuntime `configureDeviceSpawnersFromDocument` 解析各产生器模板实体（deviceType 取模板 telemetryBinding.deviceType 或 dataDrivenConfig.device.devType），`DeviceSpawnerRuntime.configure` 注册 spawnerCode→配置并订阅 spawn 消息。
 2. 消息到达 `handleMessages`：`p=status/v=offline` → 销毁；否则查实例表（`createSpawnedDeviceKey(spawnerCode, assetCode)`，已有则只刷新 `lastMessageAt`），无实例则经 host `spawnDeviceInstance` 生成，成功后 `createSpawnSnapshot` upsert 进 deviceTelemetryStore。
 3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为消息 e**，合成 entitySnapshot 供驱动读 parameterValues；root 位置=模板世界位置；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
-4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`），**五种现有 driver 零改动**驱动动画；网格 `isPickable=false`，不进编辑选择。
+4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`，常量由 `createSpawnedDeviceEntityId` / `parseSpawnedDeviceEntityId` 维护），**五种现有 driver 零改动**驱动动画；网格 `isPickable=true` 仅为生成器产物点击链路服务，常规实体拾取仍按元数据缺 `editorEntityId` 过滤，动态实例不进编辑选择。
 5. 回收：`applyFrame(nowMs)` 每帧先收集 `now - lastMessageAt > timeoutSeconds` 的实例，**帧尾统一销毁**（禁止边迭代边销毁）；显式下线立即销毁；`endTelemetryPreview` 调 `disposeAll` 清零（在预览态早退判断之前执行）。
 
 ### 调试工具
@@ -382,6 +383,69 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **快照残留**：telemetry store 无单 key 删除，超时销毁后快照留存但无候选匹配，endTelemetryPreview 统一 clear。
 - **sourceId 对齐**：spawn 快照 sourceId 必须与实例 binding.sourceId 一致，统一从订阅 adapter 透传。
 - 动态实例**不写回 SceneDocument**，退出预览全部消失；模板实例的参数修改在下次预览生效。
+
+---
+
+## 8. 模型生成器组合货物模板（kind:'composition'）
+
+模型生成器除 `kind:'model'`（单 GLB）/`kind:'mesh'`（内置几何体）外，支持拖入组合资源库条目作为货物模板。
+
+### 数据与绑定语义
+
+- 目标仅存引用 `{ kind:'composition', libraryId, revision, displayName, thumbnailUrl? }`（components.ts），**不内嵌组合定义**；revision 拖入时钉死，组合库更新不影响已保存场景，需重新拖入才升级。
+- 参数固化在组合包 `composition.json`（capture 时写入成员 modelAsset.parameterValues），生成器侧无实体、不可调参；改参数路径 = 场景放实例调参 → 另存新 revision → 重新拖入。
+- sanitize 对未知/非法 kind 返回 null（modelGenerator.ts），旧版编辑器打开含组合目标的场景回退内置 Box，不崩溃；场景版本仍为 3。
+- 签名 = `JSON.stringify({kind, libraryId, revision})`，revision 变即新签名，设备侧 `failedTargetSignatures` 与 fetch 侧批次分组的现有按签名去重/失败缓存自动生效。
+
+### 运行时链路
+
+- 组合定义经 `window.editorApi.loadComposition(libraryId, revision)` 异步加载，模块级 Promise 缓存（`composition/compositionCargoCache.ts`，inflight 去重），预览开始/停止时随 `clearModelGeneratorLoadFailureCache` 清空。
+- 成员层级由 `composition/compositionCargoBuilder.ts` 的 `buildCompositionNodeTree` 建树（节点 transform 即相对组合 frame 的局部量），compositionRoot 挂 cargo root 下随 `setGeneratedCargoRootPose` 移动。
+- **设备货物路径**：`loadModelGeneratorCompositionOutput`（SceneRuntime）逐成员加载——modelAsset 成员复用 `loadModelRuntimeAssets` + `applyModelUnitScale` + `applyModelAssetParameters`（**不做** normalizeModelContentOrigin，保留相对结构；**不执行**成员 .model.ts 脚本）；meshRenderer 成员建内置几何体；modelArrayInstance 成员展开为 `EntityArrayThinInstanceBatch`（源成员强制独占容器加载——共享 InstancedMesh 不能作批次几何源；实例矩阵 = 各成员节点相对 cargo root 的构建时刻局部矩阵，batch 网格挂组合根随动；源成员原始 Mesh 移出 scene 仅由批次承载；实例数 ≤256）。加载失败走现有 `handleModelGeneratorLoadFailure` 链回退 Box。
+- **fetch thinInstance 路径**：`loadModelTemplateForFetch`（SceneRuntime）composition 分支建树后逐成员加载，阵列成员按 `mesh.clone()`（共享 Geometry）展开，整树包围盒底部中心统一锚定原点（与单模型同语义）；`LocatorFetchRuntime.extractTemplateParts` 逐 mesh 烘焙世界矩阵，多成员零改动。阵列展开阈值保护：实例总数 ≤256 / parts ≤1024，超限记日志回退。
+- 组合货物不产生 Effect/POI 目标（`prepareEffectTargets`/`describeGeneratedEffectTarget` 对非 model 跳过）。
+- 组合内某成员模型包缺失 → 整组合同步失败统一回退（保守策略，不部分渲染）。
+
+---
+
+## 9. 生成器产物点击事件绑定
+
+模型生成器与设备产生器的 Inspector 各带一个「点击事件绑定」栏目（`ClickEventBindingInspector` 的 `variant="generator"`），配置的是**本生成器产物**的点击行为，而不是全场设备类型。
+
+### 编辑期
+
+- 生成器实体工厂（`createModelGeneratorEntity` / `createDeviceSpawnerEntity`）默认挂 `clickEventBinding = { deviceSlots: [], events: [] }`（`createGeneratorClickEventBindingComponent`，clickEventBinding.ts）。**事件为空即未接管**，点击回落到常规拾取；配了 `click` 事件才接管产物点击。
+- 生成器变体不渲染设备类型段（作用域由生成器本身确定）、不渲染事件类型下拉（产物没有货格概念，恒为 `click`）；「忽略固定轨道」参数保留——货箱的高亮目标是宿主设备，仍需该参数。
+- 生成器实体不生成编辑态点击标记：`isClickEventBindingMarkerEntity`（SceneRuntime.ts）把 `modelGenerator`/`deviceSpawner` 实体从标记的同步与销毁管理中排除。
+- 旧场景里已存在的生成器没有该组件，加载后不出现栏目（需重新创建生成器）。
+
+### 运行期：捕获
+
+- 产物网格一律 `isPickable = true`（`applyGeneratedOutputPresentation` / `refreshModelGeneratorModelMeshes` / `refreshSpawnedDeviceModelMeshes`）。常规实体拾取的谓词要求元数据带已注册的 `editorEntityId`，产物不带，因此可拾取性**只**服务本链路，不改变原有拾取结果；回退 Box 是「模板不可用」占位，仍保持 `isPickable = false`。
+- `pickGeneratedUnitClickTargetAtCanvasPoint`（SceneRuntime.ts）单独做一次射线：命中网格的元数据经 `readGeneratedUnitClickTarget` 解析为 `GeneratedUnitClickHit`。任一生成器未配置 `click` 事件时（`hasGeneratedUnitClickBinding`）直接返回 null，不为普通点击加射线。
+- 元数据来源：货箱 `generatorEntityId` + `hostEntityId` + `sourceAssetCode`；动态实例 `spawnerEntityId` + `spawnedEntityId` + `spawnedAssetCode`。
+- 优先级（Viewer 与编辑器预览一致）：产物**精确三角面命中优先**，常规命中是包围盒兜底（`precise=false`）时按距离比较。
+
+### 运行期：决策与上报
+
+- `resolveGeneratedUnitClick`（clickEventBinding.ts）读生成器实体上第一条 `click` 事件，产出 `trigger` 决议：
+  - **货箱**（模型生成器产物）：没有自身资产编号 → 上报 `sourceAssetCode`（= 承运设备的 assetCode），高亮/聚焦目标是宿主设备实体。
+  - **动态设备**（设备产生器产物）：自带编号 → 上报 `spawnedAssetCode`，高亮/聚焦目标是合成实体 id `spawned:{key}`。
+- `ClickEventBindingClickResolution.trigger.reportAssetCode` 是产物的上报编号覆盖位：产物没有 `modelAsset`，`buildClickEventAssetClickedPayload` 优先取它，取不到才回落命中实体的 `modelAsset.assetCode`。
+- 宿主随交接变化：`syncGeneratedCargoVisual` 每帧写入 `cargo.hostEntityId`（取自宿主模型 `entitySnapshot.id`）；owner 元数据变化时经 `applyGeneratedOutputMetadata` 重新下发到已加载网格，避免接管后上报旧宿主。
+- 动态实例没有文档实体，高亮/聚焦走运行时的合成 id 通道：`resolveSpawnedDeviceModel` 接入 `getEntityWorldBounds` / `isEntityWorldBoundsReady` / `rebuildModelSelectionOutline`（不经 `applyModelSelection`，按合成 id 直接命中）/ `getEntitiesFocusBounds`。编辑器预览侧对非场景实体的目标改用 `setLocalHighlightEntityIds` + `getEntitiesFocusBounds`，不写编辑器选区。
+
+### 回归
+
+- `npm run smoke:generated-cargo-click`（NullEngine）：货箱模板生成 → 网格元数据（生成器/宿主/宿主编号）→ 生成物拾取回落宿主 → 上报编号与高亮目标 → 未配置事件时短路。
+- `npm run smoke:device-spawner`（NullEngine）：动态实例的生成物拾取、合成实体 id 高亮与常规实体拾取隔离。
+- `tests/editor/clickEventBinding.test.mjs`（决策与载荷）、`tests/digitalTwin/viewerModelClick.test.ts`（Viewer 接线）。
+
+### 已知边界
+
+- 组合模板里的**阵列实例成员**由 thinInstance 批次承载，暂不参与产物点击（可点击的是组合内的普通模型成员与内置几何体成员）。
+- **fetch 驱动**放在货架货格上的货箱走 `LocatorFetchRuntime` 的独立放置链路，不带生成物元数据，暂不参与产物点击。
+- 产物点击不参与 `resolveClickEventBindingClick` 的「全场接管」判定：只有 `deviceSlots` 注册过设备类型的 POI 才让点空白变成清除选中。
 
 ---
 

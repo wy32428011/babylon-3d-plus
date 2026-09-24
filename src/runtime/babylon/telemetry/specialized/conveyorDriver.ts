@@ -9,8 +9,11 @@ import {
   getModelAxis,
   getModelTransformNodes,
   getNodesWorldBounds,
+  getThinInstanceMeshWorldBounds,
+  mergeWorldBounds,
   projectWorldBoundsOntoAxis,
   transformWorldBounds,
+  type RuntimeWorldBounds,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, sanitizeBabylonName } from '../../runtimeValueUtils';
 import { isMeasurableModelMesh } from '../../modelMeasurement';
@@ -346,7 +349,9 @@ export class ConveyorTelemetryDriver {
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
 
-    this.host.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model));
+    this.host.syncGeneratedCargoVisual(
+      cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+    );
     const pose = resolveCargoHandoffPose(
       cargo,
       this.getConveyorCargoPosition(model, plan.travelContext, state.cargoTravelOffset),
@@ -1107,12 +1112,29 @@ export class ConveyorTelemetryDriver {
 
     const nodes = output.kind === 'mesh'
       ? [output.mesh]
-      : output.model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
-    if (nodes.length === 0) return fallbackLength;
+      : output.kind === 'model'
+        ? output.model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh)
+        : output.members.flatMap((member) => [
+            ...(member.model ? member.model.contentRoot.getChildMeshes(false) : []),
+            ...(member.mesh ? [member.mesh] : []),
+          ]).filter(isMeasurableModelMesh);
 
     cargo.root.computeWorldMatrix(true);
-    const bounds = getNodesWorldBounds(nodes);
-    const projected = bounds ? projectWorldBoundsOntoAxis(bounds, travelContext.travelAxis) : null;
+    let bounds: RuntimeWorldBounds | null = nodes.length > 0 ? getNodesWorldBounds(nodes) : null;
+    if (output.kind === 'composition') {
+      // 阵列批次网格的几何保留成员原始坐标（单位换算烘在逐实例矩阵里，网格自身世界矩阵不含缩放），
+      // getMeshWorldBounds 的几何×网格世界矩阵路径会按原始单位放大测量值，必须逐实例矩阵测量。
+      for (const member of output.members) {
+        for (const batchMesh of member.arrayBatch?.meshes ?? []) {
+          if (!isMeasurableModelMesh(batchMesh)) continue;
+          const batchBounds = getThinInstanceMeshWorldBounds(batchMesh);
+          if (batchBounds) bounds = bounds ? mergeWorldBounds(bounds, batchBounds) : batchBounds;
+        }
+      }
+    }
+    if (!bounds) return fallbackLength;
+
+    const projected = projectWorldBoundsOntoAxis(bounds, travelContext.travelAxis);
     const lengthMeters = projected && projected.max > projected.min ? projected.max - projected.min : fallbackLength;
     cargo.axialLengthCache = { key: cacheKey, lengthMeters };
     return lengthMeters;

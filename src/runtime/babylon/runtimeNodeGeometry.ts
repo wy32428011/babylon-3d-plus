@@ -93,6 +93,28 @@ export function getMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | nul
   };
 }
 
+/** thinInstance 批次网格的逐实例世界包围盒：几何本地包围盒 × 各实例最终世界矩阵后取并集。 */
+export function getThinInstanceMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | null {
+  if (!(mesh instanceof Mesh) || mesh.thinInstanceCount <= 0 || !mesh.geometry) return null;
+  const { minimum, maximum } = mesh.geometry.extend;
+  mesh.computeWorldMatrix(true);
+  const meshWorldMatrix = mesh.getWorldMatrix();
+  // Babylon 9.12 的 thinInstanceGetWorldMatrices 可能返回陈旧缓存（thinInstanceBufferUpdated 不清 worldMatrices），
+  // 与 captureSourceWorldMatrices 一致：优先读当前 matrixData，逐实例组合 mesh 世界矩阵。
+  const count = mesh.thinInstanceCount;
+  const matrixData = mesh._thinInstanceDataStorage?.matrixData;
+  const instanceMatrices = matrixData && matrixData.length >= count * 16
+    ? Array.from({ length: count }, (_, index) => Matrix.FromArray(matrixData, index * 16))
+    : mesh.thinInstanceGetWorldMatrices();
+  let mergedBounds: RuntimeWorldBounds | null = null;
+  for (const matrix of instanceMatrices) {
+    const bounds = transformWorldBounds({ minimum, maximum }, matrix.multiply(meshWorldMatrix));
+    if (!bounds) continue;
+    mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
+  }
+  return mergedBounds;
+}
+
 /** 收集节点自身和后代 Mesh，用于从真实几何范围计算轨道端点。 */
 export function getNodeMeshes(node: TransformNode): AbstractMesh[] {
   const meshes = new Set<AbstractMesh>();

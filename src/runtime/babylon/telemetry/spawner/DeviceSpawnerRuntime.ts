@@ -27,6 +27,19 @@ export function createSpawnedDeviceKey(spawnerCode: string, assetCode: string): 
   return [spawnerCode, assetCode].join('\u0000');
 }
 
+/**
+ * 动态实例的运行时合成实体 id：实例不写入场景文档，用它与真实实体 id 区分开，
+ * 高亮、聚焦与生成器产物点击都按这个 id 寻址。
+ */
+export function createSpawnedDeviceEntityId(spawnerCode: string, assetCode: string): string {
+  return `spawned:${createSpawnedDeviceKey(spawnerCode, assetCode)}`;
+}
+
+/** 从合成实体 id 还原实例表键；不是合成 id 时返回 null。 */
+export function parseSpawnedDeviceEntityId(entityId: string): SpawnedDeviceKey | null {
+  return entityId.startsWith('spawned:') ? entityId.slice('spawned:'.length) : null;
+}
+
 export type DeviceSpawnerRuntimeHost = {
   pushLog(message: string): void;
   /**

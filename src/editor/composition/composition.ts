@@ -8,6 +8,16 @@ import type { SceneDocument } from '../model/SceneDocument';
 export const COMPOSITION_DRAG = 'application/x-zending-composition';
 export const COMPOSITION_SELECTION_DRAG = 'application/x-zending-composition-selection';
 export const MAX_COMPOSITION_NODES = 4096;
+
+/** 解析组合库卡片拖拽载荷（JSON {id, revision?} 或裸 id），非法时抛出带说明的错误。 */
+export function parseCompositionDragPayload(raw: string): { id: string; revision?: string } {
+  if (raw.length > 4096) throw new Error('组合拖拽信息过长。');
+  const payload = raw.startsWith('{') ? JSON.parse(raw) : { id: raw };
+  if (typeof payload.id !== 'string' || (payload.revision !== undefined && typeof payload.revision !== 'string')) {
+    throw new Error('组合拖拽信息无效。');
+  }
+  return payload;
+}
 const identity = (): CompositionTransform => ({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } });
 const uid = () => crypto.randomUUID();
 const round = (x: number) => Math.round(x * 1e6) / 1e6;
