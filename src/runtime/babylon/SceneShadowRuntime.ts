@@ -10,11 +10,13 @@ import {
   Mesh,
   MeshBuilder,
   MultiMaterial,
+  PointLight,
   RenderTargetTexture,
   type Nullable,
   type Observer,
   type Scene,
   ShadowGenerator,
+  SpotLight,
   StandardMaterial,
   type TransformNode,
   Vector3,
@@ -165,6 +167,8 @@ function engineSupportsCascadedShadows(scene: Scene): boolean {
 export class SceneShadowRuntime {
   private readonly scene: Scene;
   private readonly entityDirectionals = new Map<string, DirectionalLight>();
+  private readonly localLights = new Map<string, PointLight | SpotLight>();
+  private readonly localGenerators = new Map<string, ShadowGenerator>();
   private readonly knownMeshes = new Set<AbstractMesh>();
   private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
@@ -202,7 +206,7 @@ export class SceneShadowRuntime {
     this.refreshPrimary();
   }
 
-  /** 仅把可见方向光作为主阴影光；点光/半球光不建立方阴影，避免厂房尺度下阴影不可见。 */
+  /** 主方向光沿用缓存/级联策略；点光和聚光灯在实时模式单独产生局部阴影。 */
   syncLight(entityId: string, light: Light): void {
     if (this.disposed) return;
 
@@ -210,11 +214,13 @@ export class SceneShadowRuntime {
       this.entityDirectionals.set(entityId, light);
     } else {
       this.entityDirectionals.delete(entityId);
-      const leftover = light.getShadowGenerator();
-      if (leftover && leftover !== this.primaryGenerator) leftover.dispose();
     }
 
+    if (light instanceof PointLight || light instanceof SpotLight) this.localLights.set(entityId, light);
+    else this.localLights.delete(entityId);
+
     this.refreshPrimary();
+    if (this.syncLocalGenerators()) this.syncSceneMeshes(true);
     this.invalidateCachedShadow();
   }
 
@@ -227,6 +233,7 @@ export class SceneShadowRuntime {
     if (!this.settings.enabled || this.settings.mode !== 'realtime') {
       this.catcher.setEnabled(false);
       this.disposePrimaryGenerator();
+      this.disposeLocalGenerators();
       this.disposeAutoSun();
       this.restoreFillLightPolicy();
       for (const [mesh, observer] of this.meshTransformObservers) mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
@@ -247,6 +254,8 @@ export class SceneShadowRuntime {
       this.refreshPrimary();
     }
 
+    if (qualityChanged) this.disposeLocalGenerators();
+    this.syncLocalGenerators();
     this.applyGeneratorTuning();
     setEnvironmentShadowGenerator(this.scene, this.primaryGenerator);
     this.updateShadowDistance();
@@ -260,7 +269,12 @@ export class SceneShadowRuntime {
   removeLight(entityId: string): void {
     if (this.disposed) return;
     this.entityDirectionals.delete(entityId);
+    this.localLights.delete(entityId);
+    const hadLocalGenerator = this.localGenerators.has(entityId);
+    this.localGenerators.get(entityId)?.dispose();
+    this.localGenerators.delete(entityId);
     this.refreshPrimary();
+    if (hadLocalGenerator && this.localGenerators.size === 0) this.syncSceneMeshes(true);
   }
 
   dispose(): void {
@@ -270,11 +284,13 @@ export class SceneShadowRuntime {
       this.scene.onBeforeRenderObservable.remove(this.meshSyncObserver);
     }
     this.disposePrimaryGenerator();
+    this.disposeLocalGenerators();
     this.disposeAutoSun();
     this.restoreFillLightPolicy();
     this.catcher.material?.dispose();
     this.catcher.dispose();
     this.entityDirectionals.clear();
+    this.localLights.clear();
     for (const [mesh, observer] of this.meshTransformObservers) {
       mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
     }
@@ -286,6 +302,7 @@ export class SceneShadowRuntime {
   invalidateCachedShadow(): void {
     if (!this.isCachedProfile()) return;
     this.primaryGenerator?.getShadowMap()?.resetRefreshCounter();
+    for (const generator of this.localGenerators.values()) generator.getShadowMap()?.resetRefreshCounter();
   }
 
   /**
@@ -305,6 +322,7 @@ export class SceneShadowRuntime {
     for (const knownMesh of this.knownMeshes) {
       if (currentMeshes.has(knownMesh)) continue;
       this.primaryGenerator?.removeShadowCaster(knownMesh, false);
+      for (const generator of this.localGenerators.values()) generator.removeShadowCaster(knownMesh, false);
       const observer = this.meshTransformObservers.get(knownMesh);
       if (observer) knownMesh.onAfterWorldMatrixUpdateObservable.remove(observer);
       this.meshTransformObservers.delete(knownMesh);
@@ -321,9 +339,9 @@ export class SceneShadowRuntime {
     this.invalidateCachedShadow();
   }
 
-  /** 新增和异步加载 Mesh 共用该入口；缓存档模型只投射，环境/地面才接收。 */
+  /** 缓存主光只让环境/地面接收；存在局部投影时受光模型也必须采样局部阴影。 */
   private registerMesh(mesh: AbstractMesh): void {
-    applyReceiveShadows(mesh, isShadowReceiver(mesh, !this.isCachedProfile()));
+    applyReceiveShadows(mesh, isShadowReceiver(mesh, !this.isCachedProfile() || this.localGenerators.size > 0));
     if (!this.isCachedProfile()) {
       const leftover = this.meshTransformObservers.get(mesh);
       if (leftover) {
@@ -333,20 +351,62 @@ export class SceneShadowRuntime {
     } else if (
       !this.meshTransformObservers.has(mesh)
       && isShadowCaster(mesh)
-      && !isEnvironmentShadowReceiver(mesh)
+      && (!isEnvironmentShadowReceiver(mesh) || this.localGenerators.size > 0)
     ) {
       const observer = mesh.onAfterWorldMatrixUpdateObservable.add(() => this.invalidateCachedShadow());
       this.meshTransformObservers.set(mesh, observer);
     }
-    if (!this.primaryGenerator) return;
-
-    if (isShadowCaster(mesh)) {
-      const renderList = this.primaryGenerator.getShadowMap()?.renderList;
-      if (!renderList?.includes(mesh)) this.primaryGenerator.addShadowCaster(mesh, false);
-      return;
+    const generators = [...this.localGenerators.values()];
+    if (this.primaryGenerator) generators.push(this.primaryGenerator);
+    for (const generator of generators) {
+      if (isShadowCaster(mesh)) {
+        const renderList = generator.getShadowMap()?.renderList;
+        if (!renderList?.includes(mesh)) generator.addShadowCaster(mesh, false);
+      } else {
+        generator.removeShadowCaster(mesh, false);
+      }
     }
+  }
 
-    this.primaryGenerator.removeShadowCaster(mesh, false);
+  private syncLocalGenerators(): boolean {
+    const enabled = this.settings.enabled && this.settings.mode === 'realtime';
+    let changed = false;
+    for (const [id, generator] of this.localGenerators) {
+      const light = this.localLights.get(id);
+      if (!enabled || !light || light.isDisposed() || !light.isEnabled() || light.intensity <= 0 || generator.getLight() !== light) {
+        generator.dispose();
+        this.localGenerators.delete(id);
+        changed = true;
+      }
+    }
+    if (!enabled) return changed;
+    const quality = SHADOW_QUALITY_CONFIG[this.settings.quality];
+    for (const [id, light] of this.localLights) {
+      if (light.isDisposed() || !light.isEnabled() || light.intensity <= 0) continue;
+      light.shadowMinZ = 0.05;
+      light.shadowMaxZ = Math.max(0.1, Math.min(light.range, this.settings.distanceMeters > 0
+        ? this.settings.distanceMeters : this.resolveShadowDistance()));
+      if (this.localGenerators.has(id)) continue;
+      const generator = new ShadowGenerator(quality.mapSize, light);
+      generator.bias = this.settings.bias;
+      generator.normalBias = this.settings.normalBias;
+      generator.darkness = this.settings.darkness;
+      // 立方阴影不能使用二维 PCF 比较采样，使用 Babylon 支持的 Poisson 过滤。
+      if (light instanceof PointLight) generator.usePoissonSampling = true;
+      else {
+        generator.usePercentageCloserFiltering = true;
+        generator.filteringQuality = quality.filteringQuality;
+      }
+      this.configureShadowMapRefresh(generator);
+      this.localGenerators.set(id, generator);
+      changed = true;
+    }
+    return changed;
+  }
+
+  private disposeLocalGenerators(): void {
+    for (const generator of this.localGenerators.values()) generator.dispose();
+    this.localGenerators.clear();
   }
 
   private refreshPrimary(): void {
@@ -401,7 +461,9 @@ export class SceneShadowRuntime {
     generator.lambda = 0.72;
     generator.cascadeBlendPercentage = 0.12;
     generator.stabilizeCascades = true;
-    generator.autoCalcDepthBounds = true;
+    // 屏幕深度归约的半精度上界会把最远平面接收面裁到级联之外。
+    // 保留有界 shadowMaxZ 和稳定级联范围，避免俯视场景只剩模型自阴影。
+    generator.autoCalcDepthBounds = false;
     generator.depthClamp = true;
     generator.bias = this.settings.bias;
     generator.normalBias = this.settings.normalBias;
@@ -555,10 +617,13 @@ export class SceneShadowRuntime {
   }
 
   private applyGeneratorTuning(): void {
-    if (!this.primaryGenerator) return;
-    this.primaryGenerator.darkness = this.settings.darkness;
-    this.primaryGenerator.bias = this.settings.bias;
-    this.primaryGenerator.normalBias = this.settings.normalBias;
+    const generators = [...this.localGenerators.values()];
+    if (this.primaryGenerator) generators.push(this.primaryGenerator);
+    for (const generator of generators) {
+      generator.darkness = this.settings.darkness;
+      generator.bias = this.settings.bias;
+      generator.normalBias = this.settings.normalBias;
+    }
   }
 
   private updateShadowDistance(): void {

@@ -41,7 +41,7 @@ try {
     const scene = window.viewerEngineStore.Instances.flatMap(engine=>engine.scenes).find(scene=>scene.meshes.some(mesh=>mesh.metadata?.effectRole==='energy-hemisphere'));
     const camera=scene.activeCamera;const center=camera.target.clone();center.set(0,2.5,0);camera.setTarget(center);camera.alpha=-1.2;camera.beta=1.1;camera.radius=24;
     const count=scene.transformNodes.filter(node=>node.name.endsWith('_poiEffectRoot')).length;
-    if(count!==37)throw Error('发布特效实例数量不符: '+count);
+    if(count!==43)throw Error('发布特效实例数量不符: '+count);
   });
   const pixels = async () => {
     const png = await page.locator('canvas').first().screenshot();

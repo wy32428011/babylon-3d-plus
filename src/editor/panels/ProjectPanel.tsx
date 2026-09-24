@@ -65,6 +65,7 @@ import {
 } from '../assets/modelSyncRefreshPolicy';
 import {
   BUILT_IN_MODEL_LIBRARY_ITEMS,
+  ENVIRONMENT_LIGHT_LIBRARY_ITEM,
   PROJECT_LIBRARIES,
   createImageLibraryItems,
   createModelLibraryItems,
@@ -76,6 +77,7 @@ import {
   isImportedProjectLibraryItem,
   isSyncedImageProjectLibraryItem,
   isSceneThemeProjectLibraryItem,
+  isEnvironmentLightProjectLibraryItem,
   type ProjectLibraryItem,
   type ProjectLibraryKey,
 } from '../assets/projectLibrary';
@@ -426,6 +428,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return [
         ...createModelLibraryItems(modelAssets),
         ...BUILT_IN_MODEL_LIBRARY_ITEMS,
+        ENVIRONMENT_LIGHT_LIBRARY_ITEM,
       ];
     }
 
@@ -1911,6 +1914,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   function handleResourceCardClick(item: ProjectLibraryItem): void {
     if (props.readOnly) return;
+    if (isEnvironmentLightProjectLibraryItem(item)) {
+      setActiveLibraryKey(item.openLibrary);
+      setLibraryFilterText('');
+      setModelDeviceTypeFilter('');
+      return;
+    }
     if (isSceneThemeProjectLibraryItem(item)) {
       if (runtimeMode === 'edit' && shadowBakePhase !== 'baking') {
         applySceneTheme();
@@ -1998,7 +2007,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }
 
   function handleResourceCardDragStart(event: DragEvent<HTMLButtonElement>, item: ProjectLibraryItem): void {
-    if (props.readOnly) {
+    if (props.readOnly || isEnvironmentLightProjectLibraryItem(item)) {
       event.preventDefault();
       return;
     }
@@ -2313,19 +2322,20 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isSyncedImage = isSyncedImageProjectLibraryItem(item);
           const isSyncedChart = isDataPlatformChartLibraryItem(item);
           const isTheme = isSceneThemeProjectLibraryItem(item);
+          const isEnvironmentLight = isEnvironmentLightProjectLibraryItem(item);
           const currentTheme = sceneDocument.sceneSettings.theme;
           const isCurrentTheme = isTheme && currentTheme?.presetId === item.sceneThemePresetId;
           const themeStatus = isCurrentTheme && currentTheme
             ? isTechBlueNightThemeAdjusted(currentTheme, sceneDocument.sceneSettings.shadows) ? '当前使用 · 已调整' : '当前使用'
             : item.subtitle;
-          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart || isTheme);
+          const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart || isTheme || isEnvironmentLight);
           const isCardDisabled = props.readOnly || !isActionableItem || (isTheme && (runtimeMode !== 'edit' || shadowBakePhase === 'baking'));
 
           return (
             <ResourceCard
               className={isImportedAsset && item.asset.kind === 'skybox' ? 'skybox-resource-card' : undefined}
               disabled={isCardDisabled}
-              draggable={!isCardDisabled}
+              draggable={!isCardDisabled && !isEnvironmentLight}
               focused={item.id === focusedAssetId || isCurrentTheme}
               item={isTheme ? { ...item, subtitle: themeStatus } : item}
               key={item.id}
@@ -2340,7 +2350,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 }
               }}
               title={
-                isTheme
+                isEnvironmentLight
+                  ? '点击进入天空盒库，导入或选择 HDR/EXR 环境贴图'
+                  : isTheme
                   ? `点击应用或拖入场景：${item.name}，应用后可在场景属性中微调`
                   : isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`

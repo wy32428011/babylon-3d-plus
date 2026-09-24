@@ -21,7 +21,7 @@ type MeshState = {
   outline: boolean; outlineColor: Color3; outlineWidth: number;
   edgesColor: Color4; edgesWidth: number; ownsEdges: boolean; roof: boolean;
   plugins: ModelSurfacePlugin[]; textures: Set<BaseTexture>; suspend?: () => void;
-  materialDefaults: Map<Material, { alpha: number; transparencyMode: number | null; disableDepthWrite: boolean; backFaceCulling: boolean }>;
+  materialDefaults: Map<Material, { alpha: number; transparencyMode: number | null; disableDepthWrite: boolean; backFaceCulling: boolean; emissiveColor?: Color3 }>;
 };
 
 const modelEffectSuspensions = new WeakMap<AbstractMesh, number>();
@@ -42,7 +42,7 @@ export function suspendTargetModelEffects(mesh: AbstractMesh): () => void {
 }
 
 const MODEL_KINDS = new Set([
-  'model-outline', 'model-edges', 'model-emissive', 'model-scan', 'height-gradient',
+  'model-outline', 'model-edges', 'model-emissive', 'model-color', 'model-flash', 'model-scan', 'height-gradient',
   'hologram', 'xray', 'dissolve', 'floor-expand', 'explode', 'clip-section', 'roof-fade',
 ]);
 const STRUCTURE_KINDS = new Set(['floor-expand', 'explode']);
@@ -50,13 +50,19 @@ const finite = (value: number | undefined, fallback: number) => Number.isFinite(
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const color = (value: string) => Color3.FromHexString(/^#[\da-f]{6}$/i.test(value) ? value : '#00ccff');
 const axisVector = (axis: Visual['axis']) => axis === 'x' ? Vector3.Right() : axis === 'z' ? Vector3.Forward() : Vector3.Up();
-const modeFor = (kind: string) => (({ 'model-scan': 1, 'height-gradient': 2, dissolve: 3, 'clip-section': 4, hologram: 5 } as Record<string, number>)[kind] ?? 0);
+const modeFor = (kind: string) => (({ 'model-scan': 1, 'height-gradient': 2, dissolve: 3, 'clip-section': 4, hologram: 5, 'model-color': 6, 'model-flash': 6 } as Record<string, number>)[kind] ?? 0);
+const isColorOverlay = (kind: string) => kind === 'model-color' || kind === 'model-flash';
 const parameters = (component: PoiEffectComponent) => component.configuration?.parameters ?? {};
 const numberParameter = (component: PoiEffectComponent, key: string, fallback: number, min = -1000000, max = 1000000) => {
   const value = parameters(component)[key];
   return clamp(typeof value === 'number' && Number.isFinite(value) ? value : fallback, min, max);
 };
 const stringParameter = (component: PoiEffectComponent, key: string, fallback: string) => typeof parameters(component)[key] === 'string' ? parameters(component)[key] as string : fallback;
+function flashVisible(effect: BoundEffect): boolean {
+  if (effect.component.effectKind !== 'model-flash') return true;
+  const period = numberParameter(effect.component, 'flashPeriod', 1, 0.1, 3600);
+  return (effect.elapsed % period) / period < numberParameter(effect.component, 'dutyCycle', 0.5, 0, 1);
+}
 const effectAxis = (component: PoiEffectComponent): Visual['axis'] => {
   const value = stringParameter(component, 'axis', component.visual?.axis ?? 'y');
   return value === 'x' || value === 'z' ? value : 'y';
@@ -181,9 +187,14 @@ class ModelSurfacePlugin extends MaterialPluginBase {
             }
             gl_FragColor.rgb += dtEffectPrimary.rgb * (1.0 - smoothstep(0.0, dtEffectExtra.y, dtDistance)) * dtEffectPrimary.a;
           }
-        } else if (dtMode > 4.5) {
+        } else if (dtMode > 4.5 && dtMode < 5.5) {
           float dtLines = dtEffectOptions.w > 0.0 ? pow(max(0.0, sin(dtHeight * dtEffectOptions.w * 6.28318 - dtEffectParams.y * 6.28318)), 8.0) : 0.0;
           gl_FragColor.rgb += dtEffectPrimary.rgb * (0.25 + 0.5 * dtLines) * dtEffectPrimary.a;
+        } else if (dtMode > 5.5) {
+          // 表面整体换色仍保留明暗层次；暗相位为零混合，直接显示原材质的贴图和光照。
+          float dtShade = clamp(dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+          vec3 dtTint = dtEffectPrimary.rgb * dtEffectPrimary.a * (0.55 + 0.45 * dtShade);
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, dtTint, (1.0 - dtEffectOptions.z) * dtEffectOptions.x);
         }
       `,
     };
@@ -199,7 +210,11 @@ export class TargetModelEffects {
   private sharedGlow: GlowLayer | null = null;
   setGlowIntensity(value: number | null): void {
     this.glowIntensity = value ?? 1;
-    for (const effect of this.effects.values()) if (effect.glow) effect.glow.intensity = this.glowIntensity * numberParameter(effect.component, 'glowIntensity', 1, 0, 5);
+    for (const effect of this.effects.values()) if (effect.glow) effect.glow.intensity = this.effectGlowIntensity(effect);
+  }
+  private effectGlowIntensity(effect: BoundEffect): number {
+    const blend = isColorOverlay(effect.component.effectKind) ? 1 - numberParameter(effect.component, 'originalMix', 0, 0, 1) : 1;
+    return this.glowIntensity * numberParameter(effect.component, 'glowIntensity', 1, 0, 5) * blend * (flashVisible(effect) ? 1 : 0);
   }
   constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null, private readonly alarmAppearance = false) {}
 
@@ -374,12 +389,12 @@ export class TargetModelEffects {
       state.ownsEdges = !mesh.edgesRenderer;
       if (state.ownsEdges) mesh.enableEdgesRendering(numberParameter(effect.component, 'edgeThreshold', .95, 0, 1));
     }
-    if (kind === 'model-emissive' && mesh instanceof Mesh) {
+    if ((kind === 'model-emissive' || isColorOverlay(kind)) && mesh instanceof Mesh) {
       const p = parameters(effect.component);
       // 未配置独立光晕的效果仍复用旧共享后处理，避免为每台设备增加一次全屏模糊。
-      if (p.glowRadius === undefined && p.glowIntensity === undefined) effect.glow = this.sharedGlow ??= new GlowLayer('digitalTwinModelGlow', this.scene, { blurKernelSize: 32 });
+      if (!isColorOverlay(kind) && p.glowRadius === undefined && p.glowIntensity === undefined) effect.glow = this.sharedGlow ??= new GlowLayer('digitalTwinModelGlow', this.scene, { blurKernelSize: 32 });
       else effect.glow ??= new GlowLayer(`digitalTwinModelGlow_${effect.id}`, this.scene, { blurKernelSize: numberParameter(effect.component, 'glowRadius', 32, 1, 128) });
-      effect.glow.intensity = this.glowIntensity * numberParameter(effect.component, 'glowIntensity', 1, 0, 5);
+      effect.glow.intensity = this.effectGlowIntensity(effect);
       effect.glow.addIncludedOnlyMesh(mesh);
     }
     return state;
@@ -405,7 +420,8 @@ export class TargetModelEffects {
     state.materials.push(material);
     const originalTextures = new Set(original?.getActiveTextures() ?? []);
     for (const texture of material.getActiveTextures()) if (!originalTextures.has(texture)) state.textures.add(texture);
-    state.materialDefaults.set(material, { alpha: material.alpha, transparencyMode: material.transparencyMode, disableDepthWrite: material.disableDepthWrite, backFaceCulling: material.backFaceCulling });
+    state.materialDefaults.set(material, { alpha: material.alpha, transparencyMode: material.transparencyMode, disableDepthWrite: material.disableDepthWrite, backFaceCulling: material.backFaceCulling,
+      ...('emissiveColor' in material && material.emissiveColor instanceof Color3 ? { emissiveColor: material.emissiveColor.clone() } : {}) });
     material.unfreeze();
     const kind = effect.component.effectKind;
     if (state.source.metadata?.editorEnvironmentMesh) {
@@ -535,7 +551,7 @@ export class TargetModelEffects {
     let phase = kind === 'clip-section' ? progress : kind === 'dissolve'
       ? p.progressMode === 'external' ? progress : resolveDissolvePhase(elapsed, duration, visual.loop, numberParameter(component, 'completedHold', clamp(duration * .2, .25, 1), 0, 3600)) * progress
       : (effect.elapsed / duration) % 1;
-    let active = true;
+    let active = flashVisible(effect);
     if (kind === 'model-scan') {
       const interval = numberParameter(component, 'interval', 0, 0, 3600);
       // 旧扫光一直循环；V2 只通过显式时间/范围扩展，保持旧场景节奏。
@@ -547,7 +563,7 @@ export class TargetModelEffects {
     }
     if (kind === 'hologram') phase = effect.elapsed / duration * numberParameter(component, 'scanLineSpeed', 1, -20, 20);
     if (effect.glow) {
-      effect.glow.intensity = this.glowIntensity * numberParameter(component, 'glowIntensity', 1, 0, 5);
+      effect.glow.intensity = this.effectGlowIntensity(effect);
       const radius = numberParameter(component, 'glowRadius', 32, 1, 128);
       if (effect.glow.blurKernelSize !== radius) effect.glow.blurKernelSize = radius;
     }
@@ -565,6 +581,12 @@ export class TargetModelEffects {
       for (const material of state.materials) {
         if (!(material instanceof StandardMaterial || material instanceof PBRBaseMaterial)) continue;
         if ((kind === 'model-emissive' || kind === 'hologram' || kind === 'xray') && 'emissiveColor' in material && material.emissiveColor instanceof Color3) material.emissiveColor.copyFrom(primary.scale(intensity));
+        if (isColorOverlay(kind) && 'emissiveColor' in material && material.emissiveColor instanceof Color3) {
+          const original = state.materialDefaults.get(material)?.emissiveColor ?? Color3.Black();
+          // 同一副本贯穿亮暗两相，原材质和兄弟实例从不被改写。
+          const mix = active ? 1 - numberParameter(component, 'originalMix', 0, 0, 1) : 0;
+          Color3.LerpToRef(original, primary.scale(intensity), mix, material.emissiveColor);
+        }
         if (kind === 'xray' || kind === 'hologram') {
           const environmentAlpha = state.source.metadata?.editorEnvironmentMesh ? state.materialDefaults.get(material)?.alpha ?? 1 : 1;
           material.alpha = opacity * environmentAlpha;

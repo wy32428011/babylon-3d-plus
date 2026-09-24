@@ -18,6 +18,7 @@ type Props = {
   component: PoiEffectComponent;
   disabled: boolean;
   onChange: (component: PoiEffectComponent, label: string) => void;
+  hideTargetBinding?: boolean;
 };
 
 type NumberKey = keyof typeof DIGITAL_TWIN_EFFECT_NUMBER_LIMITS;
@@ -91,7 +92,7 @@ function DraftArea({ label, value, onChange, disabled, maxLength, rows = 5 }: {
 }
 
 /** 文本坐标和数据按一次事务应用，外观修改不会覆盖尚未提交的草稿。 */
-export function DigitalTwinEffectInspector({ component, disabled, onChange }: Props) {
+export function DigitalTwinEffectInspector({ component, disabled, onChange, hideTargetBinding = false }: Props) {
   const entities = useEditorStore(state => state.scene.entities);
   const environment = useEditorStore(state => state.scene.sceneSettings.environment);
   const selectedEntityId = useEditorStore(state => state.scene.selectedEntityId);
@@ -150,7 +151,7 @@ export function DigitalTwinEffectInspector({ component, disabled, onChange }: Pr
 
   return <div className="digital-twin-effect-inspector">
     <p className="muted">{definition.category} · {definition.description}</p>
-    {!component.configuration && fields.includes('targetEntityId') && <>
+    {!hideTargetBinding && !component.configuration && fields.includes('targetEntityId') && <>
       <label className="inspector-row"><span>绑定目标</span>
         <select aria-label="特效绑定目标" disabled={disabled} value={config.targetEntityId ?? ''}
           onChange={event => commit({ targetEntityId: event.target.value || null }, '更新特效绑定目标')}>

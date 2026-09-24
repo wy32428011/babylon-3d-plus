@@ -80,10 +80,10 @@ function configured(component, targetId, index = 3) {
   return configuration;
 }
 
-test('55 类可见特效的 V2 字段支持 Store、撤销重做、保存重开和参数副本隔离', async () => {
-  assert.equal(VISIBLE_POI_EFFECT_DEFINITIONS.length, 55);
+test('61 类可见特效的 V2 字段支持 Store、撤销重做、保存重开和参数副本隔离', async () => {
+  assert.equal(VISIBLE_POI_EFFECT_DEFINITIONS.length, 61);
   const target = createMeshEntity('cube'); target.name = '仅用于特效绑定的测试建筑';
-  const scene = createEmptySceneDocument('全部 55 类可见特效 V2'); append(scene, [target]); store.setState({ scene });
+  const scene = createEmptySceneDocument('全部 61 类可见特效 V2'); append(scene, [target]); store.setState({ scene });
   const expected = new Map(); let parameterCount = 0;
   for (const [index, definition] of VISIBLE_POI_EFFECT_DEFINITIONS.entries()) {
     store.getState().createPoiEffect(definition.kind, { x: index % 8, y: .2, z: Math.floor(index / 8) });

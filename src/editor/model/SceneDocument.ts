@@ -1,4 +1,5 @@
 import { normalizeSceneTheme, type SceneThemeSettings } from './sceneTheme';
+import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from './lightSettings';
 import { createId } from '../../shared/ids';
 import { normalizeSceneRegionViews, type SceneRegionView } from './sceneRegionViews';
 import { sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from './sceneShadowBake';
@@ -1298,6 +1299,8 @@ export function createLightEntity(lightKind: LightKind, position?: Vector3Data):
       light: {
         lightKind,
         intensity: 0.8,
+        ...(lightKind === 'spot' ? { angle: DEFAULT_SPOT_ANGLE, exponent: DEFAULT_SPOT_EXPONENT } : {}),
+        ...(lightKind === 'rectArea' ? { width: DEFAULT_AREA_LIGHT_SIZE, height: DEFAULT_AREA_LIGHT_SIZE } : {}),
       },
     },
   };

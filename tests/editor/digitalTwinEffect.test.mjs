@@ -34,7 +34,7 @@ test('新建生长特效默认完整单次播放，已有循环和显示上限�
 });
 
 test('新版特效都有独立默认值，旧入口隐藏但旧场景类型保持有效', () => {
-  assert.equal(model.DIGITAL_TWIN_EFFECT_DEFINITIONS.length, 37);
+  assert.equal(model.DIGITAL_TWIN_EFFECT_DEFINITIONS.length, 43);
   for (const definition of model.DIGITAL_TWIN_EFFECT_DEFINITIONS) {
     const a = poi.createDefaultPoiEffectComponent(definition.kind);
     const b = poi.createDefaultPoiEffectComponent(definition.kind);
@@ -51,10 +51,10 @@ test('新版特效都有独立默认值，旧入口隐藏但旧场景类型保�
 });
 
 test('输送线可选的十种内置箭头均有库入口，其余旧特效继续隐藏', () => {
-  assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.length, 55);
+  assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.length, 61);
   const counts = poi.VISIBLE_POI_EFFECT_DEFINITIONS.map(item => registry.getEffectParameterDefinitions(item.kind).length);
-  assert.equal(counts.filter(count => count > 0).length, 46);
-  assert.equal(counts.reduce((sum, count) => sum + count, 0), 330);
+  assert.equal(counts.filter(count => count > 0).length, 52);
+  assert.equal(counts.reduce((sum, count) => sum + count, 0), 367);
   for (const kind of ['conveyor-direction', 'moving-double-arrow', 'pipeline-flow-arrows', 'flow-arrows', 'conveyor-arrow-single', 'conveyor-arrow-chevron', 'conveyor-arrow-segmented', 'conveyor-arrow-ribbon', 'conveyor-arrow-double', 'conveyor-arrow-speed']) {
     assert.equal(poi.VISIBLE_POI_EFFECT_DEFINITIONS.filter(x => x.kind === kind).length, 1);
   }

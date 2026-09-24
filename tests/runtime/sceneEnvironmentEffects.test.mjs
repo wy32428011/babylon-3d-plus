@@ -4,12 +4,13 @@ import { registerHooks } from 'node:module';
 import { existsSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-const root = new URL('../../src/', import.meta.url);
+const root = new URL('../../', import.meta.url);
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith('.') && context.parentURL?.startsWith(root.href)) {
       const candidate = new URL(specifier, context.parentURL);
       if (!existsSync(candidate) && existsSync(new URL(candidate.href + '.ts'))) return next(candidate.href + '.ts', context);
+      if (!existsSync(candidate) && candidate.href.endsWith('.js') && existsSync(new URL(candidate.href.replace(/\.js$/, '.ts')))) return next(candidate.href.replace(/\.js$/, '.ts'), context);
     }
     return next(specifier, context);
   },

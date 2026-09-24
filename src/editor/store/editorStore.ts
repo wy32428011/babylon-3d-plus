@@ -6,6 +6,7 @@ import { restoreFailedSceneResources, type FailedSceneResources } from '../asset
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../model/alarmManager';
 import { create } from 'zustand';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
+import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { getSceneShadowBakeSignature, sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from '../model/sceneShadowBake';
 import type { ManualRoamAvatar } from '../model/components';
 import { updateSceneRegionViewsCommand } from '../commands/sceneRegionViewCommands';
@@ -4262,6 +4263,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       asset.dataDrivenConfig,
       asset.builtInSlotBindingConfig,
     );
+    const modelIdentity = createModelTypeIdentityFromAsset(asset);
+    if (modelIdentity && entity.components.modelAsset) entity.components.modelAsset.dataPlatformModel = modelIdentity;
     const command = createEntityCommand(entity);
 
     set((state) => {
@@ -5242,13 +5245,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const after = normalizeLightSettings({
         ...before,
         ...patch,
-        intensity: patch.intensity === undefined ? before.intensity : sanitizePositiveNumber(patch.intensity, before.intensity),
+        intensity: patch.intensity === undefined ? before.intensity : sanitizeNonNegativeNumber(patch.intensity, before.intensity),
       });
 
       if (
         before.lightKind === after.lightKind && before.intensity === after.intensity &&
         before.color === after.color && before.groundColor === after.groundColor &&
-        before.range === after.range && before.nightBehavior === after.nightBehavior
+        before.range === after.range && before.nightBehavior === after.nightBehavior &&
+        before.angle === after.angle && before.exponent === after.exponent &&
+        before.width === after.width && before.height === after.height
       ) return state;
 
       const command = updateLightCommand(entity.id, before, after);

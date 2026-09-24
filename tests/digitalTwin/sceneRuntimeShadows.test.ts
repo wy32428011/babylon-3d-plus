@@ -63,7 +63,7 @@ function flushScene(scene: Scene): void {
 
 function getActiveShadowGenerator(scene: Scene) {
   for (const light of scene.lights) {
-    const generator = light.getShadowGenerator();
+    const generator = light.getShadowGenerator(scene.activeCamera) ?? light.getShadowGenerator();
     if (generator) return generator;
   }
   return null;
@@ -185,7 +185,7 @@ test('环境 Mesh 在缓存档接收阴影，普通模型不接收', () => {
   }
 });
 
-test('点光不建立方阴影，场景继续使用自动太阳光', () => {
+test('点光建立局部立方阴影，场景继续保留自动太阳光', () => {
   const fixture = createRuntimeFixture();
   try {
     const ground = MeshBuilder.CreateGround('Ground', { width: 8, height: 8 }, fixture.scene);
@@ -195,13 +195,14 @@ test('点光不建立方阴影，场景继续使用自动太阳光', () => {
     fixture.runtime.syncLight(point.name, point);
     flushScene(fixture.scene);
 
-    assert.equal(point.getShadowGenerator(), null, '点光默认不得创建立方阴影');
+    assertAnyShadowGenerator(point.getShadowGenerator(), '实时模式点光必须创建局部阴影');
+    assert.equal(point.needCube(), true, '点光向六个方向投射阴影');
     const autoSun = fixture.scene.getLightByName(SCENE_SHADOW_SUN_NAME);
     assert.ok(autoSun instanceof DirectionalLight);
     const shadowGenerator = autoSun.getShadowGenerator();
     assertAnyShadowGenerator(shadowGenerator, '主阴影光必须创建阴影生成器');
     for (const mesh of [ground, cube]) {
-      assert.equal(mesh.receiveShadows, false, `${mesh.name} 在缓存档不应承担阴影采样成本`);
+      assert.equal(mesh.receiveShadows, true, `${mesh.name} 必须接收局部光源阴影`);
       assert.ok(shadowGenerator.getShadowMap()?.renderList?.includes(mesh), `${mesh.name} 必须加入阴影投射列表`);
     }
   } finally {

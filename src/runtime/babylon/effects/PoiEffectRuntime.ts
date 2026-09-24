@@ -3,6 +3,7 @@ import { registerEffectFollowResume } from '../../effects/effectDiagnostics';
 import type { SceneDocument } from '../../../editor/model/SceneDocument';
 import { EffectBindingRuntime } from '../../effects/EffectBindingRuntime';
 import { ConfiguredLegacyEffects, supportsConfiguredLegacyEffect } from './ConfiguredLegacyEffects';
+import { AlarmReferenceEffects, supportsAlarmReferenceEffect } from './AlarmReferenceEffects';
 import { isDigitalTwinEffectKind } from '../../../editor/model/digitalTwinEffect';
 import { SpatialEffects, supportsSpatialEffect } from './SpatialEffects';
 import { TargetModelEffects } from './TargetModelEffects';
@@ -93,7 +94,7 @@ export class PoiEffectRuntime {
   private previousFrameTime: number | null = null;
 
   /** 创建运行时并注册唯一 before-render 观察者。 */
-  constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[] } = {}) {
+  constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, private readonly alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[] } = {}) {
     this.resolveTarget = id => this.bindings?.resolveAnchor(id) ?? resolveNode(id);
     this.targetEffects = new TargetModelEffects(scene, this.resolveTarget, alarmAppearance);
     this.environmentEffects = new SceneEnvironmentEffects(scene, this.resolveTarget, canFollow);
@@ -126,7 +127,8 @@ export class PoiEffectRuntime {
 
   /** 同步单个 POI 实体；组件签名变化时只重建该实体内部资源。 */
   sync(entity: Entity, selected: boolean, visible: boolean, pickable: boolean): void {
-    if (entity.components.poiEffect?.configuration) { this.bindings.sync(entity, selected, visible, pickable); return; }
+    // 报警管理器已决定目标和激活状态；保留专用参数，但不再执行独立绑定与二次触发。
+    if (entity.components.poiEffect?.configuration && !this.alarmAppearance) { this.bindings.sync(entity, selected, visible, pickable); return; }
     this.bindings.detach(entity.id);
     this.syncResolved(entity, selected, visible, pickable);
   }
@@ -312,7 +314,10 @@ export class PoiEffectRuntime {
     const secondary = component.secondaryColor;
     const intensity = component.intensity;
 
-    if (isConveyorArrowEffectKind(kind)) {
+    if (supportsAlarmReferenceEffect(kind)) {
+      const spatial = new AlarmReferenceEffects(id, this.scene, root, component);
+      resources.spatial = spatial; resources.meshes = spatial.meshes; resources.materials = spatial.materials;
+    } else if (isConveyorArrowEffectKind(kind)) {
       const arrow = new ConveyorArrowEffect(id, this.scene, root, component);
       resources.conveyorArrow = arrow;
       resources.meshes.push(arrow.mesh);

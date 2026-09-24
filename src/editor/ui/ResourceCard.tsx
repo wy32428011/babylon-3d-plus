@@ -47,7 +47,8 @@ export function ResourceCard({
       onClick={onClick}
       onDragStart={onDragStart}
       ref={setButtonRef}
-      title={title}
+      title={item.description ? `${title}\n${item.description}` : title}
+      aria-description={item.description}
       type="button"
     >
       <span className="resource-card-preview">

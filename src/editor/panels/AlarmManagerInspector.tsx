@@ -1,7 +1,7 @@
 import { useEffect, useState, type DragEvent } from 'react';
 import type { Entity } from '../model/Entity';
 import type { ChartMarkerThemeScreen, ModelGeneratorTarget } from '../model/components';
-import { ALARM_MAX_TARGETS, isAlarmAppearanceEffectKind, normalizeAlarmManager, resizeAlarmTargets, type AlarmManagerComponent } from '../model/alarmManager';
+import { ALARM_MAX_TARGETS, isAlarmAppearanceEffectKind, matchesAlarmTargetModel, normalizeAlarmManager, resizeAlarmTargets, type AlarmManagerComponent } from '../model/alarmManager';
 import { createModelGeneratorTargetFromAsset } from '../model/modelGenerator';
 import { decodeModelAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE, BUILT_IN_ASSET_DRAG_MIME_TYPE, decodeBuiltInAssetDragPayload } from '../assets/AssetDatabase';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
@@ -12,6 +12,8 @@ import { ChartMarkerInspector } from './ChartMarkerInspector';
 import type { DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import '../../styles/alarm-manager.css';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from '../model/poiEffect';
+import { PoiEffectAppearanceFields } from './PoiEffectAppearanceFields';
+import { ALARM_APPEARANCE_PRESETS, createAlarmAppearancePreset } from '../model/alarmAppearancePresets';
 
 type AlarmChartApi = {
   listDataPlatformCharts?: () => Promise<{ charts: DataPlatformChartAssetEntry[] }>;
@@ -52,7 +54,10 @@ function EffectSlot({ config, disabled, onChange }: { config: AlarmManagerCompon
         event.preventDefault(); event.stopPropagation(); setOver(false); if (disabled) return;
         const payload = decodeBuiltInAssetDragPayload(event.dataTransfer.getData(BUILT_IN_ASSET_DRAG_MIME_TYPE));
         if (payload?.kind !== 'poi-effect' || !isAlarmAppearanceEffectKind(payload.effectKind)) { setError('请从特效库拖入可依附设备的 EFF 特效；场景环境、镜头和业务组件入口不适用。'); return; }
-        setError(''); onChange({ appearanceEffect: createDefaultPoiEffectComponent(payload.effectKind), appearanceModel: null });
+        const preset = ALARM_APPEARANCE_PRESETS.find(item => item.effectKind === payload.effectKind);
+        setError(''); onChange({ appearanceEffect: preset ? createAlarmAppearancePreset(preset.id) : createDefaultPoiEffectComponent(payload.effectKind), appearanceModel: null,
+          ...(preset ? { overrideColorEnabled: preset.tintModel } : {}),
+        });
       }}>
       <span className="model-generator-target-text"><strong>{value ? getPoiEffectDefinition(value.effectKind).name : config.appearanceModel ? config.appearanceModel.displayName + '（旧版模型外观）' : '从特效库拖入特效'}</strong></span>
       <button className="model-generator-clear-button" type="button" disabled={disabled || (!value && !config.appearanceModel)} aria-label="清空报警外观特效" onClick={() => { setError(''); onChange({ appearanceEffect: null, appearanceModel: null }); }}>×</button>
@@ -125,13 +130,29 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
       {c.listenProperty === 'RUNNING STATE' ? <label className="inspector-row"><span>运行状态</span><select aria-label="运行状态" value={c.runningState} onChange={event => commit({ runningState: event.target.value as AlarmManagerComponent['runningState'] })}><option value="offline">离线</option><option value="idle">空闲</option><option value="running">运行</option><option value="alarm">报警</option></select></label> : <>
         <label className="inspector-row"><span>火警属性</span><input aria-label="火警属性" placeholder="MQTT 的 p，例如 fireAlarm" value={c.customProperty} maxLength={256} onChange={event => commit({ customProperty: event.target.value })} /></label>
         <label className="inspector-row"><span>触发值</span><input aria-label="触发值" placeholder="该 p 的 v，例如 1 或 true" value={c.customValue} maxLength={256} onChange={event => commit({ customValue: event.target.value })} /></label>
-        <p className="muted">火警属性填写绑定设备 MQTT data 中的 p 名称；当该点位的实时 v 等于触发值时报警。例如 p 为 fireAlarm、v 为 1，则填写 fireAlarm 和 1。</p>
+        <p className="muted">火警属性填写绑定设备 MQTT data 中的 p 名称；当该点位最近一次收到的 v 等于触发值时报警。例如 p 为 fireAlarm、v 为 1，则填写 fireAlarm 和 1。</p>
         <p className="muted">触发值为 true/false 时兼容 1/0；填写 1/0 时仅匹配对应数值或字符串。实时值不会自动改写触发值。</p>
+        <p className="muted">点位最新值在本次运行中持续有效；未收到该点位的新值时保持报警，重复收到相同值时报警持续。收到不匹配的新值后解除。</p>
         {c.warehouseAlarm ? <p className="muted">已启用仓库告警，命中自定义条件时优先使用仓库告警主题；只需普通火警时可关闭仓库告警。</p> : null}
       </>}
+      <label className="inspector-row"><span>覆盖设备颜色</span><input type="checkbox" checked={c.overrideColorEnabled !== false} onChange={event => commit({ overrideColorEnabled: event.target.checked })} /></label>
       <label className="inspector-row"><span>覆盖颜色</span><input type="color" value={c.overrideColor} onChange={event => commit({ overrideColor: event.target.value })} /></label>
+      <label className="inspector-row"><span>参考报警样式</span><select aria-label="报警外观样式" value={ALARM_APPEARANCE_PRESETS.find(item => item.effectKind === c.appearanceEffect?.effectKind)?.id ?? ''}
+        onChange={event => { const preset = ALARM_APPEARANCE_PRESETS.find(item => item.id === event.target.value); if (preset) commit({ appearanceEffect: createAlarmAppearancePreset(preset.id), appearanceModel: null, overrideColorEnabled: preset.tintModel }); }}>
+        <option value="">从特效库选择或拖入</option>
+        {ALARM_APPEARANCE_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+      </select></label>
       <div className="inspector-row"><span>外观特效</span><EffectSlot config={c} disabled={disabled} onChange={commit} /></div>
       <p className="muted">从特效库拖入 EFF；报警时依附到各自绑定设备并随设备移动，解除后自动移除。为空时使用内置火焰；模型表面特效优先显示自身外观。</p>
+      {c.appearanceEffect ? <details open>
+        <summary>外观属性 · {getPoiEffectDefinition(c.appearanceEffect.effectKind).name}</summary>
+        <div className="alarm-appearance-fields" role="group" aria-label="报警外观属性">
+          <p className="muted">属性应用于本管理器的所有报警设备。目标和报警条件沿用本管理器配置。</p>
+          <PoiEffectAppearanceFields key={`${entity.id}:${c.appearanceEffect.effectKind}`} instanceKey={entity.id}
+            component={c.appearanceEffect} disabled={disabled} alarmAppearance
+            onChange={appearanceEffect => commit({ appearanceEffect })} />
+        </div>
+      </details> : null}
       {themeField('告警主题', 'theme')}
       <label className="inspector-row"><span>显示图表立标</span><input type="checkbox" checked={c.showMarker} onChange={event => commit({ showMarker: event.target.checked })} /></label>
       {c.showMarker ? <>
@@ -151,13 +172,13 @@ export function AlarmManagerInspector({ entity, disabled }: { entity: Entity; di
           <span>设备类型 {index + 1}</span><ModelSlot label={'设备类型 ' + (index + 1)} value={slot.model} disabled={disabled} onChange={model => commit({ targets: c.targets.map(t => t.id === slot.id ? { ...t, model, entityId: '' } : t) })} />
           {c.targetType === 'ENTITY' ? <label className="inspector-row"><span>场景设备</span><SearchableSelect
             missingLabel={() => '目标已删除'}
-            options={[{ value: '', label: '该模型全部实例' }, ...Object.values(entities).filter(e => e.components.modelAsset && (!slot.model || slot.model.kind === 'model' && e.components.modelAsset.sourceUrl === slot.model.modelAsset.sourceUrl)).map(e => ({ value: e.id, label: `${e.name} · ${e.components.modelAsset?.assetCode ?? ''}`, keywords: [e.components.modelAsset?.assetCode ?? ''] }))]}
+            options={[{ value: '', label: '该模型全部实例' }, ...Object.values(entities).filter(e => e.components.modelAsset && (!slot.model || matchesAlarmTargetModel(e, slot.model))).map(e => ({ value: e.id, label: `${e.name} · ${e.components.modelAsset?.assetCode ?? ''}`, keywords: [e.components.modelAsset?.assetCode ?? ''] }))]}
             value={slot.entityId}
             onChange={value => commit({ targets: c.targets.map(t => t.id === slot.id ? { ...t, entityId: value } : t) })}
           /></label> : null}
         </div>)}
       </details>
-      <p className="muted">ENTITY 可限定场景设备；MODEL 监听所选模型的全部实例。设备需配置 MQTT 遥测；未收到数据时不触发，离线按设备超时判断。</p>
+      <p className="muted">ENTITY 可限定场景设备；MODEL 监听所选模型的全部实例。设备需配置 MQTT 遥测；自定义属性首次收到点位值后判断报警，RUNNING STATE 的离线状态按设备超时判断。</p>
       {error ? <p role="alert" className="chart-marker-error">{error}</p> : null}
     </fieldset>
     {c.listenProperty === 'CUSTOM PROPERTY' ? <AlarmCustomPropertyDiagnostics config={c} /> : null}

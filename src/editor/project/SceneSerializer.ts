@@ -3,7 +3,7 @@ import type { ConveyorArrowEffectConfig } from '../model/components';
 import { validateEffectConfiguration } from '../model/effectConfigurationValidation';
 import type { EffectConfiguration } from '../model/effectConfiguration';
 import { normalizeCompositionInstance } from '../composition/composition';
-import { normalizeLightSettings } from '../model/lightSettings';
+import { LIGHT_KINDS, normalizeLightSettings } from '../model/lightSettings';
 import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalTwinEffectConfig } from '../model/digitalTwinEffect';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
@@ -86,7 +86,6 @@ import {
 const UNSUPPORTED_SCENE_FILE_ERROR = '场景文件格式不受支持。';
 const INVALID_SKYBOX_RESOURCE_ID_ERROR = '场景文件格式不受支持：dataPlatformResourceId 必须是 trim 后 1-64 位正十进制字符串。';
 const MESH_KINDS: readonly MeshKind[] = ['cube', 'sphere', 'plane'];
-const LIGHT_KINDS: readonly LightKind[] = ['hemispheric', 'directional', 'point'];
 const MODEL_SCRIPT_EXTENSION = '.ts';
 const MODEL_SCRIPT_DECLARATION_EXTENSION = '.d.ts';
 const LOCATOR_MIN_DIMENSION = 0.01;

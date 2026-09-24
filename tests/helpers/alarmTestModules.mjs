@@ -14,6 +14,9 @@ export async function buildAlarmTestModules(includeRuntime = false) {
   after(cleanup);
   const input = {
     alarmManager: 'src/editor/model/alarmManager.ts', deviceTelemetry: 'src/runtime/mqtt/deviceTelemetry.ts',
+    modelGenerator: 'src/editor/model/modelGenerator.ts', AssetDatabase: 'src/editor/assets/AssetDatabase.ts',
+    AlarmTelemetryTracker: 'src/runtime/mqtt/AlarmTelemetryTracker.ts',
+    alarmAppearancePresets: 'src/editor/model/alarmAppearancePresets.ts',
     ...(includeRuntime ? {
       SceneDocument: 'src/editor/model/SceneDocument.ts', SceneSerializer: 'src/editor/project/SceneSerializer.ts',
       editModeModelThinInstances: 'src/editor/model/editModeModelThinInstances.ts',

@@ -68,7 +68,7 @@ export const POI_EFFECT_DEFINITIONS: readonly PoiEffectDefinition[] = [
   createDefinition('conveyor-arrow-ribbon', '宽幅带式箭头', '宽幅光带 · 网格纹理', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
   createDefinition('conveyor-arrow-double', '双列前进箭头', '平行双列 · 多通道', 'panel', '#20dfff', '#c5faff', 1.2, 1, 1),
   createDefinition('conveyor-arrow-speed', '高速流动箭头', '动态流线 · 高速输送', 'panel', '#20dfff', '#c5faff', 1.2, 2, 1),
-  ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => createDefinition(definition.kind, definition.name, definition.category, 'ring', definition.kind === 'flame' ? '#ff6600' : '#22dfff', definition.kind === 'flame' ? '#ffdd44' : '#96f4ff', 1, 1, 1)),
+  ...DIGITAL_TWIN_EFFECT_DEFINITIONS.map(definition => createDefinition(definition.kind, definition.name, definition.category, 'ring', definition.kind === 'flame' ? '#ff6600' : definition.category === '设备报警' && definition.kind !== 'alarm-route' ? '#ff2424' : '#22dfff', definition.kind === 'flame' || definition.category === '设备报警' ? '#ffb347' : '#96f4ff', 1, 1, 1)),
 ];
 
 const LEGACY_HIDDEN_KINDS = new Set(['radar-scan', 'locator-beam', 'fire', 'smoke', 'pipeline-flow-particles']);

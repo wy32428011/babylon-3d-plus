@@ -705,7 +705,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <p className="muted" role={shadowBakeStatus.phase === 'error' ? 'alert' : undefined}
             style={shadowBakeStatus.phase === 'error' ? { color: '#ff6b6b' } : undefined}>
             {!environment ? '请先添加环境模型作为阴影接收面。' : shadowBakeStatus.message}</p>
-          <p className="muted">所有可见实体模型（包括脚本、参数和遥测设备）均按点击更新时的姿态烘焙。保留地面平铺纹理，运行时使用已生成的阴影贴图；模型移动、参数或太阳方向变化后需重新更新阴影。</p>
+          <p className="muted">所有可见实体模型（包括脚本、参数和遥测设备）均按点击更新时的姿态烘焙。保留地面平铺纹理，运行时使用已生成的阴影贴图；模型移动、参数或太阳方向变化后需重新更新阴影。点光源与聚光灯的投影请切换到实时阴影模式。</p>
         </>}
         {!bakedMode && <label className="inspector-row">
           <span>阴影质量</span>
@@ -774,7 +774,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             />
           </label>
         ))}
-        {!bakedMode && <p className="muted">实时阴影会增加 CPU/GPU 开销。性能/均衡档缓存阴影贴图，运动设备触发更新；高质量档使用实时级联阴影。没有可见方向光时使用自动太阳光。</p>}
+        {!bakedMode && <p className="muted">实时阴影会增加 CPU/GPU 开销。方向光在性能/均衡档缓存阴影贴图，环境与阴影地面接收投影，运动设备触发更新；高质量档使用实时级联阴影，普通模型也接收投影。没有可见方向光时使用自动太阳光。点光源和聚光灯额外生成局部实时投影；点光源使用六面阴影贴图，开销较高。半球光和矩形面光不投影，HDR/EXR 环境光不会自动生成投影。</p>}
       </fieldset>
 
       <fieldset className="transform-fieldset">

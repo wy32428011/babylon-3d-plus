@@ -5,6 +5,8 @@ import {
   Matrix,
   NullEngine,
   PointLight,
+  SpotLight,
+  RectAreaLight,
   DirectionalLight,
   Scene,
   TransformNode,
@@ -73,7 +75,10 @@ try {
   );
   const { useEditorStore } = await loadModule(server, '/src/editor/store/editorStore.ts');
 
+  // Store 的工程打开同步使用浏览器 API；NullEngine 回归无需桌面资源服务。
+  globalThis.window = {};
   useEditorStore.getState().newScene();
+  delete globalThis.window;
   useEditorStore.getState().setTransformTool('rotate');
   useEditorStore.getState().createLight('point');
   assert.equal(useEditorStore.getState().transformTool, 'translate', '创建点光源必须自动切回移动工具');
@@ -268,6 +273,47 @@ try {
   const expectedDirection = Vector3.TransformNormal(new Vector3(0, -1, 0), rotationMatrix).normalize();
   assertVector(directionalLight.direction, expectedDirection, '方向光实体旋转必须驱动实际照射方向');
 
+  const spot = createLightEntity('spot', { x: 2, y: 6, z: -1 });
+  const area = createLightEntity('rectArea', { x: -2, y: 5, z: 1 });
+  spot.components.light.angle = Math.PI / 4;
+  spot.components.light.exponent = 3;
+  area.components.light.width = 3;
+  area.components.light.height = 1.5;
+  document = createDocument(createEmptySceneDocument, [point, directional, hemispheric, spot, area], spot.id);
+  document.sceneSettings.shadows.mode = 'realtime';
+  runtime.sync(document);
+  const spotLight = scene.getLightByName(spot.id);
+  const areaLight = scene.getLightByName(area.id);
+  assert.ok(spotLight instanceof SpotLight, '聚光灯必须创建原生 SpotLight');
+  assert.ok(areaLight instanceof RectAreaLight, '矩形面光必须创建原生 RectAreaLight');
+  assert.equal(spotLight.angle, Math.PI / 4);
+  assert.equal(spotLight.exponent, 3);
+  assert.equal(areaLight.width, 3);
+  assert.equal(areaLight.height, 1.5);
+  assert.ok(pointLight.getShadowGenerator(), '实时模式点光源必须投影');
+  assert.ok(spotLight.getShadowGenerator(), '实时模式聚光灯必须投影');
+  assert.equal(areaLight.getShadowGenerator(), null, '矩形面光当前不支持投影');
+  assert.ok(scene._ltcTextures?.LTC1 && scene._ltcTextures?.LTC2, '本地面光 LUT 必须同步就绪');
+  assertVector(spotLight.direction, new Vector3(0, -1, 0), '聚光灯零旋转向下照射');
+  const areaRoot = areaLight.parent;
+  assert.ok(areaRoot instanceof TransformNode);
+  assertVector(areaRoot.position, area.components.transform.position, '矩形面光父节点同步位置');
+  assertVector(Vector3.TransformNormal(new Vector3(0, 0, -1), areaRoot.getWorldMatrix()),
+    new Vector3(0, -1, 0), '矩形面光零旋转向下照射');
+  for (const entity of [spot, area]) {
+    const target = runtime.getGizmoTargetByEntityId(entity.id);
+    assert.ok(target instanceof TransformNode);
+    assert.ok(target.getChildMeshes().length > 0);
+    for (const mesh of target.getChildMeshes()) {
+      assert.ok(!spotLight.getShadowGenerator().getShadowMap().renderList.includes(mesh), '新灯具标记不能进入阴影');
+    }
+  }
+  const changedArea = { ...area, components: { ...area.components, light: { ...area.components.light, lightKind: 'hemispheric' } } };
+  runtime.sync(createDocument(createEmptySceneDocument, [point, directional, hemispheric, spot, changedArea], spot.id));
+  assert.equal(areaLight.isDisposed(), true, '面光类型切换必须释放灯光');
+  assert.equal(areaRoot.isDisposed(), true, '面光类型切换必须释放独立父节点');
+  runtime.sync(document);
+
   runtime.disableEditorLightMarkers();
   assert.equal(pointTarget.isDisposed(), true, 'Viewer 禁用入口必须释放已经存在的编辑器灯光标记');
   runtime.sync(document);
@@ -280,6 +326,7 @@ try {
 
   console.log('Light editor smoke passed.');
 } finally {
+  delete globalThis.window;
   controller?.dispose();
   runtime?.dispose();
   scene?.dispose();

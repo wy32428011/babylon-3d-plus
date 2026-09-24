@@ -90,7 +90,7 @@ export type BuiltInAssetDragPayload =
   | { kind: 'mesh'; meshKind: 'cube' | 'sphere' | 'plane' }
   | { kind: 'virtual-conveyor' }
   | { kind: 'locator'; locatorKind: 'box-wire' }
-  | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' };
+  | { kind: 'light'; lightKind: 'hemispheric' | 'directional' | 'point' | 'spot' | 'rectArea' };
 
 type AssetEntryRecord = Record<string, unknown>;
 
@@ -425,7 +425,7 @@ export function decodeBuiltInAssetDragPayload(rawPayload: string): BuiltInAssetD
 
     if (payload.kind === 'light') {
       const lightKind = payload.lightKind;
-      if (lightKind !== 'hemispheric' && lightKind !== 'directional' && lightKind !== 'point') return null;
+      if (lightKind !== 'hemispheric' && lightKind !== 'directional' && lightKind !== 'point' && lightKind !== 'spot' && lightKind !== 'rectArea') return null;
       return { kind: 'light', lightKind };
     }
 

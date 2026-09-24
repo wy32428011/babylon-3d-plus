@@ -27,7 +27,7 @@ test('畸形和非有限输入不能进入灯光运行参数', () => {
     const normalized = normalizeLightSettings({ lightKind: 'point', intensity: 1, color: '<script>', groundColor: '#abc', range, nightBehavior: 'unknown' });
     assert.deepEqual(normalized, { lightKind: 'point', intensity: 1 });
   }
-  assert.deepEqual(normalizeLightSettings({ lightKind: 'spot', intensity: -2 }), expected);
+  assert.deepEqual(normalizeLightSettings({ lightKind: 'unknown', intensity: -2 }), expected);
   assert.deepEqual(normalizeLightSettings({ intensity: Infinity }), expected);
 });
 
@@ -38,4 +38,18 @@ test('暖白作业灯显式保持夜间亮度，参数经清洗后稳定', () =>
   assert.deepEqual(normalizeLightSettings(WARM_WORK_LIGHT_SETTINGS), WARM_WORK_LIGHT_SETTINGS);
   const light = normalizeLightSettings({ ...WARM_WORK_LIGHT_SETTINGS, range: undefined });
   assert.equal('range' in light, false);
+});
+
+
+test('聚光灯和矩形面光参数保留、拒绝无效数值', () => {
+  const spot = { lightKind: 'spot', intensity: 2, angle: Math.PI / 3, exponent: 0, range: 20 };
+  const area = { lightKind: 'rectArea', intensity: 3, width: 4, height: 2 };
+  assert.deepEqual(normalizeLightSettings(spot), spot);
+  assert.deepEqual(normalizeLightSettings(area), area);
+  for (const value of [-1, NaN, Infinity, '2']) {
+    const light = normalizeLightSettings({ lightKind: 'spot', intensity: 1, angle: value, exponent: value, width: value, height: value });
+    assert.deepEqual(light, { lightKind: 'spot', intensity: 1 });
+  }
+  for (const angle of [0, Math.PI, Math.PI * 2]) assert.equal(normalizeLightSettings({ angle }).angle, undefined);
+  assert.equal(normalizeLightSettings({ width: 0, height: 0 }).width, undefined);
 });

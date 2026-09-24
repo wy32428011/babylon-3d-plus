@@ -63,7 +63,7 @@ export type DeviceTelemetrySnapshotHistory = {
 
 export type StackerTelemetrySnapshot = DeviceTelemetrySnapshot;
 
-type DeviceTelemetryListener = () => void;
+type DeviceTelemetryListener = (snapshot?: DeviceTelemetrySnapshot) => void;
 
 type DevicePayloadItem = {
   e?: unknown;
@@ -317,7 +317,7 @@ export class DeviceTelemetryStore {
       current: snapshot,
     });
     this.effectiveSnapshotsByKey.set(key, snapshot);
-    this.emitChange();
+    this.emitChange(snapshot);
     return true;
   }
 
@@ -335,7 +335,7 @@ export class DeviceTelemetryStore {
       ...current,
       receivedAt: snapshot.receivedAt,
     });
-    this.emitChange();
+    this.emitChange(this.effectiveSnapshotsByKey.get(key));
   }
 
   /** 按资产编号、设备类型和可选数据源读取最新快照，默认兼容旧 sourceId。 */
@@ -421,9 +421,9 @@ export class DeviceTelemetryStore {
   }
 
   /** 通知所有监听者已有新遥测。 */
-  private emitChange(): void {
+  private emitChange(snapshot?: DeviceTelemetrySnapshot): void {
     for (const listener of this.listeners) {
-      listener();
+      listener(snapshot);
     }
   }
 }

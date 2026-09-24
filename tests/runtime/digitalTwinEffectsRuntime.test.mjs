@@ -5,16 +5,20 @@ import { existsSync, readFileSync } from 'node:fs';
 import ts from 'typescript';
 
 const root = new URL('../../src/', import.meta.url);
+const electronRoot = new URL('../../electron/', import.meta.url);
+const isSource = url => url?.startsWith(root.href) || url?.startsWith(electronRoot.href);
 const hooks = registerHooks({
   resolve(specifier, context, next) {
-    if (specifier.startsWith('.') && context.parentURL?.startsWith(root.href)) {
+    if (specifier.startsWith('.') && isSource(context.parentURL)) {
       const candidate = new URL(specifier, context.parentURL);
-      if (!existsSync(candidate) && existsSync(new URL(candidate.href + '.ts'))) return next(candidate.href + '.ts', context);
+      const source = new URL(candidate.href.replace(/\.js$/, '') + '.ts');
+      if (!existsSync(candidate) && existsSync(source)) return next(source.href, context);
     }
     return next(specifier, context);
   },
   load(url, context, next) {
-    if (url.startsWith(root.href) && url.endsWith('.ts')) return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
+    if (isSource(url) && /\.(png|svg|jpg|webp)$/.test(url)) return { format: 'module', shortCircuit: true, source: `export default ${JSON.stringify(url)}` };
+    if (isSource(url) && url.endsWith('.ts')) return { format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
     return next(url, context);
   },
 });

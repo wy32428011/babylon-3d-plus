@@ -73,6 +73,9 @@ try {
   await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'fire.signal', v: 1 }]));
   await page.waitForFunction(() => window.alarmHarness.inspect().overridden);
   await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'temperature', v: 26 }]));
+  await page.waitForTimeout(400);
+  assert.equal((await page.evaluate(() => window.alarmHarness.inspect())).overridden, true, '其它点位更新不能清除最后一次火警值');
+  await page.evaluate(() => window.alarmHarness.mqtt([{ p: 'fire.signal', v: 0 }]));
   await page.waitForFunction(() => !window.alarmHarness.inspect().overridden && window.alarmHarness.inspect().particles === 0);
   await page.evaluate(() => window.alarmHarness.appearance());
   await page.waitForFunction(() => window.alarmHarness.inspect().appearance);

@@ -1,4 +1,6 @@
 import { getConveyorArrowThumbnail } from './conveyorArrowThumbnails';
+import { getLightThumbnail } from './lightThumbnails';
+import { LIGHT_DESCRIPTIONS } from '../model/lightSettings';
 import techBlueNightThumbnailUrl from '../../assets/images/tech-blue-night.svg';
 import { SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
@@ -7,6 +9,7 @@ import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
 import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeometry';
 import type { LightKind, MeshKind } from '../model/components';
 import { POI_EFFECT_DEFINITIONS, VISIBLE_POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
+import { getAlarmEffectThumbnail } from './alarmEffectThumbnails';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload, ProjectSkyboxAssetEntry } from './AssetDatabase';
 import { formatSkyboxFileSize } from './skyboxAssets';
@@ -18,6 +21,7 @@ export type ProjectLibraryItemBase = {
   name: string;
   icon: string;
   subtitle?: string;
+  description?: string;
   thumbnailUrl?: string;
   hasStatusBadge?: boolean;
 };
@@ -34,6 +38,10 @@ export type SceneThemeProjectLibraryItem = ProjectLibraryItemBase & {
   sceneThemePresetId: typeof SCENE_THEME_PRESET_ID;
 };
 
+export type EnvironmentLightProjectLibraryItem = ProjectLibraryItemBase & {
+  openLibrary: 'skybox';
+};
+
 export type PlaceholderProjectLibraryItem = ProjectLibraryItemBase;
 
 /** 图片库内置图片卡片，保存可拖拽的内置图片资产元数据。 */
@@ -46,7 +54,7 @@ export type SyncedImageProjectLibraryItem = ProjectLibraryItemBase & {
   syncedImage: SyncedImageAssetEntry;
 };
 
-export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | SyncedImageProjectLibraryItem | SceneThemeProjectLibraryItem | PlaceholderProjectLibraryItem;
+export type ProjectLibraryItem = BuiltInProjectLibraryItem | ImportedProjectLibraryItem | BuiltInImageProjectLibraryItem | SyncedImageProjectLibraryItem | SceneThemeProjectLibraryItem | EnvironmentLightProjectLibraryItem | PlaceholderProjectLibraryItem;
 
 export type ProjectLibrary = {
   key: ProjectLibraryKey;
@@ -70,6 +78,45 @@ export type BuiltInProjectLibraryAction =
   | { kind: 'locator'; locatorKind: 'box-wire' }
   | { kind: 'light'; lightKind: LightKind };
 
+/** HDRI 通过唯一天空盒资源提供全局 IBL，不创建重复光源实体。 */
+export const ENVIRONMENT_LIGHT_LIBRARY_ITEM: EnvironmentLightProjectLibraryItem = {
+  id: 'builtin-environment-light',
+  name: '环境光 HDRI / IBL',
+  icon: 'ring',
+  subtitle: '全局照明与反射',
+  description: '使用 HDR/EXR 环境贴图提供全局环境照明和反射，不自动产生投射阴影；IBL Shadows 当前未接入。点击进入天空盒库，导入或选择 HDR/EXR 资源。缩略图为光照概念示意。',
+  thumbnailUrl: getLightThumbnail('environment'),
+  openLibrary: 'skybox',
+};
+
+export const BUILT_IN_LIGHT_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
+  {
+    id: 'builtin-directional-light', name: '方向光', icon: 'marker', subtitle: '平行光 · 支持投影',
+    description: `${LIGHT_DESCRIPTIONS.directional} 旋转改变照射方向；缩略图虚线仅示意光线方向。`,
+    thumbnailUrl: getLightThumbnail('directional'), builtIn: { kind: 'light', lightKind: 'directional' },
+  },
+  {
+    id: 'builtin-spot-light', name: '聚光灯', icon: 'marker', subtitle: '锥形光 · 实时阴影',
+    description: `${LIGHT_DESCRIPTIONS.spot} 可调锥角、衰减和照射方向；缩略图光束仅示意照射范围，不代表体积光。`,
+    thumbnailUrl: getLightThumbnail('spot'), builtIn: { kind: 'light', lightKind: 'spot' },
+  },
+  {
+    id: 'builtin-point-light', name: '点光源', icon: 'marker', subtitle: '全向光 · 实时阴影',
+    description: `${LIGHT_DESCRIPTIONS.point} 光源位置和范围影响受光区域；缩略图虚线仅示意光线方向。`,
+    thumbnailUrl: getLightThumbnail('point'), builtIn: { kind: 'light', lightKind: 'point' },
+  },
+  {
+    id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', subtitle: '基础照明 · 不投影',
+    description: `${LIGHT_DESCRIPTIONS.hemispheric} 可调整天空和地面颜色；缩略图虚线仅示意环境光方向。`,
+    thumbnailUrl: getLightThumbnail('hemispheric'), builtIn: { kind: 'light', lightKind: 'hemispheric' },
+  },
+  {
+    id: 'builtin-rect-area-light', name: '矩形面光', icon: 'panel', subtitle: '柔和面光 · 不投影',
+    description: `${LIGHT_DESCRIPTIONS.rectArea} 可调整宽度、高度和朝向；缩略图虚线仅示意光线方向。`,
+    thumbnailUrl: getLightThumbnail('rectArea'), builtIn: { kind: 'light', lightKind: 'rectArea' },
+  },
+];
+
 export const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
   {
     id: 'builtin-cube',
@@ -82,9 +129,7 @@ export const BUILT_IN_MODEL_LIBRARY_ITEMS: BuiltInProjectLibraryItem[] = [
   { id: 'builtin-plane', name: '地面', icon: 'panel', subtitle: formatBuiltInMeshBaseDimensionsMeters('plane'), builtIn: { kind: 'mesh', meshKind: 'plane' } },
   { id: 'builtin-virtual-conveyor', name: '虚拟输送线', icon: 'panel', subtitle: '输送设备 · 内置', builtIn: { kind: 'virtual-conveyor' } },
   { id: 'builtin-box-wire-locator', name: '虚拟定位线框', icon: 'cube', subtitle: '基础对象', builtIn: { kind: 'locator', locatorKind: 'box-wire' } },
-  { id: 'builtin-hemispheric-light', name: '半球光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'hemispheric' } },
-  { id: 'builtin-directional-light', name: '方向光', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'directional' } },
-  { id: 'builtin-point-light', name: '点光源', icon: 'marker', subtitle: '灯光', builtIn: { kind: 'light', lightKind: 'point' } },
+  ...BUILT_IN_LIGHT_LIBRARY_ITEMS,
 ];
 
 /** 示意图中的业务交互复用已有组件；卡片副标题明确实际创建入口。 */
@@ -203,7 +248,7 @@ export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
       id: `poi-eff-${definition.kind}`,
       name: definition.name,
       icon: definition.icon,
-      thumbnailUrl: getConveyorArrowThumbnail(definition.kind),
+      thumbnailUrl: getAlarmEffectThumbnail(definition.kind) ?? getConveyorArrowThumbnail(definition.kind),
       subtitle: `EFF · ${definition.subtitle}`,
       hasStatusBadge: true,
       builtIn: { kind: 'poi-effect', effectKind: definition.kind },
@@ -269,6 +314,10 @@ export function createSkyboxLibraryItems(skyboxAssets: ProjectSkyboxAssetEntry[]
 /** 主题卡片应用场景配置，不创建层级实体。 */
 export function isSceneThemeProjectLibraryItem(item: ProjectLibraryItem): item is SceneThemeProjectLibraryItem {
   return 'sceneThemePresetId' in item && item.sceneThemePresetId === SCENE_THEME_PRESET_ID;
+}
+
+export function isEnvironmentLightProjectLibraryItem(item: ProjectLibraryItem): item is EnvironmentLightProjectLibraryItem {
+  return 'openLibrary' in item && item.openLibrary === 'skybox';
 }
 
 /** 判断资源库卡片是否对应可直接创建的内置对象。 */

@@ -35,11 +35,27 @@ function ParameterInput({ definition, value, disabled, commit }: { definition: E
   </label>;
 }
 
+/** 只编辑类型专用外观参数，不创建目标选择或数据触发表单。 */
+export function EffectParameterInspector({ component, disabled, onChange }: Props) {
+  const definitions = getEffectParameterDefinitions(component.effectKind);
+  const configuration = component.configuration ?? createDefaultEffectConfiguration(component);
+  const groups = [...new Set(definitions.map(definition => definition.group))];
+  return <>{groups.map(group => <details key={group} open><summary>{group}</summary>
+    {definitions.filter(definition => definition.group === group).map(definition => <ParameterInput
+      key={definition.key + JSON.stringify(configuration.parameters[definition.key] ?? definition.default)}
+      definition={definition} value={configuration.parameters[definition.key] ?? definition.default} disabled={disabled}
+      commit={value => {
+        if (disabled) return;
+        const next = { ...configuration, parameters: { ...configuration.parameters, [definition.key]: value } };
+        onChange({ ...component, configuration: sanitizeEffectConfiguration(next, component) }, `更新特效${definition.label}`);
+      }} />)}
+  </details>)}</>;
+}
+
 export function EffectConfigurationInspector({ component, disabled, onChange }: Props) {
   const scene = useEditorStore(state=>state.scene);
   const id = scene.selectedEntityId ?? '';
   const hierarchySelectionIds = useEditorStore(state=>state.hierarchySelectionIds);
-  const definitions = getEffectParameterDefinitions(component.effectKind);
   const configuration = component.configuration ?? createDefaultEffectConfiguration(component);
   const [dropActive, setDropActive] = useState(false), [error, setError] = useState('');
   const diagnostic = useSyncExternalStore(subscribeEffectDiagnostics,()=>getEffectDiagnostic(id),()=>undefined);
@@ -83,7 +99,6 @@ export function EffectConfigurationInspector({ component, disabled, onChange }: 
     if(legacy.length&&component.effectKind!=='light-wall-fence')next.parameters=Object.fromEntries(legacy.map(d=>[d.key,structuredClone(d.default)]));
     commit(next,'启用特效详细配置');
   }}>启用详细配置与数据绑定</button><p className="muted">配置模型库匹配、资产编号、数据源和此特效专用参数。旧版效果启用后使用对应专用参数表现，可撤销。</p></div>;
-  const groups=[...new Set(definitions.map(definition=>definition.group))];
   return <div className="effect-configuration">
     {!global&&<details open><summary>目标与锚点</summary>
       <label className="inspector-row"><span>目标来源</span><select aria-label="特效目标来源" disabled={disabled} value={configuration.target.mode} onChange={e=>target({mode:e.target.value as EffectTargetBinding['mode']})}>
@@ -128,7 +143,7 @@ export function EffectConfigurationInspector({ component, disabled, onChange }: 
       }}>{candidate.name} · {candidate.assetCode||'无资产编号'}</button>)}</details>}
       {error&&<p role="alert">{error}</p>}
     </details>}
-    {groups.map(group=><details key={group} open><summary>{group}</summary>{definitions.filter(d=>d.group===group).map(definition=><ParameterInput key={definition.key+JSON.stringify(configuration.parameters[definition.key]??definition.default)} definition={definition} value={configuration.parameters[definition.key]??definition.default} disabled={disabled} commit={value=>commit({...configuration,parameters:{...configuration.parameters,[definition.key]:value}},`更新特效${definition.label}`)}/>)}</details>)}
+    <EffectParameterInspector component={component} disabled={disabled} onChange={onChange} />
     <EffectDataBindingInspector component={component} configuration={configuration} disabled={disabled} onChange={commit}/>
     <details><summary>运行诊断</summary><p role="status">{diagnostic?.status??'未运行'}：{diagnostic?.message??'运行预览后查看数据与目标状态'}</p>
       {diagnostic?.identity&&<p className="muted">{diagnostic.identity.sourceId} / {diagnostic.identity.deviceType} / {diagnostic.identity.assetCode}</p>}

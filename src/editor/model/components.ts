@@ -247,7 +247,7 @@ export type CameraComponent = {
   far: number;
 };
 
-export type LightKind = 'hemispheric' | 'directional' | 'point';
+export type LightKind = 'hemispheric' | 'directional' | 'point' | 'spot' | 'rectArea';
 
 export type LightComponent = {
   lightKind: LightKind;
@@ -256,6 +256,12 @@ export type LightComponent = {
   color?: string;
   groundColor?: string;
   range?: number;
+  /** 聚光灯完整锥角（弧度）及光束衰减指数。 */
+  angle?: number;
+  exponent?: number;
+  /** 矩形发光面尺寸，单位为米。 */
+  width?: number;
+  height?: number;
   /** 作业灯可在昼夜变化时保持亮度，旧灯光继续随环境变暗。 */
   nightBehavior?: 'dim' | 'keep';
 };

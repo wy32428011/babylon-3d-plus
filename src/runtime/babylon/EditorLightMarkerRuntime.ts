@@ -37,7 +37,7 @@ type EditorLightMarkerEntry = {
 };
 
 /**
- * 点光源和方向光的编辑器辅助标记运行时。
+ * 实体灯具的编辑器辅助标记运行时。
  * 根节点保存实体 Transform，子视觉根节点独立抵消实体缩放并维持近似固定屏幕尺寸。
  */
 export class EditorLightMarkerRuntime {
@@ -175,9 +175,10 @@ export class EditorLightMarkerRuntime {
     material.backFaceCulling = false;
     material.wireframe = true;
 
-    const meshes = kind === 'point'
-      ? this.createPointMarkerMeshes(entityId, visualRoot, material)
-      : this.createDirectionalMarkerMeshes(entityId, visualRoot, material);
+    const meshes = kind === 'point' ? this.createPointMarkerMeshes(entityId, visualRoot, material)
+      : kind === 'spot' ? this.createSpotMarkerMeshes(entityId, visualRoot, material)
+        : kind === 'rectArea' ? this.createAreaMarkerMeshes(entityId, visualRoot, material)
+          : this.createDirectionalMarkerMeshes(entityId, visualRoot, material);
 
     return {
       kind,
@@ -236,6 +237,23 @@ export class EditorLightMarkerRuntime {
     const meshes = [origin, shaft, head];
     for (const mesh of meshes) this.configureMarkerMesh(mesh, entityId, parent, material);
     return meshes;
+  }
+
+  /** 锥顶为聚光灯位置，锥体沿实际局部 -Y 发光方向展开。 */
+  private createSpotMarkerMeshes(entityId: string, parent: TransformNode, material: StandardMaterial): Mesh[] {
+    const cone = MeshBuilder.CreateCylinder(entityId + '_spotLightMarker',
+      { height: 0.9, diameterTop: 0, diameterBottom: 0.8, tessellation: 12 }, this.scene);
+    cone.position.y = -0.45;
+    this.configureMarkerMesh(cone, entityId, parent, material);
+    return [cone];
+  }
+
+  /** 矩形灯板和方向箭头共同表明面光的位置及发光侧。 */
+  private createAreaMarkerMeshes(entityId: string, parent: TransformNode, material: StandardMaterial): Mesh[] {
+    const panel = MeshBuilder.CreateBox(entityId + '_areaLightPanelMarker',
+      { width: 0.9, height: 0.04, depth: 0.65 }, this.scene);
+    this.configureMarkerMesh(panel, entityId, parent, material);
+    return [panel, ...this.createDirectionalMarkerMeshes(entityId, parent, material)];
   }
 
   private configureMarkerMesh(

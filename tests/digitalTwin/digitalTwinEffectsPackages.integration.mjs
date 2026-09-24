@@ -54,7 +54,7 @@ async function run() {
     };
     source.scene.entityIds.push('demo-building');
     content = JSON.stringify(source);
-    assert.equal(walls(source).length, 37, '先运行编辑器集成测试生成围栏场景');
+    assert.equal(walls(source).length, 43, '先运行编辑器集成测试生成特效场景');
     const projectRoot = path.join(root, 'project');
     const entrySceneFilePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
     await mkdir(path.dirname(entrySceneFilePath), { recursive: true });
@@ -108,7 +108,7 @@ async function run() {
       distFiles: distPackage.fileCount, viewerRoot,
       checks: ['source-entry', 'source-second-zero-values', 'dist-entry', 'source-not-mutated'],
     }, null, 2));
-    console.log('SOURCE 双场景 ZIP 与 DIST 实际 ZIP：37 类特效参数、目标引用、路径、数据和 Transform 保留验证通过');
+    console.log('SOURCE 双场景 ZIP 与 DIST 实际 ZIP：43 类特效参数、目标引用、路径、数据和 Transform 保留验证通过');
     code = 0;
   } catch (error) {
     console.error(error);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createServer } from 'vite';
 import { chromium } from 'playwright';
@@ -9,25 +9,30 @@ await mkdir(output, { recursive: true });
 const positions = new Float32Array([-1,-1,-1,1,-1,-1,1,1,-1,-1,1,-1,-1,-1,1,1,-1,1,1,1,1,-1,1,1]);
 const indices = new Uint16Array([0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,3,7,6,3,6,2,1,2,6,1,6,5,0,4,7,0,7,3]);
 const binary = Buffer.concat([Buffer.from(positions.buffer), Buffer.from(indices.buffer)]);
-const modelPath = path.join(output, 'device.gltf');
+const modelPath = path.join(output, 'scene-model-versions', 'a'.repeat(64), 'b'.repeat(64), 'Model-42-设备', 'device.gltf');
+const libraryPath = path.join(output, 'shared-models', 'Model-42-设备', 'device.gltf');
+await mkdir(path.dirname(modelPath), { recursive: true });
+await mkdir(path.dirname(libraryPath), { recursive: true });
 await writeFile(modelPath, JSON.stringify({ asset: { version: '2.0' }, scene: 0, scenes: [{ nodes: [0] }], nodes: [{ name: 'DeviceCube', mesh: 0 }], meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0 }] }], materials: [{ pbrMetallicRoughness: { baseColorFactor: [.1,.4,.3,1], metallicFactor: 0, roughnessFactor: 1 } }], buffers: [{ byteLength: binary.length, uri: 'data:application/octet-stream;base64,' + binary.toString('base64') }], bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.byteLength }, { buffer: 0, byteOffset: positions.byteLength, byteLength: indices.byteLength }], accessors: [{ bufferView: 0, componentType: 5126, count: 8, type: 'VEC3', min: [-1,-1,-1], max: [1,1,1] }, { bufferView: 1, componentType: 5123, count: 36, type: 'SCALAR' }] }));
+await copyFile(modelPath, libraryPath);
 const server = await createServer({ cacheDir: path.join(output, 'vite-cache'), server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
 let browser, page;
 const errors = [];
-async function cyanCount(png) {
-  return page.evaluate(async base64 => {
+async function effectPixelCount(png, color = 'cyan') {
+  return page.evaluate(async ({ base64, color }) => {
     const image = new Image(); image.src = 'data:image/png;base64,' + base64; await image.decode();
     const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
     const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-    let cyan = 0;
+    let count = 0;
     // 只比较左侧设备区域，排除中央坐标轴与右上角方向控件。
     for (let y = 70; y < canvas.height - 50; y++) for (let x = 0; x < canvas.width / 2 - 20; x++) {
       const i = (y * canvas.width + x) * 4;
-      if (pixels[i + 1] > 100 && pixels[i + 2] > 100 && pixels[i + 1] > pixels[i] + 35 && pixels[i + 2] > pixels[i] + 45 && pixels[i + 2] > pixels[i + 1]) cyan++;
+      if (color === 'cyan' ? pixels[i + 1] > 100 && pixels[i + 2] > 100 && pixels[i + 1] > pixels[i] + 35 && pixels[i + 2] > pixels[i] + 45 && pixels[i + 2] > pixels[i + 1]
+        : pixels[i] > 100 && pixels[i + 2] > 100 && pixels[i] > pixels[i + 1] + 35 && pixels[i + 2] > pixels[i + 1] + 45) count++;
     }
-    return cyan;
-  }, png.toString('base64'));
+    return count;
+  }, { base64: png.toString('base64'), color });
 }
 try {
   await server.listen();
@@ -35,15 +40,56 @@ try {
   page = await browser.newPage({ viewport: { width: 1500, height: 1050 } });
   page.setDefaultTimeout(60000);
   page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
-  await page.addInitScript(value => { window.alarmFixturePath = value; }, modelPath);
+  page.on('requestfailed', request => console.error('请求失败', request.url(), request.failure()?.errorText));
+  await page.addInitScript(value => { window.alarmFixturePaths = value; }, { sourcePath: modelPath, libraryPath });
   const html = await server.transformIndexHtml('/__alarm_appearance__', '<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div><script type="module" src="/tests/fixtures/alarmAppearance.harness.tsx"></script></body></html>');
   await page.route('**/__alarm_appearance__', route => route.fulfill({ contentType: 'text/html', body: html }));
-  await page.goto(server.resolvedUrls.local[0] + '__alarm_appearance__', { waitUntil: 'commit' });
-  await page.waitForFunction(() => window.alarmAppearanceHarness?.ready(), null, { timeout: 180000 });
+  await page.goto(server.resolvedUrls.local[0] + '__alarm_appearance__', { waitUntil: 'domcontentloaded', timeout: 180000 });
+  await page.waitForFunction(() => !!window.alarmAppearanceHarness, null, { timeout: 180000 });
+  console.log('PASS: 报警编辑器模块已加载');
+  await page.waitForFunction(() => window.alarmAppearanceHarness?.ready(), null, { timeout: 45000 });
   await page.evaluate(() => window.alarmAppearanceHarness.camera());
   const slot = page.getByRole('group', { name: '报警外观特效', exact: true });
   await slot.waitFor();
+  await page.getByLabel('监听属性', { exact: true }).selectOption('CUSTOM PROPERTY');
+  await page.getByLabel('火警属性', { exact: true }).fill('normal');
+  await page.getByLabel('触发值', { exact: true }).fill('true');
+  assert.deepEqual(await page.evaluate(() => {
+    const { listenProperty, customProperty, customValue } = window.alarmAppearanceHarness.config();
+    return { listenProperty, customProperty, customValue };
+  }), { listenProperty: 'CUSTOM PROPERTY', customProperty: 'normal', customValue: 'true' });
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.config().targets.length), 0, '目标必须从空配置开始');
+  await page.getByLabel('目标 Size', { exact: true }).fill('1');
+  await page.getByLabel('目标 Size', { exact: true }).press('Enter');
+  const modelSlot = page.getByRole('group', { name: '设备类型 1', exact: true });
+  await modelSlot.waitFor();
   await page.getByRole('button', { name: '模型库', exact: true }).click();
+  await page.getByRole('button', { name: /^报警测试设备/ }).dragTo(modelSlot);
+  await page.waitForFunction(() => window.alarmAppearanceHarness.config().targets[0]?.model?.displayName === '报警测试设备');
+  assert.equal(await page.evaluate(() => {
+    const harness = window.alarmAppearanceHarness;
+    const target = harness.config().targets[0].model.modelAsset;
+    const device = harness.store.getState().scene.entities[harness.devices[0].id].components.modelAsset;
+    return target.dataPlatformModel === undefined && target.sourceUrl !== device.sourceUrl
+      && device.sourceSnapshot?.contentSha256 === 'b'.repeat(64);
+  }), true, '拖放必须保留旧库条目缺少身份、设备固定版本路径不同的真实回归前提');
+  await page.screenshot({ path: path.join(output, 'model-target-dropped.png') });
+  const matchedDevices = await page.evaluate(() => window.alarmAppearanceHarness.resolvedTargetCount());
+  assert.equal(matchedDevices, 2, 'Size=1 后从真实模型库卡片拖入的旧格式模型应匹配两个场景缓存实例');
+  assert.equal(await page.locator('.alarm-property-diagnostics summary').textContent(), 'MQTT 点位诊断（2 台设备）');
+  await page.getByLabel('目标类型', { exact: true }).selectOption('ENTITY');
+  const deviceSelect = page.getByLabel('场景设备', { exact: true });
+  await deviceSelect.click();
+  await page.getByRole('option', { name: '设备 A · A', exact: true }).waitFor();
+  await page.getByRole('option', { name: '设备 B · B', exact: true }).waitFor();
+  await page.screenshot({ path: path.join(output, 'entity-target-options.png') });
+  await page.getByRole('option', { name: '设备 A · A', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.resolvedTargetCount()), 1, 'ENTITY 可以选择单个设备');
+  await deviceSelect.press('ArrowDown');
+  await page.getByRole('option', { name: '该模型全部实例', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.resolvedTargetCount()), 2, 'ENTITY 全部实例可恢复两台设备');
+  await page.getByLabel('目标类型', { exact: true }).selectOption('MODEL');
+  console.log('PASS: Size=1、普通模型库真实拖入、不同缓存路径匹配两台设备');
   await page.getByRole('button', { name: /^立方体/ }).dragTo(slot);
   await page.getByRole('alert').filter({ hasText: '请从特效库拖入' }).waitFor();
   assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.config().appearanceEffect), null);
@@ -56,33 +102,86 @@ try {
   await page.evaluate(() => window.alarmAppearanceHarness.store.getState().redo());
   await page.waitForFunction(() => window.alarmAppearanceHarness.config().appearanceEffect?.effectKind === 'light-pillar');
   console.log('PASS: 特效库拖入、模型拒绝、撤销重做');
+  await page.getByLabel('覆盖设备颜色', { exact: true }).check();
+  const appearance = page.getByRole('group', { name: '报警外观属性', exact: true });
+  assert.equal(await appearance.count(), 1, '已选报警外观应显示可编辑的属性面板');
+  assert.equal(await appearance.getByLabel('特效绑定目标').count(), 0, '报警外观不应要求再次绑定设备');
+  assert.equal(await appearance.getByText('启用详细配置与数据绑定', { exact: true }).count(), 0, '报警外观由管理器统一触发');
+  assert.equal(await appearance.locator('.number-row > span').evaluateAll(labels => labels.every(label => label.scrollWidth <= label.clientWidth + 1)), true, '外观属性名称应完整可读，不能被紧凑模型样式截断');
+  await appearance.getByLabel('高度 (m)', { exact: true }).fill('9');
+  await page.evaluate(() => window.alarmAppearanceHarness.store.getState().undo());
+  assert.equal(await appearance.getByLabel('高度 (m)', { exact: true }).inputValue(), '6');
+  await page.evaluate(() => window.alarmAppearanceHarness.store.getState().redo());
+  assert.equal(await appearance.getByLabel('高度 (m)', { exact: true }).inputValue(), '9');
+  await appearance.getByLabel('范围半径 (m)', { exact: true }).fill('1.5');
+  await appearance.getByLabel('不透明度 (%)', { exact: true }).fill('68');
+  await appearance.getByLabel('主颜色', { exact: true }).fill('#00cfff');
+  await appearance.getByLabel('底部半径 (米)', { exact: true }).fill('0.5');
+  await appearance.getByLabel('底部半径 (米)', { exact: true }).press('Enter');
+  await appearance.getByLabel('顶部半径 (米)', { exact: true }).fill('0.2');
+  await appearance.getByLabel('顶部半径 (米)', { exact: true }).press('Enter');
+  assert.deepEqual(await page.evaluate(() => window.alarmAppearanceHarness.config().appearanceEffect.configuration.parameters), { bottomRadius: 0.5, topRadius: 0.2, showBase: true });
+  assert.equal(await page.evaluate(() => !!window.alarmAppearanceHarness.store.getState().scene.entities[window.alarmAppearanceHarness.managerId].components.poiEffect), false, '属性编辑不能给管理器新增普通 poiEffect');
+  console.log('PASS: 外观颜色与光柱专用属性编辑、属性撤销重做');
   const saved = await page.evaluate(() => window.alarmAppearanceHarness.save());
   await writeFile(path.join(output, 'scene.scene.json'), saved);
   await page.evaluate(content => window.alarmAppearanceHarness.reopen(content), saved);
   await page.waitForFunction(() => window.alarmAppearanceHarness.ready() && window.alarmAppearanceHarness.config().appearanceEffect?.effectKind === 'light-pillar');
+  assert.equal(await page.getByLabel('监听属性', { exact: true }).inputValue(), 'CUSTOM PROPERTY');
+  assert.equal(await page.getByLabel('火警属性', { exact: true }).inputValue(), 'normal');
+  assert.equal(await page.getByLabel('触发值', { exact: true }).inputValue(), 'true');
+  assert.equal(await appearance.getByLabel('高度 (m)', { exact: true }).inputValue(), '9');
+  assert.equal(await appearance.getByLabel('范围半径 (m)', { exact: true }).inputValue(), '1.5');
+  assert.equal(await appearance.getByLabel('不透明度 (%)', { exact: true }).inputValue(), '68');
+  assert.equal(await appearance.getByLabel('主颜色', { exact: true }).inputValue(), '#00cfff');
+  assert.equal(await appearance.getByLabel('底部半径 (米)', { exact: true }).inputValue(), '0.5');
+  assert.equal(await appearance.getByLabel('顶部半径 (米)', { exact: true }).inputValue(), '0.2');
+  assert.equal(await page.evaluate(() => {
+    const harness = window.alarmAppearanceHarness;
+    const target = harness.config().targets[0];
+    const device = harness.store.getState().scene.entities[harness.devices[0].id];
+    return harness.config().targetType === 'MODEL' && !target.entityId
+      && target.model.modelAsset.sourceUrl !== device.components.modelAsset.sourceUrl
+      && device.components.modelAsset.dataPlatformModel.sourceKey === 'a'.repeat(64)
+      && device.components.modelAsset.sourcePath.includes('scene-model-versions')
+      && harness.resolvedTargetCount() === 2;
+  }), true, '保存重开后保留设备来源身份，模型库目标仍匹配不同缓存地址的两台设备');
   await page.screenshot({ path: path.join(output, 'configured.png') });
   console.log('PASS: 保存重开');
   const readiness = await page.evaluate(() => window.alarmAppearanceHarness.store.getState().startRuntimePreview());
   assert.equal(readiness.ok, true, JSON.stringify(readiness));
+  assert.equal(await appearance.count(), 0, '运行预览切换到运行面板，不提供外观编辑入口');
   await page.evaluate(() => window.alarmAppearanceHarness.camera());
   const baselineFrame = await page.evaluate(() => window.alarmAppearanceHarness.scene().getFrameId());
   await page.waitForFunction(frame => window.alarmAppearanceHarness.scene().getFrameId() > frame + 30, baselineFrame);
-  const baselinePixels = await cyanCount(await page.locator('canvas').first().screenshot({ path: path.join(output, 'baseline-canvas.png') }));
+  const baselinePixels = await effectPixelCount(await page.locator('canvas').first().screenshot({ path: path.join(output, 'baseline-canvas.png') }));
   await page.evaluate(() => window.alarmAppearanceHarness.signal(0, true));
   await page.waitForFunction(() => !!window.alarmAppearanceHarness.effect(0));
+  await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).some(mesh => mesh.material?.name.endsWith('_alarmColor') && mesh.material.diffuseColor?.toHexString().toLowerCase() === '#ff1717'));
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.modelMeshes(1).some(mesh => mesh.material?.name.endsWith('_alarmColor'))), false, '未命中的设备不能被红色覆盖');
   assert.equal(await page.evaluate(() => !!window.alarmAppearanceHarness.effect(1)), false);
   const frame = await page.evaluate(() => window.alarmAppearanceHarness.scene().getFrameId());
   await page.waitForFunction(frame => window.alarmAppearanceHarness.scene().getFrameId() > frame + 30, frame);
   const png = await page.locator('canvas').first().screenshot({ path: path.join(output, 'active-canvas.png') });
-  const cyanPixels = await cyanCount(png);
+  const cyanPixels = await effectPixelCount(png);
   assert.ok(cyanPixels > baselinePixels + 200, '必须比未报警画面多出可见的青色光柱像素：' + cyanPixels + '/' + baselinePixels);
   console.log('光柱像素', { baselinePixels, cyanPixels });
+  const pillarDimensions = await page.evaluate(() => {
+    const pillar = window.alarmAppearanceHarness.scene().meshes.find(mesh => mesh.name.includes(window.alarmAppearanceHarness.managerId + ':alarm:' + window.alarmAppearanceHarness.devices[0].id) && mesh.name.endsWith('_pillar'));
+    if (!pillar) return null;
+    const bounds = pillar.getBoundingInfo().boundingBox;
+    return { height: bounds.maximum.y - bounds.minimum.y, diameter: bounds.maximum.x - bounds.minimum.x };
+  });
+  assert.ok(Math.abs(pillarDimensions?.height - 9) < 0.001, '实际 WebGL 光柱必须应用保存的 9 米高度：' + JSON.stringify(pillarDimensions));
+  assert.ok(Math.abs(pillarDimensions?.diameter - 1) < 0.001, '实际 WebGL 光柱必须应用保存的 0.5 米底部半径：' + JSON.stringify(pillarDimensions));
   await page.evaluate(() => window.alarmAppearanceHarness.signal(1, true));
   await page.waitForFunction(() => !!window.alarmAppearanceHarness.effect(1));
   await page.evaluate(() => window.alarmAppearanceHarness.signal(0, false));
   await page.waitForFunction(() => !window.alarmAppearanceHarness.effect(0) && !!window.alarmAppearanceHarness.effect(1));
+  await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).every(mesh => !mesh.material?.name.endsWith('_alarmColor')) && window.alarmAppearanceHarness.modelMeshes(1).some(mesh => mesh.material?.name.endsWith('_alarmColor')));
   await page.evaluate(() => window.alarmAppearanceHarness.store.getState().stopRuntimePreview());
   await page.waitForFunction(() => !window.alarmAppearanceHarness.effect(0) && !window.alarmAppearanceHarness.effect(1));
+  await page.waitForFunction(() => [0, 1].every(index => window.alarmAppearanceHarness.modelMeshes(index).every(mesh => !mesh.material?.name.endsWith('_alarmColor'))));
   await page.evaluate(() => window.alarmAppearanceHarness.store.getState().selectEntity(window.alarmAppearanceHarness.managerId));
   await page.getByRole('button', { name: /^高度渐变着色/ }).dragTo(slot);
   await page.waitForFunction(() => window.alarmAppearanceHarness.config().appearanceEffect?.effectKind === 'height-gradient');
@@ -91,19 +190,50 @@ try {
   await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).some(mesh => mesh.material?.name.endsWith('_effect')));
   const surfaceFrame = await page.evaluate(() => window.alarmAppearanceHarness.scene().getFrameId());
   await page.waitForFunction(frame => window.alarmAppearanceHarness.scene().getFrameId() > frame + 30, surfaceFrame);
-  const surfacePixels = await cyanCount(await page.locator('canvas').first().screenshot({ path: path.join(output, 'surface-canvas.png') }));
+  const surfacePng = await page.locator('canvas').first().screenshot({ path: path.join(output, 'surface-canvas.png') });
+  const surfacePixels = await effectPixelCount(surfacePng);
+  const baselineMagenta = await effectPixelCount(surfacePng, 'magenta');
   assert.ok(surfacePixels > baselinePixels + 1000, '模型表面必须实际显示渐变特效：' + surfacePixels);
   await page.evaluate(() => window.alarmAppearanceHarness.store.getState().stopRuntimePreview());
   await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).every(mesh => !mesh.material?.name.endsWith('_effect')));
   await page.evaluate(() => window.alarmAppearanceHarness.store.getState().selectEntity(window.alarmAppearanceHarness.managerId));
+  assert.equal(await appearance.getByLabel('特效绑定目标').count(), 0, '模型表面外观也由报警管理器绑定目标');
+  await appearance.getByLabel('主颜色', { exact: true }).fill('#cc00ff');
+  await appearance.getByLabel('辅助颜色', { exact: true }).fill('#ff33ff');
+  await appearance.getByLabel('保留原始材质比例', { exact: true }).fill('0.1');
+  await appearance.getByLabel('保留原始材质比例', { exact: true }).press('Enter');
+  await page.screenshot({ path: path.join(output, 'appearance-properties.png') });
+  assert.equal((await page.evaluate(() => window.alarmAppearanceHarness.store.getState().startRuntimePreview())).ok, true);
+  await page.evaluate(() => { window.alarmAppearanceHarness.camera(); window.alarmAppearanceHarness.signal(0, true); });
+  await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).some(mesh => mesh.material?.name.endsWith('_effect')));
+  const changedSurfaceFrame = await page.evaluate(() => window.alarmAppearanceHarness.scene().getFrameId());
+  await page.waitForFunction(frame => window.alarmAppearanceHarness.scene().getFrameId() > frame + 30, changedSurfaceFrame);
+  const magentaPixels = await effectPixelCount(await page.locator('canvas').first().screenshot({ path: path.join(output, 'surface-edited-canvas.png') }), 'magenta');
+  assert.ok(magentaPixels > baselineMagenta + 1000, '修改报警表面外观颜色后必须实际显示紫红渐变：' + magentaPixels + '/' + baselineMagenta);
+  await page.evaluate(() => window.alarmAppearanceHarness.store.getState().stopRuntimePreview());
+  await page.waitForFunction(() => window.alarmAppearanceHarness.modelMeshes(0).every(mesh => !mesh.material?.name.endsWith('_effect')));
+  await page.evaluate(() => window.alarmAppearanceHarness.store.getState().selectEntity(window.alarmAppearanceHarness.managerId));
+  await page.getByRole('button', { name: /^单一直线箭头/ }).dragTo(slot);
+  await page.waitForFunction(() => window.alarmAppearanceHarness.config().appearanceEffect?.effectKind === 'conveyor-arrow-single');
+  await appearance.getByLabel('长度（米）', { exact: true }).fill('4');
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.config().appearanceEffect.conveyorArrow.length), 4);
+  await page.getByRole('button', { name: /^光墙围栏/ }).dragTo(slot);
+  await page.waitForFunction(() => window.alarmAppearanceHarness.config().appearanceEffect?.effectKind === 'light-wall-fence');
+  await appearance.getByLabel('围栏高度 (m)', { exact: true }).fill('7');
+  assert.equal(await page.evaluate(() => window.alarmAppearanceHarness.config().appearanceEffect.lightWall.height), 7);
+  console.log('PASS: 光柱真实尺寸、表面颜色像素变化、箭头与光墙类型字段');
   await page.getByRole('button', { name: '清空报警外观特效', exact: true }).click();
   await page.waitForFunction(() => window.alarmAppearanceHarness.config().appearanceEffect === null);
   assert.deepEqual(errors, []);
   await page.evaluate(() => window.alarmAppearanceHarness.dispose());
-  await writeFile(path.join(output, 'result.json'), JSON.stringify({ ok: true, baselinePixels, cyanPixels, surfacePixels, errors, checks: ['library-drag', 'reject-model', 'undo-redo', 'save-reopen', 'preview', 'visible-effect-pixels', 'per-device-alarm', 'clear-stop'] }, null, 2));
-  console.log('PASS: 特效库真实拖放、模型拒绝、撤销重做、保存重开、运行预览可见像素、多设备报警与停止清理。cyanPixels=' + cyanPixels);
+  await writeFile(path.join(output, 'result.json'), JSON.stringify({ ok: true, baselinePixels, cyanPixels, surfacePixels, baselineMagenta, magentaPixels, pillarDimensions, errors, checks: ['empty-target-size-ui', 'real-model-library-drag', 'legacy-library-to-scene-cache-match', 'entity-device-options', 'entity-one-and-all', 'custom-property-normal-true-ui', 'raw-mqtt-epv', 'library-drag', 'reject-model', 'undo-redo', 'appearance-properties', 'appearance-undo-redo', 'appearance-save-reopen', 'appearance-specific-parameters', 'alarm-owned-target', 'preview-readonly', 'light-pillar-mesh-dimensions', 'edited-surface-color-pixels', 'conveyor-and-lightwall-fields', 'source-identity-save-reopen', 'preview', 'red-model-material', 'visible-effect-pixels', 'per-device-alarm', 'clear-stop'] }, null, 2));
+  console.log('PASS: CUSTOM PROPERTY normal/true 表单、原始 MQTT p/v、特效库真实拖放、模型拒绝、撤销重做、保存重开、红色材质与可见特效、多设备报警及停止清理。cyanPixels=' + cyanPixels);
 } catch (error) {
-  if (page) await page.screenshot({ path: path.join(output, 'failure.png') });
+  if (page && !page.isClosed()) {
+    console.error('报警测试诊断', JSON.stringify(await page.evaluate(() => window.alarmAppearanceHarness?.diagnostic()), null, 2));
+    await page.screenshot({ path: path.join(output, 'failure.png') });
+  }
+  await writeFile(path.join(output, 'result.json'), JSON.stringify({ ok: false, error: String(error), errors }, null, 2));
   throw error;
 } finally {
   await browser?.close();

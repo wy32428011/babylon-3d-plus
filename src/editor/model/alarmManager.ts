@@ -1,4 +1,4 @@
-import type { ChartMarkerComponent, ChartMarkerThemeScreen, ModelGeneratorTarget, PoiEffectComponent, PoiEffectKind } from './components';
+import type { ChartMarkerComponent, ChartMarkerThemeScreen, ModelAssetTemplate, ModelGeneratorTarget, PoiEffectComponent, PoiEffectKind } from './components';
 import type { Entity } from './Entity';
 import type { SceneDocument } from './SceneDocument';
 import type { Vector3Data } from './math';
@@ -7,6 +7,8 @@ import { createId } from '../../shared/ids';
 import { CHART_MARKER_DEFAULTS, normalizeChartMarker, normalizeChartMarkerThemeScreen } from './chartMarker';
 import { sanitizeModelGeneratorTarget } from './modelGenerator';
 import { isPoiEffectKind, sanitizePoiEffectComponent } from './poiEffect';
+import { matchesModelTypeReference, modelTypePathKey } from '../../../electron/shared/modelTypeIdentity';
+import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
 
 export type AlarmTarget = { id: string; model: ModelGeneratorTarget | null; entityId: string };
 export type AlarmManagerComponent = {
@@ -15,6 +17,7 @@ export type AlarmManagerComponent = {
   customProperty: string;
   customValue: string;
   overrideColor: string;
+  overrideColorEnabled: boolean;
   /** 兼容旧场景；新配置从特效库选择 appearanceEffect。 */
   appearanceModel: ModelGeneratorTarget | null;
   appearanceEffect: PoiEffectComponent | null;
@@ -41,7 +44,7 @@ export const ALARM_MAX_TARGETS = 64;
 export function createDefaultAlarmManager(): AlarmManagerComponent {
   return {
     listenProperty: 'RUNNING STATE', runningState: 'running', customProperty: 'fireAlarm', customValue: 'true',
-    overrideColor: '#ff1717', appearanceModel: null, appearanceEffect: null, theme: null, showMarker: false,
+    overrideColor: '#ff1717', overrideColorEnabled: true, appearanceModel: null, appearanceEffect: null, theme: null, showMarker: false,
     markerCategory: '人员', associationType: 'chart', markerScreen: null, contentUrl: '',
     marker: { ...CHART_MARKER_DEFAULTS, text: '报警', driveMode: 'none', clickEvents: [] },
     warehouseAlarm: true, warehouseTheme: null, focusCamera: true, targetType: 'ENTITY', targets: [],
@@ -82,7 +85,7 @@ export function normalizeAlarmManager(value: unknown): AlarmManagerComponent {
   const c = { ...createDefaultAlarmManager(), ...source } as AlarmManagerComponent;
   const enums = { listenProperty: ['RUNNING STATE', 'CUSTOM PROPERTY'], runningState: ['offline', 'idle', 'running', 'alarm'], associationType: ['chart', 'third-party', 'video', 'builtin'], targetType: ['ENTITY', 'MODEL'] };
   for (const [key, values] of Object.entries(enums)) if (!values.includes(String(c[key as keyof typeof c]))) throw new Error('报警管理器选项无效: ' + key);
-  for (const key of ['showMarker', 'warehouseAlarm', 'focusCamera'] as const) if (typeof c[key] !== 'boolean') throw new Error('报警管理器开关无效: ' + key);
+  for (const key of ['showMarker', 'warehouseAlarm', 'focusCamera', 'overrideColorEnabled'] as const) if (typeof c[key] !== 'boolean') throw new Error('报警管理器开关无效: ' + key);
   if (!/^#[0-9a-f]{6}$/i.test(c.overrideColor)) throw new Error('报警覆盖颜色无效');
   c.customProperty = text(c.customProperty, 256).trim();
   if (c.customProperty.split('.').some(key => ['__proto__', 'constructor', 'prototype'].includes(key))) throw new Error('火警属性名无效');
@@ -122,13 +125,61 @@ export function createAlarmManagerEntity(position: Vector3Data): Entity {
   };
 }
 
+type AlarmModelSource = Pick<ModelAssetTemplate, 'sourcePath' | 'sourceUrl' | 'dataPlatformModel'>;
+
+/** 普通库旧条目可能没有身份；固定版本缓存目录仍记录了真实来源，不能跨来源兜底。 */
+function alarmModelSourceKey(asset: AlarmModelSource): string | undefined {
+  if (asset.dataPlatformModel) return asset.dataPlatformModel.sourceKey;
+  for (const path of [asset.sourcePath, asset.sourceUrl]) {
+    const source = /(?:^|\/)\.babylon-editor\/scene-model-versions\/([a-f0-9]{64})\/[a-f0-9]{64}\//.exec(modelTypePathKey(path))?.[1];
+    if (source) return source;
+  }
+  return undefined;
+}
+
+function alarmModelResourceKey(asset: AlarmModelSource): string | null {
+  const identity = asset.dataPlatformModel;
+  return identity ? `${identity.kind}:${identity.resourceId}:${modelTypePathKey(identity.modelPath)}`
+    : getClickEventModelResourceKey(asset.sourceUrl);
+}
+
+function matchesAlarmModelPath(asset: AlarmModelSource, reference: AlarmModelSource): boolean {
+  return matchesModelTypeReference(asset, { sourcePath: reference.sourcePath, sourceUrl: reference.sourceUrl });
+}
+
+/** 模型库与场景快照路径不同也可匹配；完整身份优先，旧条目兼容资源类别、ID和包内路径。 */
+export function matchesAlarmTargetModel(entity: Entity, target: ModelGeneratorTarget | null): boolean {
+  const asset = entity.components.modelAsset;
+  if (!asset || target?.kind !== 'model') return false;
+  const reference = target.modelAsset;
+  const sourceKey = alarmModelSourceKey(asset), targetSourceKey = alarmModelSourceKey(reference);
+  if (sourceKey && targetSourceKey && sourceKey !== targetSourceKey) return false;
+  if (asset.dataPlatformModel && reference.dataPlatformModel) {
+    return matchesModelTypeReference(asset, { identity: reference.dataPlatformModel });
+  }
+  if (matchesAlarmModelPath(asset, reference)) return true;
+  const resourceKey = alarmModelResourceKey(asset);
+  return resourceKey !== null && resourceKey === alarmModelResourceKey(reference);
+}
+
 export function resolveAlarmTargets(scene: Pick<SceneDocument, 'entityIds' | 'entities'>, c: AlarmManagerComponent): Entity[] {
-  const explicitIds = new Set(c.targetType === 'ENTITY' ? c.targets.map(t => t.entityId).filter(Boolean) : []);
-  const urls = new Set(c.targets.filter(t => c.targetType === 'MODEL' || !t.entityId).flatMap(t => t.model?.kind === 'model' ? [t.model.modelAsset.sourceUrl] : []));
-  return scene.entityIds.flatMap(id => {
-    const entity = scene.entities[id];
-    return entity?.components.modelAsset && (explicitIds.has(id) || urls.has(entity.components.modelAsset.sourceUrl)) ? [entity] : [];
-  });
+  const ids = new Set(c.targetType === 'ENTITY' ? c.targets.map(t => t.entityId).filter(Boolean) : []);
+  const entities = scene.entityIds.flatMap(id => scene.entities[id]?.components.modelAsset ? [scene.entities[id]] : []);
+  for (const slot of c.targets) {
+    if ((c.targetType === 'ENTITY' && slot.entityId) || slot.model?.kind !== 'model') continue;
+    const model = slot.model;
+    let candidates = entities.filter(entity => matchesAlarmTargetModel(entity, model));
+    if (!alarmModelSourceKey(model.modelAsset)) {
+      const sources = new Set(candidates.map(entity => alarmModelSourceKey(entity.components.modelAsset!)).filter(Boolean));
+      if (sources.size > 1) {
+        // 来源缺失且同一资源出现在多个来源时，只保留有精确路径证据的设备；用户也可明确选择单台实体。
+        candidates = candidates.filter(entity => matchesAlarmModelPath(entity.components.modelAsset!, model.modelAsset));
+        if (new Set(candidates.map(entity => alarmModelSourceKey(entity.components.modelAsset!)).filter(Boolean)).size > 1) candidates = [];
+      }
+    }
+    for (const entity of candidates) ids.add(entity.id);
+  }
+  return entities.filter(entity => ids.has(entity.id));
 }
 
 /** 仅监控设备及其已有批次伙伴独立渲染，防止覆盖共享材质时污染正常实例。 */
@@ -156,7 +207,7 @@ export function resolveAlarmDeviceBinding(entity: Entity): { assetCode: string; 
   };
 }
 
-function field(fields: Record<string, unknown>, name: string): unknown {
+export function readAlarmProperty(fields: Record<string, unknown>, name: string): unknown {
   let value: unknown = fields;
   for (const key of Object.hasOwn(fields, name) ? [name] : name.split('.')) {
     if (!value || typeof value !== 'object' || !Object.hasOwn(value, key) || ['__proto__', 'constructor', 'prototype'].includes(key)) return undefined;
@@ -178,17 +229,17 @@ function matchesCustomValue(value: unknown, expectedValue: string): boolean {
 
 export type AlarmCustomPropertyStatus = 'disabled' | 'unbound' | 'unconfigured' | 'waiting' | 'stale' | 'missing' | 'invalid' | 'matched' | 'unmatched';
 
-/** 只读数据条件诊断；字段缺失和过期不等同于设备已确认恢复。 */
+/** 自定义点位以最后一次值判断，收到新值前不因时间流逝解除报警。 */
 export function getAlarmCustomPropertyDiagnostic(c: AlarmManagerComponent, entity: Entity, snapshot: DeviceTelemetrySnapshot | null, now: number): {
   status: AlarmCustomPropertyStatus; value: unknown; trigger: AlarmTriggerKind | null;
 } {
   const binding = resolveAlarmDeviceBinding(entity);
-  const value = snapshot && c.customProperty ? field(snapshot.fields, c.customProperty) : undefined;
+  const value = snapshot && c.customProperty ? readAlarmProperty(snapshot.fields, c.customProperty) : undefined;
   const status: AlarmCustomPropertyStatus = entity.components.telemetryBinding?.enabled === false ? 'disabled'
     : !binding.assetCode || !binding.deviceType ? 'unbound'
     : !c.customProperty ? 'unconfigured'
     : !snapshot ? 'waiting'
-    : now - snapshot.receivedAt > (entity.components.telemetryBinding?.staleAfterMs ?? 10000) ? 'stale'
+    : c.listenProperty !== 'CUSTOM PROPERTY' && now - snapshot.receivedAt > (entity.components.telemetryBinding?.staleAfterMs ?? 10000) ? 'stale'
     : value === undefined ? 'missing'
     : scalar(value) === null ? 'invalid'
     : matchesCustomValue(value, c.customValue) ? 'matched' : 'unmatched';
@@ -200,11 +251,11 @@ export function resolveAlarmTrigger(c: AlarmManagerComponent, entity: Entity, sn
   const binding = entity.components.telemetryBinding;
   if (binding?.enabled === false || !snapshot) return null;
   const stale = now - snapshot.receivedAt > (binding?.staleAfterMs ?? 10000);
-  const customMatch = matchesCustomValue(c.customProperty ? field(snapshot.fields, c.customProperty) : undefined, c.customValue);
+  const customMatch = matchesCustomValue(c.customProperty ? readAlarmProperty(snapshot.fields, c.customProperty) : undefined, c.customValue);
   const warehouse = scalar(snapshot.fields.warehouseAlarm);
-  if (!stale && c.warehouseAlarm && (warehouse === 'true' || warehouse === '1' || customMatch)) return 'warehouse';
+  if ((!stale || c.listenProperty === 'CUSTOM PROPERTY') && c.warehouseAlarm && (warehouse === 'true' || warehouse === '1' || customMatch)) return 'warehouse';
   if (c.listenProperty === 'CUSTOM PROPERTY') {
-    return !stale && customMatch ? 'fire' : null;
+    return customMatch ? 'fire' : null;
   }
   const raw = scalar(snapshot.fields.runningState ?? snapshot.fields.running_state ?? snapshot.fields.state ?? snapshot.fields.status);
   const aliases: Record<string, string> = { '0': 'offline', '1': 'idle', '2': 'running', '3': 'alarm', '离线': 'offline', '空闲': 'idle', '运行': 'running', '报警': 'alarm', 'warning': 'alarm', 'fault': 'alarm' };

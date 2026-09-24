@@ -37,3 +37,14 @@ test('半球光沿用 position 数据但 Inspector 明确显示 direction', () =
   assert.equal(getLightTransformFieldLabel('point', 'position'), 'position');
   assert.equal(getLightTransformFieldLabel('directional', 'rotation'), 'rotation');
 });
+
+
+test('聚光灯与矩形面光可移动和旋转，通过参数控制光锥或发光面', () => {
+  for (const kind of ['spot', 'rectArea'] as const) {
+    assert.deepEqual(getLightEditorCapabilities(kind), {
+      markerKind: kind, supportedTools: ['translate', 'rotate'], transformFields: ['position', 'rotation'],
+    });
+    assert.equal(resolveLightTransformTool(kind, 'rotate'), 'rotate');
+    assert.equal(resolveLightTransformTool(kind, 'scale'), 'translate');
+  }
+});

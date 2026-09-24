@@ -23,8 +23,11 @@ async function run() {
   const target = asset => ({ kind: 'model', assetId: asset.id, displayName: asset.name, modelAsset: { sourcePath: asset.path, sourceUrl: asset.sourceUrl, lengthUnit: 'm', unitScaleToMeters: 1 } });
   const theme = { projectId: '42', screenId: '43', name: '火警大屏', screenUrl: 'https://example.com/screen/43' };
   const appearanceEffect = { effectKind: 'light-pillar', enabled: true, primaryColor: '#22dfff', secondaryColor: '#96f4ff', intensity: 1, speed: 1, density: 1, visual: { targetEntityId: null, radius: 1, height: 6 } };
+  const labelEffect = { ...appearanceEffect, effectKind: 'alarm-label', primaryColor: '#ff2424', visual: { targetEntityId: null, height: 1.1 },
+    configuration: { version: 2, target: { mode: 'point' }, data: { mode: 'none' }, parameters: { title: '', severity: '严重告警', message: '请检查设备', timeText: '', cardWidth: 2.8, cardHeight: 1.7 } } };
   const customCondition = { listenProperty: 'CUSTOM PROPERTY', customProperty: 'fire.signal', customValue: '1', warehouseAlarm: false };
-  const sceneFile = { version: 5, scene: { name: '报警发布', entityIds: ['device', 'alarm', 'effectAlarm'], entities: {
+  const sceneFile = { version: 5, scene: { name: '报警发布', entityIds: ['device', 'alarm', 'effectAlarm', 'labelAlarm'], entities: {
+    labelAlarm: { id: 'labelAlarm', components: { alarmManager: { ...customCondition, overrideColorEnabled: false, appearanceEffect: labelEffect, appearanceModel: null, targets: [{ id: 'label-slot', model: target(device), entityId: 'device' }] } } },
     effectAlarm: { id: 'effectAlarm', components: { alarmManager: { ...customCondition, appearanceEffect, appearanceModel: null, targets: [{ id: 'effect-slot', model: target(device), entityId: 'device' }] } } },
     device: { id: 'device', components: { modelAsset: { ...target(device).modelAsset, assetCode: 'device-1' } } },
     alarm: { id: 'alarm', components: { alarmManager: { ...customCondition, appearanceModel: target(fire), targets: [{ id: 'slot', model: target(device), entityId: 'device' }], theme } } },
@@ -38,6 +41,8 @@ async function run() {
   assert.notEqual(deployed.alarm.components.alarmManager.appearanceModel.modelAsset.sourcePath, fire.path);
   assert.deepEqual(deployed.alarm.components.alarmManager.theme, theme);
   assert.deepEqual(deployed.effectAlarm.components.alarmManager.appearanceEffect, appearanceEffect);
+  assert.deepEqual(deployed.labelAlarm.components.alarmManager.appearanceEffect, labelEffect);
+  assert.equal(deployed.labelAlarm.components.alarmManager.overrideColorEnabled, false);
   for (const [key, value] of Object.entries(customCondition)) assert.equal(deployed.alarm.components.alarmManager[key], value);
   assert.equal(deployment.sceneContent.includes(projectRoot.replaceAll('\\', '\\\\')), false);
   const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
@@ -55,6 +60,8 @@ async function run() {
   const portable = JSON.parse((await archive.files.find(file => file.path === 'Scenes/main.scene.json').buffer()).toString()).scene.entities;
   assert.match(portable.alarm.components.alarmManager.appearanceModel.modelAsset.sourcePath, /^Assets\//);
   assert.deepEqual(portable.effectAlarm.components.alarmManager.appearanceEffect, appearanceEffect);
+  assert.deepEqual(portable.labelAlarm.components.alarmManager.appearanceEffect, labelEffect);
+  assert.equal(portable.labelAlarm.components.alarmManager.overrideColorEnabled, false);
   for (const [key, value] of Object.entries(customCondition)) assert.equal(portable.alarm.components.alarmManager[key], value);
   assert.equal(portable.alarm.components.alarmManager.targets[0].model.modelAsset.sourcePath, portable.device.components.modelAsset.sourcePath);
   assert.deepEqual(await readFile(device.path), await readFile(fixture));

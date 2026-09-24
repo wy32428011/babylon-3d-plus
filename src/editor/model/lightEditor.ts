@@ -2,7 +2,7 @@ import type { LightKind } from './components';
 
 export type LightTransformTool = 'translate' | 'rotate' | 'scale';
 export type LightTransformField = 'position' | 'rotation' | 'scale';
-export type LightEditorMarkerKind = 'point' | 'directional';
+export type LightEditorMarkerKind = 'point' | 'directional' | 'spot' | 'rectArea';
 
 export type LightEditorCapabilities = {
   markerKind: LightEditorMarkerKind | null;
@@ -20,6 +20,12 @@ const LIGHT_EDITOR_CAPABILITIES: Record<LightKind, LightEditorCapabilities> = {
     markerKind: 'point',
     supportedTools: ['translate'],
     transformFields: ['position'],
+  },
+  spot: {
+    markerKind: 'spot', supportedTools: ['translate', 'rotate'], transformFields: ['position', 'rotation'],
+  },
+  rectArea: {
+    markerKind: 'rectArea', supportedTools: ['translate', 'rotate'], transformFields: ['position', 'rotation'],
   },
   directional: {
     markerKind: 'directional',

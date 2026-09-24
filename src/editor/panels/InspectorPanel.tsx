@@ -6,7 +6,7 @@ import { getBuiltInMeshMeterDescription } from '../model/builtInMeshGeometry';
 import type { DataPlatformScreenRenderMode, LightKind, MeshKind } from '../model/components';
 import type { Vector3Data } from '../model/math';
 import { getLightEditorCapabilities, getLightTransformFieldLabel } from '../model/lightEditor';
-import { WARM_WORK_LIGHT_SETTINGS } from '../model/lightSettings';
+import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE, LIGHT_KINDS, LIGHT_LABELS, LIGHT_DESCRIPTIONS, WARM_WORK_LIGHT_SETTINGS } from '../model/lightSettings';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import {
@@ -41,7 +41,6 @@ import { ManualRoamAvatarInspector } from './ManualRoamAvatarInspector';
 type TransformField = 'position' | 'rotation' | 'scale';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
 const fields: TransformField[] = ['position', 'rotation', 'scale'];
-const lightKinds: LightKind[] = ['hemispheric', 'directional', 'point'];
 const RADIANS_TO_DEGREES = 180 / Math.PI;
 const DEGREES_TO_RADIANS = Math.PI / 180;
 
@@ -594,7 +593,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : null}
       {light ? (
         <fieldset className="transform-fieldset">
-          <legend>Light</legend>
+          <legend>光源 Light</legend>
+          <p className="muted">{LIGHT_DESCRIPTIONS[light.lightKind]}</p>
           <label className="inspector-row">
             <span>类型</span>
             <select
@@ -602,8 +602,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
               disabled={isLocked}
               onChange={(event) => updateSelectedLight({ lightKind: event.target.value as LightKind })}
             >
-              {lightKinds.map((lightKind) => (
-                <option key={lightKind} value={lightKind}>{lightKind}</option>
+              {LIGHT_KINDS.map((lightKind) => (
+                <option key={lightKind} value={lightKind}>{LIGHT_LABELS[lightKind]}</option>
               ))}
             </select>
           </label>
@@ -638,7 +638,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               />
             </label>
           ) : null}
-          {light.lightKind === 'point' ? (
+          {light.lightKind === 'point' || light.lightKind === 'spot' ? (
             <>
               <label className="number-row">
                 <span>照射范围 (m)</span>
@@ -660,9 +660,46 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   }}
                 />
               </label>
-              <button type="button" disabled={isLocked} onClick={() => updateSelectedLight(WARM_WORK_LIGHT_SETTINGS)}>
-                暖白作业灯
-              </button>
+              {light.lightKind === 'point' ? (
+                <button type="button" disabled={isLocked} onClick={() => updateSelectedLight(WARM_WORK_LIGHT_SETTINGS)}>暖白作业灯</button>
+              ) : null}
+            </>
+          ) : null}
+          {light.lightKind === 'spot' ? (
+            <>
+              <label className="number-row">
+                <span>光锥角度 (°)</span>
+                <input type="number" disabled={isLocked} min="1" max="179" step="1"
+                  value={Number(radiansToDegrees(light.angle ?? DEFAULT_SPOT_ANGLE).toFixed(2))}
+                  onChange={(event) => {
+                    const degrees = Number(event.target.value);
+                    if (event.target.value !== '' && Number.isFinite(degrees) && degrees > 0 && degrees < 180) updateSelectedLight({ angle: degreesToRadians(degrees) });
+                  }} />
+              </label>
+              <label className="number-row">
+                <span>光束衰减</span>
+                <input type="number" disabled={isLocked} min="0" step="0.1"
+                  value={light.exponent ?? DEFAULT_SPOT_EXPONENT}
+                  onChange={(event) => {
+                    const exponent = Number(event.target.value);
+                    if (event.target.value !== '' && Number.isFinite(exponent) && exponent >= 0) updateSelectedLight({ exponent });
+                  }} />
+              </label>
+            </>
+          ) : null}
+          {light.lightKind === 'rectArea' ? (
+            <>
+              {(['width', 'height'] as const).map((dimension) => (
+                <label className="number-row" key={dimension}>
+                  <span>{dimension === 'width' ? '发光面宽度 (m)' : '发光面高度 (m)'}</span>
+                  <input type="number" disabled={isLocked} min="0.01" step="0.1"
+                    value={light[dimension] ?? DEFAULT_AREA_LIGHT_SIZE}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      if (event.target.value !== '' && Number.isFinite(value) && value > 0) updateSelectedLight({ [dimension]: value });
+                    }} />
+                </label>
+              ))}
             </>
           ) : null}
           <label className="inspector-row">

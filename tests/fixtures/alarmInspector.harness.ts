@@ -17,6 +17,7 @@ scene.entityIds.push(manager.id); scene.entities[manager.id] = manager; scene.se
 for (let index = 0; index < 12; index++) {
   const target = createModelEntity('C:/fixtures/device.glb', 'editor-asset://local/device.glb', '设备 ' + (index + 1));
   target.components.modelAsset!.assetCode = 'CV-' + (index + 1);
+  target.components.modelAsset!.dataPlatformModel = { sourceKey: 'a'.repeat(64), kind: 'model', resourceId: '42', modelPath: 'device.glb' };
   target.components.telemetryBinding = { enabled: true, sourceId: 'default', deviceType: 'conveyor', expectedIntervalMs: 500, staleAfterMs: 1500 };
   scene.entityIds.push(target.id); scene.entities[target.id] = target;
   config.targets.push({ id: 'slot-' + index, model: null, entityId: target.id });
@@ -50,5 +51,13 @@ Object.assign(window, { alarmInspectorHarness: {
   },
   undo: () => useEditorStore.getState().undo(),
   redo: () => useEditorStore.getState().redo(),
+  targetMode: (mode: 'empty' | 'missing' | 'synced') => useEditorStore.getState().updateAlarmManager(manager.id, {
+    targets: mode === 'empty' ? [] : [{ id: 'model-slot', entityId: '', model: {
+      kind: 'model', assetId: 'device-model', displayName: '设备模型', modelAsset: {
+        sourcePath: 'C:/old/device.glb', sourceUrl: 'editor-asset://local/old/device.glb', lengthUnit: 'meter', unitScaleToMeters: 1,
+        dataPlatformModel: { sourceKey: 'a'.repeat(64), kind: 'model', resourceId: mode === 'missing' ? '99' : '42', modelPath: 'device.glb' },
+      },
+    } }],
+  }),
   dispose: () => { root.unmount(); deviceTelemetryStore.clear(); },
 } });

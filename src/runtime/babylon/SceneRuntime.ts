@@ -10,6 +10,8 @@ import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
 import { ChartMarkerPresentation, getChartMarkerStyle, getChartMarkerText } from './ChartMarkerPresentation';
 import '@babylonjs/loaders';
 import { configureLocalBabylonDecoders } from './localDecoderConfiguration';
+import { ensureLocalAreaLightTextures } from './localAreaLightTextures';
+import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from '../../editor/model/lightSettings';
 
 configureLocalBabylonDecoders();
 import {
@@ -37,9 +39,11 @@ import {
   Plane,
   PointLight,
   Quaternion,
+  RectAreaLight,
   Scene,
   SceneLoader,
   StandardMaterial,
+  SpotLight,
   Texture,
   TransformNode,
   type ISceneLoaderProgressEvent,
@@ -2120,17 +2124,29 @@ export class SceneRuntime {
 
   /** 灯光旋转预览复用正式同步语义，方向光同时更新世界位置和方向。 */
   private applyGroupRotationLightTransform(light: Light, transform: TransformComponent): void {
+    this.applyLightTransform(light, transform);
+    this.shadowRuntime.syncLight(light.name, light);
+  }
+
+  private applyLightTransform(light: Light, transform: TransformComponent): void {
     if (light instanceof HemisphericLight) {
       light.direction.copyFrom(this.vectorFromTransformPosition(transform, new Vector3(0, 1, 0)));
       return;
     }
-    if (light instanceof DirectionalLight) {
+    if (light instanceof DirectionalLight || light instanceof SpotLight) {
       light.position.copyFrom(this.vectorFromTransformPosition(transform, Vector3.Zero()));
       light.direction.copyFrom(this.directionFromRotation(transform));
       return;
     }
     if (light instanceof PointLight) {
       light.position.copyFrom(this.vectorFromTransformPosition(transform, Vector3.Zero()));
+    }
+    if (light instanceof RectAreaLight && light.parent instanceof TransformNode) {
+      light.parent.position.copyFrom(this.vectorFromTransformPosition(transform, Vector3.Zero()));
+      // Babylon 面光沿局部 -Z 发光；先统一到灯具 -Y 基准，再应用实体旋转。
+      light.parent.rotationQuaternion = Quaternion.FromEulerAngles(transform.rotation.x, transform.rotation.y, transform.rotation.z)
+        .multiply(Quaternion.RotationAxis(Vector3.Right(), -Math.PI / 2));
+      light.parent.computeWorldMatrix(true);
     }
   }
 
@@ -2142,9 +2158,14 @@ export class SceneRuntime {
       light.direction.copyFrom(vector);
       return;
     }
-    if (light instanceof DirectionalLight || light instanceof PointLight) {
+    if (light instanceof DirectionalLight || light instanceof PointLight || light instanceof SpotLight) {
       light.position.copyFrom(vector);
     }
+    if (light instanceof RectAreaLight && light.parent instanceof TransformNode) {
+      light.parent.position.copyFrom(vector);
+      light.parent.computeWorldMatrix(true);
+    }
+    this.shadowRuntime.syncLight(light.name, light);
   }
 
   /** 天空盒包围当前相机时不参与背景拾取；相机位于球外时恢复球面点击选择。 */
@@ -3191,9 +3212,10 @@ export class SceneRuntime {
 
   /** 灯光没有可见体积时用其位置生成一个小包围盒。 */
   private getLightWorldBounds(light: Light): RuntimeWorldBounds {
-    if (light instanceof DirectionalLight || light instanceof PointLight) {
+    if (light instanceof DirectionalLight || light instanceof PointLight || light instanceof SpotLight) {
       return createPointWorldBounds(light.position);
     }
+    if (light instanceof RectAreaLight && light.parent instanceof TransformNode) return createPointWorldBounds(light.parent.getAbsolutePosition());
 
     return createPointWorldBounds(new Vector3(0, 2, 0));
   }
@@ -3745,7 +3767,7 @@ export class SceneRuntime {
 
     const light = this.lights.get(entity.id);
     if (light) {
-      light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || light instanceof PointLight));
+      light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || this.isLocalLight(light)));
       this.shadowRuntime.syncLight(entity.id, light);
     }
     if (light && entity.components.light) {
@@ -3891,7 +3913,7 @@ export class SceneRuntime {
       this.pushLog('环境主题应用失败：' + (error instanceof Error ? error.message : String(error)));
     });
     for (const [id, light] of this.lights) {
-      light.setEnabled(this.isEntityVisible(id) && (!this.themeActive || light instanceof PointLight));
+      light.setEnabled(this.isEntityVisible(id) && (!this.themeActive || this.isLocalLight(light)));
       this.shadowRuntime.syncLight(id, light);
     }
   }
@@ -5768,7 +5790,16 @@ export class SceneRuntime {
     light.range = lightComponent.range ?? Number.MAX_VALUE;
     light.metadata = { ...light.metadata, nightBehavior: lightComponent.nightBehavior ?? 'dim' };
     if (light instanceof HemisphericLight) light.groundColor = Color3.FromHexString(lightComponent.groundColor ?? '#000000');
-    light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || light instanceof PointLight));
+    if (light instanceof SpotLight) {
+      light.angle = lightComponent.angle ?? DEFAULT_SPOT_ANGLE;
+      light.exponent = lightComponent.exponent ?? DEFAULT_SPOT_EXPONENT;
+    }
+    if (light instanceof RectAreaLight) {
+      light.width = lightComponent.width ?? DEFAULT_AREA_LIGHT_SIZE;
+      light.height = lightComponent.height ?? DEFAULT_AREA_LIGHT_SIZE;
+    }
+    this.applyLightTransform(light, entity.components.transform);
+    light.setEnabled(this.isEntityVisible(entity.id) && (!this.themeActive || this.isLocalLight(light)));
     this.shadowRuntime.syncLight(entity.id, light);
     this.lightMarkerRuntime.sync(
       entity,
@@ -5776,22 +5807,6 @@ export class SceneRuntime {
       this.isEntityVisible(entity.id),
       this.isEntityScenePickable(entity.id),
     );
-
-    const transform = entity.components.transform;
-    if (light instanceof HemisphericLight) {
-      light.direction = this.vectorFromTransformPosition(transform, new Vector3(0, 1, 0));
-      return;
-    }
-
-    if (light instanceof DirectionalLight) {
-      light.position = this.vectorFromTransformPosition(transform, Vector3.Zero());
-      light.direction = this.directionFromRotation(transform);
-      return;
-    }
-
-    if (light instanceof PointLight) {
-      light.position = this.vectorFromTransformPosition(transform, Vector3.Zero());
-    }
   }
 
   /** 仅显式开启发布诊断时采集帧级耗时，正常运行不读取高精度时钟。 */
@@ -6575,6 +6590,18 @@ export class SceneRuntime {
 
     if (light.lightKind === 'point') {
       return new PointLight(entityId, Vector3.Zero(), this.scene);
+    }
+
+    if (light.lightKind === 'spot') {
+      return new SpotLight(entityId, Vector3.Zero(), Vector3.Down(),
+        light.angle ?? DEFAULT_SPOT_ANGLE, light.exponent ?? DEFAULT_SPOT_EXPONENT, this.scene);
+    }
+    if (light.lightKind === 'rectArea') {
+      ensureLocalAreaLightTextures(this.scene);
+      const area = new RectAreaLight(entityId, Vector3.Zero(), light.width ?? DEFAULT_AREA_LIGHT_SIZE,
+        light.height ?? DEFAULT_AREA_LIGHT_SIZE, this.scene);
+      area.parent = new TransformNode(`${entityId}_areaLightTransform`, this.scene);
+      return area;
     }
 
     return new HemisphericLight(entityId, new Vector3(0, 1, 0), this.scene);
@@ -7396,7 +7423,9 @@ export class SceneRuntime {
   private disposeLight(entityId: string, light: Light): void {
     this.shadowRuntime.removeLight(entityId);
     this.lightMarkerRuntime.disposeEntity(entityId);
+    const areaTransform = light instanceof RectAreaLight ? light.parent : null;
     light.dispose();
+    areaTransform?.dispose();
     this.lights.delete(entityId);
   }
 
@@ -9981,7 +10010,13 @@ export class SceneRuntime {
     return (
       (lightKind === 'hemispheric' && light instanceof HemisphericLight) ||
       (lightKind === 'directional' && light instanceof DirectionalLight) ||
-      (lightKind === 'point' && light instanceof PointLight)
+      (lightKind === 'point' && light instanceof PointLight) ||
+      (lightKind === 'spot' && light instanceof SpotLight) ||
+      (lightKind === 'rectArea' && light instanceof RectAreaLight)
     );
+  }
+
+  private isLocalLight(light: Light): boolean {
+    return light instanceof PointLight || light instanceof SpotLight || light instanceof RectAreaLight;
   }
 }

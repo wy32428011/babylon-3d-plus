@@ -60,3 +60,17 @@
   justify-content: space-between;
   gap: 8px;
 }
+
+.inspector-panel .alarm-appearance-fields .number-row,
+.inspector-panel .alarm-appearance-fields .inspector-row {
+  grid-template-columns: minmax(110px, 42%) minmax(0, 1fr);
+}
+
+.inspector-panel .alarm-appearance-fields .number-row > span,
+.inspector-panel .alarm-appearance-fields .inspector-row > span {
+  width: auto;
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}

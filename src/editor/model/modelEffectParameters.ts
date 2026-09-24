@@ -42,7 +42,10 @@ function validateStops(value: unknown): string | null {
   return null;
 }
 const groups: Definition = { key: 'structureGroups', label: '结构分组', group: '结构', type: 'rows', default: [], description: '每行 {nodePath, order, distance, axis, fixed}，可用 offset:{x,y,z} 指定世界米偏移。父子组只移动父组，避免重复位移；fixed 组不移动。', validate: validateGroups };
+const alarmColor = [paths, { ...tint, default: '#ff3030' }, number('originalMix', '保留原始材质比例', 0, 0, 1, '外观'), number('emissiveIntensity', '发光强度', 1, 0, 10, '外观'), number('glowIntensity', '光晕强度', 0.7, 0, 5, '外观'), number('glowRadius', '光晕模糊半径', 32, 1, 128, '外观')];
 const definitions: Record<string, readonly Definition[]> = {
+  'model-color': alarmColor,
+  'model-flash': [...alarmColor, number('flashPeriod', '闪烁周期 (秒)', 1, 0.1, 3600, '播放'), number('dutyCycle', '亮起时间比例', 0.5, 0, 1, '播放')],
   'model-outline': [paths, tint, number('lineWidth', '轮廓宽度 (米)', .05, .001, 5)],
   'model-edges': [paths, tint, opacity, number('edgeWidth', '棱线宽度', 1.5, .1, 20), number('edgeThreshold', '棱角余弦阈值', .95, 0, 1, '专用参数', false)],
   'model-emissive': [paths, tint, { key: 'materialNames', label: '发光材质名称', group: '部件选择', type: 'string', default: '', description: '每行一个精确材质名称；留空作用于选中部件全部受支持材质。' }, number('emissiveIntensity', '发光强度', 1, 0, 10), number('glowIntensity', '光晕强度', 1, 0, 5), number('glowRadius', '光晕模糊半径', 32, 1, 128)],

@@ -46,6 +46,104 @@ function harness(t) {
   return { scene, runtime, targets, target, mesh, original };
 }
 
+function surfaceUniforms(material, mesh) {
+  const values = new Map();
+  const updateFloat4 = material._uniformBuffer.updateFloat4;
+  material._uniformBuffer.updateFloat4 = (name, ...value) => values.set(name, value);
+  try { material._callbackPluginEventHardBindForSubMesh({ subMesh: mesh.subMeshes[0] }); }
+  finally { material._uniformBuffer.updateFloat4 = updateFloat4; }
+  return values;
+}
+
+test('设备整面着色作用于 Standard/PBR 子材质，保留纹理及共享原材质并完整恢复', t => {
+  const { scene, runtime, mesh, original } = harness(t);
+  original.emissiveColor.set(0.1, 0.2, 0.3);
+  const texture = new Texture(null, scene); texture.name = 'shared-device-texture'; original.diffuseTexture = texture;
+  const pbr = new PBRMaterial('paint-pbr', scene); pbr.albedoColor.set(0.2, 0.4, 0.7);
+  pbr.albedoTexture = texture;
+  const multi = new MultiMaterial('paint-multi', scene); multi.subMaterials = [original, pbr]; mesh.material = multi;
+  const sibling = MeshBuilder.CreateBox('paint-sibling', {}, scene); sibling.material = multi;
+  const effect = { ...component('model-color'), primaryColor: '#ff3300', configuration: { parameters: { originalMix: 0.2, emissiveIntensity: 0.7, glowIntensity: 0.6 } } };
+  runtime.sync('color', effect, true);
+  const replacement = mesh.material;
+  assert.notEqual(replacement, multi); assert.equal(sibling.material, multi);
+  assert.equal(runtime.getStatus('color').status, 'active');
+  for (const material of replacement.subMaterials) {
+    const uniforms = surfaceUniforms(material, mesh);
+    assert.equal(uniforms.get('dtEffectParams')[0], 6, '真实表面着色需启用 shader，而非仅叠加自发光');
+    assert.deepEqual(uniforms.get('dtEffectPrimary').slice(0, 3), [1, 0.2, 0]);
+    assert.equal(uniforms.get('dtEffectOptions')[2], 0.2);
+  }
+  assert.equal(replacement.subMaterials[0].diffuseTexture.name, texture.name);
+  assert.equal(replacement.subMaterials[1].albedoTexture.name, texture.name);
+  assert.ok(original.diffuseTexture === texture && pbr.albedoTexture === texture);
+  assert.deepEqual(original.emissiveColor.asArray(), [0.1, 0.2, 0.3]);
+  const clones = replacement.subMaterials.slice();
+  runtime.disposeMissing(new Set());
+  assert.equal(mesh.material, multi); assert.equal(sibling.material, multi);
+  assert.ok(clones.every(material => !scene.materials.includes(material)));
+  assert.equal(scene.textures.includes(texture), true, '恢复不得释放共享原贴图');
+});
+
+test('模型闪烁按周期进入原外观暗相位，参数更新暂停和重复 tick 不重建资源', t => {
+  const { scene, runtime, mesh, original, target } = harness(t);
+  original.emissiveColor.set(0.1, 0.2, 0.3);
+  const other = MeshBuilder.CreateBox('unselected-part', {}, scene); other.parent = target; other.material = original;
+  const effect = { ...component('model-flash'), primaryColor: '#ff0000', configuration: { parameters: { nodePaths: 'body', flashPeriod: 1, dutyCycle: 0.25, emissiveIntensity: 1, glowIntensity: 0.7 } } };
+  runtime.sync('flash', effect, true);
+  const replacement = mesh.material;
+  assert.notEqual(replacement, original); assert.equal(other.material, original);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[0], 1);
+  assert.deepEqual(replacement.emissiveColor.asArray(), [1, 0, 0]);
+  const counts = [scene.meshes.length, scene.materials.length, scene.effectLayers.length];
+  runtime.tick(0.3);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[0], 0);
+  assert.deepEqual(replacement.emissiveColor.asArray(), original.emissiveColor.asArray(), '暗相位保留原材质发光');
+  assert.equal(scene.effectLayers[0].intensity, 0, '暗相位不残留报警光晕');
+  runtime.sync('flash', { ...effect, speed: 0 }, true); runtime.tick(0.9);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[0], 0);
+  runtime.sync('flash', effect, true); runtime.tick(0.75);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[0], 1);
+  for (let index = 0; index < 120; index++) runtime.tick(1 / 60);
+  assert.equal(mesh.material, replacement);
+  assert.deepEqual([scene.meshes.length, scene.materials.length, scene.effectLayers.length], counts);
+  runtime.sync('flash', { ...effect, configuration: { parameters: { ...effect.configuration.parameters, dutyCycle: 0 } } }, true);
+  runtime.setGlowIntensity(2);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[0], 0);
+  assert.equal(scene.effectLayers[0].intensity, 0, '全局光晕更新不能点亮暗相位');
+  runtime.sync('flash', { ...effect, configuration: { parameters: { ...effect.configuration.parameters, dutyCycle: 1, originalMix: 1 } } }, true);
+  assert.equal(surfaceUniforms(replacement, mesh).get('dtEffectOptions')[2], 1);
+  assert.deepEqual(replacement.emissiveColor.asArray(), original.emissiveColor.asArray());
+  assert.equal(scene.effectLayers[0].intensity, 0, '完全保留原材质时不添加报警光晕');
+  runtime.sync('flash', effect, false);
+  assert.equal(mesh.material, original); assert.equal(other.material, original);
+  assert.equal(scene.effectLayers.length, 0);
+});
+
+test('实例闪烁只覆盖自身代理，报警租约解除后恢复常驻外观和真实原材质', t => {
+  const { scene, runtime, mesh, target, targets, original } = harness(t);
+  mesh.parent = null;
+  const instance = mesh.createInstance('flash-instance'); instance.parent = target; targets.set('target', instance);
+  const sibling = mesh.createInstance('flash-sibling');
+  const count = scene.meshes.length;
+  runtime.sync('ordinary', component('xray'), true);
+  const release = suspendTargetModelEffects(instance);
+  const alarm = new TargetModelEffects(scene, () => instance, true);
+  try {
+    alarm.sync('flash', { ...component('model-flash'), configuration: { parameters: { flashPeriod: 0.5, dutyCycle: 0.5 } } }, true);
+    assert.equal(instance.isEnabled(false), false); assert.equal(sibling.isEnabled(false), true); assert.equal(mesh.material, original);
+    assert.equal(scene.meshes.length, count + 1);
+    const proxy = scene.meshes.find(candidate => candidate.metadata?.digitalTwinEffectProxy);
+    alarm.tick(0.3);
+    assert.equal(surfaceUniforms(proxy.material, proxy).get('dtEffectOptions')[0], 0);
+    assert.equal(scene.meshes.length, count + 1);
+    alarm.dispose(); assert.equal(instance.isEnabled(false), true); assert.equal(scene.meshes.length, count);
+  } finally { alarm.dispose(); release(); }
+  runtime.tick(0.3); assert.equal(instance.isEnabled(false), false);
+  runtime.dispose(); assert.equal(instance.isEnabled(false), true); assert.equal(scene.meshes.length, count);
+  assert.equal(mesh.material, original);
+});
+
 test('共享原材质隔离，禁用和删除恢复，动画不增加资源', t => {
   const { scene, runtime, mesh, original } = harness(t);
   const other = MeshBuilder.CreateBox('other', {}, scene); other.material = original;

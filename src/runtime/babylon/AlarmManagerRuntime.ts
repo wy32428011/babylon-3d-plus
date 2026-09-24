@@ -4,11 +4,13 @@ import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { ChartMarkerThemeScreen } from '../../editor/model/components';
 import { resolveAlarmTrigger, resolveAlarmTargets, resolveAlarmDeviceBinding, type AlarmTriggerKind } from '../../editor/model/alarmManager';
 import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
+import { AlarmTelemetryTracker } from '../mqtt/AlarmTelemetryTracker';
 import { ChartMarkerPresentation, getChartMarkerStyle } from './ChartMarkerPresentation';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
 import { suspendTargetModelEffects } from './effects/TargetModelEffects';
 import { MODEL_EFFECT_KINDS } from '../../editor/model/digitalTwinEffect';
 import { createDefaultPoiEffectComponent } from '../../editor/model/poiEffect';
+import { createDefaultEffectConfiguration } from '../../editor/model/effectConfigurationValidation';
 import type { DataPlatformScreenOverlayItem } from './SceneRuntime';
 import type { RuntimeWorldBounds } from './runtimeNodeGeometry';
 import { AssetLoadScheduler } from './AssetLoadScheduler';
@@ -23,10 +25,15 @@ type Host = {
   activate: (event: AlarmActivation) => void;
   report: (message: string) => void;
 };
-type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number; modelEffectLeases: Map<AbstractMesh, () => void> };
+type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; activatedAt: number; activatedTimeText: string; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number; modelEffectLeases: Map<AbstractMesh, () => void> };
 type Tint = { original: Material | null; replacement: Material; mesh: AbstractMesh; proxy?: Mesh; originalEnabled: boolean; color: string; releaseModelEffectLease: () => void };
 const STATIC_EMISSIVE_STRENGTH = 0.35;
 const ALARM_BREATHING_PERIOD_MS = 1600;
+
+function alarmConditionSignature(manager: Entity, target: Entity): string {
+  const c = manager.components.alarmManager!;
+  return JSON.stringify([c.listenProperty, c.runningState, c.customProperty, c.customValue, c.warehouseAlarm, resolveAlarmDeviceBinding(target)]);
+}
 
 /** 颜色只覆盖当前设备的运行时材质；解除、停止预览与删除均恢复原材质引用。 */
 export class AlarmColorOverrides {
@@ -85,9 +92,11 @@ export class AlarmColorOverrides {
 export class AlarmManagerRuntime {
   private managers: { entity: Entity; targets: Entity[] }[] = [];
   private readonly active = new Map<string, ActiveAlarm>();
+  private readonly resumedActivations = new Map<string, { activatedAt: number; signature: string }>();
   private readonly colors = new AlarmColorOverrides();
   private readonly presentation = new ChartMarkerPresentation();
   private readonly effects: PoiEffectRuntime;
+  private readonly telemetry = new AlarmTelemetryTracker(deviceTelemetryStore);
   private readonly scheduler = new AssetLoadScheduler(4);
   private readonly containers = new Map<string, Promise<AssetContainer>>();
   private readonly loadedContainers = new Set<AssetContainer>();
@@ -104,11 +113,20 @@ export class AlarmManagerRuntime {
   }
 
   sync(document: SceneDocument): void {
-    this.reset();
+    for (const [key, entry] of this.active) this.resumedActivations.set(key, { activatedAt: entry.activatedAt, signature: alarmConditionSignature(entry.manager, entry.target) });
+    this.reset(false);
     this.managers = document.entityIds.flatMap(id => {
       const entity = document.entities[id];
       return entity?.components.alarmManager ? [{ entity, targets: resolveAlarmTargets(document, entity.components.alarmManager) }] : [];
     });
+    const conditions = new Map(this.managers.flatMap(({ entity, targets }) => targets.map(target => [entity.id + ':alarm:' + target.id, alarmConditionSignature(entity, target)] as const)));
+    for (const [key, resumed] of this.resumedActivations) if (conditions.get(key) !== resumed.signature) this.resumedActivations.delete(key);
+    this.telemetry.watch(this.managers.flatMap(({ entity, targets }) => {
+      const c = entity.components.alarmManager!;
+      return c.listenProperty === 'CUSTOM PROPERTY' ? targets.map(target => ({ ...resolveAlarmDeviceBinding(target),
+        properties: [c.customProperty, ...(c.warehouseAlarm ? ['warehouseAlarm'] : [])],
+      })) : [];
+    }));
   }
 
   update(now = Date.now()): void {
@@ -130,8 +148,19 @@ export class AlarmManagerRuntime {
       }
       if (c.appearanceEffect || !c.appearanceModel) {
         effectIds.add(key);
-        const effect = c.appearanceEffect ?? createDefaultPoiEffectComponent('fire');
-        const emitFromTop = ['fire', 'flame', 'smoke', 'smoke-plume', 'sparks', 'steam-leak', 'gas-leak', 'water-jet', 'warning-beacon'].includes(effect.effectKind);
+        let effect = c.appearanceEffect ?? createDefaultPoiEffectComponent('fire');
+        if (effect.configuration?.parameters.fitTarget === true && effect.visual) {
+          const radius = Math.hypot(bounds.maximum.x - bounds.minimum.x, bounds.maximum.z - bounds.minimum.z) * 0.5 + 0.25;
+          effect = { ...effect, visual: { ...effect.visual, radius: Math.max(effect.visual.radius, radius) } };
+        }
+        if (effect.effectKind === 'alarm-label') {
+          const configuration = effect.configuration ?? createDefaultEffectConfiguration(effect);
+          effect = { ...effect, configuration: { ...configuration, parameters: { ...configuration.parameters,
+            title: configuration.parameters.title || entry.target.name,
+            timeText: configuration.parameters.timeText || entry.activatedTimeText,
+          } } };
+        }
+        const emitFromTop = ['alarm-icon', 'alarm-label', 'fire', 'flame', 'smoke', 'smoke-plume', 'sparks', 'steam-leak', 'gas-leak', 'water-jet', 'warning-beacon'].includes(effect.effectKind);
         this.effects.sync({ ...entry.target, id: key, components: {
           transform: { position: { x: center.x, y: emitFromTop ? bounds.maximum.y : bounds.minimum.y, z: center.z }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
           poiEffect: effect.visual ? { ...effect, visual: { ...effect.visual, targetEntityId: entry.target.id } } : effect,
@@ -142,6 +171,11 @@ export class AlarmManagerRuntime {
         if (node && root) {
           root.rotationQuaternion ??= Quaternion.Identity();
           node.computeWorldMatrix(true).decompose(undefined, root.rotationQuaternion);
+          // 地面外观保持水平，悬浮告警保持竖直；设备倾斜不能让警戒圈或文字跟着躺倒。
+          if (['alarm-icon', 'alarm-label'].includes(effect.effectKind)) root.rotationQuaternion.copyFrom(Quaternion.Identity());
+          else if (['alarm-zone', 'alarm-route', 'alarm-pulse', 'breathing-ring', 'ripple-ring'].includes(effect.effectKind)) {
+            root.rotationQuaternion.copyFrom(Quaternion.FromEulerAngles(0, root.rotationQuaternion.toEulerAngles().y, 0));
+          }
         }
       }
     }
@@ -160,25 +194,27 @@ export class AlarmManagerRuntime {
       let newTrigger: AlarmTriggerKind | undefined;
       for (const target of targets) {
         if (!this.host.visible(target.id)) continue;
-        const { assetCode, deviceType, sourceId } = resolveAlarmDeviceBinding(target);
-        const snapshot = deviceType && assetCode ? deviceTelemetryStore.getSnapshot(assetCode, deviceType, sourceId) : null;
+        const binding = resolveAlarmDeviceBinding(target);
+        const { assetCode, deviceType, sourceId } = binding;
+        const snapshot = c.listenProperty === 'CUSTOM PROPERTY' ? this.telemetry.getSnapshot(binding)
+          : deviceType && assetCode ? deviceTelemetryStore.getSnapshot(assetCode, deviceType, sourceId) : null;
         const trigger = resolveAlarmTrigger(c, target, snapshot, now);
-        if (!trigger) continue;
+        const key = manager.id + ':alarm:' + target.id;
+        if (!trigger) { this.resumedActivations.delete(key); continue; }
         const meshes = this.host.meshes(target.id);
         if (!meshes.length) continue;
-        const key = manager.id + ':alarm:' + target.id;
         desired.add(key);
-        for (const mesh of meshes) {
+        if (c.overrideColorEnabled !== false) for (const mesh of meshes) {
           if (!colors.has(mesh)) colors.set(mesh, c.overrideColor);
           breathingMeshes.add(mesh);
         }
         const existing = this.active.get(key);
         if (!existing || existing.trigger !== trigger) {
           if (existing) existing.trigger = trigger;
-          else this.createEntry(key, manager, target, trigger);
+          else this.createEntry(key, manager, target, trigger, now);
           if (!newTarget || trigger === 'warehouse') { newTarget = target.id; newTrigger = trigger; }
         }
-        if (c.appearanceEffect && MODEL_EFFECT_KINDS.has(c.appearanceEffect.effectKind)) {
+        if (c.appearanceEffect?.enabled && MODEL_EFFECT_KINDS.has(c.appearanceEffect.effectKind)) {
           const leases = this.active.get(key)!.modelEffectLeases;
           for (const [mesh, release] of leases) if (!meshes.includes(mesh) || mesh.isDisposed()) { release(); leases.delete(mesh); }
           for (const mesh of meshes) {
@@ -197,9 +233,12 @@ export class AlarmManagerRuntime {
     this.breathingMeshes = breathingMeshes;
   }
 
-  private createEntry(key: string, manager: Entity, target: Entity, trigger: AlarmTriggerKind): void {
+  private createEntry(key: string, manager: Entity, target: Entity, trigger: AlarmTriggerKind, activatedAt: number): void {
     const c = manager.components.alarmManager!;
-    const entry: ActiveAlarm = { manager, target, trigger, root: new TransformNode(key, this.scene), generation: this.generation, modelEffectLeases: new Map(),
+    // 同一持续报警的文档同步仅重建外观，不伪造新的触发时间；解除或显式reset才开始下一轮。
+    activatedAt = this.resumedActivations.get(key)?.activatedAt ?? activatedAt;
+    this.resumedActivations.delete(key);
+    const entry: ActiveAlarm = { manager, target, trigger, activatedAt, activatedTimeText: new Date(activatedAt).toLocaleString(), root: new TransformNode(key, this.scene), generation: this.generation, modelEffectLeases: new Map(),
       style: getChartMarkerStyle({ ...c.marker, contentType: c.associationType === 'builtin' ? 'builtin' : 'screen' }) };
     this.active.set(key, entry);
     if (c.showMarker) {
@@ -279,7 +318,8 @@ export class AlarmManagerRuntime {
     entry.markerMaterial?.dispose();
     entry.disposeAppearance?.(); entry.root.dispose();
   }
-  reset(): void {
+  reset(clearTelemetry = true): void {
+    if (clearTelemetry) { this.telemetry.reset(); this.resumedActivations.clear(); }
     this.generation += 1;
     this.loadAbort.abort(); this.loadAbort = new AbortController(); this.reportedLoadErrors.clear();
     this.colors.clear(); this.desiredColors.clear(); this.breathingMeshes.clear();
@@ -288,5 +328,5 @@ export class AlarmManagerRuntime {
     for (const container of this.loadedContainers) container.dispose();
     this.loadedContainers.clear(); this.containers.clear(); this.lastEvaluation = -Infinity;
   }
-  dispose(): void { this.disposed = true; this.reset(); this.scheduler.dispose(); this.effects.dispose(); }
+  dispose(): void { this.disposed = true; this.reset(); this.telemetry.dispose(); this.scheduler.dispose(); this.effects.dispose(); }
 }

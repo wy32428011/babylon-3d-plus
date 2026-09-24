@@ -38,6 +38,12 @@ const data: Field[] = ['points', 'values', 'opacity'];
 
 /** 稳定 ID 是场景协议的一部分，名称和分类只影响编辑器展示。 */
 export const DIGITAL_TWIN_EFFECT_DEFINITIONS = [
+  { kind: 'model-color', name: '设备变红 / 变橙', category: '设备报警', description: '整体覆盖设备或指定部件的颜色，支持保留原材质比例。', fields: target },
+  { kind: 'model-flash', name: '设备闪烁高亮', category: '设备报警', description: '在高亮与原外观之间按周期闪烁，可指定报警部件。', fields: target },
+  { kind: 'alarm-icon', name: '告警图标悬浮', category: '设备报警', description: '设备上方显示面向相机的发光三角感叹号。', fields: ['height', 'opacity', 'duration'] },
+  { kind: 'alarm-zone', name: '地面警戒圈', category: '设备报警', description: '分段红橙警戒圈、警告标识与禁止靠近文字。', fields: ['radius', 'width', 'opacity'] },
+  { kind: 'alarm-label', name: '弹窗 / 标签告警', category: '设备报警', description: '显示设备名、告警级别、内容和触发时间的悬浮信息卡。', fields: ['height', 'opacity'] },
+  { kind: 'alarm-route', name: '路径指引到故障点', category: '设备报警', description: '沿配置的设备局部路径显示流动箭头，末点固定对准设备；不自动避障寻路。', fields: ['points', 'width', 'radius', 'opacity', 'duration'] },
   { kind: 'model-outline', name: '轮廓高亮', category: '建筑与模型', description: '绑定模型显示轮廓；同一模型同时启用多个模型效果时按先绑定顺序生效。', fields: [...target, 'width'] },
   { kind: 'model-edges', name: '建筑棱线发光', category: '建筑与模型', description: '提取模型棱线，强调建筑结构。', fields: [...target, 'width'] },
   { kind: 'model-emissive', name: '自发光与光晕', category: '建筑与模型', description: '绑定灯带、标识等独立部件，保留模型原有材质。', fields: target },
@@ -79,19 +85,19 @@ export const DIGITAL_TWIN_EFFECT_DEFINITIONS = [
 
 export type DigitalTwinEffectKind = (typeof DIGITAL_TWIN_EFFECT_DEFINITIONS)[number]['kind'];
 const kinds = new Set<string>(DIGITAL_TWIN_EFFECT_DEFINITIONS.map(x => x.kind));
-export const MODEL_EFFECT_KINDS = new Set<string>(['model-outline', 'model-edges', 'model-emissive', 'model-scan', 'height-gradient', 'hologram', 'xray', 'dissolve', 'floor-expand', 'explode', 'clip-section', 'roof-fade']);
+export const MODEL_EFFECT_KINDS = new Set<string>(['model-color', 'model-flash', 'model-outline', 'model-edges', 'model-emissive', 'model-scan', 'height-gradient', 'hologram', 'xray', 'dissolve', 'floor-expand', 'explode', 'clip-section', 'roof-fade']);
 export const AREA_EFFECT_KINDS = new Set<string>(['boundary-flow', 'area-fill']);
-export const PATH_EFFECT_KINDS = new Set<string>(['flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow']);
+export const PATH_EFFECT_KINDS = new Set<string>(['alarm-route', 'flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow']);
 export const DATA_EFFECT_KINDS = new Set<string>(['heatmap', 'region-level', 'data-bars']);
 export function isDigitalTwinEffectKind(kind: unknown): kind is DigitalTwinEffectKind { return typeof kind === 'string' && kinds.has(kind); }
 
 export function createDefaultDigitalTwinEffectConfig(kind: string): DigitalTwinEffectConfig {
   const isArea = AREA_EFFECT_KINDS.has(kind);
   return {
-    targetEntityId: null, radius: kind === 'light-pillar' || kind === 'flame' || kind === 'smoke-plume' ? 1 : kind === 'environment-fog' ? 20 : 5,
-    height: kind === 'environment-fog' ? 80 : 6, width: kind === 'heatmap' ? 2 : kind === 'data-bars' ? 0.8 : 0.15, opacity: 0.55, duration: kind === 'day-night' ? 20 : 4,
+    targetEntityId: null, radius: kind === 'alarm-zone' ? 2.5 : kind === 'alarm-route' ? 0.45 : kind === 'light-pillar' || kind === 'flame' || kind === 'smoke-plume' ? 1 : kind === 'environment-fog' ? 20 : 5,
+    height: kind === 'alarm-icon' ? 0.9 : kind === 'alarm-label' ? 1.1 : kind === 'environment-fog' ? 80 : 6, width: kind === 'alarm-zone' ? 0.14 : kind === 'alarm-route' ? 0.12 : kind === 'heatmap' ? 2 : kind === 'data-bars' ? 0.8 : 0.15, opacity: kind.startsWith('alarm-') ? 0.9 : 0.55, duration: kind === 'day-night' ? 20 : 4,
     progress: kind === 'clip-section' ? 0.5 : kind === 'day-night' || kind === 'path-reveal' ? 0 : 1, loop: kind !== 'day-night' && kind !== 'dissolve', axis: 'y', amount: kind === 'radar-sector' ? 60 : kind === 'motion-trail' ? 64 : kind === 'rain' ? 24 : kind === 'snow' ? 16 : kind === 'flame' ? 20 : kind === 'smoke-plume' ? 12 : 3,
-    points: isArea ? [{x:-5,y:0.03,z:-4},{x:5,y:0.03,z:-4},{x:5,y:0.03,z:4},{x:-5,y:0.03,z:4}]
+    points: kind === 'alarm-route' ? [{x:-7,y:0,z:0},{x:-3,y:0,z:0},{x:0,y:0,z:0}] : isArea ? [{x:-5,y:0.03,z:-4},{x:5,y:0.03,z:-4},{x:5,y:0.03,z:4},{x:-5,y:0.03,z:4}]
       : [{x:-4,y:0.05,z:0},{x:0,y:0.05,z:3},{x:4,y:0.05,z:0}],
     values: [3, 6, 4], labels: ['A区', 'B区', 'C区'],
   };

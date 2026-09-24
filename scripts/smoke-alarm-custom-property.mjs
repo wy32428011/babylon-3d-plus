@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 
 const outputDir = path.resolve('output/playwright/alarm-custom-property');
 await mkdir(outputDir, { recursive: true });
-const server = await createServer({ server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
+const server = await createServer({ cacheDir: path.join(outputDir, 'vite-cache'), server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
 let browser;
 const errors = [];
 try {
@@ -45,9 +45,15 @@ try {
   const after = await page.evaluate(() => window.alarmInspectorHarness.inspect());
   assert.deepEqual(after.config, before.config, '实时值不得写回场景配置');
   assert.equal(after.undoCount, before.undoCount, '实时诊断不得写入撤销历史');
-  await first.locator('[data-alarm-property-status="stale"]').waitFor();
+  await page.waitForTimeout(2200);
+  await first.locator('[data-alarm-property-status="matched"]').waitFor();
+  assert.equal(await first.locator('[data-alarm-property-status="stale"]').count(), 0, '超过设备超时仍保留最后点位值');
   await page.evaluate(() => window.alarmInspectorHarness.mqtt([{ p: 'temperature', v: 26 }]));
-  await first.locator('[data-alarm-property-status="missing"]').waitFor();
+  await page.waitForTimeout(600);
+  await first.locator('[data-alarm-property-status="matched"]').waitFor();
+  await page.evaluate(() => window.alarmInspectorHarness.mqtt([{ p: 'fire.signal', v: 1 }]));
+  await page.waitForTimeout(2200);
+  await first.locator('[data-alarm-property-status="matched"]').waitFor();
   await page.evaluate(() => window.alarmInspectorHarness.mqtt([{ p: 'fire.signal', v: 0 }]));
   await first.locator('[data-alarm-property-status="unmatched"]').waitFor();
   await page.getByRole('button', { name: '下一页', exact: true }).click();
@@ -58,11 +64,33 @@ try {
   await page.evaluate(() => window.alarmInspectorHarness.stop());
   await first.locator('[data-alarm-property-status="waiting"]').waitFor();
   assert.match(await first.innerText(), /当前 v：—/);
+  await page.evaluate(() => window.alarmInspectorHarness.targetMode('empty'));
+  await page.locator('[data-alarm-target-status="unconfigured"]').waitFor();
+  await page.evaluate(() => window.alarmInspectorHarness.targetMode('missing'));
+  await page.locator('[data-alarm-target-status="unmatched"]').waitFor();
+  await page.screenshot({ path: path.join(outputDir, 'unmatched-target.png') });
+  await page.evaluate(() => window.alarmInspectorHarness.targetMode('synced'));
+  await first.waitFor();
+  assert.equal(await page.locator('.alarm-property-device').count(), 10, '旧模型缓存引用应匹配当前场景12台设备并分页');
+  const deviceSelect = page.locator('.alarm-manager-fieldset .searchable-select__input');
+  await deviceSelect.click();
+  await page.getByRole('option', { name: '设备 1 · CV-1', exact: true }).waitFor();
+  await deviceSelect.press('Escape');
+  await page.getByLabel('火警属性', { exact: true }).fill('normal');
+  await page.getByLabel('触发值', { exact: true }).fill('true');
+  await page.evaluate(() => { window.alarmInspectorHarness.reload(); window.alarmInspectorHarness.run(); window.alarmInspectorHarness.mqtt([{ p: 'normal', v: true }]); });
+  await first.locator('[data-alarm-property-status="matched"]').waitFor();
+  assert.match(await first.innerText(), /当前 v：true/);
+  await first.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.join(outputDir, 'normal-true-matched.png') });
+  await page.evaluate(() => window.alarmInspectorHarness.stop());
   await page.locator('.alarm-property-diagnostics summary').click();
+  // details 关闭后 ARIA region 会先隐藏，需等待 React 真正卸载诊断节点。
+  await page.locator('.alarm-property-device').first().waitFor({ state: 'detached' });
   assert.equal(await page.locator('.alarm-property-device').count(), 0);
   assert.deepEqual(errors, []);
   await page.evaluate(() => window.alarmInspectorHarness.dispose());
-  console.log('PASS: CUSTOM PROPERTY 配置、撤销重做、保存重开、逐设备 p/v 只读诊断、超时、缺失、恢复、分页及停止清理。');
+  console.log('PASS: CUSTOM PROPERTY 配置、撤销重做、保存重开、逐设备只读诊断、无更新及相同值保持、缺点位保持、新值解除、分页、停止清理、空目标提示和缓存路径变化后的 normal=true 诊断。');
 } finally {
   await browser?.close();
   await server.close();
