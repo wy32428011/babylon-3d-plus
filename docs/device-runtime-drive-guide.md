@@ -103,7 +103,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 仅货物平移，**本体滚筒/链条不驱动**（:98）。每帧 `cargoTravelOffset += direction × forwardSign × speed × dt`（:342-346），`getConveyorCargoPosition`(:1182-1190) = 中心 + surfaceLift + 轴向偏移。
 
 ### 时序
-无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1116-1124)。端点容差 1e-3（:51）。自驱续行在 movement 归 0 后接管(:331-341)。
+无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1116-1124)。实测半长按生成器输出类型取世界包围盒在行走轴投影；**组合输出的阵列批次网格必须走 `getThinInstanceMeshWorldBounds` 逐实例矩阵测量**——批次几何保留成员原始坐标（单位换算烘在逐实例矩阵内、网格自身世界矩阵不含缩放），走 `getMeshWorldBounds` 的几何×网格世界矩阵路径会按原始单位放大长度（如厘米箱测出 18m），行程半径被压到下限、货物冻结在输送线中心。端点容差 1e-3（:51）。自驱续行在 movement 归 0 后接管(:331-341)。
 
 ### 状态机（ConveyorModelTelemetryState, types.ts:290-329）
 `cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/订阅(:227-296)；mode=2+双光电空→销毁(:207-222)；交付 settle(:663-699)。

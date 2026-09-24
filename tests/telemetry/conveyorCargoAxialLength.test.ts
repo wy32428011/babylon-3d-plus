@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { MeshBuilder, Matrix, NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ConveyorTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/conveyorDriver';
@@ -163,6 +163,41 @@ test('同一模板签名命中缓存不重测，签名变化后按新模板重�
     h.apply(RUNNING, 0.1, 1);
     assert.equal(h.model.conveyorTelemetry.cargoTravelOffset, resolveConveyorCargoTravelHalfRange(SPAN, 3));
     assert.deepEqual(cargo.axialLengthCache, { key: 'sig-b:x', lengthMeters: 3 });
+  } finally {
+    h.dispose();
+  }
+});
+
+test('组合阵列批次按逐实例矩阵测量：原始单位几何不放大货物长度', () => {
+  const h = makeHarness();
+  try {
+    h.apply(RUNNING);
+    const cargo = currentCargo(h);
+
+    // 模拟真实组合包：box.glb 为厘米模型（32×18×18），批次网格挂在 cargo.root 下世界缩放为 1，
+    // 0.01 单位换算与 4 个箱子位姿全部烘在逐实例矩阵里（x 偏移 ±0.27/±0.09）。
+    const batchMesh = MeshBuilder.CreateBox('batch_cm', { width: 32, height: 18, depth: 18 }, h.scene);
+    batchMesh.parent = cargo.root;
+    const instanceData = new Float32Array(4 * 16);
+    [0.27, 0.09, -0.09, -0.27].forEach((x, index) => {
+      Matrix.Compose(new Vector3(0.01, 0.01, 0.01), Quaternion.Identity(), new Vector3(x, 0, 0))
+        .copyToArray(instanceData, index * 16);
+    });
+    batchMesh.thinInstanceSetBuffer('matrix', instanceData, 16, false);
+
+    cargo.outputOwner = {
+      activeTargetSignature: 'sig-array',
+      output: { kind: 'composition', members: [{ model: null, mesh: null, arrayBatch: { meshes: [batchMesh] } }] },
+    } as unknown as ConveyorCargoRuntimeEntry['outputOwner'];
+
+    h.apply(RUNNING, 0.1, 200);
+    // 实测轴向长度 = 0.27+0.16 −(−0.27−0.16) = 0.86；若按 geometry.extend×meshWorld 会测出 32m 冻结行程
+    const expected = resolveConveyorCargoTravelHalfRange(SPAN, 0.86);
+    assert.ok(
+      Math.abs((h.model.conveyorTelemetry.cargoTravelOffset ?? 0) - expected) < 1e-6,
+      `阵列批次货物必须按逐实例世界矩阵测量，期望 ${expected} 实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+    assert.ok(Math.abs((cargo.axialLengthCache?.lengthMeters ?? 0) - 0.86) < 1e-6);
   } finally {
     h.dispose();
   }
