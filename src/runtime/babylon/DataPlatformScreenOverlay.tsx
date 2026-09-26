@@ -1,8 +1,11 @@
+import { createChartMarkerRingMedia } from './chartMarkerRingMedia';
+import { createChartMarkerRingDialog } from './chartMarkerRingDialog';
+import { createChartMarkerSurfaceUrl } from './chartMarkerSurfaceBridge';
 import { getChartMarkerCorners } from './ChartMarkerPresentation';
 import { createChartMarkerContent, type ChartMarkerTextureFrame } from './chartMarkerContent';
 import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
-import { Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
+import { Frustum, Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
 import { createChartMarkerVideo } from './chartMarkerVideo';
 import { ChartMarkerDepthSurface, type ScreenPolygon } from './ChartMarkerDepthSurface';
@@ -155,6 +158,8 @@ type OverlayEntry = {
   clipHost: HTMLDivElement;
   iframe: HTMLIFrameElement | null;
   videoContent?: ReturnType<typeof createChartMarkerVideo>;
+  ringMedia?: ReturnType<typeof createChartMarkerRingMedia>;
+  ringDialog?: ReturnType<typeof createChartMarkerRingDialog>;
   inset: number;
   item: DataPlatformScreenOverlayItem;
   screenOrigin: string;
@@ -168,6 +173,7 @@ type OverlayEntry = {
 };
 
 function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayItem): OverlayEntry {
+  const ringMode = item.markerStyle?.panelShape === 'ring';
   const builtinMode = item.markerStyle?.contentType === 'builtin';
   const videoMode = item.markerStyle?.contentType === 'video' || item.alarmMediaType === 'video';
   const factor = builtinMode || videoMode ? 1 : 6;
@@ -176,6 +182,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
   const height = item.markerStyle ? item.markerStyle.height * factor : item.chartMarker ? 1080 : OVERLAY_BASE_SIZE_PX;
   const host = document.createElement('div');
   host.dataset.screenEntityId = item.entityId;
+  if (ringMode) host.dataset.chartMarkerRingSource = '';
   host.style.cssText = `position:absolute;left:0;top:0;width:${width}px;height:${height}px;transform-origin:0 0;overflow:hidden;background:#101827;pointer-events:none`;
   if (item.chartMarker) host.style.boxShadow = 'inset 0 0 0 12px #58b9dc';
 
@@ -227,6 +234,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     status.style.display = fallback.style.display = 'none';
     videoContent = createChartMarkerVideo(content, {
       url: item.screenUrl ?? '',
+      textureSource: ringMode,
       loop: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoLoop : true,
       controls: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoControls : true,
       fit: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoFit : 'contain',
@@ -235,7 +243,7 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     iframe = document.createElement('iframe');
     iframe.title = item.name || item.entityId;
     if (item.alarmMediaType === 'third-party') iframe.setAttribute('sandbox', 'allow-scripts allow-forms');
-    iframe.src = item.screenUrl;
+    iframe.src = ringMode ? createChartMarkerSurfaceUrl(item.screenUrl) : item.screenUrl;
     iframe.loading = 'eager';
     iframe.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none;visibility:hidden';
     iframe.addEventListener('load', onLoad);
@@ -251,7 +259,11 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
     message.textContent = '将图表库大屏拖到此立标，或拖到右侧大屏槽位';
   }
 
+  const ringMedia = ringMode && !builtinMode ? createChartMarkerRingMedia(iframe, videoContent?.video) : undefined;
+  const ringDialog = ringMode ? createChartMarkerRingDialog(clipHost, host) : undefined;
   const entry: OverlayEntry = {
+    ringMedia,
+    ringDialog,
     host,
     builtin,
     clipHost,
@@ -269,6 +281,8 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       iframe?.removeEventListener('load', onLoad);
       iframe?.removeEventListener('error', showFallback);
+      ringDialog?.dispose();
+      ringMedia?.dispose();
       videoContent?.dispose();
       builtin?.dispose();
       clipHost.remove();
@@ -354,9 +368,27 @@ export function DataPlatformScreenOverlay({
       entries.delete(entityId);
     };
     window.addEventListener(CHART_MARKER_REFRESH_EVENT, handleRefresh);
+    const openRingContent = (event: MouseEvent): void => {
+      if (!interactiveRef.current) return;
+      const rect = canvas.getBoundingClientRect();
+      const camera = scene.cameraToUseForPointers ?? scene.activeCamera;
+      if (!camera) return;
+      const hit = scene.pick(event.clientX - rect.left, event.clientY - rect.top, mesh => (
+        !mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible && mesh.visibility > 0
+        && (mesh.layerMask & camera.layerMask) !== 0 && (mesh.material?.alpha ?? 1) > 0
+      ), false, camera);
+      const entry = [...entries.values()].find(candidate => candidate.item.mesh === hit?.pickedMesh);
+      if (!entry?.ringDialog || (!entry.iframe && !entry.videoContent)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      entry.ringDialog.show();
+      entry.ringDialog.update(entry.width, entry.height);
+    };
+    canvas.addEventListener('dblclick', openRingContent, true);
 
     const update = (): void => {
       const items = runtime.getDataPlatformScreenOverlayItems();
+      const frustumPlanes = Frustum.GetPlanes(scene.getTransformMatrix());
       const itemIds = new Set(items.map((item) => item.entityId));
       for (const [entityId, entry] of entries.entries()) {
         if (!itemIds.has(entityId)) {
@@ -378,6 +410,7 @@ export function DataPlatformScreenOverlay({
           || entry.item.alarmMediaType !== item.alarmMediaType
           || entry.item.chartMarker !== item.chartMarker
           || entry.item.markerStyle?.contentType !== item.markerStyle?.contentType
+          || entry.item.markerStyle?.panelShape !== item.markerStyle?.panelShape
           || entry.thumbnailUrl !== item.thumbnailUrl
           || entry.item.projectId !== item.projectId
           || entry.item.screenId !== item.screenId
@@ -387,7 +420,7 @@ export function DataPlatformScreenOverlay({
           entry = undefined;
         }
         if (!entry) {
-          entry = createOverlayEntry(item.chartMarker && depthSurface ? depthSurface.root : root, item);
+          entry = createOverlayEntry(item.chartMarker && item.markerStyle?.panelShape !== 'ring' && depthSurface ? depthSurface.root : root, item);
           entries.set(item.entityId, entry);
         } else {
           entry.item = item;
@@ -412,6 +445,21 @@ export function DataPlatformScreenOverlay({
         }
         entry.videoContent?.setInteractive(interactiveRef.current);
         postSelectionToScreen(entry, selectedEntityIdsRef.current);
+        if (item.markerStyle?.panelShape === 'ring') {
+          // 曲面由真实网格和连续 UV 渲染，源网页保持一个实例且不占据平面投影。
+          if (!interactiveRef.current) entry.ringDialog?.hide();
+          entry.ringDialog?.update(entry.width, entry.height);
+          const inView = !!scene.activeCamera && item.mesh.isInFrustum(frustumPlanes);
+          const active = inView || !!entry.ringDialog?.isOpen;
+          entry.videoContent?.setPlayback(playbackActiveRef.current, active);
+          const frame = entry.builtin?.textureFrame()
+            ?? entry.ringMedia?.update(item.markerStyle, item.screenUrl ?? '', !!entry.iframe ? active : playbackActiveRef.current && active);
+          if (frame) {
+            visibleMarkerMeshes.push(item.mesh);
+            transparentContents.set(item.mesh, frame);
+          }
+          continue;
+        }
         const corners = projectScreenCorners(scene, canvas, root, item.mesh, item.chartMarker);
         if (!corners) {
           entry.videoContent?.setPlayback(playbackActiveRef.current, false);
@@ -478,6 +526,7 @@ export function DataPlatformScreenOverlay({
       scene.onBeforeCameraRenderObservable.remove(beforeObserver);
       scene.onAfterRenderObservable.remove(observer);
       depthSurface?.dispose();
+      canvas.removeEventListener('dblclick', openRingContent, true);
       window.removeEventListener('message', handleMessage);
       window.removeEventListener(CHART_MARKER_REFRESH_EVENT, handleRefresh);
       for (const entry of entries.values()) disposeOverlayEntry(entry);

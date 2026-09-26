@@ -22,11 +22,12 @@ type NumberFieldProps = {
   min: number;
   max: number;
   step?: number;
+  integer?: boolean;
   onCommit: (value: number) => void;
 };
 
 /** 保留编辑草稿，避免键入小数或替换整个数值时立即被归一化。 */
-function ChartMarkerNumberField({ label, value, min, max, step = 1, onCommit }: NumberFieldProps) {
+function ChartMarkerNumberField({ label, value, min, max, step = 1, integer = false, onCommit }: NumberFieldProps) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
 
@@ -36,7 +37,7 @@ function ChartMarkerNumberField({ label, value, min, max, step = 1, onCommit }: 
       setDraft(String(value));
       return;
     }
-    const next = Math.max(min, Math.min(max, parsed));
+    const next = Math.max(min, Math.min(max, integer ? Math.round(parsed) : parsed));
     setDraft(String(next));
     if (next !== value) onCommit(next);
   }
@@ -258,6 +259,13 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
       <fieldset className="transform-fieldset chart-marker-fieldset" disabled={disabled}>
         <legend>图表面板</legend>
         {!alarmAppearance ? <label className="inspector-row">
+          <span>面板形状</span>
+          <select aria-label="面板形状" value={marker.panelShape} onChange={(event) => commit({ panelShape: event.target.value as ChartMarkerComponent['panelShape'] })}>
+            <option value="plane">矩形</option>
+            <option value="ring">环形</option>
+          </select>
+        </label> : null}
+        {!alarmAppearance ? <label className="inspector-row">
           <span>关联类型</span>
           <select aria-label="关联类型" value={marker.contentType} onChange={(event) => commit({ contentType: event.target.value as ChartMarkerComponent['contentType'] })}>
             <option value="builtin">内置样式</option>
@@ -341,13 +349,18 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
           <span>外观颜色</span>
           <input type="color" value={marker.appearanceColor} onChange={(event) => commit({ appearanceColor: event.target.value })} />
         </label>
+        {!alarmAppearance && marker.panelShape === 'ring' ? <>
+          <ChartMarkerNumberField label="环形半径（m）" value={marker.ringRadius} min={0.1} max={10000} step={0.1} onCommit={(ringRadius) => commit({ ringRadius })} />
+          <ChartMarkerNumberField label="内容平铺次数" integer value={marker.ringRepeat} min={1} max={32} step={1} onCommit={(ringRepeat) => commit({ ringRepeat })} />
+        </> : null}
         <ChartMarkerNumberField label="尺寸 X（px）" value={marker.width} min={16} max={4096} onCommit={(width) => commit({ width })} />
         <ChartMarkerNumberField label="尺寸 Y（px）" value={marker.height} min={16} max={4096} onCommit={(height) => commit({ height })} />
+        {!alarmAppearance && marker.panelShape === 'ring' ? <p className="muted">尺寸 X、Y 为单份内容的宽高，尺寸 Y 同时控制环高；半径和实体缩放决定环的大小。平铺次数为 1 时整圈显示一份连续画面，更高数值沿圆周重复；运行时双击大屏或视频可打开原始内容交互。</p> : null}
         <ChartMarkerNumberField label="悬浮高度（m）" value={marker.floatHeight} min={0} max={10000} step={0.1} onCommit={(floatHeight) => commit({ floatHeight })} />
-        <label className="inspector-row">
+        {alarmAppearance || marker.panelShape !== 'ring' ? <label className="inspector-row">
           <span>面向摄像机</span>
           <input type="checkbox" checked={marker.faceCamera} onChange={(event) => commit({ faceCamera: event.target.checked })} />
-        </label>
+        </label> : null}
         {!alarmAppearance && marker.contentType !== 'video' ? <div
           className={`chart-marker-screen-slot${dragOver ? ' is-drag-over' : ''}`}
           aria-label="图表立标大屏槽位"

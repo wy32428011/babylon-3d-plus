@@ -489,6 +489,12 @@ export type ChartMarkerClickEvent = {
 export type ChartMarkerComponent = {
   /** 缺省 ground 为旧版 XZ 平面；upright 将立起面板的旋转放入几何，实体保持标准 XYZ 轴。 */
   geometryBasis?: 'ground' | 'upright';
+  /** 缺省为矩形；环形将展开内容沿闭合圆周显示。 */
+  panelShape?: 'plane' | 'ring';
+  /** 环形局部半径，单位为米，仍受实体 Transform 缩放影响。 */
+  ringRadius?: number;
+  /** 一张画面沿圆周平铺的次数；全景内容可设为 1。 */
+  ringRepeat?: number;
   screenName?: string;
   contentType?: 'builtin' | 'screen' | 'video';
   /** 视频使用可发布的 HTTP(S) 直链，播放实例不进入场景。 */
@@ -505,7 +511,7 @@ export type ChartMarkerComponent = {
   appearance?: 'line' | 'column' | 'none';
   indicatorSize?: number;
   appearanceColor?: string;
-  /** 面板尺寸单位为像素，与实体 Transform 缩放共同作用。 */
+  /** 面板内容尺寸单位为像素；环形宽度为展开内容宽度，高度为环高，并受实体 Transform 缩放影响。 */
   width?: number;
   height?: number;
   /** 面板相对原位置的向上偏移，单位为米。 */

@@ -5,12 +5,14 @@ import { createServer } from 'vite';
 
 test('视频立标配置、历史与运行内容路由', async t => {
   const server = await createServer({ configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: ['@linkiez/dxf-renew'] } });
   t.after(() => server.close());
   const previousWindow = globalThis.window;
   globalThis.window = { location: { protocol: 'http:', href: 'http://localhost/' }, addEventListener() {}, removeEventListener() {} };
   t.after(() => { globalThis.window = previousWindow; });
+  await server.ssrLoadModule('/src/editor/model/chartMarker.ts');
+  await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
   const { useEditorStore: store } = await server.ssrLoadModule('/src/editor/store/editorStore.ts');
   const { normalizeChartMarker, resolveChartMarker } = await server.ssrLoadModule('/src/editor/model/chartMarker.ts');
   const { serializeScene, deserializeScene } = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');

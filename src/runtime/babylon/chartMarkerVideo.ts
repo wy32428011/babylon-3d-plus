@@ -3,6 +3,8 @@ export type ChartMarkerVideoOptions = {
   loop: boolean;
   controls: boolean;
   fit: 'contain' | 'cover';
+  /** 曲面纹理需要媒体服务器允许 CORS；普通平面保持原加载方式。 */
+  textureSource?: boolean;
 };
 
 /** 视频自身管理媒体状态；几何更新只传入可见性，不逐帧调用 play 或重建视频。 */
@@ -10,6 +12,7 @@ export function createChartMarkerVideo(parent: HTMLElement, options: ChartMarker
   const video = document.createElement('video');
   video.dataset.chartMarkerVideo = '';
   video.muted = true;
+  if (options.textureSource) video.crossOrigin = 'anonymous';
   video.playsInline = true;
   video.preload = 'metadata';
   video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;background:#000;pointer-events:none';

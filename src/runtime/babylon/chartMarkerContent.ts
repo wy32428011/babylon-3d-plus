@@ -54,7 +54,7 @@ export function createChartMarkerContent(host: HTMLElement) {
 }
 
 
-export type ChartMarkerTextureFrame = { canvas: HTMLCanvasElement; revision: number };
+export type ChartMarkerTextureFrame = { canvas: HTMLCanvasElement; revision: number; ring?: boolean; opaque?: boolean; repeats?: number };
 
 /** 无色内置内容绘为透明纹理，让场景自身完成逐像素混合；无需复制或重绘场景。 */
 function createTransparentChartMarkerTexture() {
@@ -76,10 +76,14 @@ function createTransparentChartMarkerTexture() {
       if (style !== previous || value !== previousValue) {
         dirty = true;
         if (previous?.marquee !== style.marquee || previous?.fontSize !== style.fontSize || previous?.width !== style.width) animationStart = now;
-        if (canvas.width !== style.width || canvas.height !== style.height) {
-          canvas.width = style.width;
-          canvas.height = style.height;
+        const factor = style.panelShape === 'ring'
+          ? Math.min(1, 2048 / style.width, 2048 / style.height, Math.sqrt(2097152 / (style.width * style.height))) : 1;
+        const width = Math.max(1, Math.floor(style.width * factor)), height = Math.max(1, Math.floor(style.height * factor));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
         }
+        context.setTransform(width / style.width, 0, 0, height / style.height, 0, 0);
         context.font = `${style.fontSize}px "Microsoft YaHei", sans-serif`;
         textWidth = context.measureText(value).width;
         lines = [];
@@ -110,8 +114,15 @@ function createTransparentChartMarkerTexture() {
       if (!dirty && (!style.marquee || animationFrame === lastAnimationFrame)) return frame;
       lastAnimationFrame = animationFrame;
       dirty = false;
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      if (image?.complete && image.naturalWidth > 0) context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      context.clearRect(0, 0, style.width, style.height);
+      frame.ring = style.panelShape === 'ring';
+      frame.repeats = style.ringRepeat;
+      frame.opaque = style.panelShape === 'ring' && style.backgroundColor !== 'transparent';
+      if (style.panelShape === 'ring' && style.backgroundColor !== 'transparent') {
+        context.fillStyle = style.backgroundColor;
+        context.fillRect(0, 0, style.width, style.height);
+      }
+      if (image?.complete && image.naturalWidth > 0) context.drawImage(image, 0, 0, style.width, style.height);
       context.save();
       context.font = `${style.fontSize}px "Microsoft YaHei", sans-serif`;
       context.fillStyle = '#ffffff';
@@ -129,7 +140,7 @@ function createTransparentChartMarkerTexture() {
         lines.forEach((line, index) => context.fillText(line, style.width / 2, style.height / 2 + (index - (lines.length - 1) / 2) * lineHeight));
       }
       context.restore();
-      if (style.appearance !== 'none') {
+      if (style.appearance !== 'none' && style.panelShape !== 'ring') {
         const width = style.appearance === 'column' ? 4 : 2;
         context.strokeStyle = style.appearanceColor;
         context.lineWidth = width;

@@ -10,6 +10,9 @@ export const CHART_MARKER_MAX_IMAGE_LENGTH = 3 * 1024 * 1024;
 /** 新建立标使用无色背景；旧场景的缺省行为由 resolveChartMarker 单独维护。 */
 export const CHART_MARKER_DEFAULTS: Readonly<Required<ChartMarkerComponent>> = Object.freeze({
   geometryBasis: 'upright',
+  panelShape: 'plane',
+  ringRadius: 3,
+  ringRepeat: 4,
   screenName: '',
   contentType: 'builtin',
   videoUrl: '',
@@ -154,9 +157,10 @@ function normalizeClickEvents(value: unknown): ChartMarkerClickEvent[] {
 const STRING_LIMITS = { screenName: 128, text: 4096, dataSourceEntityId: 128, dataField: 256 } as const;
 const NUMBER_LIMITS = {
   fontSize: [8, 256], indicatorSize: [0.01, 100], width: [16, 4096], height: [16, 4096], floatHeight: [0, 10000],
+  ringRadius: [0.1, 10000], ringRepeat: [1, 32],
 } as const;
 const ENUM_VALUES = {
-  geometryBasis: ['ground', 'upright'],
+  geometryBasis: ['ground', 'upright'], panelShape: ['plane', 'ring'],
   contentType: ['builtin', 'screen', 'video'], videoFit: ['contain', 'cover'], appearance: ['line', 'column', 'none'],
   driveMode: ['none', 'data'], clickAction: ['none', 'focus', 'refresh'],
 } as const;
@@ -202,7 +206,8 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
       valid = typeof field === 'string' && field.length <= STRING_LIMITS[key as keyof typeof STRING_LIMITS];
     } else if (key in NUMBER_LIMITS) {
       const [min, max] = NUMBER_LIMITS[key as keyof typeof NUMBER_LIMITS];
-      valid = typeof field === 'number' && Number.isFinite(field) && field >= min && field <= max;
+      valid = typeof field === 'number' && Number.isFinite(field) && field >= min && field <= max
+        && (key !== 'ringRepeat' || Number.isInteger(field));
     } else if (key in ENUM_VALUES) {
       valid = typeof field === 'string' && (ENUM_VALUES[key as keyof typeof ENUM_VALUES] as readonly string[]).includes(field);
     } else if (key === 'backgroundColor' || key === 'appearanceColor') {

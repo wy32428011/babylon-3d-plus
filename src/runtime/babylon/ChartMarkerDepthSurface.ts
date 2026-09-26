@@ -3,6 +3,7 @@ import type { ChartMarkerTextureFrame } from './chartMarkerContent';
 
 export type ScreenPolygon = readonly { x: number; y: number }[];
 type PixelRect = { x: number; y: number; width: number; height: number };
+type MaterialOverride = { original: Material | undefined; applied: Material };
 
 /** 合并相邻扫描行的透明区间，避免为每个像素生成一段 CSS 路径。 */
 function transparentRects(data: Uint8ClampedArray, width: number, height: number): PixelRect[] {
@@ -28,13 +29,13 @@ function transparentRects(data: Uint8ClampedArray, width: number, height: number
 
 /**
  * 与场景共用深度缓冲，在立标可见片元写入透明孔，使下层实时网页接受模型遮挡。
- * 原材质只在一帧内替换，文档同步、缩略图和选择工具仍持有原材质。
+ * 显示材质只覆盖相机的 render pass，原材质及其它相机、阴影和 Gizmo pass 保持独立。
  */
 export class ChartMarkerDepthSurface {
   readonly root: HTMLDivElement;
   private readonly material: ShaderMaterial;
-  private readonly originals = new Map<Mesh, Material | null>();
-  private readonly transparentMaterials = new Map<Mesh, { material: ShaderMaterial; texture: DynamicTexture; revision: number; width: number; height: number; canvas: HTMLCanvasElement }>();
+  private readonly overrides = new Map<Mesh, Map<number, MaterialOverride>>();
+  private readonly transparentMaterials = new Map<Mesh, { material: ShaderMaterial; texture: DynamicTexture; revision: number; width: number; height: number; canvas: HTMLCanvasElement; ring: boolean; opaque: boolean }>();
   private readonly bitmap = document.createElement('canvas');
   private readonly context = this.bitmap.getContext('2d', { willReadFrequently: true })!;
   private readonly originalStyle: Pick<CSSStyleDeclaration, 'position' | 'zIndex' | 'background' | 'clipPath'>;
@@ -59,25 +60,56 @@ export class ChartMarkerDepthSurface {
   }
 
   beginFrame(meshes: readonly Mesh[], transparentContents: ReadonlyMap<Mesh, ChartMarkerTextureFrame> = new Map()): void {
-    this.endFrame();
+    const camera = this.scene.activeCamera;
+    const cameras = this.scene.activeCameras?.length ? this.scene.activeCameras : camera ? [camera] : [];
+    const activePasses = new Set(cameras.map(item => item.renderPassId));
+    const visible = new Set(meshes.filter(mesh => !mesh.isDisposed()));
+    for (const [mesh, passes] of this.overrides) {
+      for (const [passId, override] of passes) {
+        if (visible.has(mesh) && activePasses.has(passId)) continue;
+        this.restoreOverride(mesh, passId, override);
+        passes.delete(passId);
+      }
+      if (!passes.size) this.overrides.delete(mesh);
+    }
     for (const [mesh, entry] of this.transparentMaterials) {
-      if (transparentContents.has(mesh) && !mesh.isDisposed()) continue;
+      if (visible.has(mesh) && transparentContents.has(mesh)) continue;
       entry.material.dispose();
       entry.texture.dispose();
       this.transparentMaterials.delete(mesh);
     }
-    for (const mesh of meshes) {
-      if (mesh.isDisposed()) continue;
-      this.originals.set(mesh, mesh.material);
+    if (!camera) return;
+    const passId = camera.renderPassId;
+    for (const mesh of visible) {
       const content = transparentContents.get(mesh);
-      mesh.material = content ? this.getTransparentMaterial(mesh, content) : this.material;
+      const material = content ? this.getTransparentMaterial(mesh, content) : this.material;
+      let passes = this.overrides.get(mesh);
+      if (!passes) { passes = new Map(); this.overrides.set(mesh, passes); }
+      let override = passes.get(passId);
+      const current = mesh.getMaterialForRenderPass(passId);
+      if (!override) {
+        override = { original: current, applied: material };
+        passes.set(passId, override);
+      } else {
+        // 外部宿主更新同一 pass 时，以最新的宿主材质作为退出后的恢复目标。
+        if (current !== override.applied) override.original = current;
+        override.applied = material;
+      }
+      // 每帧重设材质会销毁 draw cache，使首帧就绪检查持续在 true/false 间振荡。
+      if (current !== material) mesh.setMaterialForRenderPass(passId, material);
+    }
+  }
+
+  private restoreOverride(mesh: Mesh, passId: number, override: MaterialOverride): void {
+    if (!mesh.isDisposed() && mesh.getMaterialForRenderPass(passId) === override.applied) {
+      mesh.setMaterialForRenderPass(passId, override.original);
     }
   }
 
   private getTransparentMaterial(mesh: Mesh, content: ChartMarkerTextureFrame): ShaderMaterial {
     const { width, height } = content.canvas;
     let entry = this.transparentMaterials.get(mesh);
-    if (entry && (entry.width !== width || entry.height !== height || entry.canvas !== content.canvas)) {
+    if (entry && (entry.width !== width || entry.height !== height || entry.canvas !== content.canvas || entry.ring !== !!content.ring || entry.opaque !== !!content.opaque)) {
       entry.material.dispose();
       entry.texture.dispose();
       this.transparentMaterials.delete(mesh);
@@ -89,27 +121,25 @@ export class ChartMarkerDepthSurface {
       texture.wrapU = texture.wrapV = Texture.CLAMP_ADDRESSMODE;
       const material = new ShaderMaterial('chart-marker-transparent-content', this.scene, {
         vertexSource: 'precision highp float; attribute vec3 position; attribute vec2 uv; uniform mat4 worldViewProjection; varying vec2 vUV; void main(){vUV=uv;gl_Position=worldViewProjection*vec4(position,1.0);}',
-        fragmentSource: 'precision highp float; varying vec2 vUV; uniform sampler2D content; void main(){vec2 p=vec2(gl_FrontFacing?1.0-vUV.x:vUV.x,1.0-vUV.y);vec4 color=texture2D(content,p);if(color.a==0.0)discard;gl_FragColor=color;}',
-      }, { attributes: ['position', 'uv'], uniforms: ['worldViewProjection'], samplers: ['content'], needAlphaBlending: true });
+        fragmentSource: `precision highp float; varying vec2 vUV; uniform sampler2D content; uniform float repeatCount; void main(){float u=${content.ring ? 'fract(vUV.x*repeatCount)' : 'vUV.x'};vec2 p=vec2(${content.ring ? 'gl_FrontFacing?u:1.0-u' : 'gl_FrontFacing?1.0-u:u'},${content.ring ? 'vUV.y' : '1.0-vUV.y'});vec4 color=texture2D(content,p);if(color.a==0.0)discard;gl_FragColor=color;}`,
+      }, { attributes: ['position', 'uv'], uniforms: ['worldViewProjection', 'repeatCount'], samplers: ['content'], needAlphaBlending: !content.opaque });
       material.backFaceCulling = false;
-      material.disableDepthWrite = true;
-      material.transparencyMode = Material.MATERIAL_ALPHABLEND;
+      material.disableDepthWrite = !content.opaque;
+      material.transparencyMode = content.opaque ? Material.MATERIAL_OPAQUE : Material.MATERIAL_ALPHABLEND;
       material.setTexture('content', texture);
-      entry = { material, texture, revision: -1, width, height, canvas: content.canvas };
+      entry = { material, texture, revision: -1, width, height, canvas: content.canvas, ring: !!content.ring, opaque: !!content.opaque };
       this.transparentMaterials.set(mesh, entry);
     }
     if (entry.revision !== content.revision) {
       entry.texture.update(true);
       entry.revision = content.revision;
     }
+    entry.material.setFloat('repeatCount', content.repeats ?? 1);
     return entry.material;
   }
 
   endFrame(): void {
-    for (const [mesh, material] of this.originals) {
-      if (!mesh.isDisposed() && (mesh.material === this.material || mesh.material === this.transparentMaterials.get(mesh)?.material)) mesh.material = material;
-    }
-    this.originals.clear();
+    // 覆盖保留到下一帧的可见性/相机更新；帧末释放会再次破坏 draw cache 和就绪状态。
   }
 
   /**
@@ -176,7 +206,10 @@ export class ChartMarkerDepthSurface {
   }
 
   dispose(): void {
-    this.endFrame();
+    for (const [mesh, passes] of this.overrides) {
+      for (const [passId, override] of passes) this.restoreOverride(mesh, passId, override);
+    }
+    this.overrides.clear();
     this.material.dispose();
     for (const entry of this.transparentMaterials.values()) { entry.material.dispose(); entry.texture.dispose(); }
     this.transparentMaterials.clear();

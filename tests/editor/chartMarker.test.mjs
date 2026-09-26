@@ -6,7 +6,7 @@ test('图表立标创建、绑定与持久化', async (t) => {
   const server = await createServer({
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, watch: null },
     optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });
@@ -14,6 +14,8 @@ test('图表立标创建、绑定与持久化', async (t) => {
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {} };
   t.after(() => { globalThis.window = previousWindow; });
+  await server.ssrLoadModule('/src/editor/model/chartMarker.ts');
+  await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
   const { useEditorStore: store } = await server.ssrLoadModule('/src/editor/store/editorStore.ts');
   const { serializeScene, deserializeScene } = await server.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
   const { CHART_MARKER_DEFAULTS, CHART_MARKER_MAX_IMAGE_LENGTH, CHART_MARKER_MAX_CLICK_EVENTS, CHART_MARKER_MAX_CLICK_ACTIONS, normalizeChartMarker, resolveChartMarker, getChartMarkerClickEvents } = await server.ssrLoadModule('/src/editor/model/chartMarker.ts');
