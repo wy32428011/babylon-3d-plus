@@ -1,5 +1,12 @@
 /// <reference types="vite/client" />
 
+type OpeningPackageBinding = import('../electron/shared/openingPackage').OpeningPackageBinding;
+type OpeningPackageListResult = { projectRoot: string | null; packages: OpeningPackageBinding[]; warnings: string[] };
+type OpeningPackageImportResult = OpeningPackageListResult & { canceled: boolean; package: OpeningPackageBinding | null };
+type OpeningPackageExportRequest = Pick<OpeningPackageBinding, 'id' | 'version' | 'contentHash'>;
+type OpeningPackageExportResult = { canceled: boolean; filePath: string | null };
+type OpeningAssetImportResult = { canceled: boolean; assetUrl: string | null; filePath: string | null; size: number; sha256: string };
+
 declare module '*?raw' {
   const content: string;
   export default content;
@@ -645,6 +652,10 @@ interface Window {
     readSyncedImage: (reference: string) => Promise<SyncedImageReadResult>;
     onDataPlatformImageSyncProgress: (handler: (progress: DataPlatformImageSyncProgress) => void) => () => void;
     listProjectAssets: () => Promise<ProjectListAssetsResult>;
+    listOpeningPackages: () => Promise<OpeningPackageListResult>;
+    importOpeningPackage: () => Promise<OpeningPackageImportResult>;
+    exportOpeningPackage: (request: OpeningPackageExportRequest) => Promise<OpeningPackageExportResult>;
+    importOpeningAsset: () => Promise<OpeningAssetImportResult>;
     openRecentProject: (request: OpenRecentProjectRequest) => Promise<ProjectListAssetsResult>;
     removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest) => Promise<void>;
     selectProjectDirectory: () => Promise<SelectProjectDirectoryResult>;

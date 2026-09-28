@@ -91,8 +91,9 @@ export async function createDeploymentReleaseCacheManifest(
       size: file.size,
       sha256,
       contentType: CONTENT_TYPES[path.posix.extname(relativePath).toLowerCase()] ?? 'application/octet-stream',
+      // 内置人物也由模型加载器读取，HTTP 部署时需进入 IndexedDB，不能依赖 Service Worker。
       storage: relativePath === 'project/scene.json' || relativePath === 'project/asset-manifest.json'
-        || relativePath.startsWith('project/assets/') ? 'asset' : 'response',
+        || relativePath.startsWith('project/assets/') || relativePath === 'manual-roam/EQ_People.glb' ? 'asset' : 'response',
     });
   }
   throwIfDeploymentExportAborted(signal);

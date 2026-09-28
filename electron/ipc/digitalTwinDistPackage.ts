@@ -16,6 +16,7 @@ import { createAssetManifestContent, prepareDeploymentExport } from './deploymen
 import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } from './deploymentReleaseCacheManifest.js';
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
 import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
+import { assertViewerTemplateSupportsScene } from './viewerTemplateCapabilities.js';
 
 const COPY_CONCURRENCY = 4;
 const MAX_DIST_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -65,6 +66,7 @@ export async function buildDigitalTwinDistPackage(
   try {
     options.onProgress?.('正在检查 Viewer 模板…', 3);
     const templateFiles = await createTemplateCopyPlan(resolveViewerTemplateRoot(), [stagingRoot, archivePath], options.signal);
+    await assertViewerTemplateSupportsScene(options.sceneContent, templateFiles, options.signal);
     const prepared = await prepareDeploymentExport(
       options.sceneContent,
       options.publishName,

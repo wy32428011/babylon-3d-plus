@@ -1,0 +1,86 @@
+import assert from 'node:assert/strict';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { chromium } from 'playwright';
+
+const output=path.resolve('output/geographic-opening');
+await mkdir(output,{recursive:true});
+const browser=await chromium.launch({channel:'chrome',headless:true});
+const errors=[];
+const report={stages:[],checks:[],differences:[],errors};
+try{
+ const page=await browser.newPage({viewport:{width:1600,height:900},deviceScaleFactor:1});
+ page.setDefaultTimeout(30000);
+ page.on('pageerror',e=>{errors.push(e.message);console.error(e.message);});
+ await page.goto(process.env.OPENING_DEMO_URL||pathToFileURL(path.join(output,'geographic-opening-demo.html')).href+'?seek=4',{waitUntil:'load',timeout:120000});
+ await page.waitForFunction(()=>window.__openingDemo?.getState().ready,null,{timeout:120000});
+ const frames=()=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+ const seek=async seconds=>{await page.evaluate(s=>window.__openingDemo.seek(s),seconds);await frames();};
+ const configure=async patch=>{await page.evaluate(p=>{window.__openingDemo.configure(p);window.__openingDemo.pause();},patch);await page.waitForFunction(()=>window.__openingDemo.getState().ready);await frames();};
+ const camera=await page.evaluate(()=>Array.from(window.__openingDemo.scene.activeCamera.getViewMatrix(true).m));
+ const defaults=await page.evaluate(()=>JSON.parse(JSON.stringify(window.__openingDemo.settings)));
+ const sceneMeshes=await page.evaluate(()=>window.__openingDemo.scene.meshes.length);
+ const capture=async name=>await page.screenshot({path:path.join(output,name),timeout:120000});
+ const delta=async(a,b)=>page.evaluate(async({a,b})=>{
+   const pixels=async s=>{const img=new Image();img.src='data:image/png;base64,'+s;await img.decode();const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const x=c.getContext('2d');x.drawImage(img,0,0);return x.getImageData(350,170,850,520).data;};
+   const x=await pixels(a),y=await pixels(b);let changed=0,total=0,error=0;
+   for(let i=0;i<x.length;i+=4){const d=Math.abs(x[i]-y[i])+Math.abs(x[i+1]-y[i+1])+Math.abs(x[i+2]-y[i+2]);if(d>12)changed++;error+=d;total++;}
+   return{changed,total,meanChannelError:error/total/3};
+ },{a:a.toString('base64'),b:b.toString('base64')});
+ const stages=[['01-globe',4,'globe'],['02-unfold',12,'unfold'],['03-world',20,'routes'],['04-china',28,'china'],['05-jiangsu-highlight',32,'jiangsu-highlight'],['06-domestic',38,'china-routes'],['07-jiangsu',45,'jiangsu'],['08-wuxi',51,'wuxi'],['09-huishan',59,'huishan']];
+ for(const[name,seconds,phase]of stages){
+   await seek(seconds);
+   const state=await page.evaluate(()=>window.__openingDemo.getState());
+   assert.equal(state.error,null);assert.equal(state.snapshot.phase,phase);assert.equal(state.snapshot.totalDurationSeconds,62);
+   const png=await capture(`reference-${name}.png`);
+   const original=await readFile(path.resolve(`output/opening-reference/reference-${String(seconds).padStart(2,'0')}s.png`));
+   const difference=await delta(png,original);report.differences.push({seconds,...difference});
+   assert.ok(difference.meanChannelError<6,`参考画面中央区域差异过大: ${seconds}s ${JSON.stringify(difference)}`);
+   report.stages.push({seconds,phase,screenshot:`reference-${name}.png`});
+ }
+ console.log('验证步骤完成');report.checks.push('相同1600×900视口和九个时刻与原HTML逐帧对照');
+ await seek(20);assert.match(await page.locator('[data-role="readout-value"]').textContent(),/40/);
+ const networkBefore=await page.locator('canvas.zd-effects').screenshot();
+ await seek(20.5);const networkAfter=await page.locator('canvas.zd-effects').screenshot();
+ assert.ok(!networkBefore.equals(networkAfter),'动态飞线应实际改变画布像素');
+ await seek(38);assert.match(await page.locator('[data-role="readout-value"]').textContent(),/34/);
+ const frozen=await page.locator('canvas.zd-effects').evaluate(c=>c.toDataURL());
+ await page.waitForTimeout(250);assert.ok((await page.locator('canvas.zd-effects').evaluate(c=>c.toDataURL()))===frozen,'暂停时实际绘制冻结');
+ report.checks.push('40条全球与34条国内路线、动态像素、暂停冻结');
+ await configure({...defaults,reference:{...defaults.reference,stageDurations:[9,7,8,6,4,28,6,6,8],chinaDestinations:[{name:'自定义地区',x:.4,y:.5}]}});
+ await seek(48);
+ assert.equal((await page.evaluate(()=>window.__openingDemo.getState())).snapshot.chinaHoldProgress,.5);
+ assert.match(await page.locator('[data-role="readout-value"]').textContent(),/1 条/);
+ await configure({...defaults,reference:{...defaults.reference,stageDurations:[9,7,0,6,4,0,6,6,8],worldDestinations:[],chinaDestinations:[]}});
+ await seek(16);assert.equal((await page.evaluate(()=>window.__openingDemo.getState())).snapshot.phase,'china');
+ await seek(26);assert.equal((await page.evaluate(()=>window.__openingDemo.getState())).snapshot.phase,'jiangsu');
+ report.checks.push('独立停留时长、零秒跳段、地区增删与显式空数组');
+ await configure({...defaults,allowSkip:false,reference:{...defaults.reference,showUI:false}});
+ await seek(20);assert.equal(await page.locator('[data-action="skip"]:visible').count(),0);
+ await page.keyboard.press('Escape');assert.equal((await page.evaluate(()=>window.__openingDemo.getState())).snapshot.phase,'routes');
+ await configure({...defaults,reference:{...defaults.reference,brandName:'<img src=x onerror=alert(1)>',companyName:'<script>alert(1)</script>'}});
+ await seek(59);assert.equal(await page.locator('.zd-brand-name img').count(),0);
+ await configure(defaults);await seek(12);await page.setViewportSize({width:900,height:600});await frames();
+ assert.equal(await page.locator('canvas.zd-effects').evaluate(c=>c.getBoundingClientRect().width),900);
+ await capture('reference-responsive.png');await page.setViewportSize({width:1600,height:900});
+ report.checks.push('隐藏界面、禁止跳过、文案按纯文本显示、调整视口');
+ await seek(61.6);await capture('reference-handoff.png');
+ assert.ok(Number(await page.locator('.zd-intro').evaluate(e=>getComputedStyle(e).opacity))<1);
+ await seek(62);await page.waitForFunction(()=>window.__openingDemo.getState().snapshot.phase==='complete');
+ assert.equal(await page.locator('.geographic-opening-host').count(),0);
+ assert.deepEqual(await page.evaluate(()=>Array.from(window.__openingDemo.scene.activeCamera.getViewMatrix(true).m)),camera);
+ assert.equal(await page.evaluate(()=>window.__openingDemo.scene.meshes.length),sceneMeshes);
+ await capture('reference-scene-ready.png');
+ const before=await page.evaluate(()=>window.__openingDemo.getState().completions);
+ await page.evaluate(()=>{window.__openingDemo.skip();window.__openingDemo.skip();});
+ assert.equal(await page.evaluate(()=>window.__openingDemo.getState().completions),before);
+ await configure({...defaults,enabled:false});assert.equal(await page.locator('.geographic-opening-host').count(),0);
+ await page.evaluate(()=>{window.__openingDemo.configure({...window.__openingDemo.settings,enabled:true});window.__openingDemo.dispose();});
+ await page.waitForTimeout(300);assert.equal(await page.locator('.geographic-opening-host').count(),0);
+ assert.equal(await page.evaluate(()=>window.__openingDemo.engine.scenes.length),1);
+ report.checks.push('最终淡出、相机与业务模型保持、完成幂等、关闭无动画、准备阶段取消后不复活');
+ assert.deepEqual(errors,[]);
+ await writeFile(path.join(output,'reference-verification.json'),JSON.stringify(report,null,2));
+ console.log(JSON.stringify(report,null,2));
+}finally{await browser.close();}

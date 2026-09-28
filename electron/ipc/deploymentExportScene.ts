@@ -8,6 +8,7 @@ import { readUtf8File } from '../shared/strictUtf8.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
+import { getSceneOpeningPackage, resolveOpeningPackageResources } from './openingPackageResources.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import {
   assertSafeDirectory,
@@ -75,7 +76,7 @@ const NON_RUNTIME_DEPLOYMENT_FILE_EXTENSIONS = new Set([
 const NON_RUNTIME_DEPLOYMENT_DIRECTORY_NAMES = new Set(['node_modules']);
 
 type PlainObject = Record<string, unknown>;
-type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts' | 'images';
+type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts' | 'images' | 'openings' | 'opening-assets';
 
 type ResourceBundle = {
   key: string;
@@ -190,6 +191,22 @@ export async function prepareDeploymentExport(
   const references = collectSceneReferences(scene);
   const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
   const bundles = new Map<string, ResourceBundle>();
+  const openingBinding = getSceneOpeningPackage(scene);
+  if (openingBinding && !projectContext) throw new Error('发布开场包需要打开其所属项目目录。');
+  const opening = openingBinding ? await resolveOpeningPackageResources(scene, projectContext!.projectRoot, signal) : null;
+  const openingIntegrity = new Map<string, { size: number; sha256: string }>();
+  if (opening) {
+    const bundle = getOrCreateBundle(bundles, 'openings', opening.packageRoot, false,
+      `project/assets/openings/${opening.binding.id}/${opening.binding.version}-${opening.binding.contentHash}`);
+    for (const file of opening.files) {
+      addExplicitFileToBundle(bundle, file.sourcePath);
+      openingIntegrity.set(toLocalPathKey(file.sourcePath), file);
+    }
+    for (const { file } of opening.overrides) {
+      addExplicitFileToBundle(getOrCreateBundle(bundles, 'opening-assets', path.dirname(file.sourcePath), false, 'project/assets/opening-assets'), file.sourcePath);
+      openingIntegrity.set(toLocalPathKey(file.sourcePath), file);
+    }
+  }
 
   onStatus('正在解析模型、环境、天空盒、CAD 与脚本资源…');
   const resolvedModels: ResolvedModelReference[] = [];
@@ -238,6 +255,14 @@ export async function prepareDeploymentExport(
     onStatus,
     warnings,
   );
+  for (const file of assetFiles) {
+    const integrity = openingIntegrity.get(toLocalPathKey(file.sourcePath));
+    if (integrity) { file.expectedSize = integrity.size; file.expectedSha256 = integrity.sha256; file.integrityLabel = '开场包固定版本资源'; }
+  }
+  if (opening) {
+    opening.binding.manifestUrl = requireMappedUrl(sourceUrlMap, opening.manifestPath, '开场包');
+    for (const { value, file } of opening.overrides) value.assetUrl = requireMappedUrl(sourceUrlMap, file.sourcePath, '开场替换图片');
+  }
 
   normalizeEffectDeploymentReferences(scene, sourceUrlMap);
   rewriteModelReferences(resolvedModels, sourceUrlMap);

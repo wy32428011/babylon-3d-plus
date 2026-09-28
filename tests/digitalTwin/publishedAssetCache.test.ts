@@ -231,3 +231,99 @@ test('完整缓存预热与原生资源读取合并下载，持久内容损坏�
   assert.equal(downloads, 2);
   cache.dispose();
 });
+
+test('天空盒限额读取与完整预热在任一启动顺序下共用一次下载和写入', async t => {
+  const url = 'http://viewer.test/release/project/assets/sky.hdr';
+  const resources = new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]);
+  for (const boundedFirst of [true, false]) {
+    const store = memoryStore();
+    let writes = 0;
+    const put = store.put; store.put = async (...args) => { writes++; await put(...args); };
+    let finish!: () => void;
+    const networkReady = new Promise<void>(resolve => { finish = resolve; });
+    const network = t.mock.method(globalThis, 'fetch', async () => { await networkReady; return new Response('abc'); });
+    const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [], resources, rawStore: store });
+    const restore = installPublishedAssetCache(cache);
+    try {
+      const read = () => readSkyboxTextureBlob(url + '?resolution=256', new AbortController().signal, 3);
+      const first = boundedFirst ? read() : cache.fetch(url);
+      const second = boundedFirst ? cache.fetch(url) : read();
+      finish();
+      assert.deepEqual(await Promise.all([first, second].map(async result => (await result).text())), ['abc', 'abc']);
+      assert.equal(network.mock.callCount(), 1, `boundedFirst=${boundedFirst}`);
+      assert.equal(writes, 1);
+    } finally { restore(); cache.dispose(); network.mock.restore(); }
+  }
+});
+
+test('清单已确定天空盒超限时在缓存读取和网络下载前拒绝', async t => {
+  const url = 'http://viewer.test/release/project/assets/sky.hdr';
+  let reads = 0;
+  const rawStore: PublishedCacheStore = { async get() { reads++; }, async put() {} };
+  const network = t.mock.method(globalThis, 'fetch', async () => new Response('abc'));
+  const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [],
+    resources: new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]), rawStore });
+  try {
+    await assert.rejects(cache.fetch(url, {}, undefined, 2), /读取上限/);
+    assert.equal(reads, 0);
+    assert.equal(network.mock.callCount(), 0);
+  } finally { cache.dispose(); }
+});
+
+test('取消限额天空盒读取不会中断共享预热或取消其它读取者', async t => {
+  const url = 'http://viewer.test/release/project/assets/sky.hdr';
+  let finish!: () => void;
+  const networkReady = new Promise<void>(resolve => { finish = resolve; });
+  let started!: () => void;
+  const networkStarted = new Promise<void>(resolve => { started = resolve; });
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const network = t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    signals.push(init?.signal); started(); await networkReady; init?.signal?.throwIfAborted(); return new Response('abc');
+  });
+  const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [],
+    resources: new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]), rawStore: memoryStore() });
+  const controller = new AbortController();
+  try {
+    const bounded = cache.fetch(url, { signal: controller.signal }, undefined, 3);
+    const cancelled = assert.rejects(bounded, { name: 'AbortError' });
+    await networkStarted;
+    const prefetch = cache.fetch(url);
+    controller.abort(); finish();
+    await cancelled;
+    assert.equal(await (await prefetch).text(), 'abc');
+    assert.equal(network.mock.callCount(), 1);
+    assert.equal(signals.every(signal => !signal?.aborted), true);
+    assert.equal(await cache.hasResource(url), true);
+  } finally { cache.dispose(); }
+});
+
+test('未知大小的天空盒继续执行流式限额检查且不缓存超限文件', async t => {
+  const url = 'http://viewer.test/release/project/assets/sky.hdr';
+  let writes = 0;
+  const rawStore: PublishedCacheStore = { async get() {}, async put() { writes++; } };
+  t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(5)));
+  const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [], rawStore });
+  try {
+    await assert.rejects(cache.fetch(url, {}, undefined, 4), /读取上限/);
+    assert.equal(writes, 0);
+  } finally { cache.dispose(); }
+});
+
+test('天空盒下载合并不接管自定义请求头或 POST 请求', async t => {
+  const url = 'http://viewer.test/release/project/assets/sky.hdr';
+  const seen: RequestInit[] = [];
+  let reads = 0;
+  t.mock.method(globalThis, 'fetch', async (_url, init) => { seen.push(init ?? {}); return new Response('live'); });
+  const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [],
+    resources: new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]),
+    rawStore: { async get() { reads++; }, async put() { throw new Error('不可写入'); } } });
+  try {
+    await Promise.all([cache.fetch(url, { headers: { Accept: 'application/octet-stream' } }, undefined, 2),
+      cache.fetch(url, { method: 'POST', body: 'live' }, undefined, 2)]);
+    assert.equal(reads, 0);
+    assert.equal(seen.length, 2);
+    assert.deepEqual(seen[0].headers, { Accept: 'application/octet-stream' });
+    assert.equal(seen[1].method, 'POST');
+    assert.equal(seen[1].body, 'live');
+  } finally { cache.dispose(); }
+});

@@ -1,6 +1,11 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AssetEntry,
+  OpeningPackageListResult,
+  OpeningPackageImportResult,
+  OpeningPackageExportRequest,
+  OpeningPackageExportResult,
+  OpeningAssetImportResult,
   DeploymentExportCancelRequest,
   DeploymentExportProgress,
   DeploymentExportRequest,
@@ -208,6 +213,10 @@ contextBridge.exposeInMainWorld('editorApi', {
     };
   },
   listProjectAssets: (): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:listAssets'),
+  listOpeningPackages: (): Promise<OpeningPackageListResult> => ipcRenderer.invoke('opening:listPackages'),
+  importOpeningPackage: (): Promise<OpeningPackageImportResult> => ipcRenderer.invoke('opening:importPackage'),
+  exportOpeningPackage: (request: OpeningPackageExportRequest): Promise<OpeningPackageExportResult> => ipcRenderer.invoke('opening:exportPackage', request),
+  importOpeningAsset: (): Promise<OpeningAssetImportResult> => ipcRenderer.invoke('opening:importAsset'),
   openRecentProject: (request: OpenRecentProjectRequest): Promise<ProjectListAssetsResult> => ipcRenderer.invoke('project:openRecent', request),
   removeRecentWorkspaceItem: (request: RemoveRecentWorkspaceItemRequest): Promise<void> => ipcRenderer.invoke('project:removeRecentWorkspaceItem', request),
   selectProjectDirectory: (): Promise<SelectProjectDirectoryResult> => ipcRenderer.invoke('project:selectDirectory'),

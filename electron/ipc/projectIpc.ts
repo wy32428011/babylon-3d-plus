@@ -17,6 +17,8 @@ import type {
 import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
+import { registerOpeningPackageIpc } from './openingPackageIpc.js';
+import { prepareOpeningSceneContent } from './openingPackageResources.js';
 import { beginScenePublishScopeUpdate, confirmScenePublishScopeFile, stageScenePublishScopeFile } from './scenePublishScope.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import {
@@ -83,6 +85,7 @@ function assertSceneSwitchAllowed(): void {
 }
 
 export function registerProjectIpc(): void {
+  registerOpeningPackageIpc();
   ipcMain.handle('project:getRecentWorkspaces', async (): Promise<RecentWorkspacesResult> => {
     return getRecentWorkspaces();
   });
@@ -207,7 +210,7 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null, content: null };
     }
 
-    const content = await readUtf8File(filePath, '场景文件');
+    const content = await prepareOpeningSceneContent(await readUtf8File(filePath, '场景文件'), filePath);
     assertSceneSwitchAllowed();
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
@@ -224,7 +227,7 @@ export function registerProjectIpc(): void {
     const sceneOpenToken = beginScenePublishScopeUpdate();
     const filePath = await assertRecentSceneFile(loadRequest.filePath);
     assertSceneSwitchAllowed();
-    const content = await readUtf8File(filePath, '场景文件');
+    const content = await prepareOpeningSceneContent(await readUtf8File(filePath, '场景文件'), filePath);
     assertSceneSwitchAllowed();
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
@@ -247,7 +250,7 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('file:readText', async (_event, request: ReadTextFileRequest): Promise<ReadTextFileResult> => {
     const readRequest = validateReadTextFileRequest(request);
-    const content = await readUtf8File(readRequest.filePath, '文本文件');
+    const content = await prepareOpeningSceneContent(await readUtf8File(readRequest.filePath, '文本文件'), readRequest.filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(readRequest.filePath);
 

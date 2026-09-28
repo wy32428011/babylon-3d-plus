@@ -931,6 +931,7 @@ export class SceneRuntime {
   private readonly reportedDuplicateLocatorTargets = new Set<string>();
   private readonly reportedOverlappingLocatorRanges = new Set<string>();
   private telemetryPreviewActive = false;
+  private openingCameraOwned = false;
   private telemetryPerformanceTimingEnabled = false;
   private telemetryFrameTimeMs: number | null = null;
   private readonly telemetryOuterStages = { diagnosticsMs: 0, baselineMs: 0, alarmsMs: 0 };
@@ -998,7 +999,7 @@ export class SceneRuntime {
         return node;
       }
       return this.meshes.get(id) ?? model?.root ?? null;
-    }, () => this.telemetryPreviewActive, false, { getRuntimeTargets: () => this.getRuntimeEffectTargets() });
+    }, () => this.telemetryPreviewActive && !this.openingCameraOwned, false, { getRuntimeTargets: () => this.getRuntimeEffectTargets() });
     this.shadowRuntime = new SceneShadowRuntime(scene);
     this.themeRuntime = new SceneThemeRuntime(scene);
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(scene);
@@ -1562,6 +1563,11 @@ export class SceneRuntime {
     if (!fetchRuntime) return;
     fetchRuntime.dispose();
     this.locatorFetchRuntimes.delete(entityId);
+  }
+
+  /** 开场占用镜头时暂停相机跟随，设备和遥测继续更新。 */
+  setOpeningCameraOwned(owned: boolean): void {
+    this.openingCameraOwned = owned;
   }
 
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */

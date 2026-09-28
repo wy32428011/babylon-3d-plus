@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>中鼎智能 · 数字孪生开场动画</title>
+  <style>
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#020815;color:#edf8ff;font-family:"Segoe UI","Microsoft YaHei",sans-serif}body{position:relative}#renderCanvas{display:block;width:100%;height:100%;outline:none}.complete-controls{position:absolute;left:3%;right:3%;bottom:4%;z-index:85;display:none;align-items:center;justify-content:space-between;gap:20px}.scene-ready .complete-controls{display:flex}.complete-controls strong{font-size:22px;font-weight:500}.complete-controls p{font-size:12px;color:#89aabc}.complete-controls button{border:1px solid #65c4f550;border-radius:6px;color:#d6efff;background:#071729dc;padding:10px 18px;cursor:pointer}.opening-preparing::after{content:'正在构建全域视野';position:absolute;inset:0;display:grid;place-items:center;z-index:81;background:#020815;color:#85a6bb;letter-spacing:.15em}#error{position:absolute;inset:20% 10%;z-index:90;background:#381d28;color:#ffc9c9;padding:24px;display:none;white-space:pre-wrap}
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas" aria-label="数字孪生园区示意"></canvas>
+  <div class="complete-controls"><div><strong>数字孪生场景已就绪</strong><p>园区演示模型 · 拖拽旋转，滚轮缩放</p></div><button id="replay" type="button">重新播放开场</button></div>
+  <div id="error" role="alert"></div>
+  <script type="module" src="./geographicOpeningDemo.ts"></script>
+</body>
+</html>

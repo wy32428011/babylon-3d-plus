@@ -14,6 +14,7 @@ import type {
 } from './deploymentSkyboxCache.js';
 import type { SourceEnvironmentPackageIntegrity } from './digitalTwinSourceEnvironmentRelink.js';
 import type { SourceResourcePlan, SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
+import { collectOpeningSourceBundles, getSceneOpeningPackage } from './openingPackageResources.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
@@ -43,7 +44,7 @@ const MAX_SCENE_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_FILES = 200_000;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024 * 1024;
 const PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
-const URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
+const URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl']);
 const PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 const STABLE_SKYBOX_PATH_FIELDS = new Set(['packagePath', 'sourcePath', 'sourceUrl']);
@@ -221,6 +222,7 @@ export async function buildDigitalTwinSourcePackage(
       legacyWorkspaceRoot,
       cadBundleMap,
     );
+    candidates.push(...await collectOpeningSourceBundles(scenes.map(scene => scene.parsed), projectRoot, options.signal));
     await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
     const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
     const bundles = resourcePlan.bundles;
@@ -667,6 +669,7 @@ function collectResourceBundles(
   for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
   for (const skyboxBundle of stableSkyboxBundles.values()) registerBundle(skyboxBundle);
   const effectMetadata = new WeakSet(sceneValues.flatMap(collectEffectModelReferences));
+  const openingMetadata = new WeakSet<object>(sceneValues.map(getSceneOpeningPackage).filter((value): value is NonNullable<typeof value> => value !== null));
 
   let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {
@@ -702,6 +705,8 @@ function collectResourceBundles(
       return;
     }
     if (isPlainObject(value)) {
+      // 开场按完整固定版本显式收集，避免通用 URL 扫描把 manifest 当独立包或重复复制素材。
+      if (openingMetadata.has(value)) return;
       if (effectMetadata.has(value)) return;
       const stableSkybox = stableSkyboxObjects.has(value);
       for (const [childKey, child] of Object.entries(value)) {
@@ -929,7 +934,7 @@ function toPortableAssetReference(value: string): string | null {
     const relativePath = segments.slice(environmentCachePath.revisionEndIndex).join('/');
     return relativePath ? `${packagePath}/${relativePath}` : packagePath;
   }
-  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i.exec(normalized);
+  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/.*|$))/i.exec(normalized);
   return match ? path.posix.normalize(match[1]) : null;
 }
 

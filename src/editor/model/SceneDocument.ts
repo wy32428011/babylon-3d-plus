@@ -1,3 +1,4 @@
+import { normalizeSceneOpeningAnimation, type SceneOpeningAnimationSettings } from './sceneOpeningAnimation';
 import { normalizeSceneTheme, type SceneThemeSettings } from './sceneTheme';
 import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from './lightSettings';
 import { createId } from '../../shared/ids';
@@ -255,6 +256,7 @@ export type SceneSettings = {
   theme?: SceneThemeSettings | null;
   camera: SceneCameraSettings;
   regionViews: SceneRegionView[];
+  openingAnimation?: SceneOpeningAnimationSettings;
   sensitivity: SceneSensitivitySettings;
   shadows: SceneShadowSettings;
   environment: SceneEnvironmentSettings | null;
@@ -328,6 +330,7 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
 export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   theme: null,
   regionViews: [],
+  openingAnimation: normalizeSceneOpeningAnimation(undefined),
   camera: {
     savedPose: null,
     savedOrientation: SCENE_CAMERA_ORIENTATION_DEFAULT,
@@ -941,6 +944,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       viewDistance: sanitizeSceneViewDistance(settings.camera.viewDistance),
     },
     regionViews: regionViews.views,
+    openingAnimation: normalizeSceneOpeningAnimation(settings.openingAnimation),
     sensitivity: {
       zoom: sanitizeSceneSensitivityValue(settings.sensitivity.zoom),
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),

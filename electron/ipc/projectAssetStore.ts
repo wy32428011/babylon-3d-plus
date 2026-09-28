@@ -725,6 +725,8 @@ function getProjectAssetLibraryRoot(projectRoot: string, libraryKind: ModelAsset
 
 /** 授权普通模型、环境模型与天空盒三个项目资产目录。 */
 function authorizeProjectAssetRoots(projectRoot: string): void {
+  authorizeAssetRoot(path.join(projectRoot, 'Assets', 'OpeningPackages'));
+  authorizeAssetRoot(path.join(projectRoot, 'Assets', 'OpeningAssets'));
   authorizeAssetRoot(path.join(projectRoot, 'Assets', 'Compositions'));
   authorizeAssetRoot(getProjectModelsRoot(projectRoot));
   authorizeAssetRoot(getProjectEnvironmentsRoot(projectRoot));

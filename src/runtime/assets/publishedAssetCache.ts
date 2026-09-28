@@ -55,10 +55,16 @@ export class PublishedAssetCache {
 
   async fetch(source: string, init: RequestInit = {}, onProgress?: AssetReadProgress, maxBytes?: number): Promise<Response> {
     init.signal?.throwIfAborted();
-    if (!this.rawStore || maxBytes !== undefined || !this.accepts(source) || init.headers || init.body || (init.method && init.method !== 'GET')) {
+    if (!this.rawStore || !this.accepts(source) || init.headers || init.body || (init.method && init.method !== 'GET')) {
       return this.fetchResource(source, init, onProgress, maxBytes);
     }
     const url = this.resourceUrl(new URL(source, this.base));
+    if (maxBytes !== undefined) {
+      const identity = this.resources?.get(url);
+      if (!identity) return this.fetchResource(source, init, onProgress, maxBytes);
+      if (identity.size > maxBytes) throw new Error(`资源超过读取上限（${maxBytes} 字节）。`);
+      // 已知清单大小由共享读取逐块校验，允许天空盒与预热合并下载，同时保留各读取者的限额。
+    }
     let pending = this.inFlight.get(url);
     if (!pending) {
       pending = this.fetchResource(url, { ...init, signal: undefined }, onProgress).then(async response => ({

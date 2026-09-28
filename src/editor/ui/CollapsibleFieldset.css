@@ -1,0 +1,57 @@
+.collapsible-fieldset {
+  min-width: 0;
+}
+
+.collapsible-fieldset > legend {
+  width: 100%;
+  padding: 0;
+}
+
+.panel .collapsible-fieldset-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 2px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.panel .collapsible-fieldset-toggle:hover {
+  color: #a1d4ff;
+  background: #ffffff08;
+}
+
+.panel .collapsible-fieldset-toggle:focus-visible {
+  outline: 2px solid #5faaff;
+  outline-offset: 2px;
+}
+
+.collapsible-fieldset-arrow {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  margin: 0 3px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.collapsible-fieldset-toggle[aria-expanded='true'] .collapsible-fieldset-arrow {
+  transform: rotate(45deg);
+}
+
+.collapsible-fieldset-content {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.collapsible-fieldset-content[hidden] {
+  display: none;
+}

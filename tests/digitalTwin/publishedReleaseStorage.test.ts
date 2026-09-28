@@ -28,8 +28,14 @@ test('配额按尚缺内容加元信息余量准入，已缓存部分与完整�
   assert.equal(assessPublishedReleaseCapacity(1000, 600, { quota: 2000, usage: 1500 }).admitted, true);
   assert.equal(assessPublishedReleaseCapacity(1000, 1000, { quota: 2000, usage: 2000 }).admitted, true);
   assert.equal(assessPublishedReleaseCapacity(1000, 1000, undefined).admitted, true);
-  assert.equal(assessPublishedReleaseCapacity(1000, 999, undefined).admitted, false);
-  assert.equal(assessPublishedReleaseCapacity(1000, 999, { quota: NaN, usage: 0 }).admitted, false);
+  assert.equal(assessPublishedReleaseCapacity(1000, 999, undefined).admitted, true);
+  assert.equal(assessPublishedReleaseCapacity(1000, 999, { quota: NaN, usage: 0 }).admitted, true);
+});
+
+test('HTTP 局域网缺少容量 API 时仍允许 IndexedDB 逐文件缓存', () => {
+  assert.equal(assessPublishedReleaseCapacity(275704900, 0, undefined).admitted, true);
+  assert.equal(assessPublishedReleaseCapacity(1000, 0, {}).admitted, true);
+  assert.equal(assessPublishedReleaseCapacity(1000, 0, { quota: 10, usage: 10 }).admitted, false);
 });
 
 test('清理策略仅允许同项目超过七天的其他版本，时钟回拨与无 Locks 都保留', async () => {

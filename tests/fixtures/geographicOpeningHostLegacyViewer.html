@@ -1,0 +1,11 @@
+<!doctype html><html lang="zh-CN"><meta charset="UTF-8"><title>旧版 Viewer 协议 fixture</title><style>body{margin:0;background:linear-gradient(135deg,#061623,#123346);color:#90d0d8;font:26px sans-serif;display:grid;place-items:center;height:100vh}small{display:block;font-size:14px;margin-top:12px;color:#7295a7}</style><body><div>旧版 Viewer 就绪<small>只实现既有 v1 消息，不发送任何开场扩展</small></div><script>
+window.addEventListener('message', event => {
+  if (event.source !== parent || event.origin !== location.origin) return;
+  const message = event.data;
+  if (message?.channel !== 'zending.digital-twin.bridge' || message.version !== 1 || message.type !== 'host.hello') return;
+  const base = { channel: message.channel, version: 1, sessionId: message.sessionId };
+  parent.postMessage({ ...base, type: 'bridge.ready' }, event.origin);
+  parent.postMessage({ ...base, type: 'viewer.initialLoadState', payload: { phase: 'complete' } }, event.origin);
+  parent.postMessage({ ...base, type: 'viewer.ready', payload: { capabilities: ['hardwareGpu', 'focusAsset'] } }, event.origin);
+});
+</script></body></html>

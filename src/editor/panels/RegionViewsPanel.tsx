@@ -1,6 +1,7 @@
 import { useEffect, useState, type DragEvent } from 'react';
 import { MAX_REGION_VIEW_NAME_LENGTH, MAX_SCENE_REGION_VIEWS, type SceneRegionView } from '../model/sceneRegionViews';
 import { useEditorStore } from '../store/editorStore';
+import { CollapsibleFieldset } from '../ui/CollapsibleFieldset';
 
 const REGION_VIEW_DRAG_TYPE = 'application/x-zending-region-view';
 type DropTarget = { id: string; position: 'before' | 'after' };
@@ -72,8 +73,7 @@ export function RegionViewsPanel({ readOnly = false }: { readOnly?: boolean }) {
     && dragged.sessionId === useEditorStore.getState().sceneSessionId
     && event.dataTransfer.types.includes(REGION_VIEW_DRAG_TYPE);
   return (
-    <fieldset className="transform-fieldset">
-      <legend>区域视角（{views.length}）</legend>
+    <CollapsibleFieldset title={`区域视角（${views.length}）`}>
       <div style={{ display: 'flex', gap: 6 }}>
         <input aria-label="新区域视角名称" placeholder="输入区域名称" value={name} maxLength={MAX_REGION_VIEW_NAME_LENGTH}
           disabled={disabled} onChange={event => setName(event.target.value)} style={{ minWidth: 0, flex: 1 }} />
@@ -122,6 +122,6 @@ export function RegionViewsPanel({ readOnly = false }: { readOnly?: boolean }) {
         </div>)}
       </div>
       {message && <p role="status" style={{ fontSize: 12, overflowWrap: 'anywhere' }}>{message}</p>}
-    </fieldset>
+    </CollapsibleFieldset>
   );
 }

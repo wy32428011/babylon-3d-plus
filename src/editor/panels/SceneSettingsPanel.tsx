@@ -1,3 +1,4 @@
+import { SceneOpeningAnimationPanel } from './SceneOpeningAnimationPanel';
 import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
 import { RegionViewsPanel } from './RegionViewsPanel';
@@ -79,6 +80,7 @@ import {
 import { useEditorStore, type SceneSensitivitySettingKey } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
 import { SearchableSelect } from '../ui/SearchableSelect';
+import { CollapsibleFieldset } from '../ui/CollapsibleFieldset';
 
 const ENVIRONMENT_LIBRARY: ProjectLibrary = {
   key: 'environment',
@@ -592,8 +594,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   return (
     <section className="panel scene-settings-panel">
       <h2>Inspector</h2>
-      <fieldset className="transform-fieldset">
-        <legend>场景</legend>
+      <CollapsibleFieldset title="场景">
         <label className="inspector-row">
           <span>场景名称</span>
           <input
@@ -609,10 +610,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <button type="button" disabled={props.readOnly} onClick={handleResetScene}>场景初始化</button>
           <button type="button" disabled={props.readOnly} onClick={() => void importCadReference()}>导入CAD</button>
         </div>
-      </fieldset>
+      </CollapsibleFieldset>
 
-      <fieldset className="transform-fieldset">
-        <legend>相机</legend>
+      <CollapsibleFieldset title="相机">
         <div className="scene-settings-button-row">
           <button type="button" onClick={requestCameraReset}>复位视角</button>
           <button type="button" disabled={props.readOnly} onClick={requestCameraPoseSave}>保存当前视角</button>
@@ -641,14 +641,15 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         {skybox ? (
           <p className="muted">10 km 天空盒要求可视距离至少为 {SCENE_SKYBOX_VIEW_DISTANCE_MIN} m。</p>
         ) : null}
-      </fieldset>
+      </CollapsibleFieldset>
 
       <RegionViewsPanel readOnly={props.readOnly} />
 
+      <SceneOpeningAnimationPanel readOnly={props.readOnly} />
+
       <SceneThemePanel readOnly={props.readOnly} />
 
-      <fieldset className="transform-fieldset">
-        <legend>相机运动幅度（统一标准）</legend>
+      <CollapsibleFieldset title="相机运动幅度（统一标准）">
         <p className="muted">
           保留原有右键拖拽旋转、中键拖拽移动、Ctrl+左键平移、左键短点击选择和滚轮缩放。以下数值只调整运动幅度。
         </p>
@@ -675,10 +676,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             />
           </label>
         ))}
-      </fieldset>
+      </CollapsibleFieldset>
 
-      <fieldset className="transform-fieldset" disabled={shadowBakeStatus.phase === 'baking' || runtimeMode === 'preview'}>
-        <legend>阴影</legend>
+      <CollapsibleFieldset title="阴影" disabled={shadowBakeStatus.phase === 'baking' || runtimeMode === 'preview'}>
         <label className="inspector-row environment-visible-row">
           <span>启用阴影</span>
           <input
@@ -775,10 +775,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           </label>
         ))}
         {!bakedMode && <p className="muted">实时阴影会增加 CPU/GPU 开销。方向光在性能/均衡档缓存阴影贴图，环境与阴影地面接收投影，运动设备触发更新；高质量档使用实时级联阴影，普通模型也接收投影。没有可见方向光时使用自动太阳光。点光源和聚光灯额外生成局部实时投影；点光源使用六面阴影贴图，开销较高。半球光和矩形面光不投影，HDR/EXR 环境光不会自动生成投影。</p>}
-      </fieldset>
+      </CollapsibleFieldset>
 
-      <fieldset className="transform-fieldset">
-        <legend>球形天空盒</legend>
+      <CollapsibleFieldset title="球形天空盒">
         <label
           className={skyboxDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
           onDragEnter={handleSkyboxDragOver}
@@ -876,10 +875,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         ) : (
           <p className="muted">未放置球形天空盒，场景保持原有背景和环境反射。</p>
         )}
-      </fieldset>
+      </CollapsibleFieldset>
 
-      <fieldset className="transform-fieldset environment-inspector-fieldset">
-        <legend>环境属性</legend>
+      <CollapsibleFieldset title="环境属性" className="environment-inspector-fieldset">
         <label
           className={environmentDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
           onDragEnter={handleEnvironmentDragOver}
@@ -1077,10 +1075,9 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
               : <p className="muted">暂无自定义效果</p>}
           </div>
         </div>
-      </fieldset>
+      </CollapsibleFieldset>
 
-      <fieldset className="transform-fieldset">
-        <legend>货箱生成器</legend>
+      <CollapsibleFieldset title="货箱生成器">
         <label className="inspector-row">
           <span>默认模板来源</span>
           <SearchableSelect
@@ -1094,7 +1091,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
           <p className="telemetry-runtime-error">默认模型生成器已被删除，未绑定的设备将回退内置立方体。</p>
         ) : null}
         <p className="muted">遥测设备与定位线框未单独绑定模型生成器时，统一使用此默认模板渲染货箱。</p>
-      </fieldset>
+      </CollapsibleFieldset>
 
       {skyboxDialogOpen ? (
         <div

@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import { mkdir,writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { chromium } from 'playwright';
+const output=path.resolve('output/geographic-opening');
+await mkdir(output,{recursive:true});
+const browser=await chromium.launch({channel:'chrome',headless:true});
+const errors=[],checks=[];
+try{
+ const page=await browser.newPage({viewport:{width:1600,height:900}});
+ page.on('pageerror',error=>errors.push(error.message));
+ await page.goto(pathToFileURL(path.join(output,'geographic-opening-demo.html')).href+'?seek=38',{waitUntil:'load',timeout:120000});
+ await page.waitForFunction(()=>window.__openingDemo?.getState().ready);
+ const original=await page.evaluate(()=>JSON.parse(JSON.stringify(window.__openingDemo.settings)));
+ const base={...original,reference:{...original.reference,worldDestinations:[],chinaDestinations:[]}};
+ const configure=async settings=>{await page.evaluate(s=>{window.__openingDemo.configure(s);window.__openingDemo.pause();},settings);await page.waitForFunction(()=>window.__openingDemo.getState().ready);};
+ const pixels=async seconds=>{await page.evaluate(async seconds=>{window.__openingDemo.seek(seconds);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));},seconds);return page.locator('canvas.zd-effects').evaluate(c=>c.toDataURL());};
+ await configure(base);
+ const first=await pixels(38.2),second=await pixels(38.7);
+ assert.notEqual(first,second,'开启呼吸时源点光圈应有真实像素变化');
+ await page.screenshot({path:path.join(output,'reference-breathing.png')});
+ await page.waitForTimeout(200);assert.equal(await page.locator('canvas.zd-effects').evaluate(c=>c.toDataURL()),second,'暂停时呼吸也冻结');
+ await configure({...base,breathingEnabled:false});
+ const disabled=await pixels(38.2);assert.equal(disabled,await pixels(38.7),'呼吸关闭后静态底图和光圈不应漂动');
+ await configure({...base,breathingIntensity:0});
+ assert.equal(await pixels(38.2),disabled,'零强度与关闭效果一致');
+ assert.equal(await pixels(38.2),await pixels(38.7));
+ await configure({...base,breathingPeriodSeconds:7});assert.notEqual(await pixels(38.7),second,'呼吸周期影响同帧效果');
+ await configure({...base,motionPreference:'reduced'});assert.equal(await pixels(58),await pixels(59),'减少动态时抵达画面静止');
+ await page.evaluate(()=>window.__openingDemo.skip());await page.waitForFunction(()=>window.__openingDemo.getState().snapshot.phase==='complete');
+ assert.equal(await page.locator('.geographic-opening-host').count(),0);
+ checks.push('真实画布呼吸变化','暂停冻结','关闭与零强度一致','周期生效','减少动态不移动','跳过清理覆盖层');
+ assert.deepEqual(errors,[]);
+ await writeFile(path.join(output,'reference-breathing-verification.json'),JSON.stringify({checks,errors},null,2));
+ console.log(JSON.stringify({checks,errors}));
+}finally{await browser.close();}

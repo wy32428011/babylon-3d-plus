@@ -1,3 +1,5 @@
+import { normalizeSceneOpeningAnimation, type SceneOpeningAnimationSettings } from '../model/sceneOpeningAnimation';
+import { updateSceneOpeningAnimationCommand } from '../commands/sceneOpeningAnimationCommands';
 import { compositionDescendants } from '../composition/composition';
 import { createTechBlueNightTheme, normalizeSceneTheme, TECH_BLUE_NIGHT_SHADOWS, type SceneThemeSettings } from '../model/sceneTheme';
 import { updateSceneThemeCommand } from '../commands/sceneThemeCommands';
@@ -315,6 +317,12 @@ export type CameraResetRequest = {
   id: string;
 };
 
+export type OpeningAnimationPreviewRequest = {
+  requestId: string;
+  sceneSessionId: string;
+  action: 'play' | 'stop';
+};
+
 export type RegionViewRequest = {
   id: string;
   sceneSessionId: string;
@@ -518,6 +526,10 @@ type EditorState = {
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
   revealHierarchyEntityRequest: { id: string; entityId: string } | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
+  openingAnimationPreviewRequest: OpeningAnimationPreviewRequest | null;
+  updateSceneOpeningAnimation: (patch: Partial<SceneOpeningAnimationSettings>) => void;
+  requestOpeningAnimationPreview: (action: OpeningAnimationPreviewRequest['action']) => void;
+  consumeOpeningAnimationPreviewRequest: (requestId: string, sceneSessionId: string) => void;
   regionViewRequest: RegionViewRequest | null;
   regionViewMessage: string | null;
   cameraResetRequest: CameraResetRequest | null;
@@ -764,6 +776,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
     projectAssetFocusRequest: null,
     revealHierarchyEntityRequest: null,
     cameraPoseSaveRequest: null,
+    openingAnimationPreviewRequest: null,
     regionViewRequest: null,
     regionViewMessage: null,
     cameraResetRequest: { id: createId('camera_reset') },
@@ -2738,6 +2751,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   projectAssetFocusRequest: null,
   revealHierarchyEntityRequest: null,
   cameraPoseSaveRequest: null,
+  openingAnimationPreviewRequest: null,
   regionViewRequest: null,
   regionViewMessage: null,
   cameraResetRequest: null,
@@ -2808,6 +2822,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         hierarchySelectionIds: [],
         environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
+        openingAnimationPreviewRequest: null,
         regionViewRequest: null,
         autoPatrolCameraRequest: null,
         selectedAutoPatrolWaypointId: null,
@@ -3518,6 +3533,32 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         successMessage: `切换环境效果：${activeVariant.name}`,
       },
     );
+  },
+  updateSceneOpeningAnimation: patch => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改开场动画');
+      const before = state.scene.sceneSettings.openingAnimation;
+      const normalizedBefore = normalizeSceneOpeningAnimation(before);
+      const after = normalizeSceneOpeningAnimation({ ...normalizedBefore, ...patch });
+      if (JSON.stringify(normalizedBefore) === JSON.stringify(after)) return state;
+      return executeCommand(state.scene, state.history, updateSceneOpeningAnimationCommand(before, after));
+    });
+  },
+  requestOpeningAnimationPreview: action => {
+    set(state => {
+      if (action === 'play' && isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '预览开场动画');
+      return { openingAnimationPreviewRequest: {
+        requestId: createId('opening_preview'), sceneSessionId: state.sceneSessionId, action,
+      } };
+    });
+  },
+  consumeOpeningAnimationPreviewRequest: (requestId, sceneSessionId) => {
+    set(state => {
+      const request = state.openingAnimationPreviewRequest;
+      if (!request || request.requestId !== requestId || request.sceneSessionId !== sceneSessionId
+        || state.sceneSessionId !== sceneSessionId) return state;
+      return { openingAnimationPreviewRequest: null };
+    });
   },
   requestRegionView: (kind, name, regionViewId) => {
     set(state => {

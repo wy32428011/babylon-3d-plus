@@ -36,7 +36,8 @@ export async function createPublishedReleaseStorageIdentity(baseUrl: string, cac
 export function assessPublishedReleaseCapacity(totalBytes: number, reusableBytes: number, estimate?: StorageEstimate): { admitted: boolean; reason?: string } {
   const remaining = Math.max(0, totalBytes - Math.max(0, reusableBytes));
   if (remaining === 0) return { admitted: true };
-  if (!Number.isFinite(estimate?.quota) || !Number.isFinite(estimate?.usage)) return { admitted: false, reason: '浏览器未提供可用缓存容量，暂不完整预缓存。' };
+  // 普通 HTTP 下 StorageManager 不可用，但 IndexedDB 仍可读写；未知配额由实际写入结果判定。
+  if (!Number.isFinite(estimate?.quota) || !Number.isFinite(estimate?.usage)) return { admitted: true };
   // 为分块头、索引与响应元信息留余量；同版本已保存的文件不重复申请空间。
   const required = Math.ceil(remaining * 1.1);
   return (estimate!.quota! - estimate!.usage!) >= required
@@ -134,6 +135,14 @@ async function reclaimDecodedEntries(signal?: AbortSignal): Promise<void> {
   } finally { decoded.close(); }
 }
 
+async function estimatePublishedStorage(): Promise<StorageEstimate | undefined> {
+  try { return await globalThis.navigator?.storage?.estimate?.(); }
+  catch (error) {
+    console.warn('[Viewer cache] 无法查询存储容量，继续逐文件缓存并检查实际写入结果。', error);
+    return undefined;
+  }
+}
+
 /** 一个页面持有一个发布版本；容量不足仍可读已有缓存，由调用方停止预热并正常按需加载。 */
 export async function openPublishedReleaseStorage(baseUrl: string, manifest: StorageManifest, signal?: AbortSignal): Promise<PublishedReleaseStorage> {
   signal?.throwIfAborted();
@@ -164,11 +173,11 @@ export async function openPublishedReleaseStorage(baseUrl: string, manifest: Sto
     await catalog.put(identity.databaseName, record, JSON.stringify(record).length * 2);
     await cleanupExpiredReleases(catalog, identity, locks, signal);
     const reusable = await countReusableRawBytes(chunkStore, signal) + await countReusableResponseBytes(identity, manifest, signal);
-    let estimate = await globalThis.navigator?.storage?.estimate?.();
+    let estimate = await estimatePublishedStorage();
     let capacity = assessPublishedReleaseCapacity(manifest.totalBytes, reusable, estimate);
     if (!capacity.admitted && Number.isFinite(estimate?.quota) && Number.isFinite(estimate?.usage)) {
       await reclaimDecodedEntries(signal);
-      estimate = await globalThis.navigator?.storage?.estimate?.();
+      estimate = await estimatePublishedStorage();
       capacity = assessPublishedReleaseCapacity(manifest.totalBytes, reusable, estimate);
     }
     signal?.throwIfAborted();

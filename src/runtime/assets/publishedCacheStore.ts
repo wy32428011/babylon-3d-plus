@@ -6,6 +6,7 @@ export const PUBLISHED_CACHE_MAX_ENTRY_BYTES = 512 * 1024 * 1024;
 const MAX_ENTRIES = 4096;
 const OPEN_TIMEOUT_MS = 10_000;
 const TRANSACTION_IDLE_TIMEOUT_MS = 30_000;
+const TRANSACTION_LATE_TIMER_GRACE_MS = 1_000;
 const TOUCH_BATCH_DELAY_MS = 100;
 type Metadata = { key: string; bytes: number; usedAt: number };
 type WatchRequest = <T>(request: IDBRequest<T>, onSuccess?: (result: T) => void) => void;
@@ -186,7 +187,16 @@ export class IndexedDbPublishedCacheStore implements PublishedCacheStore {
       const cancel = (error: Error) => stop(error);
       const refreshDeadline = () => {
         if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(() => stop(new Error('发布缓存读写超时。'), true), TRANSACTION_IDLE_TIMEOUT_MS);
+        const expectedDeadline = performance.now() + TRANSACTION_IDLE_TIMEOUT_MS;
+        const expire = () => stop(new Error('发布缓存读写超时。'), true);
+        timer = setTimeout(() => {
+          if (settled) return;
+          // 长任务可能同时挡住 watchdog 和 IDB 成功事件；明显迟到时先让事件队列派发一次。
+          // 宽限直接到期，不递归续期；只有真实请求成功才能重新开始一个停滞周期。
+          if (performance.now() > expectedDeadline + TRANSACTION_LATE_TIMER_GRACE_MS) {
+            timer = setTimeout(expire, TRANSACTION_LATE_TIMER_GRACE_MS);
+          } else expire();
+        }, TRANSACTION_IDLE_TIMEOUT_MS);
       };
       const watch: WatchRequest = (request, onSuccess) => {
         request.onsuccess = () => {

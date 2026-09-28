@@ -2,7 +2,7 @@ import path from 'node:path';
 import { captureSceneShadowBakeRelocation } from '../shared/sceneShadowBakeContract.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
-const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
+const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl']);
 const SCENE_PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
 const SCENE_PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const isPlainObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -56,10 +56,10 @@ function rewriteSceneAssetUrl(value: string, editorRoot: string): string {
 
 function rewriteSceneAssetPath(value: string, editorRoot: string): string | null {
   const normalized = value.trim().replace(/\\/g, '/');
-  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i);
+  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/.*|$))/i);
   if (!match) return null;
   const relativeAssetPath = path.posix.normalize(match[1]);
-  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/|$)/i.test(relativeAssetPath)) return null;
+  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/|$)/i.test(relativeAssetPath)) return null;
   const targetPath = path.resolve(editorRoot, ...relativeAssetPath.split('/'));
   return isPathInside(editorRoot, targetPath) ? targetPath : null;
 }

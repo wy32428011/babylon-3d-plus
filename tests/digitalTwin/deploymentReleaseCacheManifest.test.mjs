@@ -78,6 +78,21 @@ test('排除根级实时配置、说明、清单与 worker，保留同名嵌套�
   });
 });
 
+test('内置漫游人物模型进入原始资源缓存，其他 Viewer 文件保持响应缓存', async () => {
+  await withFiles({
+    'manual-roam/EQ_People.glb': Buffer.from([1, 2, 3, 4]),
+    'manual-roam/help.js': 'export const help = true;',
+    'manual-roam-copy/EQ_People.glb': Buffer.from([5, 6]),
+  }, async (root) => {
+    const manifest = await createDeploymentReleaseCacheManifest(root, REVISION, new AbortController().signal);
+    const entries = Object.fromEntries(manifest.files.map((entry) => [entry.path, entry]));
+    assert.equal(entries['manual-roam/EQ_People.glb'].storage, 'asset');
+    assert.equal(entries['manual-roam/EQ_People.glb'].contentType, 'model/gltf-binary');
+    assert.equal(entries['manual-roam/help.js'].storage, 'response');
+    assert.equal(entries['manual-roam-copy/EQ_People.glb'].storage, 'response');
+  });
+});
+
 test('相对路径逐段编码并拒绝绝对路径、空段、反斜杠及路径逃逸', () => {
   assert.equal(toReleaseCacheManifestUrlPath('assets/模型 #1%.glb'), `assets/${encodeURIComponent('模型 #1%.glb')}`);
   for (const unsafe of ['', '/asset.glb', '../asset.glb', 'assets/../a', './a', 'assets//a', 'assets/', 'a\\b', 'C:/a', 'a\u0000b']) {

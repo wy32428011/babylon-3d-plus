@@ -22,7 +22,7 @@ import {
   Vector3,
 } from '@babylonjs/core';
 import type { SceneShadowQuality, SceneShadowSettings } from '../../editor/model/SceneDocument';
-import { setEnvironmentShadowGenerator } from './EnvironmentShadowMaterialPlugin.ts';
+import { setEnvironmentLocalShadowGenerators, setEnvironmentShadowGenerator } from './EnvironmentShadowMaterialPlugin.ts';
 
 export const SCENE_SHADOW_SUN_NAME = '__SceneShadowSun';
 export const SCENE_SHADOW_CATCHER_NAME = '__SceneShadowCatcher';
@@ -273,6 +273,7 @@ export class SceneShadowRuntime {
     const hadLocalGenerator = this.localGenerators.has(entityId);
     this.localGenerators.get(entityId)?.dispose();
     this.localGenerators.delete(entityId);
+    this.syncEnvironmentLocalShadows();
     this.refreshPrimary();
     if (hadLocalGenerator && this.localGenerators.size === 0) this.syncSceneMeshes(true);
   }
@@ -379,7 +380,10 @@ export class SceneShadowRuntime {
         changed = true;
       }
     }
-    if (!enabled) return changed;
+    if (!enabled) {
+      this.syncEnvironmentLocalShadows();
+      return changed;
+    }
     const quality = SHADOW_QUALITY_CONFIG[this.settings.quality];
     for (const [id, light] of this.localLights) {
       if (light.isDisposed() || !light.isEnabled() || light.intensity <= 0) continue;
@@ -401,10 +405,16 @@ export class SceneShadowRuntime {
       this.localGenerators.set(id, generator);
       changed = true;
     }
+    this.syncEnvironmentLocalShadows();
     return changed;
   }
 
+  private syncEnvironmentLocalShadows(): void {
+    setEnvironmentLocalShadowGenerators(this.scene, [...this.localGenerators.values()]);
+  }
+
   private disposeLocalGenerators(): void {
+    setEnvironmentLocalShadowGenerators(this.scene, []);
     for (const generator of this.localGenerators.values()) generator.dispose();
     this.localGenerators.clear();
   }

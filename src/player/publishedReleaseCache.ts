@@ -12,11 +12,16 @@ type StateListener = (state: PublishedReleaseCacheState) => void;
 export async function preparePublishedReleaseCache(config: ReleaseConfig, baseUrl: string, signal: AbortSignal,
   onState?: StateListener) {
   if (!config.cacheManifest || !config.cacheRevision) return null;
+  let warningReported = false;
   const publish = (state: PublishedReleaseCacheState) => {
     if (signal.aborted) return;
     const snapshot = Object.freeze({ ...state });
     (globalThis as typeof globalThis & { __ZENDING_RELEASE_CACHE__?: PublishedReleaseCacheState }).__ZENDING_RELEASE_CACHE__ = snapshot;
     onState?.(snapshot);
+    if (snapshot.phase === 'partial' && !warningReported) {
+      warningReported = true;
+      console.warn('[Viewer cache] 发布缓存未全部完成，已缓存的模型、环境模型和天空盒仍可复用。', snapshot);
+    }
   };
   let state: PublishedReleaseCacheState = { phase: 'checking', completedFiles: 0, totalFiles: 0, completedBytes: 0, totalBytes: 0 };
   publish(state);
@@ -46,8 +51,13 @@ export async function preparePublishedReleaseCache(config: ReleaseConfig, baseUr
       prefetch(cache: PublishedAssetCache, verifyVersion: () => Promise<void>): void {
         if (started || signal.aborted) return;
         started = true;
-        if (!admitted) { state = { ...state, phase: 'partial', reason }; publish(state); return; }
         void (async () => {
+          if (!admitted) {
+            state = { ...state, phase: 'partial', reason };
+            await lifetime.markComplete(state);
+            publish(state);
+            return;
+          }
           state = await prefetchPublishedReleaseFiles(manifest.files, async file => {
             if (file.storage === 'response') return responseSession?.available ? responseSession.ensure(file) : false;
             const loaded = await cache.fetch(file.url, { signal });
@@ -67,7 +77,6 @@ export async function preparePublishedReleaseCache(config: ReleaseConfig, baseUr
           if (signal.aborted) return;
           state = { ...state, phase: 'partial', reason: error instanceof Error ? error.message : '发布资源缓存未完成。' };
           publish(state);
-          console.warn('[Viewer cache] 完整缓存未完成，已缓存文件仍可复用。', error);
         });
       },
       dispose() { responseSession?.dispose(); lifetime.dispose(); },
@@ -76,7 +85,6 @@ export async function preparePublishedReleaseCache(config: ReleaseConfig, baseUr
     for (const dispose of cleanup.reverse()) dispose();
     signal.throwIfAborted();
     publish({ ...state, phase: 'partial', reason: error instanceof Error ? error.message : '完整缓存不可用。' });
-    console.warn('[Viewer cache] 完整缓存不可用，继续普通资源加载。', error);
     return null;
   }
 }

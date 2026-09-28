@@ -40,7 +40,9 @@ export function parsePublishedReleaseManifest(value: unknown, baseUrl: string, r
     seen.add(url.href);
     if (!Number.isSafeInteger(entry.size) || (entry.size as number) < 0 || typeof entry.sha256 !== 'string' || !/^[a-f\d]{64}$/i.test(entry.sha256)
       || typeof entry.contentType !== 'string' || !entry.contentType || /[\r\n]/.test(entry.contentType)) throw new Error('发布缓存文件大小、类型或校验值无效。');
-    const storage = relative === 'project/scene.json' || relative === 'project/asset-manifest.json' || relative.startsWith('project/assets/') ? 'asset' : 'response';
+    // 仅新增内置人物的原始缓存归属；旧发布清单的 response 保持兼容，不替其他 Viewer 文件放宽规则。
+    const storage = relative === 'project/scene.json' || relative === 'project/asset-manifest.json' || relative.startsWith('project/assets/')
+      || (relative === 'manual-roam/EQ_People.glb' && entry.storage === 'asset') ? 'asset' : 'response';
     if (entry.storage !== storage) throw new Error('发布缓存文件的存储归属无效。');
     total += entry.size as number;
     if (!Number.isSafeInteger(total)) throw new Error('发布缓存清单总大小无效。');

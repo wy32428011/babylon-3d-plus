@@ -8,7 +8,7 @@ const outputDir = path.resolve('output/playwright/environment-shadows');
 const harness = `
 import {
   AssetContainer, Color3, Engine, FreeCamera, MeshBuilder, PBRMaterial,
-  Scene, StandardMaterial, Vector3, HemisphericLight, PointLight, DirectionalLight,
+  Scene, StandardMaterial, Vector3, HemisphericLight, PointLight, SpotLight, DirectionalLight,
 } from '@babylonjs/core';
 import { SceneEnvironmentRuntime } from '/src/runtime/babylon/SceneEnvironmentRuntime.ts';
 import { SceneShadowRuntime } from '/src/runtime/babylon/SceneShadowRuntime.ts';
@@ -16,7 +16,10 @@ import { DEFAULT_SCENE_SHADOW_SETTINGS, createEmptySceneDocument } from '/src/ed
 import { serializeScene, deserializeScene } from '/src/editor/project/SceneSerializer.ts';
 const engine = new Engine(document.querySelector('canvas'), false, { preserveDrawingBuffer: true, stencil: true });
 window.checkEnvironmentShadows = async (kind) => {
+  window.localShadowImages = {};
   const scene = new Scene(engine);
+  const render = () => scene.render();
+  engine.runRenderLoop(render);
   const camera = new FreeCamera('camera', new Vector3(10, 12, -15), scene);
   camera.setTarget(Vector3.Zero());
   new HemisphericLight('EditorLight', Vector3.Up(), scene);
@@ -90,6 +93,51 @@ window.checkEnvironmentShadows = async (kind) => {
     }
     const settings = { ...DEFAULT_SCENE_SHADOW_SETTINGS, mode: 'realtime', catcherEnabled: false, sunElevationDegrees: 45 };
     shadows.applySettings(settings);
+    await runtime.syncShadows(settings);
+    // 关闭主阴影后单独验证局部光，避免太阳阴影掩盖环境漏接 Point/Spot 的问题。
+    const primary = scene.lights.find(light => light.getShadowGenerator?.());
+    primary.shadowEnabled = false;
+    for (const lightKind of ['point', 'spot']) {
+      const local = lightKind === 'point'
+        ? new PointLight('local-point', new Vector3(-3, 6, -2), scene)
+        : new SpotLight('local-spot', new Vector3(-3, 6, -2), new Vector3(3, -6, 2).normalize(), Math.PI / 2, 2, scene);
+      local.range = 20;
+      shadows.syncLight('local', local);
+      const off = await receiving(false);
+      window.localShadowImages[lightKind + '-off'] = document.querySelector('canvas').toDataURL('image/png');
+      const on = await receiving(true);
+      window.localShadowImages[lightKind + '-on'] = document.querySelector('canvas').toDataURL('image/png');
+      const result = { label: 'local-' + lightKind, ...difference(off, on), generator: !!local.getShadowGenerator() };
+      console.log('shadow-check', kind, JSON.stringify(result));
+      results.push(result);
+      for (const quality of ['performance', 'quality', 'balanced']) {
+        shadows.applySettings({ ...settings, quality });
+        results.push({ label: 'local-' + lightKind + '-' + quality, ...difference(await receiving(false), await receiving(true)) });
+      }
+      local.position.x += 2;
+      shadows.syncLight('local', local);
+      results.push({ label: 'local-' + lightKind + '-moved', ...difference(await receiving(false), await receiving(true)) });
+      local.range = 1;
+      shadows.syncLight('local', local);
+      results.push({ label: 'empty-' + lightKind + '-range', ...difference(await receiving(false), await receiving(true)) });
+      local.range = 20;
+      if (lightKind === 'spot') {
+        const originalDirection = local.direction.clone();
+        local.direction.copyFrom(Vector3.Up());
+        shadows.syncLight('local', local);
+        results.push({ label: 'empty-spot-cone', ...difference(await receiving(false), await receiving(true)) });
+        local.direction.copyFrom(originalDirection);
+      }
+      local.setEnabled(false);
+      shadows.syncLight('local', local);
+      results.push({ label: 'empty-' + lightKind + '-hidden', ...difference(await receiving(false), await receiving(true)) });
+      local.setEnabled(true);
+      shadows.syncLight('local', local);
+      results.push({ label: 'local-' + lightKind + '-restored', ...difference(await receiving(false), await receiving(true)) });
+      shadows.removeLight('local'); local.dispose();
+      results.push({ label: 'empty-' + lightKind + '-removed', ...difference(await receiving(false), await receiving(true)) });
+    }
+    primary.shadowEnabled = true;
     const baseline = await receiving(false);
     const point = new PointLight('user-point', new Vector3(1, 5, 1), scene); point.intensity = 10;
     shadows.syncLight('point', point);
@@ -125,7 +173,7 @@ window.checkEnvironmentShadows = async (kind) => {
     const strongShadow = difference(await receiving(false), await receiving(true));
     const concentrationWorks = strongShadow.darkening > weakShadow.darkening * 2;
     return { results, stableColor, opacityWorks, concentrationWorks, loadCount, unlit: material.unlit, disableLighting: material.disableLighting };
-  } finally { runtime.dispose(); shadows.dispose(); scene.dispose(); }
+  } finally { engine.stopRenderLoop(render); runtime.dispose(); shadows.dispose(); scene.dispose(); }
 };
 window.disposeFixture = () => engine.dispose();
 `;
@@ -133,6 +181,7 @@ window.disposeFixture = () => engine.dispose();
 await mkdir(outputDir, { recursive: true });
 const server = await createServer({
   configFile: false,
+  cacheDir: 'node_modules/.vite-environment-shadows',
   optimizeDeps: { noDiscovery: true, include: ['@babylonjs/core'] },
   server: { host: '127.0.0.1', port: 0, hmr: false },
   plugins: [{
@@ -155,9 +204,9 @@ try {
   await server.listen();
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage();
-  page.on('pageerror', error => errors.push(error.message));
+  page.on('pageerror', error => { errors.push(error.message); console.error(error.message); });
   page.on('console', message => {
-    if (message.type() === 'error') errors.push(message.text());
+    if (message.type() === 'error') { errors.push(message.text()); console.error(message.text()); }
     else if (message.text().startsWith('shadow-check')) console.log(message.text());
   });
   await page.goto(server.resolvedUrls.local[0] + '__environment_shadows__', { waitUntil: 'commit' });
@@ -172,8 +221,12 @@ try {
     await writeFile(path.join(outputDir, kind + '.json'), JSON.stringify(result, null, 2));
     const image = await page.evaluate(() => window.shadowImage);
     await writeFile(path.join(outputDir, kind + '.png'), Buffer.from(image.split(',')[1], 'base64'));
+    const localImages = await page.evaluate(() => window.localShadowImages);
+    for (const [name, data] of Object.entries(localImages)) {
+      await writeFile(path.join(outputDir, kind + '-' + name + '.png'), Buffer.from(data.split(',')[1], 'base64'));
+    }
     for (const state of result.results) {
-      if (state.label === 'disabled') assert.equal(state.darker, 0, kind + ': 关闭阴影后不能残留');
+      if (state.label === 'disabled' || state.label.startsWith('empty-')) assert.equal(state.darker, 0, kind + '/' + state.label + ': 范围外或关闭阴影后不能残留');
       else assert.ok(state.darker > 30, kind + '/' + state.label + ': 环境表面必须实际显示阴影');
       assert.equal(state.brighter, 0, kind + '/' + state.label + ': 阴影接收不能照亮环境');
       if ('frozen' in state) assert.equal(state.frozen, true);

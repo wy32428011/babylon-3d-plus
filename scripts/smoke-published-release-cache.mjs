@@ -40,6 +40,7 @@ async function createFixture(version, model, skybox) {
   await cp(template, root, { recursive: true, errorOnExist: true, force: false });
   const scene = sceneArgument ? JSON.parse(await readFile(path.resolve(sceneArgument), 'utf8')) : { version: 5, units: { length: 'meter' }, scene: {} };
   const modelUrl = 'editor-asset://local/project%2Fassets%2Fmodel.glb';
+  const environmentUrl = 'editor-asset://local/project%2Fassets%2Fenvironments%2Fenvironment.glb';
   const skyboxUrl = 'editor-asset://local/project%2Fassets%2Fsky.hdr';
   const transform = { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } };
   scene.scene = {
@@ -55,7 +56,11 @@ async function createFixture(version, model, skybox) {
     },
     fetchConfig: { url: '', apiKey: '' }, mqttConfig: mqtt,
     sceneSettings: { camera: { savedPose: { alpha: -Math.PI / 3, beta: Math.PI / 3, radius: 6, target: { x: 0, y: 0, z: 0 } },
-      savedOrientation: 'orbit', savedProjection: 'perspective', viewDistance: 1000 } },
+      savedOrientation: 'orbit', savedProjection: 'perspective', viewDistance: 1000 },
+      environment: { packagePath: 'editor-asset://local/project%2Fassets%2Fenvironments%2F', lengthUnit: 'meter', unitScaleToMeters: 1,
+        displayName: '缓存验收环境', placementMode: 'scene-base', visible: true, opacity: 1,
+        transform: { position: { x: 2, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: 1 },
+        activeVariantUrl: environmentUrl, variants: [{ name: '环境模型', sourcePath: environmentUrl, sourceUrl: environmentUrl }] } },
   };
   const config = { version: 2, cacheRevision: `smoke-release-${version}`, cacheManifest: 'release-cache-manifest.json',
     page: { title: `缓存验收 ${version}`, loadingText: '场景加载中...', backgroundColor: '#141414' },
@@ -65,11 +70,13 @@ async function createFixture(version, model, skybox) {
   };
   const assetManifest = { version: 1, assets: [
     { logicalUrl: modelUrl, path: './model.glb', kind: 'model', size: model.length, sha256: sha256(model) },
+    { logicalUrl: environmentUrl, path: './environments/environment.glb', kind: 'model', size: model.length, sha256: sha256(model) },
     { logicalUrl: skyboxUrl, path: './sky.hdr', kind: 'texture', size: skybox.length, sha256: sha256(skybox) },
   ] };
   for (const [relative, content] of [
     ['runtime-config.json', JSON.stringify(config)], ['project/scene.json', JSON.stringify(scene)],
     ['project/asset-manifest.json', JSON.stringify(assetManifest)], ['project/assets/model.glb', model],
+    ['project/assets/environments/environment.glb', model], ['project/assets/models/lazy-model.glb', model],
     ['project/assets/sky.hdr', skybox], [lazyPath, lazyBody],
   ]) {
     const target = path.join(root, relative);
@@ -180,6 +187,8 @@ async function ready(target, version, expectedPhase = 'ready') {
   } else {
     assert.ok(state.totalFiles === 0 || state.completedFiles < state.totalFiles, '故障时不得把全部资源标为已持久缓存');
     assert.ok(typeof state.reason === 'string' && state.reason, '部分缓存必须说明原因');
+    await frame.locator('.player-cache-status').waitFor({ state: 'detached' });
+    assert.equal(await frame.getByText('部分资源尚未缓存，刷新时将按需下载').count(), 0, '缓存警告只允许出现在控制台');
   }
   return { frame, state };
 }
@@ -292,7 +301,8 @@ async function checkCacheFailureModes() {
   // 独立的新 context 不继承前述 SW、CacheStorage 或 IDB，避免旧缓存掩盖故障回退。
   await context.close(); context = null;
   faultBrowser = await chromium.launch({ executablePath: process.env.CHROME_PATH
-    ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
+    ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true,
+    args: ['--host-resolver-rules=MAP cache-http.test 127.0.0.1', '--no-proxy-server'] });
   context = await faultBrowser.newContext({ viewport: { width: 1100, height: 760 }, serviceWorkers: 'allow' });
   await context.addInitScript(() => {
     Object.defineProperty(IDBFactory.prototype, 'open', { configurable: true,
@@ -303,7 +313,8 @@ async function checkCacheFailureModes() {
   await page.goto(`${origin}/bigscreen?fault=indexeddb`);
   let frame = await record('indexeddb-unavailable', page, '1', before, { fault: 'IndexedDB.open throws' }, 'partial');
   const rawEntries = releases.get('1').manifest.files.filter((file) => file.storage === 'asset');
-  for (const entry of rawEntries) {
+  // 缓存完全不可用时只按需加载，未启用的漫游人物与备用模型不应因此强制下载。
+  for (const entry of rawEntries.filter(file => !['project/assets/models/lazy-model.glb', 'manual-roam/EQ_People.glb'].includes(file.path))) {
     const resource = releasePrefix('1') + decodeURIComponent(entry.path);
     assert.ok((counts.get(resource) ?? 0) > (before.get(resource) ?? 0), `IDB 故障应联网加载 ${entry.path}`);
   }
@@ -323,7 +334,7 @@ async function checkCacheFailureModes() {
     { fault: 'navigator.serviceWorker unavailable' }, 'partial');
   assert.equal(await frame.evaluate(() => navigator.serviceWorker === undefined), true, 'SW 故障注入必须生效');
   assert.equal((await frame.evaluate(() => globalThis.__ZENDING_RELEASE_CACHE__)).completedFiles, rawEntries.length,
-    'SW 不可用时仍完整缓存四项原始场景与资源');
+    'SW 不可用时仍完整缓存所有原始场景与资源');
   before = snapshot();
   await page.reload();
   await record('service-worker-unavailable-refresh', page, '1', before,
@@ -333,6 +344,33 @@ async function checkCacheFailureModes() {
   }
   assert.ok(increments(before, '1').some((entry) => entry.storage === 'response' && entry.requests > 0),
     'SW 不可用时壳资源按普通网络加载，不能冒充完整缓存');
+  await context.close(); context = null;
+
+  context = await faultBrowser.newContext({ viewport: { width: 1100, height: 760 } });
+  page = await context.newPage(); trackPage(page);
+  const httpOrigin = origin.replace('127.0.0.1', 'cache-http.test');
+  before = snapshot();
+  await page.goto(`${httpOrigin}/bigscreen`);
+  frame = await record('http-lan-cold', page, '1', before, {}, 'partial');
+  assert.deepEqual(await frame.evaluate(() => ({ secure: isSecureContext, storage: typeof navigator.storage, idb: typeof indexedDB })),
+    { secure: false, storage: 'undefined', idb: 'object' });
+  assert.equal((await frame.evaluate(() => globalThis.__ZENDING_RELEASE_CACHE__)).completedFiles, rawEntries.length,
+    '真实 HTTP 下模型、环境、天空盒和未使用的模型都必须缓存');
+  before = snapshot();
+  await page.reload();
+  await record('http-lan-refresh', page, '1', before, {}, 'partial');
+  for (const entry of increments(before, '1').filter(file => file.storage === 'asset')) {
+    assert.equal(entry.requests, 0, `HTTP 刷新不重复下载：${entry.path}`);
+  }
+  currentRelease = '2'; before = snapshot();
+  await page.reload();
+  frame = await record('http-lan-republished', page, '2', before, {}, 'partial');
+  assert.equal((await frame.evaluate(() => globalThis.__ZENDING_RELEASE_CACHE__)).completedFiles,
+    releases.get('2').manifest.files.filter(file => file.storage === 'asset').length);
+  for (const entry of increments(before, '2').filter(file => file.storage === 'asset')) {
+    assert.equal(entry.requests, 1, `HTTP 重新发布后重新缓存：${entry.path}`);
+  }
+  currentRelease = '1';
   await context.close(); context = null;
 
   context = await faultBrowser.newContext({ viewport: { width: 1100, height: 760 }, serviceWorkers: 'allow' });
@@ -411,10 +449,8 @@ try {
 
   before = snapshot();
   assert.equal((await fetchLazy(frame)).sha256, sha256(lazyBody));
-  assert.equal((await fetchLazy(frame, 'manual-roam/EQ_People.glb')).sha256,
-    releases.get('1').manifest.files.find((file) => file.path === 'manual-roam/EQ_People.glb').sha256);
   assertNoStaticDownloads(before, '1', '首次进入懒加载功能');
-  samples.push({ name: 'lazy-files', version: '1', files: [lazyPath, 'manual-roam/EQ_People.glb'], staticRequests: increments(before, '1') });
+  samples.push({ name: 'lazy-files', version: '1', files: [lazyPath], staticRequests: increments(before, '1') });
 
   before = snapshot();
   await page.goto(`${origin}/bigscreen?layout=republished-screen`);

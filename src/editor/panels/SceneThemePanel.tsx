@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { isTechBlueNightThemeAdjusted, type SceneThemeSettings } from '../model/sceneTheme';
 import { useEditorStore } from '../store/editorStore';
 import './SceneThemePanel.css';
+import { CollapsibleFieldset } from '../ui/CollapsibleFieldset';
 
 type ThemeColorKey = 'backgroundColor' | 'fillColor' | 'groundColor' | 'mainColor' | 'fogColor';
 type ThemeNumberKey = 'environmentIntensity' | 'exposure' | 'contrast' | 'glowIntensity' | 'bloomWeight' | 'fogStart' | 'fogEnd';
@@ -70,8 +71,7 @@ export function SceneThemePanel({ readOnly = false }: { readOnly?: boolean }) {
   }
 
   return (
-    <fieldset className="transform-fieldset scene-theme-panel" disabled={disabled}>
-      <legend>场景主题</legend>
+    <CollapsibleFieldset title="场景主题" className="scene-theme-panel" disabled={disabled}>
       <div className="scene-theme-heading">
         <strong>{theme ? '科技蓝夜景' : '保持当前配置'}</strong>
         {theme ? <span className="scene-theme-state">{adjusted ? '已调整' : '当前使用'}</span> : null}
@@ -133,6 +133,6 @@ export function SceneThemePanel({ readOnly = false }: { readOnly?: boolean }) {
           <p className="muted">门口、装卸区等暖色照明，请从模型库放置灯光并调整位置；业务特效和告警颜色由对应组件控制。</p>
         </>
       )}
-    </fieldset>
+    </CollapsibleFieldset>
   );
 }

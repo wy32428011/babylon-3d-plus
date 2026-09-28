@@ -62,3 +62,39 @@ for (const kind of ['point', 'spot'] as const) {
     }
   });
 }
+
+test('同一灯光实体从点光切到聚光时释放旧贴图，其他局部灯继续投影', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  new FreeCamera('camera', new Vector3(0, 4, -10), scene);
+  const runtime = new SceneShadowRuntime(scene);
+  const first = new PointLight('first', new Vector3(-2, 4, 0), scene);
+  const second = new PointLight('second', new Vector3(2, 4, 0), scene);
+  const replacement = new SpotLight('replacement', new Vector3(-2, 4, 0), Vector3.Down(), Math.PI / 3, 2, scene);
+  try {
+    runtime.applySettings(settings);
+    runtime.syncLight('first', first);
+    runtime.syncLight('second', second);
+    const oldGenerator = first.getShadowGenerator()!;
+    const secondGenerator = second.getShadowGenerator();
+    assert.ok(oldGenerator.getShadowMap());
+    runtime.syncLight('first', replacement);
+    assert.equal(first.getShadowGenerator(), null);
+    assert.equal(oldGenerator.getShadowMap(), null, '替换类型不能遗留旧 Cube 阴影图');
+    assert.ok(replacement.getShadowGenerator());
+    assert.equal(replacement.getShadowGenerator()!.getShadowMap()!.isCube, false);
+    assert.equal(second.getShadowGenerator(), secondGenerator, '更换一盏灯不应重建其他灯贴图');
+    replacement.intensity = 0;
+    runtime.syncLight('first', replacement);
+    assert.equal(replacement.getShadowGenerator(), null);
+    assert.equal(second.getShadowGenerator(), secondGenerator);
+    replacement.intensity = 1;
+    runtime.syncLight('first', replacement);
+    assert.ok(replacement.getShadowGenerator());
+    runtime.removeLight('second');
+    assert.equal(second.getShadowGenerator(), null);
+    assert.ok(replacement.getShadowGenerator());
+    runtime.dispose();
+    assert.equal(replacement.getShadowGenerator(), null);
+  } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
+});

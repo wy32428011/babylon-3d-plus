@@ -4,7 +4,8 @@ import { IndexedDbPublishedCacheStore } from '../../src/runtime/assets/published
 
 /** 分离原生事务状态与 JS 事件派发，复现繁忙渲染线程下的跨任务队列竞态。 */
 function databaseHarness(context: TestContext) {
-  context.mock.timers.enable({ apis: ['setTimeout'] });
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  context.mock.method(performance, 'now', () => Date.now());
   type Request = { result: unknown; onsuccess?: () => void; onerror?: () => void };
   const transactions: Array<{
     stores: string[]; mode: string; finished: boolean; abortCalls: number; putError?: Error;
@@ -66,7 +67,7 @@ test('已完成事务的完成事件晚于超时任务：不抛 InvalidStateErro
   request.result = 'cached-model'; request.onsuccess?.();
   transaction.finished = true;
   try {
-    assert.doesNotThrow(() => context.mock.timers.tick(60_000), '事务已结束时超时回调不能产生未捕获异常');
+    assert.doesNotThrow(() => context.mock.timers.tick(30_000), '事务已结束时超时回调不能产生未捕获异常');
   } finally {
     transaction.oncomplete?.();
     assert.equal(await read, 'cached-model');
@@ -93,7 +94,7 @@ test('真实挂起的事务只中止一次，Promise 拒绝且迟到事件不能
   const rejected = assert.rejects(read, /超时/);
   await flushMicrotasks();
   const transaction = transactions[0];
-  context.mock.timers.tick(60_000);
+  context.mock.timers.tick(30_000);
   await rejected;
   transaction.oncomplete?.();
   context.mock.timers.tick(60_000);
@@ -142,7 +143,7 @@ test('原生事务已中止但 abort 事件尚未派发：保留原始错误而�
   const transaction = transactions[0];
   transaction.error = new DOMException('quota', 'QuotaExceededError');
   transaction.finished = true;
-  assert.doesNotThrow(() => context.mock.timers.tick(60_000));
+  assert.doesNotThrow(() => context.mock.timers.tick(30_000));
   transaction.onabort?.();
   await rejected;
   store.close();
@@ -194,5 +195,101 @@ test('完整发布原始文件独立存储且不参与逐条 LRU 淘汰', async 
   assert.equal(transaction.requests.filter(item => item.operation === 'put').length, 2);
   transaction.finished = true; transaction.oncomplete?.();
   await write;
+  store.close();
+});
+
+test('watchdog 晚交付时先给排队成功事件短宽限，不把渲染阻塞误判为存储停滞', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore();
+  const read = store.get('environment-chunk');
+  const outcome = read.catch(error => error);
+  await flushMicrotasks();
+  const transaction = transactions[0];
+  const request = transaction.requests[0].request;
+  request.result = 'cached-environment';
+  try {
+    context.mock.timers.tick(90_000);
+    assert.equal(transaction.abortCalls, 0, '30 秒定时器晚了 60 秒，不能立即中止仍待派发成功事件的事务');
+    request.onsuccess?.();
+    transaction.finished = true; transaction.oncomplete?.();
+    assert.equal(await outcome, 'cached-environment');
+  } finally { store.close(); }
+});
+
+test('迟到补偿只有一秒，宽限期间仍无进展则必须中止', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore();
+  const read = store.get('hung-after-render');
+  const rejected = assert.rejects(read, /超时/);
+  await flushMicrotasks();
+  try {
+    context.mock.timers.tick(90_000);
+    assert.equal(transactions[0].abortCalls, 0);
+    context.mock.timers.tick(999);
+    assert.equal(transactions[0].abortCalls, 0);
+    context.mock.timers.tick(1);
+    await rejected;
+    assert.equal(transactions[0].abortCalls, 1);
+  } finally { store.close(); }
+});
+
+test('同一无进展周期即使宽限定时器再次迟到，也不能再次补偿', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore();
+  const read = store.get('always-late');
+  const rejected = assert.rejects(read, /超时/);
+  await flushMicrotasks();
+  try {
+    context.mock.timers.tick(90_000);
+    assert.equal(transactions[0].abortCalls, 0);
+    context.mock.timers.tick(60_000);
+    await rejected;
+    assert.equal(transactions[0].abortCalls, 1);
+  } finally { store.close(); }
+});
+
+test('真实请求成功后重新计时，后续独立停滞周期可获得一次迟到补偿', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore({ evict: false });
+  const write = store.put('chunk', new Blob(['model']), 5);
+  const outcome = write.catch(error => error);
+  await flushMicrotasks();
+  const transaction = transactions[0];
+  assert.equal(transaction.requests.length, 2);
+  try {
+    context.mock.timers.tick(90_000);
+    assert.equal(transaction.abortCalls, 0);
+    transaction.requests[0].request.onsuccess?.();
+    context.mock.timers.tick(90_000);
+    assert.equal(transaction.abortCalls, 0);
+    transaction.requests[1].request.onsuccess?.();
+    transaction.finished = true; transaction.oncomplete?.();
+    assert.equal(await outcome, undefined);
+  } finally { store.close(); }
+});
+
+test('迟到宽限期间 close 仍即时中止并撤销全部定时器', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore();
+  const read = store.get('closing');
+  const outcome = read.catch(error => error);
+  await flushMicrotasks();
+  context.mock.timers.tick(90_000);
+  assert.equal(transactions[0].abortCalls, 0);
+  store.close();
+  assert.equal((await outcome).name, 'AbortError');
+  context.mock.timers.tick(60_000);
+  assert.equal(transactions[0].abortCalls, 1);
+});
+
+test('定时器仅有一秒正常调度误差时不延长真实停滞', async context => {
+  const { transactions } = databaseHarness(context);
+  const store = new IndexedDbPublishedCacheStore();
+  const read = store.get('regular-stall');
+  const rejected = assert.rejects(read, /超时/);
+  await flushMicrotasks();
+  context.mock.timers.tick(31_000);
+  await rejected;
+  assert.equal(transactions[0].abortCalls, 1);
   store.close();
 });

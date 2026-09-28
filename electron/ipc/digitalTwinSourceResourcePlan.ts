@@ -29,7 +29,7 @@ type SnapshotBundle = SourceResourceBundle & {
 };
 const LOCAL_URL = 'editor-asset://local/';
 const PATH_FIELDS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path', 'scriptPaths']);
-const URL_FIELDS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl']);
+const URL_FIELDS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl']);
 const key = (value: string): string => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 const targetKey = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
 const abort = (signal: AbortSignal): void => { signal.throwIfAborted(); };

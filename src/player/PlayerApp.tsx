@@ -1,4 +1,10 @@
 import { RuntimeFollowControls } from '../shared/ui/RuntimeFollowControls';
+import { normalizeSceneOpeningAnimation } from '../editor/model/sceneOpeningAnimation';
+import type { OpeningSnapshot } from '../runtime/opening/GeographicOpeningRuntime';
+import { createSceneOpeningPlayback } from '../shared/opening/createSceneOpeningPlayback';
+import type { OpeningPlaybackCoordinator } from '../shared/opening/OpeningPlaybackCoordinator';
+import { OpeningAnimationOverlay } from '../shared/ui/OpeningAnimationOverlay';
+import { GeographicOpeningBridge } from './geographicOpeningBridge';
 import { configureEffectDataTransport } from '../runtime/effects/EffectDataRuntime';
 import type { AlarmActivation } from '../runtime/babylon/AlarmManagerRuntime';
 import { executeChartMarkerClick } from '../runtime/babylon/chartMarkerClick';
@@ -244,6 +250,23 @@ export function PlayerApp() {
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
   const [initialLoadCompleted, setInitialLoadCompleted] = useState(false);
+  const [openingActive, setOpeningActive] = useState(false);
+  const openingActiveRef = useRef(false);
+  openingActiveRef.current = openingActive;
+  const [openingSnapshot, setOpeningSnapshot] = useState<OpeningSnapshot | null>(null);
+  const [openingSettings, setOpeningSettings] = useState(() => normalizeSceneOpeningAnimation(undefined));
+  const openingPlaybackRef = useRef<OpeningPlaybackCoordinator | null>(null);
+  const cancelOpeningForCommandRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!openingActive) return;
+    const handle = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (openingSettings.allowSkip) openingPlaybackRef.current?.skip();
+    };
+    window.addEventListener('keydown', handle, true);
+    return () => window.removeEventListener('keydown', handle, true);
+  }, [openingActive, openingSettings.allowSkip]);
   const [initialLoadNotice, setInitialLoadNotice] = useState('');
   const [releaseCacheState, setReleaseCacheState] = useState<PublishedReleaseCacheState | null>(null);
   const initialLoadMonitorRef = useRef<(() => void) | null>(null);
@@ -301,6 +324,7 @@ export function PlayerApp() {
 
     runtime.setExternalHighlightEntityIds([entityId]);
     if (command.type !== 'screen.focusEntity') return;
+    cancelOpeningForCommandRef.current();
     const bounds = runtime.getEntitiesFocusBounds([entityId]);
     const viewport = viewportRef.current;
     if (!bounds || !viewport) {
@@ -337,6 +361,22 @@ export function PlayerApp() {
     let manualRoam: ManualRoamRuntime | null = null;
     let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
+    let openingBridge: GeographicOpeningBridge | null = null;
+    let sceneOpeningSettings = normalizeSceneOpeningAnimation(undefined);
+    let openingSuppressed = false;
+    let openingFinished = false;
+    let pendingAlarmFocus: AlarmActivation | null = null;
+    setOpeningActive(false);
+    setOpeningSnapshot(null);
+    const cancelOpeningForCommand = (): void => {
+      if (openingFinished || openingSuppressed) return;
+      openingSuppressed = true;
+      autoPatrolStartGate.cancelPending();
+      openingPlaybackRef.current?.cancel();
+      openingBridge?.setPhase('skipped');
+      setOpeningActive(false);
+    };
+    cancelOpeningForCommandRef.current = cancelOpeningForCommand;
     // 宿主握手可能晚于首条遥测；仅保留最新主题，在 ready 后确认报警仍有效再发送。
     let pendingAlarmTheme: AlarmActivation | null = null;
     const flushAlarmTheme = (): void => {
@@ -347,6 +387,52 @@ export function PlayerApp() {
     };
     const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
     autoPatrolStartGateRef.current = autoPatrolStartGate;
+    const startOpening = (): void => {
+      if (disposed || !viewport || !runtime) return;
+      const playback = createSceneOpeningPlayback({
+        viewport, runtime, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
+        waitUntilVisible: async signal => {
+          const visible = await (openingBridge?.waitForHostVisible(signal) ?? Promise.resolve(true));
+          if (!visible && !signal.aborted && !disposed) {
+            console.warn('[Viewer opening] 未收到宿主开场可见确认，已跳过开场。请确认大屏前端已同步更新。');
+          }
+          return visible;
+        },
+        isHostVisible: () => openingBridge?.isHostVisible() ?? true,
+        subscribeToHostVisibility: listener => openingBridge?.subscribeVisibility(listener) ?? (() => {}),
+        beforeStart: () => { pauseHistoryReplay(); autoPatrolPlayback?.stop(); manualRoam?.setEnabled(false); },
+        onActiveChange: active => { if (!disposed) setOpeningActive(active); },
+        onProgress: snapshot => {
+          if (disposed) return;
+          setOpeningSnapshot(snapshot);
+          // 完成帧紧接着进入 onTerminal，不能把 handoff 再误报成一次 playing。
+          if (snapshot.phase !== 'complete') openingBridge?.setPhase(snapshot.phase === 'handoff' ? 'handoff' : 'playing');
+        },
+        onTerminal: result => {
+          openingFinished = true;
+          if (disposed) return;
+          if (sceneOpeningSettings.enabled) console.info('[Viewer opening] 开场结束', { result, template: sceneOpeningSettings.template });
+          setOpeningActive(false);
+          runtime?.setOpeningCameraOwned(false);
+          setOpeningSnapshot(null);
+          openingBridge?.setPhase(result === 'cancelled' ? 'skipped' : result);
+          if (sceneOpeningSettings.enabled && (sceneOpeningSettings.afterOpening === 'stay' || result === 'cancelled')) autoPatrolStartGate.cancelPending();
+          const pending = pendingAlarmFocus;
+          pendingAlarmFocus = null;
+          if (result !== 'cancelled' && pending && runtime?.isAlarmActive(pending.managerId, pending.targetId)) {
+            const bounds = runtime.getEntitiesFocusBounds([pending.targetId]);
+            if (bounds) {
+              autoPatrolStartGate.cancelPending(); autoPatrolPlayback?.stop();
+              viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+            }
+          }
+          autoPatrolStartGate.markReady();
+        },
+        onError: error => { console.error('[开场动画]', error); if (!disposed) setRuntimeMessage(`开场动画未能完成，已回到场景：${getErrorMessage(error)}`); },
+      });
+      openingPlaybackRef.current = playback;
+      void playback.start();
+    };
     setInitialLoadCompleted(false);
     setInitialLoadNotice('');
     setModelLoadProgress(null);
@@ -362,8 +448,8 @@ export function PlayerApp() {
       interactionController?.markInitialLoadComplete();
       publishedCache?.prefetch();
     }, {
-      // 缓慢加载持续等待；只有真实资源及首帧成功后才放行巡检。
-      onSettled: () => autoPatrolStartGate.markReady(),
+      // 开场与资源加载分别结算；场景可见后播放，终态才交还相机和巡检。
+      onSettled: startOpening,
       verifyReady: async signal => {
         if (!viewport || !runtime) throw new Error('场景视图尚未创建。');
         const before = runtime.getInitialLoadSnapshot().error;
@@ -379,6 +465,8 @@ export function PlayerApp() {
     const blockInitialLoad = (detail: string) => {
       if (disposed || initialLoadFailed || initialLoadCompletedForSession) return;
       initialLoadFailed = true;
+      openingBridge?.setPhase('failed');
+      setOpeningActive(false);
       if (!runtime) abortController.abort();
       initialLoadGate.dispose();
       autoPatrolStartGate.dispose();
@@ -434,6 +522,7 @@ export function PlayerApp() {
       if (disposed) return;
       const recovered = status.type === 'context-restored' || status.type === 'render-recovered';
       setViewportRuntimeIssue(!recovered);
+      if (!recovered && openingActiveRef.current) openingPlaybackRef.current?.fail(new Error(status.message));
       setRuntimeMessage(recovered ? null : status.message);
       if (status.type === 'context-restored') resize?.();
     };
@@ -451,6 +540,17 @@ export function PlayerApp() {
         publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal,
           state => { if (!disposed) setReleaseCacheState(state); });
         if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
+        openingBridge = new GeographicOpeningBridge({
+          enabled: true, embedded: window.parent !== window, parentWindow: window.parent,
+          viewerOrigin: window.location.origin,
+          allowedParentOrigins: projectRuntimeConfig ? parseDigitalTwinAllowedParentOrigins(projectRuntimeConfig.config) : [],
+          subscribeToMessages: listener => {
+            const handle = (event: MessageEvent<unknown>) => listener({ data: event.data, origin: event.origin, source: event.source });
+            window.addEventListener('message', handle);
+            return () => window.removeEventListener('message', handle);
+          },
+          postToParent: (message, origin) => window.parent.postMessage(message, origin),
+        });
         interactionController = new DigitalTwinInteractionController({
           parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -492,6 +592,10 @@ export function PlayerApp() {
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         startupStage = '读取场景文档';
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        sceneOpeningSettings = normalizeSceneOpeningAnimation(sceneDocument.sceneSettings.openingAnimation);
+        setOpeningSettings(sceneOpeningSettings);
+        setOpeningActive(sceneOpeningSettings.enabled && !openingSuppressed);
+        openingBridge.setPhase(sceneOpeningSettings.enabled && !openingSuppressed ? 'waiting' : 'disabled');
         await publishedCache?.verifyDocuments();
         if (disposed || initialLoadFailed) return;
         setViewportScreen(sceneDocument.sceneSettings.viewportScreen);
@@ -566,6 +670,7 @@ export function PlayerApp() {
           },
         );
         runtimeRef.current = runtime;
+        runtime.setOpeningCameraOwned(sceneOpeningSettings.enabled && !openingSuppressed);
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.disableEditorManualRoamSpawnMarkers();
@@ -641,6 +746,7 @@ export function PlayerApp() {
         setAutoPatrolRoutes(patrolRoutes);
 
         const notifyManualInput = (): void => {
+          cancelOpeningForCommand();
           pauseHistoryReplay();
           interactionController?.notifyManualCameraInput();
           autoPatrolPlayback?.notifyManualInput();
@@ -719,7 +825,9 @@ export function PlayerApp() {
         });
         runtime.onAlarmActivated = event => {
           if (disposed || !runtime) return;
-          if (event.focusCamera) {
+          if (event.focusCamera && sceneOpeningSettings.enabled && !openingFinished && !openingSuppressed) {
+            pendingAlarmFocus = event;
+          } else if (event.focusCamera) {
             const bounds = runtime.getEntitiesFocusBounds([event.targetId]);
             if (bounds && viewport) { manualRoam?.setEnabled(false); notifyManualInput(); viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
           }
@@ -795,6 +903,7 @@ export function PlayerApp() {
           };
           const handleWheel = (): void => notifyManualInput();
           const handleKeyDown = (event: KeyboardEvent): void => {
+            if (openingActiveRef.current) return;
             if (!['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC'].includes(event.code)) return;
             const target = event.target;
             const interactiveControlFocused = target instanceof HTMLElement
@@ -836,6 +945,7 @@ export function PlayerApp() {
             ? runtime!.getLocatorCellWorldBounds(entityId, slot)
             : runtime!.getEntitiesFocusBounds([entityId]),
           focusOnBounds: (bounds, options) => {
+            cancelOpeningForCommand();
             manualRoam?.setEnabled(false);
             viewport!.focusOnBounds(bounds, options);
           },
@@ -855,6 +965,7 @@ export function PlayerApp() {
           applyRegionView: (viewId, options) => {
             const view = sceneDocument.sceneSettings.regionViews.find(item => item.id === viewId);
             if (!view) throw new Error('区域视角不存在');
+            cancelOpeningForCommand();
             autoPatrolStartGate.cancelPending();
             pauseHistoryReplay();
             autoPatrolPlayback?.stop();
@@ -866,7 +977,7 @@ export function PlayerApp() {
             });
           },
           globalOverview: () => restorePlayerGlobalOverview({
-            cancelPendingAutoPatrol: () => autoPatrolStartGate.cancelPending(),
+            cancelPendingAutoPatrol: () => { cancelOpeningForCommand(); autoPatrolStartGate.cancelPending(); },
             stopHistoryReplay: pauseHistoryReplay,
             stopAutoPatrol: () => autoPatrolPlayback?.stop(),
             disableManualRoam: () => manualRoamRuntime?.setEnabled(false),
@@ -887,6 +998,7 @@ export function PlayerApp() {
           }),
           ...(preferredPatrolRoute ? {
             startAutoPatrol: () => {
+              cancelOpeningForCommand();
               const nextControl = resolvePlayerFloatingControlToggle(
                 openedDigitalTwinFloatingControlRef.current,
                 'auto-patrol',
@@ -922,6 +1034,7 @@ export function PlayerApp() {
           } : {}),
           ...(manualRoamRuntime ? {
             startManualRoam: () => {
+              cancelOpeningForCommand();
               const nextControl = resolvePlayerFloatingControlToggle(
                 openedDigitalTwinFloatingControlRef.current,
                 'manual-roam',
@@ -959,6 +1072,11 @@ export function PlayerApp() {
         console.error('Web Viewer 启动失败。', error);
         setPhase('blocked');
         setMessage(`Web Viewer 启动失败：${getErrorMessage(error)}`);
+        openingPlaybackRef.current?.dispose();
+        openingPlaybackRef.current = null;
+        openingBridge?.setPhase('failed');
+        openingBridge?.dispose();
+        setOpeningActive(false);
         interactionController?.dispose();
         interactionController = null;
         initialLoadGate.dispose();
@@ -1006,6 +1124,10 @@ export function PlayerApp() {
     return () => {
       disposed = true;
       abortController.abort();
+      openingPlaybackRef.current?.dispose();
+      openingPlaybackRef.current = null;
+      openingBridge?.dispose();
+      cancelOpeningForCommandRef.current = () => {};
       canvasResizeObserver?.disconnect();
       canvasResizeObserver = null;
       if (resize) window.removeEventListener('resize', resize);
@@ -1258,7 +1380,8 @@ export function PlayerApp() {
   return (
     <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
-      {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
+      {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
+      {phase === 'ready' && !openingActive && viewportRef.current && runtimeRef.current ? (
         <DataPlatformScreenOverlay
           canvas={canvasRef.current}
           runtime={runtimeRef.current}
@@ -1267,7 +1390,7 @@ export function PlayerApp() {
           scene={viewportRef.current.scene}
         />
       ) : null}
-      {phase === 'ready' ? (
+      {phase === 'ready' && !openingActive ? (
         <DataPlatformViewportScreenOverlay
           interactive
           onCommand={handleViewportDataPlatformScreenCommand}
@@ -1275,8 +1398,8 @@ export function PlayerApp() {
           selectedEntityIds={viewerSelectedEntityIds}
         />
       ) : null}
-      {phase === 'ready' ? <RuntimeFollowControls /> : null}
-      {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
+      {phase === 'ready' && !openingActive ? <RuntimeFollowControls /> : null}
+      {phase === 'ready' && !openingActive && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
           snapshot={manualRoamSnapshot}
           onConfigChange={handleManualRoamConfig}
@@ -1291,6 +1414,7 @@ export function PlayerApp() {
         />
       ) : null}
       {phase === 'ready'
+      && !openingActive
       && autoPatrolControlsVisible
       && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
       && !manualRoamSnapshot.enabled ? (

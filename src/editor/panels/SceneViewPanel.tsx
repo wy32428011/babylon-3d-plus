@@ -1,4 +1,7 @@
 import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
+import { OpeningAnimationOverlay } from '../../shared/ui/OpeningAnimationOverlay';
+import { useEditorOpeningAnimation } from '../opening/useEditorOpeningAnimation';
+import { PendingOpeningAlarmFocus } from '../opening/PendingOpeningAlarmFocus';
 import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
 import { CompositionEditStatus } from '../composition/CompositionControls';
@@ -627,6 +630,41 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     && preparationState.assetRefreshStatus === 'settled'
     && scenePreparationNaturallyCompleted
     && (!sceneDocument.sceneSettings.environment || environmentRuntimePhase === 'ready');
+  const pendingOpeningAlarmFocusRef = useRef(new PendingOpeningAlarmFocus());
+  const openingAlarmSessionRef = useRef('');
+  const openingAlarmSession = `${sceneSessionId}:${isRuntimePreview}`;
+  if (openingAlarmSessionRef.current !== openingAlarmSession) {
+    openingAlarmSessionRef.current = openingAlarmSession;
+    pendingOpeningAlarmFocusRef.current.reset(isRuntimePreview && sceneDocument.sceneSettings.openingAnimation?.enabled === true);
+  } else if (sceneDocument.sceneSettings.openingAnimation?.enabled !== true) {
+    pendingOpeningAlarmFocusRef.current.reset(false);
+  }
+  const opening = useEditorOpeningAnimation({
+    viewport: viewportRef.current, runtime: runtimeRef.current, ready: sceneReadyForAutoPatrol,
+    sceneDocument, sceneSessionId, isRuntimePreview,
+    beforeStart: () => {
+      pendingOpeningAlarmFocusRef.current.begin();
+      pauseHistoryReplay(); autoPatrolPlaybackRef.current?.stop(); manualRoamRef.current?.setEnabled(false);
+    },
+    onTerminal: result => {
+      const rt = runtimeRef.current;
+      const vp = viewportRef.current;
+      const pending = pendingOpeningAlarmFocusRef.current.finish(result, event => (
+        useEditorStore.getState().runtimeMode === 'preview'
+        && Boolean(rt?.isAlarmActive(event.managerId, event.targetId))
+      ));
+      if (!pending || !rt || !vp || vp.scene.isDisposed) return;
+      const bounds = rt.getEntitiesFocusBounds([pending.targetId]);
+      if (bounds) {
+        autoPatrolPreviewAutoStartCancelledRef.current = true;
+        autoPatrolPlaybackRef.current?.stop();
+        manualRoamRef.current?.setEnabled(false);
+        vp.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
+      }
+    },
+  });
+  const openingActiveRef = useRef(false);
+  openingActiveRef.current = opening.active;
 
   /** 发布当前单模型尺寸和 Hierarchy 群组世界包围盒，二者都只进入临时 Inspector 状态。 */
   const publishSelectedInspectorSpatialInfo = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -1711,7 +1749,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     viewportRef.current = viewport;
     setViewportCamera(viewport.camera);
     runtime.onAlarmActivated = event => {
-      if (event.focusCamera) {
+      if (event.focusCamera && !pendingOpeningAlarmFocusRef.current.defer(event)) {
         const bounds = runtime?.getEntitiesFocusBounds([event.targetId]);
         if (bounds) { manualRoam?.setEnabled(false); viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
       }
@@ -2480,6 +2518,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   /** Inspector 和悬浮控制器通过 Store 发出一次性播放命令。 */
   useEffect(() => {
     if (!autoPatrolPlaybackRequest) return;
+    opening.stop();
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
     if (
@@ -2582,6 +2621,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
     if (autoPatrolPreviewStartedRef.current) return;
+    if (opening.blockAutoPatrol) return;
     if (autoPatrolPreviewAutoStartCancelledRef.current) return;
     if (!sceneReadyForAutoPatrol) return;
     autoPatrolPreviewStartedRef.current = true;
@@ -2590,12 +2630,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!route) return;
     const result = controller.start(route.entityId);
     if (!result.ok) pushLog(result.error);
-  }, [autoPatrolRoutes, isRuntimePreview, pushLog, sceneReadyForAutoPatrol]);
+  }, [autoPatrolRoutes, isRuntimePreview, pushLog, sceneReadyForAutoPatrol, opening.blockAutoPatrol]);
 
   /** 启用或关闭运行预览手动漫游；场景没有出生点 POI 时拒绝启用。 */
   function handleManualRoamEnabled(enabled: boolean): void {
     if (enabled && !hasManualRoamSpawn) return;
     if (enabled) {
+      opening.stop();
       autoPatrolPreviewAutoStartCancelledRef.current = true;
       const pendingRequest = useEditorStore.getState().autoPatrolPlaybackRequest;
       if (pendingRequest?.action === 'start' || pendingRequest?.action === 'resume') {
@@ -2625,6 +2666,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   /** F1 只在非输入态、编辑模式且选中巡检路线时录制或覆盖当前相机视角。 */
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (openingActiveRef.current) return;
       if (isScenePreparationActive()) {
         if (event.target instanceof Element && event.target.closest('[data-scene-loading-action]')) return;
         event.preventDefault();
@@ -2664,6 +2706,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!environmentAdjustmentActive) return;
 
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (openingActiveRef.current) return;
       if (isScenePreparationActive()) return;
       if (event.key !== 'Escape') return;
       setEnvironmentAdjustmentActive(false);
@@ -2748,6 +2791,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       } else {
         const view = state.scene.sceneSettings.regionViews.find(item => item.id === regionViewRequest.regionViewId);
         if (!view) throw new Error('区域视角不存在，可能已被删除');
+        opening.stop();
         pauseHistoryReplay();
         autoPatrolPlaybackRef.current?.stop();
         manualRoamRef.current?.setEnabled(false);
@@ -2761,6 +2805,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   useEffect(() => {
     if (!cameraResetRequest) return;
+    opening.stop();
     if (manualRoamSnapshot.enabled) {
       consumeCameraResetRequest(cameraResetRequest.id);
       manualRoamRef.current?.reset();
@@ -2989,7 +3034,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           onPointerCancelCapture={handleCanvasPointerCancel}
           onWheel={handleCanvasWheel}
         />
-        {overlayViewport && overlayRuntime ? (
+        {opening.active ? <OpeningAnimationOverlay settings={opening.settings} snapshot={opening.snapshot} preview={!isRuntimePreview} onSkip={isRuntimePreview ? opening.skip : opening.stop} /> : null}
+        {!opening.active && overlayViewport && overlayRuntime ? (
           <DataPlatformScreenOverlay
             playbackActive={isRuntimePreview}
             canvas={canvasRef.current}
@@ -3005,9 +3051,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           />
         ) : null}
         <DataPlatformViewportScreenOverlay
-          interactive={isRuntimePreview}
+          interactive={isRuntimePreview && !opening.active}
           onCommand={handleViewportDataPlatformScreenCommand}
-          screen={sceneDocument.sceneSettings.viewportScreen}
+          screen={opening.active ? null : sceneDocument.sceneSettings.viewportScreen}
           selectedEntityIds={hierarchySelectionIds.length > 0
             ? hierarchySelectionIds
             : selectedEntityId
@@ -3016,7 +3062,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         />
         <ViewportOrientationCompass
           camera={viewportCamera}
-          disabled={Boolean(viewportError) || (isRuntimePreview && manualRoamSnapshot.enabled)}
+          disabled={opening.active || Boolean(viewportError) || (isRuntimePreview && manualRoamSnapshot.enabled)}
           onReset={() => {
             pauseHistoryReplay();
             autoPatrolPlaybackRef.current?.notifyManualInput();
@@ -3031,8 +3077,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           }}
           orientation={cameraOrientation}
         />
-        {isRuntimePreview ? <RuntimeFollowControls /> : null}
-        {isRuntimePreview && hasManualRoamSpawn ? (
+        {isRuntimePreview && !opening.active ? <RuntimeFollowControls /> : null}
+        {isRuntimePreview && !opening.active && hasManualRoamSpawn ? (
           <ManualRoamControls
             snapshot={manualRoamSnapshot}
             onConfigChange={handleManualRoamConfig}
@@ -3047,6 +3093,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           />
         ) : null}
         {isRuntimePreview
+          && !opening.active
           && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
           && !manualRoamSnapshot.enabled ? (
           <AutoPatrolControls

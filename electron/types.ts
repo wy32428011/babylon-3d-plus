@@ -1,3 +1,11 @@
+import type { OpeningPackageBinding } from './shared/openingPackage.js';
+
+export type OpeningPackageListResult = { projectRoot: string | null; packages: OpeningPackageBinding[]; warnings: string[] };
+export type OpeningPackageImportResult = OpeningPackageListResult & { canceled: boolean; package: OpeningPackageBinding | null };
+export type OpeningPackageExportRequest = Pick<OpeningPackageBinding, 'id' | 'version' | 'contentHash'>;
+export type OpeningPackageExportResult = { canceled: boolean; filePath: string | null };
+export type OpeningAssetImportResult = { canceled: boolean; assetUrl: string | null; filePath: string | null; size: number; sha256: string };
+
 export type SceneFilePayload = {
   name: string;
   content: string;
