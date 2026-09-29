@@ -24,7 +24,7 @@ export function registerOpeningPackageIpc(): void {
   ipcMain.handle('opening:importPackage', async (): Promise<OpeningPackageImportResult> => {
     const projectRoot = await requireProject();
     if (!projectRoot) return { projectRoot: null, canceled: true, package: null, packages: [], warnings: [] };
-    const selected = await dialog.showOpenDialog({ title: '导入开场动画包', properties: ['openFile'], filters: [{ name: '开场动画 ZIP 包', extensions: ['zip'] }] });
+    const selected = await dialog.showOpenDialog({ title: '导入开场动画包', properties: ['openFile'], filters: [{ name: '开场动画包', extensions: ['dtopening', 'zip'] }] });
     assertReady(projectRoot);
     if (selected.canceled || !selected.filePaths[0]) return { ...await list(), canceled: true, package: null };
     const imported = await importOpeningPackageArchive(projectRoot, selected.filePaths[0]);

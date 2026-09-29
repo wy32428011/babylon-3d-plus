@@ -44,6 +44,7 @@ function fixture() {
     requestAnimationFrame: callback => { queueMicrotask(callback); return 1; }, cancelAnimationFrame() {},
   });
   const controller = createSceneOpeningPlayback({
+    container: canvas,
     settings: { ...createDefaultSceneOpeningAnimation(), enabled: true },
     viewport: { scene: {}, engine: { getRenderingCanvas: () => canvas }, cancelCameraTransition() {},
       setCameraControlsEnabled: value => { controlsEnabled = value; } },
@@ -76,6 +77,8 @@ test('开场播放中宿主隐藏会暂停，再可见后继续同一次播放',
   try {
     await f.controller.start();
     assert.equal(f.state().starts, 1);
+    assert.equal(f.state().owned, false, '开场不能占用业务相机');
+    assert.equal(f.state().controlsEnabled, true, '开场不能关闭三维控制');
     f.host(false);
     assert.equal(f.state().paused, true, 'iframe 隐藏不能继续消耗开场时长');
     f.host(true);

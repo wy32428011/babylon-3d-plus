@@ -22,10 +22,14 @@ function referenceSettings(settings: SceneOpeningAnimationSettings, binding: Ope
   reference.stageDurations = binding.config.stages.map(stage => stage.durationSeconds) as SceneOpeningStageDurations;
   for (const [index, originKey, destinationsKey] of [[2, 'worldOrigin', 'worldDestinations'], [5, 'chinaOrigin', 'chinaDestinations']] as const) {
     const stage = binding.config.stages[index];
-    if (stage.origin) reference[originKey] = { ...stage.origin };
-    if (stage.routes) reference[destinationsKey] = stage.routes.map(route => ({ name: route.name, ...route.to }));
+    reference[originKey] = { ...(stage.origin ?? stage.routes?.[0]?.from ?? { x: 0, y: 0 }) };
+    reference[destinationsKey] = (stage.routes ?? []).map(route => ({ name: route.name, ...route.to }));
   }
-  return { ...settings, reference };
+  return { ...settings, reference,
+    breathingEnabled: typeof values.breathingEnabled === 'boolean' ? values.breathingEnabled : settings.breathingEnabled,
+    breathingIntensity: typeof values.breathingIntensity === 'number' ? values.breathingIntensity : settings.breathingIntensity,
+    breathingPeriodSeconds: typeof values.breathingPeriodSeconds === 'number' ? values.breathingPeriodSeconds : settings.breathingPeriodSeconds,
+  };
 }
 
 /** 只有内置受控渲染器可被包选中；资源及实例参数均经协议验证。 */
@@ -72,7 +76,11 @@ export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings,
           }));
           if (disposed) return;
           const legacy = createReferenceOpening(container, { settings: adapted, ...controls,
-            stageOverrides: stages.map(stage => resolveOpeningStage(stage, binding.config.values)),
+            stageOverrides: stages.map((stage, index) => {
+              const resolved = resolveOpeningStage(stage, binding.config.values);
+              if (index === 8 && binding.config.values.arrivalDescription === '') delete resolved.description;
+              return resolved;
+            }),
             assetUrls: { images: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [index + 1, urls[index + 1]])), atlas: urls[10] } });
           visual = { ready: legacy.ready, resize: legacy.resize, dispose: legacy.dispose,
             renderAt: (seconds, context) => legacy.renderAt(reducedMotion ? 61 : getReferenceOpeningFrame(seconds, adapted.reference).referenceSeconds, context) };
@@ -83,7 +91,10 @@ export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings,
         await visual.ready;
       })();
       return { ready, renderAt: (seconds, context) => visual?.renderAt(seconds, context), resize: () => visual?.resize(),
-        dispose() { if (disposed) return; disposed = true; visual?.dispose(); visual = null; assets.dispose(); } };
+        dispose() {
+          if (disposed) return; disposed = true;
+          try { visual?.dispose(); } finally { visual = null; assets.dispose(); }
+        } };
     },
   };
 }

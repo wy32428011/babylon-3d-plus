@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   assertViewerTemplateSupportsScene,
+  assertViewerCoreIntegrity, selectRuntimeTemplateFiles,
   createViewerTemplateCapabilities,
   VIEWER_TEMPLATE_CAPABILITIES_PATH,
 } from '../../electron/ipc/viewerTemplateCapabilities.ts';
@@ -78,6 +79,10 @@ test('插件包仅能发布到明确支持其协议和渲染器的新 Viewer', a
   await f.validate(scene('reference-huishan'));
   await assert.rejects(f.validate(scene('external-js')), /插件包.*渲染器|插件包.*协议/);
   await assert.rejects(f.validate(scene('timeline', 2)), /插件包.*协议/);
+  const unisolated = structuredClone(f.manifest);
+  delete unisolated.openingPackages!.isolatedPlayback;
+  await f.add(VIEWER_TEMPLATE_CAPABILITIES_PATH, JSON.stringify(unisolated));
+  await assert.rejects(f.validate(scene()), /业务隔离/);
   const old = { ...f.manifest } as Record<string, unknown>;
   delete old.openingPackages;
   await f.add(VIEWER_TEMPLATE_CAPABILITIES_PATH, JSON.stringify(old));
@@ -157,4 +162,14 @@ test('未知开场模板和损坏场景明确失败，缺失磁盘资源不泄�
     assert.equal(error.message.includes(sourcePath), false);
     return true;
   });
+});
+
+test('开场可选性不能放宽业务入口完整性，DIST只选择运行所需模板文件', async t => {
+  const f = await fixture(t); await f.writeManifest();
+  await assertViewerCoreIntegrity(f.files, new AbortController().signal);
+  const selected = await selectRuntimeTemplateFiles(f.files, new AbortController().signal);
+  assert.ok(selected.some(file => file.destinationRelativePath === 'index.html'));
+  assert.equal(selected.some(file => file.destinationRelativePath.endsWith('.webp') || file.destinationRelativePath === VIEWER_TEMPLATE_CAPABILITIES_PATH), false);
+  await f.add(f.entries[1].path, 'broken core runtime');
+  await assert.rejects(assertViewerCoreIntegrity(f.files, new AbortController().signal), /资源不一致/);
 });

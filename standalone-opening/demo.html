@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZENDING · 独立开场动画</title>
+  <link rel="stylesheet" href="./dist/zending-opening.css">
+  <style>
+    :root{color-scheme:dark;font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#e5f2fa;background:#061019;font-synthesis:none}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 45% 0,#102b3a 0,transparent 58%),#061019;min-height:100vh}button,input,textarea{font:inherit}button,a,input,textarea{outline-offset:4px}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}
+    .page{max-width:1800px;margin:auto;padding:32px 36px 24px}.header{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:26px}.eyebrow{font-size:11px;letter-spacing:.24em;color:#79d9ed;font-weight:600}.header h1{font-size:28px;letter-spacing:.02em;margin:10px 0 9px;font-weight:600}.header p{color:#91a8b8;margin:0;font-size:13px;line-height:1.8}.links{display:flex;gap:18px;padding-top:8px;white-space:nowrap}.links a{font-size:13px;color:#adcadb;text-decoration:none;border-bottom:1px solid #33515f;padding-bottom:4px}.links a:hover{color:#8cf0ff}
+    .layout{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:24px;align-items:start}.stage-frame{border:1px solid #28404c;border-radius:16px;overflow:hidden;background:#020815;box-shadow:0 20px 70px #0005}.stage{position:relative;aspect-ratio:16/9;min-height:320px;background:#020815;isolation:isolate}.animation-layer{position:absolute;inset:0;z-index:2}.business{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;text-align:center;background:radial-gradient(ellipse at 50% 35%,#12313f,transparent 62%),linear-gradient(135deg,#091922,#05101a)}.business::before{position:absolute;inset:0;content:"";background-image:linear-gradient(#5785910a 1px,transparent 1px),linear-gradient(90deg,#5785910a 1px,transparent 1px);background-size:44px 44px;pointer-events:none}.business-mark{width:58px;height:58px;border:1px solid #5ddae68c;border-radius:16px;display:grid;place-items:center;color:#8bf4f3;font-size:25px;box-shadow:0 0 32px #18afc523;margin-bottom:24px}.business h2{margin:0 0 12px;font-size:clamp(20px,2.1vw,32px);font-weight:500}.business p{margin:0;color:#8dabbc;font-size:13px;line-height:1.9}.business .primary{margin-top:25px}.business-placeholder{position:absolute;top:22px;left:24px;display:flex;align-items:center;gap:8px;font-size:11px;color:#7298a9;letter-spacing:.1em}.dot{width:6px;height:6px;border-radius:50%;background:#6cf1d0;box-shadow:0 0 12px #4aecb777}
+    .transport{display:flex;align-items:center;gap:9px;padding:15px 18px;border-top:1px solid #203745;background:#0b1722}.transport button,.secondary{border:1px solid #38515f;background:#142733;color:#cfe7f2;border-radius:7px;padding:8px 12px;font-size:12px}.transport button:hover:not(:disabled),.secondary:hover{background:#1d3745}.transport .status{margin-left:auto;color:#7ea1b3;font-size:12px;display:flex;align-items:center;gap:14px;min-width:0}.timeline{height:2px;background:#193440;position:relative;overflow:hidden}.timeline>span{display:block;height:100%;width:0;background:#67d4e8;transition:width .1s linear}.stage-note{color:#829baa;font-size:12px;margin:15px 3px 0;line-height:1.9}
+    .settings{border:1px solid #233c49;border-radius:14px;padding:22px;background:#0b1923d9}.settings h2{font-size:16px;font-weight:600;margin:0 0 7px}.settings>p{font-size:12px;color:#7e9eae;line-height:1.8;margin:0 0 24px}.field{display:block;margin-bottom:18px}.field>span{display:block;font-size:12px;color:#b5cbd8;margin-bottom:8px}.field input,.field textarea{width:100%;color:#e1f1f8;background:#07141e;border:1px solid #2a4351;border-radius:7px;padding:10px 11px;font-size:13px;resize:vertical;line-height:1.6}.field input:focus,.field textarea:focus{border-color:#77d3e2}.field small{display:block;color:#7796a7;font-size:11px;line-height:1.7;margin-top:7px}.toggle{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#b5cbd8;margin:18px 0}.toggle input{accent-color:#65d0e1;width:17px;height:17px}.primary{border:1px solid #83e4ed;background:#80dce7;color:#06212d;border-radius:7px;padding:10px 16px;font-size:13px;font-weight:600;cursor:pointer}.primary:hover{background:#a2eef4}.apply{width:100%;margin-top:10px}.settings .reset{border:0;background:none;color:#89a6b6;font-size:12px;display:block;margin:13px auto 0;padding:5px 8px}.footer{display:flex;justify-content:space-between;gap:20px;color:#567888;font-size:11px;margin-top:23px;line-height:1.8}.error{margin:14px 0 0;color:#ffb6a5;background:#522b2580;border:1px solid #9c5c48;padding:12px 16px;font-size:13px;border-radius:8px}.error[hidden]{display:none}
+    body.embed{overflow:hidden;background:#020815}.embed .page{max-width:none;padding:0}.embed .header,.embed .settings,.embed .transport,.embed .timeline,.embed .stage-note,.embed .footer{display:none}.embed .layout{display:block}.embed .stage-frame{border:0;border-radius:0;box-shadow:none}.embed .stage{width:100vw;height:100vh;min-height:0;aspect-ratio:auto}.embed .business-placeholder{font-size:10px}.embed .error{position:absolute;bottom:16px;left:16px;right:16px;z-index:5}
+    @media(max-width:1050px){.page{padding:22px}.layout{grid-template-columns:minmax(0,1fr) 250px;gap:18px}.settings{padding:18px}.stage{min-height:300px}.transport .status{gap:8px}.header h1{font-size:24px}}
+    .layout>section,.layout>.settings,.settings .field{min-width:0}
+    @media(max-width:800px){.page{padding:18px 14px}.header{display:block}.links{margin-top:14px}.layout{grid-template-columns:minmax(0,1fr)}.stage{min-height:390px}.settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}.settings h2,.settings>p,.settings .apply,.settings .reset{grid-column:1/-1}.footer,.footer span{display:block}.transport{flex-wrap:wrap}.transport .status{font-size:11px}.field{margin-bottom:14px}}
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div><div class="eyebrow">ZENDING / OPENING EXPERIENCE</div><h1>从全球，抵达智能现场</h1><p>独立运行的开场动画。双击即可离线预览，也可嵌入你的网站或大屏。</p></div>
+      <nav class="links" aria-label="演示导航"><a href="./iframe-demo.html">查看 iframe 演示 ↗</a><a href="./README.md">接入说明 ↗</a></nav>
+    </header>
+    <main class="layout">
+      <section>
+        <div class="stage-frame">
+          <div class="stage" id="stage">
+            <div class="business" id="businessPanel">
+              <div class="business-placeholder"><span class="dot"></span>BUSINESS CANVAS · 演示占位</div>
+              <div class="business-mark" aria-hidden="true">◇</div><h2>业务页面已接管</h2><p>开场播放完毕后，这里继续显示你的场景与业务内容。<br>动画独立于业务页面，按需播放和释放。</p>
+              <button class="primary" id="businessReplay" type="button">重新体验开场</button>
+            </div>
+            <div id="openingMount" class="animation-layer" aria-label="开场动画区域"></div>
+          </div>
+          <div class="timeline" role="progressbar" aria-label="开场总进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="timelineFill"></span></div>
+          <div class="transport"><button id="pauseToggle" type="button">暂停播放</button><button id="replay" type="button">重新播放</button><button id="skip" type="button">跳过开场</button><div class="status"><span id="statusText" role="status">正在准备素材</span><span id="timeText">00:00 / 01:02</span></div></div>
+        </div>
+        <p class="stage-note">完整开场包含 9 个连续章节，默认时长 62 秒。修改右侧设置后，点击“应用并重播”查看效果。</p>
+        <div id="errorText" class="error" role="alert" hidden></div>
+      </section>
+      <form class="settings" id="settingsForm">
+        <h2>演示设置</h2><p>调整品牌与播放方式，快速检查在你的页面中的展示效果。</p>
+        <label class="field"><span>品牌名称</span><input id="brandName" name="brandName" autocomplete="off"></label>
+        <label class="field"><span>开场主标题</span><textarea id="heroTitle" name="heroTitle" rows="2"></textarea></label>
+        <label class="field"><span>结束标题</span><textarea id="finaleTitle" name="finaleTitle" rows="2"></textarea></label>
+        <label class="field"><span>总时长（秒）</span><input id="duration" name="duration" type="number" min="1" step="0.1" value="62" required><small>按原章节比例调整播放时长。</small></label>
+        <label class="toggle" for="allowSkip"><span>允许跳过与拖动进度</span><input id="allowSkip" type="checkbox"></label>
+        <label class="toggle" for="breathing"><span>飞线呼吸效果</span><input id="breathing" type="checkbox"></label>
+        <button class="primary apply" type="submit">应用并重播</button><button class="reset" id="reset" type="button">恢复默认设置</button>
+      </form>
+    </main>
+    <footer class="footer"><span>独立网页组件 · 本地素材 · 无需安装</span><span id="versionText">ZENDING OPENING</span></footer>
+  </div>
+  <script src="./dist/zending-opening.js"></script>
+  <script>
+    (() => {
+      'use strict';
+      const params = new URLSearchParams(location.search);
+      const embedded = params.get('embed') === '1';
+      const sessionId = params.get('session') || '';
+      const messageOrigin = location.protocol === 'file:' ? 'null' : location.origin;
+      const targetOrigin = location.protocol === 'file:' ? '*' : messageOrigin;
+      if (embedded) document.body.classList.add('embed');
+      const byId = id => document.getElementById(id);
+      const mount = byId('openingMount');
+      const history = [];
+      let instance = null;
+      let settings = null;
+      let lastHistoryKey = '';
+      let controllerGeneration = 0;
+      let readinessGeneration = 0;
+      const labels = { loading:'正在准备素材', ready:'准备就绪', playing:'正在播放', paused:'已暂停', completed:'播放完成', skipped:'已跳过', failed:'加载失败', destroyed:'已释放' };
+      const time = seconds => `${String(Math.floor(Math.max(0, seconds) / 60)).padStart(2, '0')}:${String(Math.floor(Math.max(0, seconds) % 60)).padStart(2, '0')}`;
+      const send = message => { if (embedded && parent !== window) parent.postMessage({ channel:'zending-opening-demo', version:1, sessionId, ...message }, targetOrigin); };
+      const remember = event => { history.push(event); if (history.length > 128) history.shift(); };
+      function update(state) {
+        byId('statusText').textContent = labels[state.status] || state.status;
+        byId('timeText').textContent = `${time(state.elapsedSeconds)} / ${time(state.totalDurationSeconds)}`;
+        const progress = Math.max(0, Math.min(100, (state.progress || 0) * 100));
+        byId('timelineFill').style.width = `${progress}%`;
+        document.querySelector('.timeline').setAttribute('aria-valuenow', String(Math.round(progress)));
+        const terminal = ['completed','skipped','failed','destroyed'].includes(state.status);
+        byId('pauseToggle').disabled = terminal || state.status === 'loading';
+        byId('pauseToggle').textContent = state.isPaused ? '继续播放' : '暂停播放';
+        byId('skip').disabled = terminal || settings?.allowSkip === false;
+        const pointerEvents = terminal ? 'none' : 'auto';
+        if (mount.style.pointerEvents !== pointerEvents) mount.style.pointerEvents = pointerEvents;
+        const key = `${state.status}:${state.stageIndex}`;
+        if (key !== lastHistoryKey) { remember({ type:'state', ...state }); lastHistoryKey = key; }
+        send({ type:'state', state });
+      }
+      function showError(error) {
+        byId('errorText').hidden = false;
+        byId('errorText').textContent = error instanceof Error ? error.message : String(error);
+        remember({ type:'error', message:byId('errorText').textContent });
+        mount.style.pointerEvents = 'none';
+        send({ type:'error', message:byId('errorText').textContent });
+      }
+      function loadForm(value) {
+        byId('brandName').value = value.reference.brandName;
+        byId('heroTitle').value = value.reference.heroTitle;
+        byId('finaleTitle').value = value.reference.finaleTitle;
+        byId('duration').value = String(Number(value.reference.stageDurations.reduce((sum, item) => sum + item, 0).toFixed(3)));
+        byId('allowSkip').checked = value.allowSkip;
+        byId('breathing').checked = value.breathingEnabled;
+      }
+      function readForm() {
+        const next = ZendingOpening.defaultSettings();
+        const duration = Number(byId('duration').value);
+        if (!Number.isFinite(duration) || duration < 1) throw new Error('请输入不小于 1 秒的播放时长。');
+        const originalTotal = next.reference.stageDurations.reduce((sum, item) => sum + item, 0);
+        next.reference = { ...next.reference, brandName:byId('brandName').value, heroTitle:byId('heroTitle').value, finaleTitle:byId('finaleTitle').value,
+          stageDurations:next.reference.stageDurations.map(item => item / originalTotal * duration) };
+        next.allowSkip = byId('allowSkip').checked;
+        next.breathingEnabled = byId('breathing').checked;
+        return next;
+      }
+      function watchReady(controller) {
+        const generation = ++readinessGeneration;
+        controller.ready.then(() => {
+          if (instance === controller && generation === readinessGeneration) send({ type:'ready' });
+        }, error => {
+          // 应用新设置和重新播放会取消旧轮准备，旧 Promise 不得覆盖当前轮的界面。
+          if (instance !== controller || generation !== readinessGeneration || error?.name === 'AbortError') return;
+          showError(error);
+        });
+      }
+      function start(next) {
+        const generation = ++controllerGeneration;
+        instance?.destroy();
+        settings = next;
+        byId('errorText').hidden = true;
+        byId('statusText').textContent = '正在准备素材';
+        byId('pauseToggle').disabled = true;
+        lastHistoryKey = '';
+        mount.style.pointerEvents = 'auto';
+        instance = ZendingOpening.createOpening(mount, {
+          settings,
+          onProgress:state => { if (generation === controllerGeneration) update(state); },
+          onComplete:result => { if (generation !== controllerGeneration) return; remember({ type:'complete', reason:result.reason }); send({ type:'complete', reason:result.reason }); },
+          onError:error => { if (generation === controllerGeneration) showError(error); },
+        });
+        watchReady(instance);
+        return instance;
+      }
+      const restart = () => {
+        readinessGeneration++;
+        byId('errorText').hidden = true;
+        byId('statusText').textContent = '正在准备素材';
+        byId('pauseToggle').disabled = true;
+        mount.style.pointerEvents = 'auto';
+        instance.restart();
+        watchReady(instance);
+      };
+      byId('settingsForm').addEventListener('submit', event => { event.preventDefault(); try { start(readForm()); } catch (error) { showError(error); } });
+      byId('reset').addEventListener('click', () => { const next = ZendingOpening.defaultSettings(); loadForm(next); start(next); });
+      byId('pauseToggle').addEventListener('click', () => { if (instance.getState().isPaused) instance.resume(); else instance.pause(); });
+      byId('skip').addEventListener('click', () => instance.skip());
+      byId('replay').addEventListener('click', restart);
+      byId('businessReplay').addEventListener('click', restart);
+      window.addEventListener('message', event => {
+        if (!embedded || event.source !== parent || event.origin !== messageOrigin || event.data?.channel !== 'zending-opening-demo'
+          || event.data.version !== 1 || event.data.sessionId !== sessionId || !instance) return;
+        const message = event.data;
+        if (message.type === 'pause') instance.pause();
+        else if (message.type === 'resume') instance.resume();
+        else if (message.type === 'restart') restart();
+        else if (message.type === 'skip') instance.skip();
+        else if (message.type === 'hostVisible' && typeof message.visible === 'boolean') instance.setHostVisible(message.visible);
+        else if (message.type === 'getState') send({ type:'state', state:instance.getState() });
+      });
+      window.addEventListener('pagehide', () => instance?.destroy());
+      try {
+        const initial = ZendingOpening.defaultSettings();
+        const queryDuration = Number(params.get('duration'));
+        if (params.has('duration') && Number.isFinite(queryDuration) && queryDuration >= 1) {
+          const total = initial.reference.stageDurations.reduce((sum, value) => sum + value, 0);
+          initial.reference.stageDurations = initial.reference.stageDurations.map(value => value / total * queryDuration);
+        }
+        if (params.has('allowSkip')) initial.allowSkip = params.get('allowSkip') !== '0';
+        loadForm(initial);
+        byId('versionText').textContent = `ZENDING OPENING · v${ZendingOpening.VERSION}`;
+        // 演示开放控制器，方便开发者在控制台试用公开 API。
+        window.openingDemo = { get instance() { return instance; }, get settings() { return settings; }, get history() { return history.slice(); } };
+        start(initial);
+      } catch (error) { showError(error); }
+    })();
+  </script>
+</body>
+</html>

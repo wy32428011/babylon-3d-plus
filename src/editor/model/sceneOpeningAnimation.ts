@@ -1,5 +1,5 @@
 import { createDefaultReferenceOpening, normalizeReferenceOpening, type SceneOpeningReferenceSettings } from './sceneOpeningReference.ts';
-import type { OpeningPackageBinding } from '../../shared/opening/openingPackage.ts';
+import { getOpeningPackageProblem, type OpeningPackageBinding } from '../../shared/opening/openingPackage.ts';
 
 export type SceneOpeningDestination = { name: string; longitude: number; latitude: number };
 
@@ -26,6 +26,32 @@ export type SceneOpeningAnimationSettings = {
   motionPreference: 'normal' | 'reduced' | 'system';
   afterOpening: 'stay' | 'auto-patrol';
 };
+
+/** 场景只保存实际存在的配置；完整默认值仅供受控渲染器适配使用。 */
+export type SceneOpeningConfig = Partial<SceneOpeningAnimationSettings> & { unavailableReason?: string };
+
+export function normalizeSceneOpeningConfig(value: unknown): SceneOpeningConfig | undefined {
+  const settings = asRecord(value);
+  if (!settings || settings.template === 'none') return undefined;
+  if (settings.template !== 'package') return structuredClone(settings) as SceneOpeningConfig;
+  return {
+    template: 'package', enabled: settings.enabled === true,
+    allowSkip: typeof settings.allowSkip === 'boolean' ? settings.allowSkip : true,
+    motionPreference: settings.motionPreference === 'reduced' || settings.motionPreference === 'system' ? settings.motionPreference : 'normal',
+    ...(settings.package !== undefined ? { package: structuredClone(settings.package) as OpeningPackageBinding } : {}),
+    ...(typeof settings.unavailableReason === 'string' ? { unavailableReason: settings.unavailableReason } : {}),
+    // 兼容已保存的旧包播放参数；新包将这三项放入自己的 schema/config.values。
+    ...(typeof settings.breathingEnabled === 'boolean' ? { breathingEnabled: settings.breathingEnabled } : {}),
+    ...(typeof settings.breathingIntensity === 'number' ? { breathingIntensity: settings.breathingIntensity } : {}),
+    ...(typeof settings.breathingPeriodSeconds === 'number' ? { breathingPeriodSeconds: settings.breathingPeriodSeconds } : {}),
+  };
+}
+
+/** 场景运行只接受显式绑定的有效包；旧内置配置保留给迁移，不隐式启动。 */
+export function resolvePackageOpeningSettings(value: unknown): SceneOpeningAnimationSettings {
+  const settings = normalizeSceneOpeningAnimation(value);
+  return { ...settings, enabled: settings.template === 'package' && settings.enabled && !getOpeningPackageProblem(settings.package) };
+}
 
 export const SCENE_OPENING_MIN_DURATION_SECONDS = 6;
 export const SCENE_OPENING_MAX_DURATION_SECONDS = 90;

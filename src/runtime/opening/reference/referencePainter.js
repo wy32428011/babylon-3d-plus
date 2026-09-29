@@ -1,5 +1,7 @@
 // 从用户提供的参考 HTML 抽取；原绘制常量与分镜保持，配置仅注入UV路线和呼吸时钟。
 const clamp01=x=>Math.max(0,Math.min(1,x));
+// 可调镜头轴会让局部呼吸时钟为负；循环相位必须取正模，避免脉冲半径和透明度越界。
+const cyclePhase=x=>((x%1)+1)%1;
 const lerp=(a,b,t)=>a+(b-a)*t;
 const smooth=(a,b,x)=>{const t=clamp01((x-a)/(b-a));return t*t*(3-2*t);};
 const easeQuint=t=>{t=clamp01(t);return t<.5?16*t*t*t*t*t:1-Math.pow(-2*t+2,5)/2;};
@@ -78,7 +80,7 @@ export function createPainter(backCanvas,effectsCanvas,images,configuration){
    if(alpha<.001)return;ctx.save();ctx.globalCompositeOperation='lighter';
    const rgb=gold?'255,199,79':'64,203,255';
    for(let i=0;i<3;i++){
-     const moving=((effectTime(t)*.34+i/3)%1+1)%1,p=i/3+(moving-i/3)*Math.min(1,amplitude()),r=radius*(.34+p*.96);
+    const moving=cyclePhase(effectTime(t)*.34+i/3),p=i/3+(moving-i/3)*Math.min(1,amplitude()),r=radius*(.34+p*.96);
      ctx.strokeStyle=`rgba(${rgb},${(1-p)*alpha})`;ctx.lineWidth=1.1;ctx.beginPath();ctx.ellipse(point.x,point.y,r,r*ellipse,0,0,Math.PI*2);ctx.stroke();
    }
    ctx.fillStyle=`rgba(${rgb},${alpha*.2})`;ctx.beginPath();ctx.ellipse(point.x,point.y,radius*.3,radius*.3*ellipse,0,0,Math.PI*2);ctx.fill();ctx.restore();
@@ -111,7 +113,7 @@ export function createPainter(backCanvas,effectsCanvas,images,configuration){
        const glow=ctx.createRadialGradient(now.x,now.y,0,now.x,now.y,7);glow.addColorStop(0,route.gold?'rgba(255,241,197,.9)':'rgba(211,250,255,.95)');glow.addColorStop(.28,`rgba(${rgb},.7)`);glow.addColorStop(1,`rgba(${rgb},0)`);ctx.fillStyle=glow;ctx.fillRect(now.x-7,now.y-7,14,14);
        if(i%6===0){const prev=uvPoint(rect,...route.points[Math.max(0,head-1)]);ctx.save();ctx.translate(now.x,now.y);ctx.rotate(Math.atan2(now.y-prev.y,now.x-prev.x));ctx.fillStyle=route.gold?'#ffedbd':'#bcf3ff';ctx.beginPath();ctx.moveTo(6,0);ctx.lineTo(-4,-3);ctx.lineTo(-2,0);ctx.lineTo(-4,3);ctx.closePath();ctx.fill();ctx.restore();}
      }
-     if(reveal>.92){const p=uvPoint(rect,...route.dest);const moving=(effectTime(age)*.40+route.phase)%1,pulse=route.phase+(moving-route.phase)*Math.min(1,amplitude());if(route.pulse!==false){ctx.strokeStyle=`rgba(${rgb},${.48*(1-pulse)})`;ctx.lineWidth=.8;ctx.beginPath();ctx.arc(p.x,p.y,3+pulse*8,0,Math.PI*2);ctx.stroke();}ctx.fillStyle=route.color?`rgb(${rgb})`:(route.gold?'#ffe7ae':'#a4eeff');ctx.beginPath();ctx.arc(p.x,p.y,1.7,0,Math.PI*2);ctx.fill();}
+    if(reveal>.92){const p=uvPoint(rect,...route.dest);const moving=cyclePhase(effectTime(age)*.40+route.phase),pulse=route.phase+(moving-route.phase)*Math.min(1,amplitude());if(route.pulse!==false){ctx.strokeStyle=`rgba(${rgb},${.48*(1-pulse)})`;ctx.lineWidth=.8;ctx.beginPath();ctx.arc(p.x,p.y,3+pulse*8,0,Math.PI*2);ctx.stroke();}ctx.fillStyle=route.color?`rgb(${rgb})`:(route.gold?'#ffe7ae':'#a4eeff');ctx.beginPath();ctx.arc(p.x,p.y,1.7,0,Math.PI*2);ctx.fill();}
      ctx.restore();
    }
    ctx.restore();rings(uvPoint(rect,...origin),38*Math.min(relativeScale,2),t,.65*alpha,true);
@@ -122,7 +124,7 @@ export function createPainter(backCanvas,effectsCanvas,images,configuration){
    ctx.save();ctx.globalCompositeOperation='lighter';
    const beam=ctx.createLinearGradient(p.x,p.y-170*scale,p.x,p.y);beam.addColorStop(0,'rgba(255,207,107,0)');beam.addColorStop(.76,'rgba(255,207,107,.025)');beam.addColorStop(1,'rgba(255,207,107,.15)');ctx.fillStyle=beam;ctx.beginPath();ctx.moveTo(p.x-6,p.y-170*scale);ctx.lineTo(p.x+6,p.y-170*scale);ctx.lineTo(p.x+23*scale,p.y);ctx.lineTo(p.x-23*scale,p.y);ctx.closePath();ctx.fill();
    // Sparse animated gold particles suggest data entering the highlighted site.
-   for(let i=0;i<14;i++){const q=(effectTime(t)*.19+i*.079)%1,x=p.x+Math.sin(i*2.43)*16*scale,y=p.y-q*145*scale;ctx.fillStyle=`rgba(255,224,151,${Math.sin(q*Math.PI)*.55})`;ctx.fillRect(x,y,1.4,3.5);}
+  for(let i=0;i<14;i++){const q=cyclePhase(effectTime(t)*.19+i*.079),x=p.x+Math.sin(i*2.43)*16*scale,y=p.y-q*145*scale;ctx.fillStyle=`rgba(255,224,151,${Math.sin(q*Math.PI)*.55})`;ctx.fillRect(x,y,1.4,3.5);}
    ctx.restore();
  }
  function drawMap(kind,rect,t,alpha=1){

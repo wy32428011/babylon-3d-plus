@@ -24,7 +24,7 @@ export type ResolvedOpeningResources = {
 export function getSceneOpeningPackage(sceneValue: unknown): OpeningPackageBinding | null {
   const scene = record(sceneValue) && record(sceneValue.scene) ? sceneValue.scene : sceneValue;
   const opening = record(scene) && record(scene.sceneSettings) ? scene.sceneSettings.openingAnimation : null;
-  if (!record(opening) || (opening.package === undefined && opening.template !== 'package')) return null;
+  if (!record(opening) || opening.template !== 'package') return null;
   const problem = getOpeningPackageProblem(opening.package);
   if (problem) throw new Error(problem);
   return opening.package as OpeningPackageBinding;
@@ -65,9 +65,16 @@ export async function resolveOpeningPackageResources(sceneValue: unknown, projec
 }
 
 export async function collectOpeningSourceBundles(sceneValues: readonly unknown[], projectRoot: string, signal: AbortSignal): Promise<SourceResourceBundle[]> {
-  const bundles = new Map<string, SourceResourceBundle>();
+  const resolved: ResolvedOpeningResources[] = [];
   for (const sceneValue of sceneValues) {
-    const resolved = await resolveOpeningPackageResources(sceneValue, projectRoot, signal); if (!resolved) continue;
+    const item = await resolveOpeningPackageResources(sceneValue, projectRoot, signal); if (item) resolved.push(item);
+  }
+  return openingSourceBundles(resolved, projectRoot);
+}
+
+export function openingSourceBundles(items: readonly ResolvedOpeningResources[], projectRoot: string): SourceResourceBundle[] {
+  const bundles = new Map<string, SourceResourceBundle>();
+  for (const resolved of items) {
     bundles.set(resolved.packageRoot, { sourcePath: resolved.packageRoot, destinationRelativePath: path.relative(projectRoot, resolved.packageRoot).replace(/\\/g, '/'),
       integrityFiles: resolved.files.map(file => ({ relativePath: file.relativePath, expectedSize: file.size, expectedSha256: file.sha256, label: `开场包 ${resolved.binding.id}/${file.relativePath}` })) });
     for (const { file } of resolved.overrides) bundles.set(file.sourcePath, { sourcePath: file.sourcePath,

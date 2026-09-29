@@ -43,6 +43,16 @@ export type OpeningPackageBinding = {
   definition: OpeningPackageDefinition; config: OpeningPackageConfig;
 };
 
+/** 场景快照与工程实际包定义必须一致；对象键顺序不构成版本差异。 */
+export function isOpeningPackageInstalled(binding: OpeningPackageBinding, inventory: readonly OpeningPackageBinding[]): boolean {
+  const actual = inventory.find(item => item.id === binding.id && item.version === binding.version && item.contentHash === binding.contentHash);
+  if (!actual) return false;
+  const ordered = (value: unknown): unknown => Array.isArray(value) ? value.map(ordered)
+    : value !== null && typeof value === 'object'
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, ordered(child)])) : value;
+  return JSON.stringify(ordered(actual.definition)) === JSON.stringify(ordered(binding.definition));
+}
+
 export const OPENING_PACKAGE_MAX_ASSETS = 256;
 export const OPENING_PACKAGE_MAX_STAGES = 64;
 export const OPENING_PACKAGE_MAX_ROUTES = 256;

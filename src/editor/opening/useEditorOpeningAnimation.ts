@@ -1,119 +1,90 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SceneDocument } from '../model/SceneDocument';
-import { normalizeSceneOpeningAnimation } from '../model/sceneOpeningAnimation';
+import { resolvePackageOpeningSettings } from '../model/sceneOpeningAnimation';
+import { isOpeningPackageInstalled } from '../../shared/opening/openingPackage';
 import { useEditorStore } from '../store/editorStore';
 import type { BabylonViewport } from '../../runtime/babylon/createEngine';
-import type { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import type { OpeningSnapshot } from '../../runtime/opening/GeographicOpeningRuntime';
-import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
 import { createSceneOpeningPlayback } from '../../shared/opening/createSceneOpeningPlayback';
-import type { OpeningPlaybackCoordinator, OpeningTerminal } from '../../shared/opening/OpeningPlaybackCoordinator';
+import type { OpeningPlaybackCoordinator } from '../../shared/opening/OpeningPlaybackCoordinator';
 
 export function useEditorOpeningAnimation(options: {
-  viewport: BabylonViewport | null; runtime: SceneRuntime | null; ready: boolean;
+  viewport: BabylonViewport | null; ready: boolean;
   sceneDocument: SceneDocument; sceneSessionId: string; isRuntimePreview: boolean;
-  beforeStart(): void;
-  onTerminal?(result: OpeningTerminal): void;
 }) {
-  const { viewport, runtime, ready, sceneDocument, sceneSessionId, isRuntimePreview } = options;
-  const settings = normalizeSceneOpeningAnimation(sceneDocument.sceneSettings.openingAnimation);
+  const { viewport, ready, sceneDocument, sceneSessionId, isRuntimePreview } = options;
+  const settings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
   const request = useEditorStore(state => state.openingAnimationPreviewRequest);
   const playback = useRef<OpeningPlaybackCoordinator | null>(null);
+  const previewHost = useRef<HTMLElement | null>(null);
   const [active, setActive] = useState(false);
   const [snapshot, setSnapshot] = useState<OpeningSnapshot | null>(null);
-  const runKey = `${sceneSessionId}:${isRuntimePreview}`;
-  const [completedRunKey, setCompletedRunKey] = useState<string | null>(null);
-  const played = useRef(false);
-  const mounted = useRef(true);
-  const latest = useRef(options);
-  latest.current = options;
-  const stop = useCallback(() => { playback.current?.cancel(); playback.current = null; }, []);
-  const skip = useCallback(() => playback.current?.skip(), []);
-
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; playback.current?.dispose(); playback.current = null; };
+  const played = useRef(false), mounted = useRef(true), generation = useRef(0);
+  const latest = useRef(options); latest.current = options;
+  const stop = useCallback(() => {
+    generation.current++; playback.current?.dispose(); playback.current = null;
+    previewHost.current?.remove(); previewHost.current = null;
   }, []);
-  useEffect(() => {
-    stop(); played.current = false; setCompletedRunKey(null); setSnapshot(null); setActive(false);
-  }, [sceneSessionId, isRuntimePreview, stop]);
-  useEffect(() => { if (!settings.enabled) stop(); }, [settings.enabled, stop]);
+  const skip = useCallback(() => playback.current?.skip(), []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; stop(); }; }, [stop]);
+  useEffect(() => { stop(); played.current = false; setActive(false); setSnapshot(null); }, [sceneSessionId, isRuntimePreview, stop]);
+  useEffect(() => { stop(); setActive(false); setSnapshot(null); }, [sceneDocument.sceneSettings.openingAnimation, stop]);
 
-  const start = useCallback((restoreEditView: boolean) => {
+  const start = useCallback(async (preview: boolean) => {
     const current = latest.current;
-    const vp = current.viewport, rt = current.runtime;
-    if (!vp || !rt || !current.ready) return;
-    stop();
-    const config = normalizeSceneOpeningAnimation(current.sceneDocument.sceneSettings.openingAnimation);
-    const originalSession = current.sceneSessionId;
-    const reportFailure = (error: unknown) => {
-      console.error('[编辑器开场动画]', error);
-      useEditorStore.getState().pushLog(`开场动画失败，已恢复场景：${error instanceof Error ? error.message : String(error)}`);
+    const config = resolvePackageOpeningSettings(current.sceneDocument.sceneSettings.openingAnimation);
+    if (config.template !== 'package' || !config.package) return;
+    if (!preview && (!current.ready || !config.enabled)) return;
+    stop(); const token = generation.current;
+    const failure = (error: unknown) => {
+      console.warn('[编辑器开场动画]', error);
+      useEditorStore.getState().pushLog('开场未播放，三维场景继续运行：' + (error instanceof Error ? error.message : String(error)));
     };
     try {
-      // 相机过渡中不能读取完整视角；先保留当前帧，运行态无需编辑视角快照。
-      vp.cancelCameraTransition('replaced');
-      const originalView = restoreEditView
-        ? { ...vp.getCameraView(), viewDistance: current.sceneDocument.sceneSettings.camera.viewDistance }
-        : null;
-      let session: OpeningPlaybackCoordinator;
-      session = createSceneOpeningPlayback({
-        viewport: vp, runtime: rt, settings: config,
-        beforeStart: () => {
-          latest.current.beforeStart();
-          applySavedSceneCameraView(vp, current.sceneDocument.sceneSettings.camera, { animate: false, lockStandardOrientation: !current.isRuntimePreview });
-        },
+      // 桌面预览必须确认固定版本已导入，不能只凭场景中的定义快照冒充资源可用。
+      if (window.editorApi?.listOpeningPackages) {
+        const inventory = await window.editorApi.listOpeningPackages();
+        if (!isOpeningPackageInstalled(config.package, inventory.packages)) throw new Error('当前开场包未导入或不可用，请重新导入所需版本。');
+      }
+      if (!mounted.current || token !== generation.current) return;
+      let container = current.viewport?.engine.getRenderingCanvas()?.parentElement;
+      if (preview) {
+        // 编辑态只打开独立预览层，不读取或恢复业务相机，不暂停业务播放器。
+        const host = document.createElement('div'); host.className = 'opening-editor-preview';
+        host.setAttribute('role', 'dialog'); host.setAttribute('aria-label', '开场包独立预览');
+        Object.assign(host.style, { position: 'fixed', inset: '8vh 8vw', zIndex: '10000', background: '#020815', border: '1px solid #579ac0', borderRadius: '8px', overflow: 'hidden' });
+        const close = document.createElement('button'); close.textContent = '关闭开场预览 · Esc';
+        Object.assign(close.style, { position: 'absolute', zIndex: '100', top: '8px', right: '8px' });
+        close.onclick = stop; host.appendChild(close); document.body.appendChild(host); previewHost.current = host; container = host;
+      }
+      if (!container) throw new Error('开场展示容器尚未就绪。');
+      const instance = createSceneOpeningPlayback({ container, settings: { ...config, enabled: true },
         onActiveChange: value => { if (mounted.current) setActive(value); },
         onProgress: value => { if (mounted.current) setSnapshot(value); },
-        onTerminal: result => {
-          if (originalView && mounted.current && latest.current.sceneSessionId === originalSession
-            && !latest.current.isRuntimePreview && !vp.scene.isDisposed) {
-            vp.applyCameraView(originalView, { animate: false });
-          }
-          if (mounted.current) { setSnapshot(null); setCompletedRunKey(`${originalSession}:${current.isRuntimePreview}`); }
-          if (mounted.current && latest.current.sceneSessionId === originalSession) latest.current.onTerminal?.(result);
-          if (playback.current === session) playback.current = null;
-        },
-        onError: reportFailure,
-      });
-      playback.current = session;
-      void session.start();
-    } catch (error) {
-      reportFailure(error);
-      if (mounted.current) {
-        setActive(false); setSnapshot(null); setCompletedRunKey(`${originalSession}:${current.isRuntimePreview}`);
-        latest.current.onTerminal?.('failed');
-      }
-    }
+        onTerminal: () => {
+          if (mounted.current) { setActive(false); setSnapshot(null); }
+          previewHost.current?.remove(); previewHost.current = null;
+        }, onError: failure });
+      playback.current = instance; void instance.start();
+    } catch (error) { if (token === generation.current) { stop(); failure(error); } }
   }, [stop]);
-
   useEffect(() => {
     if (!request || request.sceneSessionId !== sceneSessionId) return;
     useEditorStore.getState().consumeOpeningAnimationPreviewRequest(request.requestId, request.sceneSessionId);
-    if (request.action === 'stop') { stop(); return; }
-    if (!ready) { useEditorStore.getState().pushLog('场景尚未准备完成，请加载完成后预览开场动画。'); return; }
-    if (!isRuntimePreview && settings.enabled) start(true);
-  }, [request, sceneSessionId, ready, isRuntimePreview, settings.enabled, start, stop]);
-
+    if (request.action === 'stop') stop(); else if (!isRuntimePreview) void start(true);
+  }, [request, sceneSessionId, isRuntimePreview, start, stop]);
   useEffect(() => {
-    if (!isRuntimePreview || !ready || !viewport || !runtime || played.current || !settings.enabled) return;
-    played.current = true;
-    start(false);
-  }, [isRuntimePreview, ready, viewport, runtime, settings.enabled, start]);
-
+    if (!isRuntimePreview || !ready || !viewport || played.current || !settings.enabled) return;
+    played.current = true; void start(false);
+  }, [isRuntimePreview, ready, viewport, settings.enabled, start]);
   useEffect(() => {
     if (!active) return;
     const key = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      event.preventDefault(); event.stopImmediatePropagation();
       if (!isRuntimePreview) stop(); else if (settings.allowSkip) skip();
     };
     window.addEventListener('keydown', key, true);
     return () => window.removeEventListener('keydown', key, true);
   }, [active, isRuntimePreview, settings.allowSkip, stop, skip]);
-
-  return { active, snapshot, settings, stop, skip,
-    // 编辑态预览完成不能放行下一次运行预览的巡检，避免模式切换同一提交中的竞态。
-    blockAutoPatrol: isRuntimePreview && settings.enabled && (completedRunKey !== runKey || settings.afterOpening === 'stay'),
-  };
+  return { active, snapshot, settings, stop, skip };
 }

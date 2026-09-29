@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ZipArchive } from 'archiver';
@@ -47,7 +47,9 @@ async function writePackage(output, definition, assets) {
   for (const name of Object.keys(files)) archive.file(path.join(folder, name), { name });
   for (const [, assetPath] of assets) archive.file(path.join(folder, assetPath), { name: assetPath });
   await archive.finalize(); await finished;
-  return { id: definition.manifest.id, folder, zip, stages: definition.timeline.stages.length, definition };
+  const plugin = `${folder}.dtopening`;
+  await copyFile(zip, plugin);
+  return { id: definition.manifest.id, folder, zip, plugin, stages: definition.timeline.stages.length, definition };
 }
 
 export async function buildOpeningPackages(output = path.join(root, 'output/opening-packages')) {
@@ -55,14 +57,19 @@ export async function buildOpeningPackages(output = path.join(root, 'output/open
   const reference = createDefaultReferenceOpening();
   const referenceFields = {
     brandName: { type: 'string', title: '品牌名称', maxLength: 80 },
+    companyName: { type: 'string', title: '公司名称', maxLength: 160 },
     heroTitle: { type: 'string', title: '开场标题', format: 'multiline', maxLength: 160 },
     heroSubtitle: { type: 'string', title: '开场说明', format: 'multiline', maxLength: 240 },
     finaleTitle: { type: 'string', title: '抵达标题', format: 'multiline', maxLength: 160 },
-    arrivalDescription: { type: 'string', title: '抵达说明', format: 'multiline' },
+    arrivalDescription: { type: 'string', title: '抵达说明（留空使用公司名称）', format: 'multiline' },
     quality: { type: 'string', title: '渲染画质', enum: ['high', 'low'] },
     showUI: { type: 'boolean', title: '显示播放器界面' },
+    breathingEnabled: { type: 'boolean', title: '科技呼吸效果' },
+    breathingIntensity: { type: 'number', title: '呼吸强度', minimum: 0, maximum: 1 },
+    breathingPeriodSeconds: { type: 'number', title: '呼吸周期（秒）', minimum: 2, maximum: 10 },
   };
-  const referenceDefaults = Object.fromEntries(Object.keys(referenceFields).map(key => [key, key === 'arrivalDescription' ? `惠山区 · ${reference.companyName}` : reference[key]]));
+  const referenceDefaults = Object.fromEntries(Object.keys(referenceFields).map(key => [key, key === 'arrivalDescription' ? '' : reference[key]]));
+  Object.assign(referenceDefaults, { breathingEnabled: true, breathingIntensity: .65, breathingPeriodSeconds: 4 });
   const referenceStages = REFERENCE_STAGES.map((stage, index) => ({ id: `stage-${index + 1}`, label: stage.label,
     durationSeconds: reference.stageDurations[index], title: stage.title, subtitle: stage.en, description: stage.detail,
     ...(index === 8 ? { titleKey: 'finaleTitle', descriptionKey: 'arrivalDescription' } : {}),
@@ -76,9 +83,9 @@ export async function buildOpeningPackages(output = path.join(root, 'output/open
     const name = `asset-${index + 1}`;
     return [name, `assets/${name}.webp`, await readFile(path.join(root, `src/runtime/opening/reference/assets/${name}.webp`))];
   }));
-  const first = await writePackage(output, { manifest: { formatVersion: 1, runtimeApiVersion: 1, id: 'reference-huishan', version: '1.0.0',
+  const first = await writePackage(output, { manifest: { formatVersion: 1, runtimeApiVersion: 1, id: 'reference-huishan', version: '1.1.0',
     name: '地球到惠山 · 参考开场', description: '保留原参考九段画面，可配置文字、时长、飞线与素材槽位。地图底图内已有文字属于像素。', renderer: 'reference-huishan', assets: [], previewAssetId: 'asset-9' },
-    schema: { type: 'object', properties: referenceFields }, uiSchema: { groups: [{ title: '品牌与叙事', fields: ['brandName', 'heroTitle', 'heroSubtitle', 'finaleTitle', 'arrivalDescription'] }, { title: '界面与画质', fields: ['quality', 'showUI'] }] },
+    schema: { type: 'object', properties: referenceFields }, uiSchema: { groups: [{ title: '品牌与叙事', fields: ['brandName', 'companyName', 'heroTitle', 'heroSubtitle', 'finaleTitle', 'arrivalDescription'] }, { title: '界面与画质', fields: ['quality', 'showUI'] }, { title: '科技呼吸', fields: ['breathingEnabled', 'breathingIntensity', 'breathingPeriodSeconds'] }] },
     defaults: referenceDefaults, timeline: { stages: referenceStages, handoffSeconds: .8 } }, referenceAssets);
 
   const origin = { x: .63, y: .64 };

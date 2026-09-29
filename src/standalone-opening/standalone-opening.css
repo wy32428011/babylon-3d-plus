@@ -1,0 +1,50 @@
+/* 插件常嵌在网页局部区域，排版应随容器宽度而非浏览器视口缩放。 */
+.zending-opening-root { container: zending-opening / inline-size; }
+.zending-opening-root .zd-intro .zd-brand-name { font-size: clamp(15px, 1.1cqw, 21px); }
+.zending-opening-root .zd-intro .zd-heading { width: min(400px, 28cqw); }
+.zending-opening-root .zd-intro .zd-heading h2 { font-size: clamp(18px, 1.9cqw, 32px); }
+.zending-opening-root .zd-intro .zd-hero h1 {
+  font-size: clamp(28px, 4.1cqw, 68px);
+  margin-bottom: clamp(10px, 1.3cqw, 21px);
+}
+.zending-opening-root .zd-intro .zd-hero p { font-size: clamp(10px, .82cqw, 14px); }
+.zending-opening-root .zd-intro.is-finale .zd-heading { width: 15.3cqw; }
+.zending-opening-root .zd-intro.is-finale .zd-heading h2 { font-size: clamp(20px, 1.9cqw, 30px); }
+
+@container zending-opening (max-width: 1000px) {
+  .zending-opening-root .zd-intro .zd-caption-note,
+  .zending-opening-root .zd-intro .zd-stage-btn small,
+  .zending-opening-root .zd-intro .zd-readout { display: none; }
+  .zending-opening-root .zd-intro .zd-stage-btn { font-size: 10px; gap: 3px; }
+  .zending-opening-root .zd-intro .zd-heading { top: 15%; width: 30%; }
+  .zending-opening-root .zd-intro .zd-brand-en,
+  .zending-opening-root .zd-intro .zd-preview-badge { font-size: 8px; }
+  .zending-opening-root .zd-intro .zd-controls-left,
+  .zending-opening-root .zd-intro .zd-controls-right { gap: 6px; }
+  .zending-opening-root .zd-intro .zd-hero { left: 4%; width: 35%; }
+  .zending-opening-root .zd-intro .zd-hero h1 { font-size: clamp(28px, 4cqw, 48px); }
+}
+
+@container zending-opening (max-width: 650px) {
+  .zending-opening-root .zd-intro .zd-header { top: 19px; }
+  .zending-opening-root .zd-intro .zd-preview-badge,
+  .zending-opening-root .zd-intro .zd-hero p,
+  .zending-opening-root .zd-intro .zd-hero-route,
+  .zending-opening-root .zd-intro .zd-controls-right .zd-plain-btn,
+  .zending-opening-root .zd-intro .zd-select[data-role=quality],
+  .zending-opening-root .zd-intro .zd-bottom-location { display: none; }
+  .zending-opening-root .zd-intro .zd-heading { top: 12%; width: 70%; }
+  .zending-opening-root .zd-intro .zd-heading h2 { font-size: 19px; }
+  .zending-opening-root .zd-intro .zd-heading p { font-size: 9px; }
+  .zending-opening-root .zd-intro .zd-hero { top: 27%; width: 60%; left: 6%; }
+  .zending-opening-root .zd-intro .zd-hero h1 { font-size: 29px; }
+  .zending-opening-root .zd-intro .zd-player { bottom: 14px; padding: 10px; }
+  .zending-opening-root .zd-intro .zd-stage-list { overflow-x: auto; grid-template-columns: repeat(9, 70px); padding-bottom: 5px; }
+  .zending-opening-root .zd-intro .zd-overline { font-size: 8px; }
+  .zending-opening-root .zd-intro .zd-brand-name { font-size: 15px; }
+  .zending-opening-root .zd-intro .zd-controls-left { gap: 4px; }
+  .zending-opening-root .zd-intro .zd-enter { font-size: 10px; padding: 5px 7px; }
+  .zending-opening-root .zd-intro.is-finale .zd-heading { width: 63cqw; max-width: none; top: 15%; }
+  .zending-opening-root .zd-intro.is-finale .zd-heading h2 { font-size: 21px; }
+  .zending-opening-root .zd-intro.is-finale .zd-heading p { max-width: 75%; }
+}

@@ -1,4 +1,6 @@
 import React from 'react';
+import { createDefaultSceneOpeningAnimation } from '../../src/editor/model/sceneOpeningAnimation';
+import { EngineStore } from '@babylonjs/core/Engines/engineStore';
 import { createRoot } from 'react-dom/client';
 import { SceneOpeningAnimationPanel } from '../../src/editor/panels/SceneOpeningAnimationPanel';
 import { SceneViewPanel } from '../../src/editor/panels/SceneViewPanel';
@@ -45,15 +47,19 @@ const referenceDefinition = validateOpeningPackageDefinition({
     backgroundAssetId: index === 5 ? 'asset-6' : 'asset-2', ...(index === 5 ? { routes: structuredClone(definition.timeline.stages[1].routes) } : {}) })) },
 });
 const reference = createOpeningPackageBinding(referenceDefinition, original.manifestUrl, '9'.repeat(64));
-const packages = [original, upgrade, other, reference];
+const migrationDefinition = validateOpeningPackageDefinition(await (await fetch('/__opening_pkg__/reference-definition.json')).json());
+const migration = createOpeningPackageBinding(migrationDefinition, new URL('/__opening_migration__/manifest.json', location.href).href, 'e'.repeat(64));
+const packages = [original, upgrade, other, reference, migration];
+let imported = false;
 let deferImport = false;
 let releaseImport: (() => void) | null = null;
 Object.assign(window, { editorApi: {
   listProjectAssets: async () => ({ projectRoot: null, assets: [], skyboxes: [], localAssets: [], localSkyboxes: [] }),
   listCompositions: async () => [],
-  listOpeningPackages: async () => ({ projectRoot: 'fixture', packages: structuredClone(packages), warnings: [] }),
+  listOpeningPackages: async () => ({ projectRoot: 'fixture', packages: imported ? structuredClone(packages) : [], warnings: [] }),
   importOpeningPackage: async () => {
     if (deferImport) await new Promise<void>(resolve => { releaseImport = resolve; });
+    imported = true;
     return { projectRoot: 'fixture', canceled: false, package: structuredClone(original), packages: structuredClone(packages), warnings: [] };
   },
   exportOpeningPackage: async () => ({ canceled: false, filePath: 'fixture.dtopening' }),
@@ -65,12 +71,28 @@ function createScene(name = '场景 A') {
   const mesh = createMeshEntity('cube', { x: 0, y: 1, z: 0 }); mesh.components.transform.scale = { x: 6, y: 2, z: 4 };
   scene.entities[mesh.id] = mesh; scene.entityIds.push(mesh.id); reopen(serializeScene(scene));
 }
+let stopBusinessProbe = () => {};
+let probeFrames = 0;
+function businessScene() { return EngineStore.Instances.flatMap(engine => engine.scenes).find(scene => scene.activeCamera); }
+function startBusinessProbe() {
+  stopBusinessProbe(); const scene = businessScene(); if (!scene) throw new Error('真实三维场景尚未创建');
+  const camera = scene.activeCamera as import('@babylonjs/core/Cameras/arcRotateCamera').ArcRotateCamera;
+  camera.alpha += 1.1; probeFrames = 0;
+  const observer = scene.onBeforeRenderObservable.add(() => { probeFrames++; camera.alpha += .001; });
+  stopBusinessProbe = () => { scene.onBeforeRenderObservable.remove(observer); };
+}
+function businessState() {
+  const scene = businessScene();
+  return { frames: probeFrames, sceneId: scene?.uid, alpha: (scene?.activeCamera as import('@babylonjs/core/Cameras/arcRotateCamera').ArcRotateCamera)?.alpha };
+}
 createScene();
 createRoot(document.getElementById('root')!).render(<main style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 470px', height: '100vh' }}>
   <div style={{ display: 'grid', gridTemplateRows: 'minmax(0,1fr) 90px', minHeight: 0 }}><SceneViewPanel /><ProjectPanel /></div>
   <aside className="panel inspector-panel" style={{ overflow: 'auto', padding: 18 }}><h2>开场包配置</h2><SceneOpeningAnimationPanel /></aside>
 </main>);
 Object.assign(window, { openingPackageHarness: {
+  makeLegacy: createDefaultSceneOpeningAnimation,
+  startBusinessProbe, businessState, stopBusinessProbe: () => stopBusinessProbe(),
   store: useEditorStore, original, packages, createScene, reopen, preparation: getScenePreparationSnapshot,
   save: () => serializeScene(useEditorStore.getState().scene),
   defer: () => { deferImport = true; }, release: () => { releaseImport?.(); deferImport = false; },

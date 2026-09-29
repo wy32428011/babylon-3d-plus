@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ZENDING · iframe 嵌入演示</title>
+  <style>
+    :root{color-scheme:dark;font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#e1eff5;background:#07131d}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 55% 0,#123346,transparent 60%),#07131d}.page{max-width:1450px;margin:auto;padding:30px}.header{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:24px}.eyebrow{font-size:11px;letter-spacing:.24em;color:#78cfe1}h1{font-size:26px;font-weight:500;margin:10px 0}p{font-size:13px;color:#89a7b8;line-height:1.8;margin:0}a{color:#8dd8e7;text-decoration:none;font-size:13px}.shell{position:relative;aspect-ratio:16/9;border:1px solid #294754;border-radius:14px;overflow:hidden;background:#08121c}.shell::before{position:absolute;inset:0;display:grid;place-items:center;content:"动画已隐藏 · 宿主业务继续运行";color:#7696a8;font-size:15px}iframe{position:relative;width:100%;height:100%;border:0;display:block}.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:18px 0}button{font:inherit;font-size:12px;background:#183441;color:#d5f0f7;border:1px solid #345e6c;padding:10px 15px;border-radius:7px;cursor:pointer}button:hover{background:#234c5b}button:focus-visible,a:focus-visible{outline:2px solid #96e9f3;outline-offset:4px}.status{margin-left:auto;font-size:12px;color:#7f9cac}.note{padding:17px 20px;border:1px solid #243f4c;background:#0b1c27;border-radius:10px}code{color:#aadfea;font-size:12px}@media(max-width:720px){.page{padding:18px 14px}.header{display:block}.header a{display:inline-block;margin-top:15px}h1{font-size:22px}.shell{aspect-ratio:4/3}.status{width:100%;margin-left:0}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="header"><div><div class="eyebrow">ZENDING / EMBED EXPERIENCE</div><h1>把开场嵌入你的页面</h1><p>宿主页面与动画各自运行，播放控制通过消息传递。</p></div><a href="./demo.html">← 返回独立演示</a></header>
+    <div class="shell"><iframe id="openingFrame" title="独立开场动画" src="about:blank"></iframe></div>
+    <div class="toolbar"><button type="button" id="pause">暂停</button><button type="button" id="resume">继续</button><button type="button" id="restart">重新播放</button><button type="button" id="visibility">隐藏动画</button><span id="status" class="status" role="status">正在连接动画</span></div>
+    <div class="note"><p>点击“隐藏动画”会同时暂停动画计时，重新显示后接着播放。此页展示最小 <code>postMessage</code> 接入方式，可直接查看 HTML 源码。</p></div>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const frame = document.getElementById('openingFrame');
+      const params = new URLSearchParams(location.search);
+      const sessionId = crypto.randomUUID();
+      const messageOrigin = location.protocol === 'file:' ? 'null' : location.origin;
+      const targetOrigin = location.protocol === 'file:' ? '*' : messageOrigin;
+      const frameUrl = new URL('./demo.html', location.href);
+      frameUrl.searchParams.set('embed', '1');
+      frameUrl.searchParams.set('session', sessionId);
+      if (params.has('duration')) {
+        const duration = Number(params.get('duration'));
+        if (Number.isFinite(duration) && duration >= 1) frameUrl.searchParams.set('duration', String(duration));
+      }
+      let visible = true;
+      const send = message => frame.contentWindow.postMessage({ channel:'zending-opening-demo', version:1, sessionId, ...message }, targetOrigin);
+      for (const type of ['pause','resume','restart']) document.getElementById(type).addEventListener('click', () => send({ type }));
+      document.getElementById('visibility').addEventListener('click', () => {
+        visible = !visible;
+        frame.style.visibility = visible ? 'visible' : 'hidden';
+        send({ type:'hostVisible', visible });
+        document.getElementById('visibility').textContent = visible ? '隐藏动画' : '显示动画';
+      });
+      window.addEventListener('message', event => {
+        const message = event.data;
+        if (event.source !== frame.contentWindow || event.origin !== messageOrigin || message?.channel !== 'zending-opening-demo'
+          || message.version !== 1 || message.sessionId !== sessionId) return;
+        if (message.type === 'state') {
+          window.iframeDemoState = message.state;
+          const state = message.state;
+          const label = { loading:'准备中', playing:'播放中', paused:'已暂停', completed:'已完成', skipped:'已跳过', failed:'加载失败' }[state.status] || state.status;
+          document.getElementById('status').textContent = `${label} · ${Math.floor(state.elapsedSeconds)} / ${Math.round(state.totalDurationSeconds)} 秒`;
+        } else if (message.type === 'error') document.getElementById('status').textContent = `动画加载失败：${message.message}`;
+      });
+      frame.addEventListener('load', () => send({ type:'getState' }));
+      frame.src = frameUrl.href;
+    })();
+  </script>
+</body>
+</html>

@@ -4,13 +4,15 @@ import test from 'node:test';
 
 const playerSource = await readFile(new URL('../../src/player/PlayerApp.tsx', import.meta.url), 'utf8');
 
-test('发布 Viewer 在模型与环境结算后开始开场，开场终态再放行自动巡检', () => {
+test('发布 Viewer 在模型与环境结算后开始开场，自动巡检只等业务首帧而不等开场终态', () => {
   assert.match(playerSource, /const autoPatrolStartGate = new DeferredAutoPatrolStartGate\(\)/);
   assert.match(
     playerSource,
     /const initialLoadGate = new PlayerInitialLoadGate\([\s\S]*?onSettled: startOpening/,
   );
-  assert.match(playerSource, /const startOpening = [\s\S]*?createSceneOpeningPlayback\([\s\S]*?onTerminal: result => \{[\s\S]*?autoPatrolStartGate\.markReady\(\)/);
+  assert.match(playerSource, /markInitialLoadComplete\(\);\s*autoPatrolStartGate\.markReady\(\)/);
+  const openingStart = playerSource.slice(playerSource.indexOf('const startOpening ='), playerSource.indexOf('setInitialLoadCompleted(false)'));
+  assert.doesNotMatch(openingStart, /autoPatrolStartGate\.|setOpeningCameraOwned|manualRoam\?\.setEnabled|autoPatrolPlayback\?\.stop|pauseHistoryReplay\(/);
   assert.doesNotMatch(playerSource, /initialLoadGate\.forceComplete\(/, '慢加载不能绕过真实首帧并提前播放开场');
   assert.match(playerSource, /initialLoadGate\.update\(progress\);\s*setModelLoadProgress\(progress\);/);
   assert.match(playerSource, /initialLoadGate\.startTracking\(\);\s*runtime\.sync\(sceneDocument\);/);

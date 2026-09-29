@@ -1,4 +1,6 @@
 .opening-animation-overlay { position: absolute; inset: 0; z-index: 80; overflow: hidden; color: #edf8ff; background: #020815; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; }
+/* 只遮住展示控件，不卸载业务 iframe、数据订阅或三维场景。加载失败/结束即恢复。 */
+.opening-presentation-active > :not(canvas):not(.opening-animation-overlay):not(.geographic-opening-host):not([aria-busy="true"]) { visibility: hidden; pointer-events: none; }
 .opening-animation-overlay.is-ready { background: transparent; pointer-events: none; }
 .opening-animation-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; }
 .opening-animation-loading > i { width: 64px; height: 64px; border: 1px solid #56b5e544; border-top-color: #7ce7ff; border-radius: 50%; box-shadow: 0 0 35px #1689c422; }

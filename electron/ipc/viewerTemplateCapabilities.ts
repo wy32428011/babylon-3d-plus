@@ -21,7 +21,7 @@ type ViewerTemplateCapabilities = {
   version: 1;
   entryFiles: FileIntegrity[];
   openingAnimation: { template: string; assets: (FileIntegrity & { id: string })[] };
-  openingPackages?: { runtimeApiVersion: number; renderers: string[] };
+  openingPackages?: { runtimeApiVersion: number; renderers: string[]; isolatedPlayback?: boolean };
 };
 
 function invalidManifest(): Error {
@@ -83,32 +83,34 @@ export function createViewerTemplateCapabilities(
       template: OPENING_TEMPLATE,
       assets: openingAssets.map(asset => ({ id: asset.id, ...integrity(asset) })),
     },
-    openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline'] },
+    openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline'], isolatedPlayback: true },
   });
 }
 
 /** 只对启用开场的场景要求新能力；普通旧场景仍可沿用旧模板。 */
-export async function assertViewerTemplateSupportsScene(
-  sceneContent: string,
+async function checkTemplate(
+  sceneContent: string | null,
   templateFiles: readonly TemplateFile[],
   signal: AbortSignal,
+  coreOnly: boolean,
 ): Promise<void> {
   assertNotAborted(signal);
   let sceneFile: unknown;
   try {
-    sceneFile = JSON.parse(sceneContent);
+    sceneFile = sceneContent === null ? {} : JSON.parse(sceneContent);
   } catch {
     throw new Error('导出场景不是有效 JSON。');
   }
   const scene = isRecord(sceneFile) && isRecord(sceneFile.scene) ? sceneFile.scene : null;
   const settings = scene && isRecord(scene.sceneSettings) ? scene.sceneSettings : null;
   const opening = settings && isRecord(settings.openingAnimation) ? settings.openingAnimation : null;
-  if (!opening || opening.enabled !== true) return;
-  if (opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
+  if (!coreOnly && (!opening || opening.enabled !== true)) return;
+  if (!coreOnly && opening && opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
     throw new Error(`Viewer 模板不支持场景配置的开场动画。${REBUILD_HINT}`);
   }
   const filesByPath = new Map(templateFiles.map(file => [file.destinationRelativePath, file]));
   const manifestFile = filesByPath.get(VIEWER_TEMPLATE_CAPABILITIES_PATH);
+  if (!manifestFile && coreOnly) return;
   if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前开场动画。${REBUILD_HINT}`);
   if (manifestFile.size <= 0 || manifestFile.size > MAX_MANIFEST_BYTES) throw invalidManifest();
   let manifest: ViewerTemplateCapabilities;
@@ -123,7 +125,7 @@ export async function assertViewerTemplateSupportsScene(
     assertNotAborted(signal);
     throw invalidManifest();
   }
-  if (opening.template === 'package') {
+  if (!coreOnly && opening?.template === 'package') {
     const binding = isRecord(opening.package) ? opening.package : null;
     const definition = binding && isRecord(binding.definition) ? binding.definition : null;
     const requested = definition && isRecord(definition.manifest) ? definition.manifest : null;
@@ -132,8 +134,9 @@ export async function assertViewerTemplateSupportsScene(
       || !Array.isArray(support.renderers) || !support.renderers.includes(String(requested.renderer))) {
       throw new Error(`Viewer 模板不支持此开场插件包的协议或渲染器。${REBUILD_HINT}`);
     }
+    if (support.isolatedPlayback !== true) throw new Error(`Viewer 模板不具备开场业务隔离能力，本次不启用开场。${REBUILD_HINT}`);
   }
-  for (const expected of [...manifest.entryFiles, ...manifest.openingAnimation.assets]) {
+  for (const expected of [...manifest.entryFiles, ...(!coreOnly && opening?.template !== 'package' ? manifest.openingAnimation.assets : [])]) {
     assertNotAborted(signal);
     const file = filesByPath.get(expected.path);
     if (!file) throw new Error(`Viewer 模板缺少开场动画资源：${expected.path}。${REBUILD_HINT}`);
@@ -156,4 +159,22 @@ export async function assertViewerTemplateSupportsScene(
     file.expectedSha256 = expected.sha256;
     file.integrityLabel = `Viewer 开场动画资源 ${expected.path}`;
   }
+}
+
+/** 业务 Viewer 的代码完整性始终严格检查；不能随可选开场一起降级。 */
+export function assertViewerCoreIntegrity(files: readonly TemplateFile[], signal: AbortSignal): Promise<void> {
+  return checkTemplate(null, files, signal, true);
+}
+export function assertViewerTemplateSupportsScene(scene: string, files: readonly TemplateFile[], signal: AbortSignal): Promise<void> {
+  return checkTemplate(scene, files, signal, false);
+}
+
+/** DIST 仅使用已绑定包内素材；模板能力清单与旧内置参考图片是构建期资源。 */
+export async function selectRuntimeTemplateFiles<T extends TemplateFile>(files: readonly T[], signal: AbortSignal): Promise<T[]> {
+  const source = files.find(file => file.destinationRelativePath === VIEWER_TEMPLATE_CAPABILITIES_PATH);
+  if (!source) return [...files];
+  assertNotAborted(signal);
+  const manifest = parseCapabilities(JSON.parse(await fs.readFile(source.sourcePath, { encoding: 'utf8', signal })));
+  const excluded = new Set([VIEWER_TEMPLATE_CAPABILITIES_PATH, ...manifest.openingAnimation.assets.map(asset => asset.path)]);
+  return files.filter(file => !excluded.has(file.destinationRelativePath));
 }

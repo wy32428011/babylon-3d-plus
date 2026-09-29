@@ -16,6 +16,7 @@ after(async () => {
 const packages = await buildOpeningPackages(path.join(temporaryRoot, 'packages'));
 const entry = path.join(temporaryRoot, 'entry.mjs');
 await writeFile(entry, [
+  "export { migrateLegacyOpening } from '../../src/editor/opening/migrateLegacyOpening.ts';",
   "export { createOpeningVisualPlan } from '../../src/runtime/opening/createOpeningVisualPlan.ts';",
   "export { createDefaultSceneOpeningAnimation } from '../../src/editor/model/sceneOpeningAnimation.ts';",
   "export { GeographicOpeningRuntime } from '../../src/runtime/opening/GeographicOpeningRuntime.ts';",
@@ -24,7 +25,7 @@ await writeFile(entry, [
 ].join('\n'));
 await build({ configFile: false, publicDir: false, logLevel: 'silent',
   build: { ssr: entry, outDir: path.join(temporaryRoot, 'ssr'), rolldownOptions: { output: { entryFileNames: 'modules.mjs' } } } });
-const { createOpeningVisualPlan, createDefaultSceneOpeningAnimation, GeographicOpeningRuntime, OpeningPackageAssets, installDeploymentAssetManifest, clearDeploymentAssetManifest } = await import(pathToFileURL(path.join(temporaryRoot, 'ssr/modules.mjs')).href);
+const { migrateLegacyOpening, createOpeningVisualPlan, createDefaultSceneOpeningAnimation, GeographicOpeningRuntime, OpeningPackageAssets, installDeploymentAssetManifest, clearDeploymentAssetManifest } = await import(pathToFileURL(path.join(temporaryRoot, 'ssr/modules.mjs')).href);
 
 test('两个真实ZIP均含完整声明式定义和素材，九段/三段独立通过协议', async () => {
   for (const pack of packages) {
@@ -96,13 +97,15 @@ test('未知渲染器和缺失包不会静默播放错误模板，减少动态�
 });
 
 test('宿主隐藏期间重播或用户继续不能推进时钟，恢复可见保留主动暂停，隐藏跳过立即释放', async () => {
-  const previous = { document: globalThis.document, HTMLElement: globalThis.HTMLElement, performance: globalThis.performance };
+  const previous = { document: globalThis.document, HTMLElement: globalThis.HTMLElement, performance: globalThis.performance, requestAnimationFrame: globalThis.requestAnimationFrame, cancelAnimationFrame: globalThis.cancelAnimationFrame };
   class Element { style = {}; isConnected = true; appendChild() {} contains() { return false; } remove() {} }
   globalThis.HTMLElement = Element;
   globalThis.document = { activeElement: null, createElement: () => new Element() };
   let clock = 0;
   globalThis.performance = { now: () => clock };
   const callbacks = new Set();
+  globalThis.requestAnimationFrame = callback => { callbacks.add(callback); return callback; };
+  globalThis.cancelAnimationFrame = callback => callbacks.delete(callback);
   const observable = { add(callback) { callbacks.add(callback); return callback; }, remove(callback) { callbacks.delete(callback); } };
   const scene = { getEngine: () => ({ getRenderingCanvas: () => ({ parentElement: new Element() }) }),
     onAfterRenderObservable: observable, onDisposeObservable: { add: () => null, remove() {} } };
@@ -110,7 +113,7 @@ test('宿主隐藏期间重播或用户继续不能推进时钟，恢复可见�
   const runtime = new GeographicOpeningRuntime({ scene, settings: { ...createDefaultSceneOpeningAnimation(), enabled: true },
     onComplete: () => completes++, onError: error => { throw error; } });
   runtime.plan = { ...runtime.plan, createVisual(_container, next) { controls = next; return { ready: Promise.resolve(), renderAt() {}, resize() {}, dispose() { disposes++; } }; } };
-  const frame = () => { clock += 100; for (const callback of callbacks) callback(); };
+  const frame = () => { clock += 100; for (const callback of [...callbacks]) { callbacks.delete(callback); callback(); } };
   try {
     runtime.start(); await Promise.resolve();
     runtime.pause(); controls.onRestart(); controls.onPauseToggle(); frame();
@@ -122,8 +125,36 @@ test('宿主隐藏期间重播或用户继续不能推进时钟，恢复可见�
     assert.equal(runtime.getSnapshot().isPaused, true);
     runtime.pause(); runtime.skip();
     assert.equal(completes, 1); assert.equal(disposes, 1); assert.equal(callbacks.size, 0);
+    let cleanupFailure;
+    const fault = new GeographicOpeningRuntime({ container: new Element(), settings: { ...createDefaultSceneOpeningAnimation(), enabled: true }, onComplete() {}, onError(error) { cleanupFailure = error; } });
+    fault.plan = { ...fault.plan, createVisual() { return { ready: Promise.resolve(), renderAt() {}, resize() {}, dispose() { throw new Error('dispose fixture'); } }; } };
+    fault.start(); await Promise.resolve();
+    assert.ok(fault.host); fault.pause(); fault.skip();
+    assert.match(cleanupFailure.message, /dispose fixture/, '清理异常也必须通知协调器退出开场');
+    assert.equal(fault.host, null, '渲染器释放失败也必须移除开场覆盖层');
+    assert.equal(callbacks.size, 0, '释放失败不能遗留开场RAF');
+
   } finally {
     runtime.dispose();
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }
   }
+});
+
+test('显式迁移参考包保留零时长、空路线、文案及呼吸，并且不改输入', () => {
+  const legacy = createDefaultSceneOpeningAnimation(); legacy.enabled = true;
+  legacy.reference.brandName = '原品牌'; legacy.reference.companyName = '原公司';
+  legacy.reference.stageDurations[2] = 0; legacy.reference.stageDurations[5] = 0;
+  legacy.reference.worldDestinations = []; legacy.breathingIntensity = 0;
+  const before = structuredClone(legacy);
+  const binding = createOpeningPackageBinding(packages[0].definition, 'Assets/OpeningPackages/reference/manifest.json', 'e'.repeat(64));
+  const migrated = migrateLegacyOpening(legacy, binding);
+  assert.equal(migrated.enabled, true); assert.equal(migrated.template, 'package');
+  assert.equal(migrated.package.config.values.brandName, '原品牌');
+  assert.equal(migrated.package.config.values.companyName, '原公司');
+  assert.equal(migrated.package.config.values.breathingIntensity, 0);
+  assert.equal(migrated.package.config.stages[2].durationSeconds, 0);
+  assert.equal(migrated.package.config.stages[5].durationSeconds, 0);
+  assert.deepEqual(migrated.package.config.stages[2].routes, []);
+  assert.deepEqual(legacy, before); assert.equal(binding.config.values.breathingIntensity, .65);
+  assert.equal(Object.hasOwn(migrated, 'reference'), false);
 });

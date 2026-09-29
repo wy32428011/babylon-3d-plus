@@ -8,7 +8,8 @@ import { readUtf8File } from '../shared/strictUtf8.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
-import { getSceneOpeningPackage, resolveOpeningPackageResources } from './openingPackageResources.js';
+import { resolveOpeningPackageResources } from './openingPackageResources.js';
+import { createOpeningPublishPlan } from '../shared/openingPublishPlan.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import {
   assertSafeDirectory,
@@ -149,6 +150,7 @@ export type PreparedDeploymentExport = {
 
 export type PrepareDeploymentExportOptions = {
   skipCadReferences?: boolean;
+  validateOpeningViewer?: (sceneContent: string) => Promise<void>;
   skyboxCacheContext?: DeploymentSkyboxCacheContext;
   skyboxValidationCache?: DeploymentSkyboxValidationCache;
 };
@@ -179,7 +181,7 @@ export async function prepareDeploymentExport(
     const skippedCadCount = stripCadReferencesFromSceneFile(sceneFile);
     if (skippedCadCount > 0) warnings.push(`发布包已跳过 ${skippedCadCount} 个 CAD 参考图及其 DXF 文件。`);
   }
-  const scene = requirePlainObject(sceneFile.scene, '场景内容');
+  let scene = requirePlainObject(sceneFile.scene, '场景内容');
 
   const shadowBakeError = getSceneShadowBakeErrorContract(scene);
   if (shadowBakeError) throw new Error(shadowBakeError);
@@ -188,12 +190,19 @@ export async function prepareDeploymentExport(
   const validBake = shadowSettings && isPlainObject(shadowSettings.bake)
     && shadowSettings.bake.signature === getSceneShadowBakeSignatureContract(scene)
     ? shadowSettings.bake : null;
-  const references = collectSceneReferences(scene);
+
   const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
   const bundles = new Map<string, ResourceBundle>();
-  const openingBinding = getSceneOpeningPackage(scene);
-  if (openingBinding && !projectContext) throw new Error('发布开场包需要打开其所属项目目录。');
-  const opening = openingBinding ? await resolveOpeningPackageResources(scene, projectContext!.projectRoot, signal) : null;
+  const openingPlan = await createOpeningPublishPlan(scene, { mode: 'dist', signal,
+    validateViewer: options.validateOpeningViewer ? candidate => options.validateOpeningViewer!(JSON.stringify({ ...sceneFile, scene: candidate })) : undefined,
+    resolve: candidate => {
+      if (!projectContext) throw new Error('开场包所属工程目录不可用。');
+      return resolveOpeningPackageResources(candidate, projectContext.projectRoot, signal);
+    } });
+  scene = openingPlan.scene; sceneFile.scene = scene;
+  warnings.push(...openingPlan.warnings);
+  const opening = openingPlan.opening;
+  const references = collectSceneReferences(scene);
   const openingIntegrity = new Map<string, { size: number; sha256: string }>();
   if (opening) {
     const bundle = getOrCreateBundle(bundles, 'openings', opening.packageRoot, false,

@@ -14,7 +14,8 @@ import type {
 } from './deploymentSkyboxCache.js';
 import type { SourceEnvironmentPackageIntegrity } from './digitalTwinSourceEnvironmentRelink.js';
 import type { SourceResourcePlan, SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
-import { collectOpeningSourceBundles, getSceneOpeningPackage } from './openingPackageResources.js';
+import { openingSourceBundles, resolveOpeningPackageResources, type ResolvedOpeningResources } from './openingPackageResources.js';
+import { createOpeningPublishPlan, rawSceneOpening } from '../shared/openingPublishPlan.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
@@ -209,6 +210,15 @@ export async function buildDigitalTwinSourcePackage(
       );
     }
 
+    const resolvedOpenings: ResolvedOpeningResources[] = [];
+    for (const snapshot of scenes) {
+      const plan = await createOpeningPublishPlan(snapshot.parsed, { mode: 'source', signal: options.signal,
+        resolve: scene => resolveOpeningPackageResources(scene, projectRoot, options.signal) });
+      snapshot.parsed = plan.scene;
+      warnings.push(...plan.warnings.map(warning => '场景「' + snapshot.name + '」：' + warning));
+      if (plan.opening) resolvedOpenings.push(plan.opening);
+    }
+
     const candidates = collectResourceBundles(
       scenes.map((scene) => scene.parsed),
       projectRoot,
@@ -222,7 +232,7 @@ export async function buildDigitalTwinSourcePackage(
       legacyWorkspaceRoot,
       cadBundleMap,
     );
-    candidates.push(...await collectOpeningSourceBundles(scenes.map(scene => scene.parsed), projectRoot, options.signal));
+    candidates.push(...openingSourceBundles(resolvedOpenings, projectRoot));
     await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
     const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
     const bundles = resourcePlan.bundles;
@@ -669,7 +679,7 @@ function collectResourceBundles(
   for (const platformBundle of platformImageBundleMap.values()) registerBundle(platformBundle);
   for (const skyboxBundle of stableSkyboxBundles.values()) registerBundle(skyboxBundle);
   const effectMetadata = new WeakSet(sceneValues.flatMap(collectEffectModelReferences));
-  const openingMetadata = new WeakSet<object>(sceneValues.map(getSceneOpeningPackage).filter((value): value is NonNullable<typeof value> => value !== null));
+  const openingMetadata = new WeakSet<object>(sceneValues.map(rawSceneOpening).filter((value): value is NonNullable<typeof value> => value !== null));
 
   let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {

@@ -1,5 +1,4 @@
 import type { Scene } from '@babylonjs/core/scene';
-import type { Observer } from '@babylonjs/core/Misc/observable';
 import { normalizeSceneOpeningAnimation, type SceneOpeningAnimationSettings } from '../../editor/model/sceneOpeningAnimation';
 import type { OpeningSnapshot } from './geographicOpeningMath';
 import { createOpeningVisualPlan, type OpeningVisualPlan } from './createOpeningVisualPlan';
@@ -7,7 +6,9 @@ import type { OpeningControlledVisual } from './TimelineOpeningVisual';
 
 export type { OpeningSnapshot } from './geographicOpeningMath';
 type OpeningOptions = {
-  scene: Scene;
+  /** 旧离线演示兼容入口，产品播放器只传独立容器。 */
+  scene?: Scene;
+  container?: HTMLElement;
   settings: SceneOpeningAnimationSettings;
   onComplete(): void;
   onSkip?(): void;
@@ -23,8 +24,8 @@ export class GeographicOpeningRuntime {
   private readonly plan: OpeningVisualPlan;
   private visual: OpeningControlledVisual | null = null;
   private host: HTMLDivElement | null = null;
-  private observer: Observer<Scene> | null = null;
-  private disposeObserver: Observer<Scene> | null = null;
+  private frame: number | null = null;
+  private detachLegacyScene: (() => void) | null = null;
   private preparationTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private previousFocus: HTMLElement | null = null;
@@ -53,14 +54,19 @@ export class GeographicOpeningRuntime {
     if (this.running || this.disposed) return;
     if (!this.settings.enabled) { this.finish(); return; }
     try {
-      const canvas = this.options.scene.getEngine().getRenderingCanvas();
-      if (!canvas?.parentElement) throw new Error('开场动画缺少可用的场景画布容器。');
+      const container = this.options.container ?? this.options.scene?.getEngine().getRenderingCanvas()?.parentElement;
+      if (!container) throw new Error('开场动画缺少可用的画面容器。');
       this.running = true;
+      const legacyScene = this.options.scene;
+      if (legacyScene) {
+        const observer = legacyScene.onDisposeObservable.add(() => this.dispose());
+        this.detachLegacyScene = () => { if (observer) legacyScene.onDisposeObservable.remove(observer); };
+      }
       this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       this.host = document.createElement('div');
       this.host.className = 'geographic-opening-host';
       Object.assign(this.host.style, { position: 'absolute', inset: '0', zIndex: '79', overflow: 'hidden' });
-      canvas.parentElement.appendChild(this.host);
+      container.appendChild(this.host);
       this.visual = this.plan.createVisual(this.host, {
         onSkip: () => {
           if (!this.settings.allowSkip) return;
@@ -73,18 +79,17 @@ export class GeographicOpeningRuntime {
           else this.userPaused = true;
           this.lastTime = performance.now();
           this.draw();
+          this.scheduleFrame();
         },
         onRestart: () => {
           if (this.skipElapsed !== null) return;
-          this.userPaused = false; this.seek(0);
+          this.userPaused = false; this.seek(0); this.scheduleFrame();
         },
       });
       // 减少动态直接展示到达画面，短停留后交接，不因系统设置永远卡在暂停状态。
       if (this.reducedMotion) this.elapsed = this.plan.reducedStartSeconds;
       this.snapshot = this.frameAt(this.elapsed);
       this.lastTime = performance.now();
-      this.observer = this.options.scene.onAfterRenderObservable.add(() => this.render());
-      this.disposeObserver = this.options.scene.onDisposeObservable.add(() => this.dispose());
       if (typeof ResizeObserver !== 'undefined') {
         this.resizeObserver = new ResizeObserver(() => { this.visual?.resize(); this.draw(); });
         this.resizeObserver.observe(this.host);
@@ -96,6 +101,7 @@ export class GeographicOpeningRuntime {
         this.ready = true;
         this.lastTime = performance.now();
         this.draw();
+        this.scheduleFrame();
       }).catch(error => this.fail(error));
     } catch (error) { this.fail(error); }
   }
@@ -107,11 +113,12 @@ export class GeographicOpeningRuntime {
     this.skipOpacity = this.frameAt(this.elapsed).opacity;
     this.userPaused = false;
     this.lastTime = performance.now();
+    this.scheduleFrame();
   }
 
   /** 宿主可见性暂停独立于播放器主动暂停，页面重新可见不会覆盖用户选择。 */
-  pause(): void { this.suspended = true; this.draw(); }
-  resume(): void { this.suspended = false; this.lastTime = performance.now(); this.draw(); }
+  pause(): void { this.suspended = true; this.draw(); this.cancelFrame(); }
+  resume(): void { this.suspended = false; this.lastTime = performance.now(); this.draw(); this.scheduleFrame(); }
   getSnapshot(): OpeningSnapshot { return { ...this.snapshot }; }
 
   seek(seconds: number): void {
@@ -126,21 +133,28 @@ export class GeographicOpeningRuntime {
     this.disposed = true;
     this.running = false;
     this.clearPreparationTimer();
-    if (this.observer) this.options.scene.onAfterRenderObservable.remove(this.observer);
-    if (this.disposeObserver) this.options.scene.onDisposeObservable.remove(this.disposeObserver);
-    this.observer = null;
-    this.disposeObserver = null;
+    this.cancelFrame();
+    this.detachLegacyScene?.(); this.detachLegacyScene = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     const ownsFocus = !!this.host?.contains(document.activeElement);
-    this.visual?.dispose();
-    this.visual = null;
-    this.host?.remove();
-    this.host = null;
-    if (ownsFocus && this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true });
-    this.previousFocus = null;
+    try { this.visual?.dispose(); }
+    finally {
+      this.visual = null;
+      this.host?.remove(); this.host = null;
+      if (ownsFocus && this.previousFocus?.isConnected) this.previousFocus.focus({ preventScroll: true });
+      this.previousFocus = null;
+    }
   }
 
+  private cancelFrame(): void {
+    if (this.frame !== null) cancelAnimationFrame(this.frame);
+    this.frame = null;
+  }
+  private scheduleFrame(): void {
+    if (this.frame !== null || !this.running || !this.ready || this.disposed || this.suspended || this.userPaused) return;
+    this.frame = requestAnimationFrame(() => { this.frame = null; this.render(); this.scheduleFrame(); });
+  }
   private frameAt(seconds: number) { return this.plan.frameAt(seconds); }
   private clearPreparationTimer(): void {
     if (this.preparationTimer !== null) clearTimeout(this.preparationTimer);
@@ -192,14 +206,18 @@ export class GeographicOpeningRuntime {
   private finish(): void {
     if (this.disposed) return;
     this.snapshot = { ...this.frameAt(this.frameAt(0).totalDurationSeconds), isPaused: false };
-    this.dispose();
-    this.options.onProgress?.(this.snapshot);
+    try { this.dispose(); this.options.onProgress?.(this.snapshot); }
+    catch (error) { this.notifyFailure(error); return; }
     this.options.onComplete();
   }
 
   private fail(error: unknown): void {
     if (this.disposed) return;
-    this.dispose();
+    try { this.dispose(); } catch (cleanupError) { console.warn('[GeographicOpeningRuntime] 开场释放异常', cleanupError); }
+    this.notifyFailure(error);
+  }
+
+  private notifyFailure(error: unknown): void {
     if (this.options.onError) this.options.onError(error);
     else { console.error('[GeographicOpeningRuntime] 开场动画失败，已恢复场景', error); this.options.onComplete(); }
   }

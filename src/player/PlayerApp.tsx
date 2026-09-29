@@ -1,5 +1,5 @@
 import { RuntimeFollowControls } from '../shared/ui/RuntimeFollowControls';
-import { normalizeSceneOpeningAnimation } from '../editor/model/sceneOpeningAnimation';
+import { resolvePackageOpeningSettings } from '../editor/model/sceneOpeningAnimation';
 import type { OpeningSnapshot } from '../runtime/opening/GeographicOpeningRuntime';
 import { createSceneOpeningPlayback } from '../shared/opening/createSceneOpeningPlayback';
 import type { OpeningPlaybackCoordinator } from '../shared/opening/OpeningPlaybackCoordinator';
@@ -254,7 +254,7 @@ export function PlayerApp() {
   const openingActiveRef = useRef(false);
   openingActiveRef.current = openingActive;
   const [openingSnapshot, setOpeningSnapshot] = useState<OpeningSnapshot | null>(null);
-  const [openingSettings, setOpeningSettings] = useState(() => normalizeSceneOpeningAnimation(undefined));
+  const [openingSettings, setOpeningSettings] = useState(() => resolvePackageOpeningSettings(undefined));
   const openingPlaybackRef = useRef<OpeningPlaybackCoordinator | null>(null);
   const cancelOpeningForCommandRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -362,16 +362,14 @@ export function PlayerApp() {
     let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
     let openingBridge: GeographicOpeningBridge | null = null;
-    let sceneOpeningSettings = normalizeSceneOpeningAnimation(undefined);
+    let sceneOpeningSettings = resolvePackageOpeningSettings(undefined);
     let openingSuppressed = false;
     let openingFinished = false;
-    let pendingAlarmFocus: AlarmActivation | null = null;
     setOpeningActive(false);
     setOpeningSnapshot(null);
     const cancelOpeningForCommand = (): void => {
-      if (openingFinished || openingSuppressed) return;
+      if (openingFinished || openingSuppressed || !sceneOpeningSettings.enabled) return;
       openingSuppressed = true;
-      autoPatrolStartGate.cancelPending();
       openingPlaybackRef.current?.cancel();
       openingBridge?.setPhase('skipped');
       setOpeningActive(false);
@@ -389,8 +387,9 @@ export function PlayerApp() {
     autoPatrolStartGateRef.current = autoPatrolStartGate;
     const startOpening = (): void => {
       if (disposed || !viewport || !runtime) return;
+      if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; return; }
       const playback = createSceneOpeningPlayback({
-        viewport, runtime, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
+        container: canvas.parentElement!, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
         waitUntilVisible: async signal => {
           const visible = await (openingBridge?.waitForHostVisible(signal) ?? Promise.resolve(true));
           if (!visible && !signal.aborted && !disposed) {
@@ -400,7 +399,6 @@ export function PlayerApp() {
         },
         isHostVisible: () => openingBridge?.isHostVisible() ?? true,
         subscribeToHostVisibility: listener => openingBridge?.subscribeVisibility(listener) ?? (() => {}),
-        beforeStart: () => { pauseHistoryReplay(); autoPatrolPlayback?.stop(); manualRoam?.setEnabled(false); },
         onActiveChange: active => { if (!disposed) setOpeningActive(active); },
         onProgress: snapshot => {
           if (disposed) return;
@@ -413,22 +411,11 @@ export function PlayerApp() {
           if (disposed) return;
           if (sceneOpeningSettings.enabled) console.info('[Viewer opening] 开场结束', { result, template: sceneOpeningSettings.template });
           setOpeningActive(false);
-          runtime?.setOpeningCameraOwned(false);
           setOpeningSnapshot(null);
           openingBridge?.setPhase(result === 'cancelled' ? 'skipped' : result);
-          if (sceneOpeningSettings.enabled && (sceneOpeningSettings.afterOpening === 'stay' || result === 'cancelled')) autoPatrolStartGate.cancelPending();
-          const pending = pendingAlarmFocus;
-          pendingAlarmFocus = null;
-          if (result !== 'cancelled' && pending && runtime?.isAlarmActive(pending.managerId, pending.targetId)) {
-            const bounds = runtime.getEntitiesFocusBounds([pending.targetId]);
-            if (bounds) {
-              autoPatrolStartGate.cancelPending(); autoPatrolPlayback?.stop();
-              viewport?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS });
-            }
-          }
-          autoPatrolStartGate.markReady();
+
         },
-        onError: error => { console.error('[开场动画]', error); if (!disposed) setRuntimeMessage(`开场动画未能完成，已回到场景：${getErrorMessage(error)}`); },
+        onError: error => { console.warn('[开场动画] 开场未完成，三维场景继续运行。', error); },
       });
       openingPlaybackRef.current = playback;
       void playback.start();
@@ -446,6 +433,7 @@ export function PlayerApp() {
       setInitialLoadCompleted(true);
       if (initialLoadMonitorRef.current === checkInitialLoad) initialLoadMonitorRef.current = null;
       interactionController?.markInitialLoadComplete();
+      autoPatrolStartGate.markReady();
       publishedCache?.prefetch();
     }, {
       // 开场与资源加载分别结算；场景可见后播放，终态才交还相机和巡检。
@@ -592,7 +580,7 @@ export function PlayerApp() {
         const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         startupStage = '读取场景文档';
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
-        sceneOpeningSettings = normalizeSceneOpeningAnimation(sceneDocument.sceneSettings.openingAnimation);
+        sceneOpeningSettings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
         setOpeningSettings(sceneOpeningSettings);
         setOpeningActive(sceneOpeningSettings.enabled && !openingSuppressed);
         openingBridge.setPhase(sceneOpeningSettings.enabled && !openingSuppressed ? 'waiting' : 'disabled');
@@ -670,7 +658,6 @@ export function PlayerApp() {
           },
         );
         runtimeRef.current = runtime;
-        runtime.setOpeningCameraOwned(sceneOpeningSettings.enabled && !openingSuppressed);
         runtime.disableEditorLightMarkers();
         runtime.disableEditorAutoPatrolMarkers();
         runtime.disableEditorManualRoamSpawnMarkers();
@@ -825,9 +812,7 @@ export function PlayerApp() {
         });
         runtime.onAlarmActivated = event => {
           if (disposed || !runtime) return;
-          if (event.focusCamera && sceneOpeningSettings.enabled && !openingFinished && !openingSuppressed) {
-            pendingAlarmFocus = event;
-          } else if (event.focusCamera) {
+          if (event.focusCamera) {
             const bounds = runtime.getEntitiesFocusBounds([event.targetId]);
             if (bounds && viewport) { manualRoam?.setEnabled(false); notifyManualInput(); viewport.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS }); }
           }
@@ -903,7 +888,6 @@ export function PlayerApp() {
           };
           const handleWheel = (): void => notifyManualInput();
           const handleKeyDown = (event: KeyboardEvent): void => {
-            if (openingActiveRef.current) return;
             if (!['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC'].includes(event.code)) return;
             const target = event.target;
             const interactiveControlFocused = target instanceof HTMLElement
@@ -1378,10 +1362,10 @@ export function PlayerApp() {
   }, [sceneFullscreen]);
 
   return (
-    <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
+    <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}${openingActive ? ' opening-presentation-active' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
       {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
-      {phase === 'ready' && !openingActive && viewportRef.current && runtimeRef.current ? (
+      {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
         <DataPlatformScreenOverlay
           canvas={canvasRef.current}
           runtime={runtimeRef.current}
@@ -1414,7 +1398,6 @@ export function PlayerApp() {
         />
       ) : null}
       {phase === 'ready'
-      && !openingActive
       && autoPatrolControlsVisible
       && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
       && !manualRoamSnapshot.enabled ? (

@@ -1,4 +1,4 @@
-import { normalizeSceneOpeningAnimation, type SceneOpeningAnimationSettings } from '../model/sceneOpeningAnimation';
+import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from '../model/sceneOpeningAnimation';
 import { updateSceneOpeningAnimationCommand } from '../commands/sceneOpeningAnimationCommands';
 import { compositionDescendants } from '../composition/composition';
 import { createTechBlueNightTheme, normalizeSceneTheme, TECH_BLUE_NIGHT_SHADOWS, type SceneThemeSettings } from '../model/sceneTheme';
@@ -527,7 +527,7 @@ type EditorState = {
   revealHierarchyEntityRequest: { id: string; entityId: string } | null;
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   openingAnimationPreviewRequest: OpeningAnimationPreviewRequest | null;
-  updateSceneOpeningAnimation: (patch: Partial<SceneOpeningAnimationSettings>) => void;
+  updateSceneOpeningAnimation: (patch: SceneOpeningConfig | null) => void;
   requestOpeningAnimationPreview: (action: OpeningAnimationPreviewRequest['action']) => void;
   consumeOpeningAnimationPreviewRequest: (requestId: string, sceneSessionId: string) => void;
   regionViewRequest: RegionViewRequest | null;
@@ -3538,8 +3538,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set(state => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改开场动画');
       const before = state.scene.sceneSettings.openingAnimation;
-      const normalizedBefore = normalizeSceneOpeningAnimation(before);
-      const after = normalizeSceneOpeningAnimation({ ...normalizedBefore, ...patch });
+      if (!before && patch && !patch.template && !patch.package && !patch.reference) return state;
+      const normalizedBefore = normalizeSceneOpeningConfig(before);
+      const previousPackage = normalizedBefore?.package;
+      const switchingPackage = patch?.template === 'package' && patch.package && (normalizedBefore?.template !== 'package'
+        || patch.package.id !== previousPackage?.id || patch.package.version !== previousPackage?.version || patch.package.contentHash !== previousPackage?.contentHash);
+      const base = switchingPackage ? { enabled: normalizedBefore?.enabled, allowSkip: normalizedBefore?.allowSkip, motionPreference: normalizedBefore?.motionPreference } : normalizedBefore;
+      const after = patch === null ? undefined : normalizeSceneOpeningConfig({ ...base, ...patch });
       if (JSON.stringify(normalizedBefore) === JSON.stringify(after)) return state;
       return executeCommand(state.scene, state.history, updateSceneOpeningAnimationCommand(before, after));
     });

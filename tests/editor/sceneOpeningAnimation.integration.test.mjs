@@ -23,6 +23,7 @@ after(async () => {
 
 const entry = path.join(temporaryRoot, 'entry.mjs');
 await writeFile(entry, [
+  "export { createDefaultSceneOpeningAnimation, normalizeSceneOpeningAnimation } from '../../src/editor/model/sceneOpeningAnimation.ts';",
   "export { useEditorStore } from '../../src/editor/store/editorStore.ts';",
   "export { createEmptySceneDocument } from '../../src/editor/model/SceneDocument.ts';",
   "export { createCommandHistory } from '../../src/editor/commands/CommandHistory.ts';",
@@ -36,13 +37,14 @@ await build({
   build: { ssr: entry, outDir: path.join(temporaryRoot, 'ssr'),
     rolldownOptions: { output: { entryFileNames: 'modules.mjs' } } },
 });
-const { useEditorStore, createEmptySceneDocument, createCommandHistory, serializeScene, deserializeScene, SceneOpeningAnimationPanel, createOpeningPackageBinding }
+const { createDefaultSceneOpeningAnimation, normalizeSceneOpeningAnimation, useEditorStore, createEmptySceneDocument, createCommandHistory, serializeScene, deserializeScene, SceneOpeningAnimationPanel, createOpeningPackageBinding }
   = await import(pathToFileURL(path.join(temporaryRoot, 'ssr/modules.mjs')).href);
 store = useEditorStore;
 originalState = store.getState();
 beforeEach(() => {
   store.setState(originalState, true);
-  store.setState({ scene: createEmptySceneDocument('开场验收'), history: createCommandHistory(),
+  const legacy = createEmptySceneDocument('旧开场配置兼容验收'); legacy.sceneSettings.openingAnimation = createDefaultSceneOpeningAnimation();
+  store.setState({ scene: legacy, history: createCommandHistory(),
     runtimeMode: 'edit', sceneSessionId: 'opening-test-session', logs: [] });
 });
 
@@ -91,15 +93,16 @@ test('开场更新可保存回读，撤销重做只恢复开场配置并保留�
   assert.equal(store.getState().scene.sceneSettings.camera.viewDistance, 2000);
 });
 
-test('旧场景缺少开场字段仍可回读且不开启，重复提交不堆叠历史，运行预览不能修改配置', () => {
+test('无包场景保存重开仍无配置，空开关不物化参数，运行预览不能修改配置', () => {
+  store.setState({ scene: createEmptySceneDocument('无包') });
   const file = JSON.parse(serializeScene(store.getState().scene));
   delete file.scene.sceneSettings.openingAnimation;
-  assert.equal(deserializeScene(JSON.stringify(file)).sceneSettings.openingAnimation.enabled, false);
+  assert.equal(deserializeScene(JSON.stringify(file)).sceneSettings.openingAnimation, undefined);
   store.getState().updateSceneOpeningAnimation({ enabled: false });
   assert.equal(store.getState().history.undoStack.length, 0);
   store.setState({ runtimeMode: 'preview' });
   store.getState().updateSceneOpeningAnimation({ enabled: true });
-  assert.equal(store.getState().scene.sceneSettings.openingAnimation.enabled, false);
+  assert.equal(store.getState().scene.sceneSettings.openingAnimation, undefined);
   assert.equal(store.getState().history.undoStack.length, 0);
 });
 
@@ -144,7 +147,7 @@ test('中国地区增改删与停留可以保存及撤销，全球飞线和关�
   assert.deepEqual(store.getState().scene.sceneSettings.openingAnimation, after);
 });
 
-test('旧开场场景缺中国字段回读默认地区和六秒，不改变原来开关与全球配置', () => {
+test('旧开场缺省字段原样保留，仅显式渲染适配派生历史默认值', () => {
   const file = JSON.parse(serializeScene(store.getState().scene));
   file.scene.sceneSettings.openingAnimation.enabled = true;
   file.scene.sceneSettings.openingAnimation.destinations = [];
@@ -152,27 +155,17 @@ test('旧开场场景缺中国字段回读默认地区和六秒，不改变原�
   delete file.scene.sceneSettings.openingAnimation.chinaDestinations;
   const restored = deserializeScene(JSON.stringify(file)).sceneSettings.openingAnimation;
   assert.equal(restored.enabled, true);
-  assert.equal(restored.chinaHoldSeconds, 6);
-  assert.deepEqual(restored.chinaDestinations.map(location => location.name), ['四川', '上海', '杭州', '深圳', '安徽']);
+  assert.equal(restored.chinaHoldSeconds, undefined);
+  assert.deepEqual(normalizeSceneOpeningAnimation(restored).chinaDestinations.map(location => location.name), ['四川', '上海', '杭州', '深圳', '安徽']);
   assert.deepEqual(restored.destinations, []);
 });
 
-test('配置面板显示62秒参考模板、两组UV点位和实际生效配置，保留折叠外壳', () => {
-  const initial = renderToStaticMarkup(createElement(SceneOpeningAnimationPanel));
-  const text = initial.replace(/<[^>]*>/g, '');
-  assert.match(text, /参考动画总时长：62 秒/);
-  assert.match(text, /全球飞线停留（秒）/);
-  assert.match(text, /国内飞线停留（秒）/);
-  assert.match(text, /全球参考点位（40）/);
-  assert.match(text, /国内参考点位（34）/);
-  assert.match(text, /全球起点 UV X/);
-  assert.match(text, /国内起点 UV Y/);
-  assert.match(text, /品牌与公司文案/);
-  assert.match(initial, /collapsible-fieldset/);
-  assert.doesNotMatch(initial, />目的地经度<|>中国停留（秒）</);
-  assert.match(text, /科技呼吸效果/);
-  assert.match(text, /呼吸强度（%）/);
-  assert.match(text, /呼吸周期（秒）/);
+test('初始面板无包时仅提供资源入口，保存也不包含默认参数', () => {
+  store.setState({ scene: createEmptySceneDocument('无包') });
+  const empty = renderToStaticMarkup(createElement(SceneOpeningAnimationPanel));
+  assert.match(empty, /导入开场包/); assert.match(empty, /collapsible-fieldset/);
+  assert.doesNotMatch(empty, /品牌名称|参考动画总时长|允许跳过开场|全球飞线停留|呼吸强度/);
+  assert.equal(Object.hasOwn(JSON.parse(serializeScene(store.getState().scene)).scene.sceneSettings, 'openingAnimation'), false);
 });
 
 test('参考配置完整保存重开与撤销重做，独立修改不回写旧地理档案和相机', () => {
@@ -215,7 +208,7 @@ test('呼吸关闭和零强度保存重开与撤销重做一致，不影响时�
   assert.equal(store.getState().scene.sceneSettings.openingAnimation.breathingIntensity, 0);
 });
 
-test('已开启的旧开场配置缺呼吸字段时重开补默认，原有零秒与空列表继续保留', () => {
+test('旧配置缺呼吸字段时保存不补默认，零秒和空列表仍保留', () => {
   const file = JSON.parse(serializeScene(store.getState().scene));
   const opening = file.scene.sceneSettings.openingAnimation;
   opening.enabled = true;
@@ -226,9 +219,9 @@ test('已开启的旧开场配置缺呼吸字段时重开补默认，原有零�
   delete opening.breathingPeriodSeconds;
   const restored = deserializeScene(JSON.stringify(file)).sceneSettings.openingAnimation;
   assert.equal(restored.enabled, true);
-  assert.equal(restored.breathingEnabled, true);
-  assert.equal(restored.breathingIntensity, 0.65);
-  assert.equal(restored.breathingPeriodSeconds, 4);
+  assert.equal(restored.breathingEnabled, undefined);
+  assert.equal(restored.breathingIntensity, undefined);
+  assert.equal(restored.breathingPeriodSeconds, undefined);
   assert.equal(restored.chinaHoldSeconds, 0);
   assert.deepEqual(restored.chinaDestinations, []);
 });
