@@ -2,6 +2,7 @@ import {
   AbstractMesh, AssetContainer, Camera, Light, Material, Mesh, MultiMaterial, TransformNode,
   type Animation, type Node,
 } from '@babylonjs/core';
+import { cloneMaterialWithSharedTexturePixels } from './cloneMaterialWithSharedTexturePixels.ts';
 
 type ModelAnimationPlayback = { started: boolean; playing: boolean; loop: boolean; speed: number; from: number; to: number; additive: boolean };
 const templateAnimationPlayback = new WeakMap<AssetContainer, ModelAnimationPlayback[]>();
@@ -40,7 +41,7 @@ export function cloneModelAssetContainer(source: AssetContainer): AssetContainer
     // Babylon 9 的 instantiateModelsToScene(cloneMaterials=true) 会改写 MultiMaterial
     // 源对象的 subMaterials；在此显式克隆，保持模板和其它实例完全独立。
     const copy = material instanceof MultiMaterial
-      ? material.clone(material.name, false) : material.clone(material.name);
+      ? material.clone(material.name, false) : cloneMaterialWithSharedTexturePixels(material, material.name);
     if (!copy) throw new Error(`模型材质无法克隆：${material.name}`);
     materials.set(material, copy);
     materialTargets.set(material, copy);

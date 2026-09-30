@@ -1,10 +1,11 @@
 import { type Material, PBRMaterial, SerializationHelper, StandardMaterial } from '@babylonjs/core';
+import { cloneMaterialWithSharedTexturePixels } from './cloneMaterialWithSharedTexturePixels.ts';
 
 /** 环境显示副本共享只读纹理，避免 RawTexture.clone 丢失平铺参数和重复分配纹理。 */
 export function cloneEnvironmentMaterial(source: Material, name: string): Material | null {
-  if (!(source instanceof PBRMaterial || source instanceof StandardMaterial)) return source.clone(name);
+  if (!(source instanceof PBRMaterial || source instanceof StandardMaterial)) return cloneMaterialWithSharedTexturePixels(source, name);
   // 原生 clone 负责保留 Detail Map 等材质插件，再把只读资源恢复为共享引用。
-  const material = source.clone(name);
+  const material = cloneMaterialWithSharedTexturePixels(source, name);
   if (!material) return null;
   const originals = new Set(source.getActiveTextures());
   const copiedTextures = new Set(material.getActiveTextures().filter(texture => !originals.has(texture)));

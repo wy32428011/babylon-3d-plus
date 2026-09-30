@@ -257,6 +257,17 @@ float environmentPrimaryShadowFactor(vec3 position) {
   float depth = (projected.z + environmentShadowDepth.x) / environmentShadowDepth.y;
 #endif
 #ifdef ENVIRONMENT_SHADOW_PCF
+  // 按接收面的深度斜率补偿半个贴图像素，避免近镜头平面产生条纹状自阴影。
+  vec3 clipPosition = projected.xyz / projected.w;
+  vec3 receiverPlane = cross(dFdx(clipPosition), dFdy(clipPosition));
+  float planeDepthBias = abs(receiverPlane.z) > 0.00001 * length(receiverPlane)
+    ? (abs(receiverPlane.x) + abs(receiverPlane.y)) / abs(receiverPlane.z) * environmentShadowInfo.z
+    : 0.0;
+#ifdef USE_REVERSE_DEPTHBUFFER
+  projected.z += planeDepthBias * projected.w;
+#else
+  projected.z -= planeDepthBias * projected.w;
+#endif
   return computeShadowWithPCF1(projected, depth, shadowTextureEnv, environmentShadowInfo.x, environmentShadowInfo.w);
 #else
   return computeShadowWithPoissonSampling(projected, depth, shadowTextureEnv,

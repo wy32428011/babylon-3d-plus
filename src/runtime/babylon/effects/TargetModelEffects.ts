@@ -7,6 +7,7 @@ import type { PoiEffectComponent } from '../../../editor/model/components';
 import { ENVIRONMENT_EFFECT_TARGET_ID, isEnvironmentBuildingEffectKind } from '../../../editor/model/environmentBuildingEffect';
 import { EnvironmentShadowMaterialPlugin } from '../EnvironmentShadowMaterialPlugin';
 import { cloneEnvironmentMaterial } from '../cloneEnvironmentMaterial';
+import { cloneMaterialWithSharedTexturePixels } from '../cloneMaterialWithSharedTexturePixels';
 
 type Visual = NonNullable<PoiEffectComponent['visual']>;
 type BoundEffect = {
@@ -430,7 +431,7 @@ export class TargetModelEffects {
     const material = original
       ? (state.source.metadata?.editorEnvironmentMesh
           ? cloneEnvironmentMaterial(original, `${original.name}_${effect.id}_effect`)
-          : original.clone(`${original.name}_${effect.id}_effect`))
+          : cloneMaterialWithSharedTexturePixels(original, `${original.name}_${effect.id}_effect`))
       : new StandardMaterial(`${effect.id}_effect`, this.scene);
     if (!material) return null;
     state.materials.push(material);
