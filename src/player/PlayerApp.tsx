@@ -2,6 +2,8 @@ import { RuntimeFollowControls } from '../shared/ui/RuntimeFollowControls';
 import { resolvePackageOpeningSettings } from '../editor/model/sceneOpeningAnimation';
 import type { OpeningSnapshot } from '../runtime/opening/GeographicOpeningRuntime';
 import { createSceneOpeningPlayback } from '../shared/opening/createSceneOpeningPlayback';
+import { SceneModelEntrancePlayback } from '../shared/opening/SceneModelEntrancePlayback';
+import { normalizeSceneModelEntranceSettings } from '../editor/model/sceneModelEntrance';
 import type { OpeningPlaybackCoordinator } from '../shared/opening/OpeningPlaybackCoordinator';
 import { OpeningAnimationOverlay } from '../shared/ui/OpeningAnimationOverlay';
 import { GeographicOpeningBridge } from './geographicOpeningBridge';
@@ -363,6 +365,18 @@ export function PlayerApp() {
     let interactionController: DigitalTwinInteractionController | null = null;
     let openingBridge: GeographicOpeningBridge | null = null;
     let sceneOpeningSettings = resolvePackageOpeningSettings(undefined);
+    let sceneModelEntranceSettings = normalizeSceneModelEntranceSettings(undefined);
+    let modelEntrancePlayback: SceneModelEntrancePlayback | null = null;
+    const prepareModelEntrance = (): void => {
+      if (disposed || !runtime || !viewport || modelEntrancePlayback || !sceneModelEntranceSettings.enabled) return;
+      modelEntrancePlayback = new SceneModelEntrancePlayback({ runtime, container: canvas.parentElement!, settings: sceneModelEntranceSettings,
+        isReady: () => runtime?.isModelEntranceReady() ?? false,
+        // 没有可见性能力的旧宿主沿用容器可见性；支持能力的宿主明确隐藏时暂停。
+        isHostVisible: () => !openingBridge?.hasHostVisibilitySupport() || openingBridge.isHostVisible(),
+        subscribeToHostVisibility: listener => openingBridge?.subscribeVisibility(listener) ?? (() => {}),
+        onError: error => console.warn('[模型入场] 已恢复正常模型。', error),
+      });
+    };
     let openingSuppressed = false;
     let openingFinished = false;
     setOpeningActive(false);
@@ -387,7 +401,8 @@ export function PlayerApp() {
     autoPatrolStartGateRef.current = autoPatrolStartGate;
     const startOpening = (): void => {
       if (disposed || !viewport || !runtime) return;
-      if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; return; }
+      prepareModelEntrance();
+      if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; modelEntrancePlayback?.start(); return; }
       const playback = createSceneOpeningPlayback({
         container: canvas.parentElement!, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
         waitUntilVisible: async signal => {
@@ -413,7 +428,7 @@ export function PlayerApp() {
           setOpeningActive(false);
           setOpeningSnapshot(null);
           openingBridge?.setPhase(result === 'cancelled' ? 'skipped' : result);
-
+          modelEntrancePlayback?.start();
         },
         onError: error => { console.warn('[开场动画] 开场未完成，三维场景继续运行。', error); },
       });
@@ -442,6 +457,7 @@ export function PlayerApp() {
         if (!viewport || !runtime) throw new Error('场景视图尚未创建。');
         const before = runtime.getInitialLoadSnapshot().error;
         if (before) throw new Error(before);
+        prepareModelEntrance();
         await waitForSceneRenderReady(viewport.scene, signal);
         const after = runtime.getInitialLoadSnapshot().error;
         if (after) throw new Error(after);
@@ -581,6 +597,7 @@ export function PlayerApp() {
         startupStage = '读取场景文档';
         const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
         sceneOpeningSettings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
+        sceneModelEntranceSettings = normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance);
         setOpeningSettings(sceneOpeningSettings);
         setOpeningActive(sceneOpeningSettings.enabled && !openingSuppressed);
         openingBridge.setPhase(sceneOpeningSettings.enabled && !openingSuppressed ? 'waiting' : 'disabled');
@@ -1054,6 +1071,7 @@ export function PlayerApp() {
       } catch (error) {
         if (disposed || abortController.signal.aborted) return;
         console.error('Web Viewer 启动失败。', error);
+        modelEntrancePlayback?.dispose();
         setPhase('blocked');
         setMessage(`Web Viewer 启动失败：${getErrorMessage(error)}`);
         openingPlaybackRef.current?.dispose();
@@ -1108,6 +1126,7 @@ export function PlayerApp() {
     return () => {
       disposed = true;
       abortController.abort();
+      modelEntrancePlayback?.dispose();
       openingPlaybackRef.current?.dispose();
       openingPlaybackRef.current = null;
       openingBridge?.dispose();

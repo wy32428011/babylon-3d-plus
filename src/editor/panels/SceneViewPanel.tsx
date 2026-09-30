@@ -1,6 +1,8 @@
 import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
 import { OpeningAnimationOverlay } from '../../shared/ui/OpeningAnimationOverlay';
 import { useEditorOpeningAnimation } from '../opening/useEditorOpeningAnimation';
+import { SceneModelEntrancePlayback } from '../../shared/opening/SceneModelEntrancePlayback';
+import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
 import { CompositionEditStatus } from '../composition/CompositionControls';
@@ -633,6 +635,24 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     viewport: viewportRef.current, ready: sceneReadyForAutoPatrol,
     sceneDocument, sceneSessionId, isRuntimePreview,
   });
+  const modelEntrancePlayback = useRef<SceneModelEntrancePlayback | null>(null);
+  useEffect(() => {
+    return () => { modelEntrancePlayback.current?.dispose(); modelEntrancePlayback.current = null; };
+  }, [sceneSessionId, isRuntimePreview]);
+  useEffect(() => {
+    if (!isRuntimePreview || !sceneReadyForAutoPatrol) return;
+    const runtime = runtimeRef.current;
+    const container = viewportRef.current?.engine.getRenderingCanvas()?.parentElement;
+    if (!runtime || !container) return;
+    if (!modelEntrancePlayback.current) {
+      modelEntrancePlayback.current = new SceneModelEntrancePlayback({ runtime, container,
+        settings: normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance),
+        isReady: () => runtime.isModelEntranceReady(),
+        onError: error => pushLog('模型入场未播放，已恢复正常模型：' + getErrorMessage(error)),
+      });
+    }
+    if (opening.settled) modelEntrancePlayback.current.start();
+  }, [isRuntimePreview, sceneReadyForAutoPatrol, sceneSessionId, opening.settled, sceneDocument.sceneSettings.modelEntrance, pushLog]);
 
   /** 发布当前单模型尺寸和 Hierarchy 群组世界包围盒，二者都只进入临时 Inspector 状态。 */
   const publishSelectedInspectorSpatialInfo = useCallback((runtime: SceneRuntime, entityId: string | null): void => {

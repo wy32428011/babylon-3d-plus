@@ -55,6 +55,7 @@ export class GeographicOpeningBridge {
   }
 
   isHostVisible = (): boolean => !this.options.embedded || this.hostVisible;
+  hasHostVisibilitySupport = (): boolean => this.hostVisibilitySupported || this.hostVisible;
 
   subscribeVisibility = (listener: () => void): (() => void) => {
     if (this.disposed) return () => undefined;

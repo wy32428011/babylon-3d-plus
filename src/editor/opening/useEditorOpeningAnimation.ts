@@ -19,23 +19,25 @@ export function useEditorOpeningAnimation(options: {
   const previewHost = useRef<HTMLElement | null>(null);
   const [active, setActive] = useState(false);
   const [snapshot, setSnapshot] = useState<OpeningSnapshot | null>(null);
+  const [settled, setSettled] = useState(false);
   const played = useRef(false), mounted = useRef(true), generation = useRef(0);
   const latest = useRef(options); latest.current = options;
   const stop = useCallback(() => {
     generation.current++; playback.current?.dispose(); playback.current = null;
     previewHost.current?.remove(); previewHost.current = null;
+    if (mounted.current) setSettled(true);
   }, []);
   const skip = useCallback(() => playback.current?.skip(), []);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; stop(); }; }, [stop]);
-  useEffect(() => { stop(); played.current = false; setActive(false); setSnapshot(null); }, [sceneSessionId, isRuntimePreview, stop]);
-  useEffect(() => { stop(); setActive(false); setSnapshot(null); }, [sceneDocument.sceneSettings.openingAnimation, stop]);
+  useEffect(() => { stop(); played.current = false; setActive(false); setSnapshot(null); setSettled(false); }, [sceneSessionId, isRuntimePreview, stop]);
+  useEffect(() => { stop(); setActive(false); setSnapshot(null); setSettled(false); }, [sceneDocument.sceneSettings.openingAnimation, stop]);
 
   const start = useCallback(async (preview: boolean) => {
     const current = latest.current;
     const config = resolvePackageOpeningSettings(current.sceneDocument.sceneSettings.openingAnimation);
-    if (config.template !== 'package' || !config.package) return;
+    if (config.template !== 'package' || !config.package) { if (mounted.current) setSettled(true); return; }
     if (!preview && (!current.ready || !config.enabled)) return;
-    stop(); const token = generation.current;
+    stop(); if (mounted.current) setSettled(false); const token = generation.current;
     const failure = (error: unknown) => {
       console.warn('[编辑器开场动画]', error);
       useEditorStore.getState().pushLog('开场未播放，三维场景继续运行：' + (error instanceof Error ? error.message : String(error)));
@@ -62,7 +64,7 @@ export function useEditorOpeningAnimation(options: {
         onActiveChange: value => { if (mounted.current) setActive(value); },
         onProgress: value => { if (mounted.current) setSnapshot(value); },
         onTerminal: () => {
-          if (mounted.current) { setActive(false); setSnapshot(null); }
+          if (mounted.current) { setActive(false); setSnapshot(null); setSettled(true); }
           previewHost.current?.remove(); previewHost.current = null;
         }, onError: failure });
       playback.current = instance; void instance.start();
@@ -86,5 +88,5 @@ export function useEditorOpeningAnimation(options: {
     window.addEventListener('keydown', key, true);
     return () => window.removeEventListener('keydown', key, true);
   }, [active, isRuntimePreview, settings.allowSkip, stop, skip]);
-  return { active, snapshot, settings, stop, skip };
+  return { active, snapshot, settings, stop, skip, settled: !settings.enabled || settled };
 }

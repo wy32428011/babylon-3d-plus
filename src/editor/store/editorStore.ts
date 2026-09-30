@@ -1,3 +1,5 @@
+import { updateSceneModelEntranceCommand } from '../commands/sceneModelEntranceCommands';
+import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from '../model/sceneOpeningAnimation';
 import { updateSceneOpeningAnimationCommand } from '../commands/sceneOpeningAnimationCommands';
 import { compositionDescendants } from '../composition/composition';
@@ -528,6 +530,7 @@ type EditorState = {
   cameraPoseSaveRequest: CameraPoseSaveRequest | null;
   openingAnimationPreviewRequest: OpeningAnimationPreviewRequest | null;
   updateSceneOpeningAnimation: (patch: SceneOpeningConfig | null) => void;
+  updateSceneModelEntranceSettings: (patch: Partial<SceneModelEntranceSettings>) => void;
   requestOpeningAnimationPreview: (action: OpeningAnimationPreviewRequest['action']) => void;
   consumeOpeningAnimationPreviewRequest: (requestId: string, sceneSessionId: string) => void;
   regionViewRequest: RegionViewRequest | null;
@@ -3533,6 +3536,16 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         successMessage: `切换环境效果：${activeVariant.name}`,
       },
     );
+  },
+  updateSceneModelEntranceSettings: patch => {
+    set(state => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改模型入场动画');
+      const before = state.scene.sceneSettings.modelEntrance;
+      const current = normalizeSceneModelEntranceSettings(before);
+      const after = normalizeSceneModelEntranceSettings({ ...current, ...patch });
+      if (JSON.stringify(current) === JSON.stringify(after)) return state;
+      return executeCommand(state.scene, state.history, updateSceneModelEntranceCommand(before, after));
+    });
   },
   updateSceneOpeningAnimation: patch => {
     set(state => {

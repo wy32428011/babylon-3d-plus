@@ -1,3 +1,4 @@
+import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from './sceneModelEntrance';
 import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from './sceneOpeningAnimation';
 import { normalizeSceneTheme, type SceneThemeSettings } from './sceneTheme';
 import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from './lightSettings';
@@ -257,6 +258,7 @@ export type SceneSettings = {
   camera: SceneCameraSettings;
   regionViews: SceneRegionView[];
   openingAnimation?: SceneOpeningConfig;
+  modelEntrance?: SceneModelEntranceSettings;
   sensitivity: SceneSensitivitySettings;
   shadows: SceneShadowSettings;
   environment: SceneEnvironmentSettings | null;
@@ -331,6 +333,7 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   theme: null,
   regionViews: [],
   openingAnimation: normalizeSceneOpeningConfig(undefined),
+  modelEntrance: normalizeSceneModelEntranceSettings(undefined),
   camera: {
     savedPose: null,
     savedOrientation: SCENE_CAMERA_ORIENTATION_DEFAULT,
@@ -945,6 +948,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     },
     regionViews: regionViews.views,
     openingAnimation: normalizeSceneOpeningConfig(settings.openingAnimation),
+    modelEntrance: normalizeSceneModelEntranceSettings(settings.modelEntrance),
     sensitivity: {
       zoom: sanitizeSceneSensitivityValue(settings.sensitivity.zoom),
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),

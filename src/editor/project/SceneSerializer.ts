@@ -1,3 +1,4 @@
+import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig } from '../model/sceneOpeningAnimation';
 import { isConveyorArrowEffectKind } from '../model/conveyorArrowEffect';
 import type { ConveyorArrowEffectConfig } from '../model/components';
@@ -129,6 +130,7 @@ function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
       ...sceneSettings,
       skybox: normalizeSceneSkyboxSettings(sceneSettings.skybox),
       openingAnimation: normalizeSceneOpeningConfig(sceneSettings.openingAnimation),
+      modelEntrance: normalizeSceneModelEntranceSettings(sceneSettings.modelEntrance),
     },
   };
 }
@@ -347,6 +349,7 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
     // 统一校验器负责隔离坏项并报告；缺失字段兼容历史场景。
     regionViews: settings.regionViews as SceneSettings['regionViews'],
     openingAnimation: normalizeSceneOpeningConfig(settings.openingAnimation),
+    modelEntrance: normalizeSceneModelEntranceSettings(settings.modelEntrance),
     camera: {
       savedPose: normalizeSceneCameraPose(camera.savedPose),
       savedOrientation: normalizeSceneCameraOrientation(camera.savedOrientation),

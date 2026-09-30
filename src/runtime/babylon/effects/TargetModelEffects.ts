@@ -27,6 +27,22 @@ type MeshState = {
 const modelEffectSuspensions = new WeakMap<AbstractMesh, number>();
 const modelEffectSuspensionCallbacks = new WeakMap<AbstractMesh, Set<() => void>>();
 
+/** 共享外观租约供入场动画与报警协调，注销仅移除本调用方。 */
+export function registerTargetModelEffectSuspension(mesh: AbstractMesh, callback: () => void): () => void {
+  const callbacks = modelEffectSuspensionCallbacks.get(mesh) ?? new Set<() => void>();
+  callbacks.add(callback); modelEffectSuspensionCallbacks.set(mesh, callbacks);
+  let registered = true;
+  return () => {
+    if (!registered) return;
+    registered = false; callbacks.delete(callback);
+    if (callbacks.size === 0 && modelEffectSuspensionCallbacks.get(mesh) === callbacks) modelEffectSuspensionCallbacks.delete(mesh);
+  };
+}
+
+export function isTargetModelEffectSuspended(mesh: AbstractMesh): boolean {
+  return modelEffectSuspensions.has(mesh);
+}
+
 /** 报警先释放模型视觉，再捕获真实原材质；租约释放后由下一次 tick 恢复模型效果。 */
 export function suspendTargetModelEffects(mesh: AbstractMesh): () => void {
   modelEffectSuspensions.set(mesh, (modelEffectSuspensions.get(mesh) ?? 0) + 1);

@@ -1,3 +1,4 @@
+import { SceneModelEntrancePanel } from './SceneModelEntrancePanel';
 import { SceneOpeningAnimationPanel } from './SceneOpeningAnimationPanel';
 import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
@@ -646,6 +647,8 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
       <RegionViewsPanel readOnly={props.readOnly} />
 
       <SceneOpeningAnimationPanel readOnly={props.readOnly} />
+
+      <SceneModelEntrancePanel readOnly={props.readOnly} />
 
       <SceneThemePanel readOnly={props.readOnly} />
 

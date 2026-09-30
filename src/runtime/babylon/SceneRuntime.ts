@@ -1,4 +1,6 @@
 import { SceneThemeRuntime } from './SceneThemeRuntime';
+import { ModelEntranceRuntime } from './ModelEntranceRuntime';
+import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
 import { ENVIRONMENT_EFFECT_TARGET_ID } from '../../editor/model/environmentBuildingEffect';
 import { createStackerFocusView, getStackerFocusWorldBounds } from './stackerFocusBounds';
 import { AlarmManagerRuntime, type AlarmActivation } from './AlarmManagerRuntime';
@@ -826,6 +828,9 @@ export class SceneRuntime {
   private readonly meshes = new Map<string, Mesh>();
   private readonly chartMarkerPresentation = new ChartMarkerPresentation();
   private readonly alarmRuntime: AlarmManagerRuntime;
+  private readonly modelEntranceRuntime: ModelEntranceRuntime;
+  private modelEntranceVisible = true;
+  private modelEntranceIncludesEnvironment = false;
   onAlarmActivated?: (event: AlarmActivation) => void;
   isAlarmActive(managerId: string, targetId: string): boolean { return this.alarmRuntime.isActive(managerId, targetId); }
   private readonly alarmManagerIds = new Set<string>();
@@ -978,6 +983,7 @@ export class SceneRuntime {
     onEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void = () => undefined,
     private readonly onModelLoadProgress?: (progress: SceneRuntimeModelLoadProgress) => void,
   ) {
+    this.modelEntranceRuntime = new ModelEntranceRuntime(scene);
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
     this.poiEffectRuntime = new PoiEffectRuntime(scene, id => {
       if (id === ENVIRONMENT_EFFECT_TARGET_ID) return this.environmentRuntime?.getBuildingEffectTarget() ?? null;
@@ -1014,7 +1020,11 @@ export class SceneRuntime {
     });
     this.skyboxRuntime = new SceneSkyboxRuntime(scene, this.pushLog, () => this.notifyModelLoadProgressChanged());
     this.environmentRuntime = new SceneEnvironmentRuntime(scene, {
-      withBuildingEffectMutation: mutate => this.poiEffectRuntime.withTargetMutation(ENVIRONMENT_EFFECT_TARGET_ID, mutate),
+      withBuildingEffectMutation: mutate => {
+        // 环境切换材质、阴影或透明度前释放入场覆盖，避免保留旧外观或旧材质引用。
+        if (this.modelEntranceIncludesEnvironment && this.modelEntranceRuntime.isActive) this.cancelModelEntrance();
+        this.poiEffectRuntime.withTargetMutation(ENVIRONMENT_EFFECT_TARGET_ID, mutate);
+      },
       // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
       loadAssetContainer: (rootUrl, fileName, signal) => {
         return this.loadEnvironmentAssetContainer(rootUrl, fileName, signal);
@@ -1048,6 +1058,7 @@ export class SceneRuntime {
       this.updateConveyorSurfaceArrows();
       this.updateStackerMotionArrows();
       this.updateRgvMotionArrows();
+      this.modelEntranceRuntime.tick(Math.min(this.scene.getEngine().getDeltaTime() / 1000, 0.1), this.modelEntranceVisible);
     });
     // 跟随相机应读取本帧设备/货物运动处理后的最终位置。
     this.poiEffectRuntime.moveFrameObserverToEnd();
@@ -1570,6 +1581,47 @@ export class SceneRuntime {
     this.openingCameraOwned = owned;
   }
 
+  /** 收集就绪的环境和业务模型；阵列按来源批次处理，不拆实例、不包含编辑标记。 */
+  prepareModelEntrance(settings: SceneModelEntranceSettings): void {
+    const config = normalizeSceneModelEntranceSettings(settings);
+    const targets: Array<{ id: string; node: TransformNode | AbstractMesh; meshes: AbstractMesh[] }> = [];
+    const selected = new Set(config.targetEntityIds);
+    const environment = this.environmentRuntime.getBuildingEffectTarget();
+    this.modelEntranceIncludesEnvironment = Boolean(environment && !environment.isDisposed() && environment.isEnabled()
+      && this.environmentRuntime.getSnapshot().phase === 'ready'
+      && (config.scope === 'all' || selected.has(ENVIRONMENT_EFFECT_TARGET_ID)));
+    if (environment && this.modelEntranceIncludesEnvironment) {
+      targets.push({ id: ENVIRONMENT_EFFECT_TARGET_ID, node: environment,
+        meshes: environment.getChildMeshes(false).filter(mesh => !mesh.isDisposed() && mesh.getTotalVertices() > 0) });
+    }
+    for (const [id, entity] of this.syncedEntities) {
+      if (entity.components.modelArrayInstance || !this.isEntityVisible(id)
+        || (config.scope === 'selected' && !selected.has(id))) continue;
+      const model = entity.components.modelAsset ? this.models.get(id) : null;
+      const mesh = entity.components.meshRenderer ? this.meshes.get(id) : null;
+      const node = model?.root ?? mesh;
+      if (!node) continue;
+      const meshes = model ? [...model.meshes, ...(model.modelArrayBatch?.meshes ?? [])] : [mesh!];
+      if (model) for (const variant of this.modelArrayParameterVariants.values()) {
+        if (variant.sourceEntityId === id) meshes.push(...variant.model.meshes, ...(variant.model.modelArrayBatch?.meshes ?? []));
+      }
+      targets.push({ id, node, meshes: [...new Set(meshes)].filter(candidate => !candidate.isDisposed() && candidate.getTotalVertices() > 0) });
+    }
+    try {
+      if (config.enabled && !targets.length) throw new Error('没有可播放入场的就绪模型，请检查作用范围和模型可见性。');
+      this.modelEntranceRuntime.prepare(config, targets);
+      const unsupported = this.modelEntranceRuntime.getSnapshot().unsupportedMeshCount;
+      if (unsupported) this.pushLog(`模型入场：${unsupported} 个网格材质不支持入场覆盖，保留原外观。`);
+    }
+    catch (error) { this.modelEntranceRuntime.cancel(); throw error; }
+  }
+
+  startModelEntrance(): void { this.modelEntranceRuntime.start(); }
+  cancelModelEntrance(): void { this.modelEntranceIncludesEnvironment = false; this.modelEntranceRuntime.cancel(); }
+  setModelEntranceVisible(visible: boolean): void { this.modelEntranceVisible = visible; }
+  isModelEntranceReady(): boolean { return this.scene.isReady(); }
+  getModelEntranceSnapshot() { return this.modelEntranceRuntime.getSnapshot(); }
+
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
     if (this.telemetryPreviewActive) return;
@@ -1594,6 +1646,7 @@ export class SceneRuntime {
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
   endTelemetryPreview(): void {
+    this.cancelModelEntrance();
     // 停表必须先于早退与代际表清理：tick 会重写 latestFetchRequestByRow，清表后再停会让在途响应被放行、批次在编辑态复活
     this.stopFetchSyncTimer();
     this.fetchSyncFailureReported = false;
@@ -4015,6 +4068,7 @@ export class SceneRuntime {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.modelEntranceRuntime.dispose();
     this.modelReadinessErrors.clear();
     this.progressNotificationPending = false;
     this.modelPresentationRefreshPending = false;
