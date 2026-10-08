@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
+import packageInfo from '../../../package.json' with { type: 'json' };
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
 import { createProjectOpenSession } from './projectLoadingCancellation';
@@ -578,6 +579,7 @@ export function HomePage({
           <h1 aria-label={APPLICATION_NAME}>
             <BrandLogo className="home-brand-logo" surface="dark" />
             <span className="home-brand-product">3D EDITOR</span>
+            <span className="home-brand-version" title="编辑器版本">v{packageInfo.version}</span>
           </h1>
           <p>项目启动台</p>
         </div>
