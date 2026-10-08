@@ -18,7 +18,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 设备类型识别
 
-- 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:21)、`isStackerModelAsset`(:39)、`isRgvModelAsset`(:52)、`isShuttleModelAsset`、`isLiftModelAsset`，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
+- 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:23)、`isStackerModelAsset`(:41)、`isRgvModelAsset`(:54)、`isShuttleModelAsset`、`isLiftModelAsset`，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
 - 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→shuttle→rgv→lift。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`。
 - shuttle 的 `isShuttleRuntimeModel` 仅按脚本 `dataDriven.device.devType==='shuttle'` 判定（该模型必有脚本，不加 ModelRuntimeEntry.capable 标志位）。
 - lift 双保险：`isLiftRuntimeModel` 仅按脚本 `devType==='lift'` 判定（同 shuttle 策略），`ModelRuntimeEntry.liftCapable`（资产签名）仅用于编辑态解锁绑定 UI；「提升机」中文签名不进运行时判定，防止误接管。
@@ -26,32 +26,32 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### MQTT 链路（deviceTelemetry.ts）
 
-- topic：`dt/factory/logistics/{deviceType}/{assetCode}/twindatadriven/joint`（:81）。设备匹配 = assetCode 严格相等。
-- payload `data[].{e,p,v}` 展平为字段表（:445-456），e 校验资产编号。
-- `createSnapshot`(:344) 生成快照：`currentLocationKey`(front_x·y·z) / `targetLocationKey`(to_x·y·z) / faulted（command=8 或 normal 字段，:432)。
-- store 键 `sourceId:deviceType:assetCode`(:276)；stale = 现在 - receivedAt > staleAfterMs（expectedIntervalMs×3 且 ≥2000ms，telemetryBinding.ts:197-199）。
+- topic：`dt/factory/logistics/{deviceType}/{assetCode}/twindatadriven/joint`（:82）。设备匹配 = assetCode 严格相等。
+- payload `data[].{e,p,v}` 展平为字段表（:601-612），e 校验资产编号。
+- `createSnapshot`(:487) 生成快照：`currentLocationKey`(front_x·y·z) / `targetLocationKey`(to_x·y·z) / faulted（command=8 或 normal 字段，:588)。
+- store 键 `sourceId:deviceType:assetCode`(:419)；stale = 现在 - receivedAt > staleAfterMs（expectedIntervalMs×3 且 ≥2000ms，telemetryBinding.ts:211-213）。
 - specialized 侧每帧 `resolveSpecializedTelemetrySnapshot` 拉取，禁止跨源兜底（:57-62）。
 
 ### fetch 链路（LocatorFetchRuntime + SceneRuntime）
 
-- 场景级 `FetchConfig{url, apiKey, syncIntervalSeconds}`（SceneDocument.ts:264-277）。`syncIntervalSeconds`（秒，默认 60、最小 10）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
+- 场景级 `FetchConfig{url, apiKey, syncIntervalSeconds}`（SceneDocument.ts:272-277）。`syncIntervalSeconds`（秒，默认 60、最小 10）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
 - **三个触发源**：
-  1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1012），同时按 `syncIntervalSeconds` 启动定时器（`startFetchSyncTimer` :1144，幂等重启）。
-  2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1051）；响应应用后解除格口抑制并销毁保留货箱。
-  3. 定时全量：`runScheduledFetchSync`（:1160）复用 ① 的全量体 `runFetchFullSync`（:1025）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
-- 请求 `fetchInventoryRecords`（:1080-1120）：POST `{rows}`，响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure` :1133），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
-- 乱序防护：`latestFetchRequestByRow` 代际戳（声明 :782-783，打戳与校验见 `runFetchFullSync` :1025-1048）。
+  1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1328），同时按 `syncIntervalSeconds` 启动定时器（`startFetchSyncTimer` :1460，幂等重启）。
+  2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1367）；响应应用后解除格口抑制并销毁保留货箱。
+  3. 定时全量：`runScheduledFetchSync`（:1476）复用 ① 的全量体 `runFetchFullSync`（:1341）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
+- 请求 `fetchInventoryRecords`（:1396-1435）：POST `{rows}`，响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure` :1449），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
+- 乱序防护：`latestFetchRequestByRow` 代际戳（声明 :883，打戳与校验见 `runFetchFullSync` :1341-1364）。
 
 ### 参数注入
 
-- 链路：SceneDocument → `entity.components.modelAsset.parameterConfig/Values` → `applyModelAssetParameters`（SceneRuntime.ts:6278），签名比对后重置重放，**参数变化即热更新**。
+- 链路：SceneDocument → `entity.components.modelAsset.parameterConfig/Values` → `applyModelAssetParameters`（SceneRuntime.ts:8125），签名比对后重置重放，**参数变化即热更新**。
 - driver 侧另直接读 `model.telemetryBinding`（如 stackerCargoGapY、columnBindings、cargoAutoDispose）和模型脚本 `dataDriven` 配置。
 
 ### 驱动生命周期
 
-- 注册：`drivers` 数组（SpecializedTelemetryRuntime.ts:60-79），每帧 `applyFrame`（:83-124），由 `SceneRuntime.applyDeviceTelemetryFrame`（SceneRuntime.ts:5143，`telemetryPreviewActive` 门控）调用。
-- 开始预览：`beginTelemetryPreview`(:1261) + 基线捕获 `captureReadyTelemetryPreviewBaselines`（SceneRuntime.ts:5167）。
-- 结束预览：`endTelemetryPreview`(:1278) → **先停 fetch 定时器**（`stopFetchSyncTimer` :1280，必须早于 `hadPreviewState` 早退与 `latestFetchRequestByRow.clear()`：清表后若 tick 重写代际，在途响应会被放行、批次在编辑态复活）→ 销毁全部货物(:1297) → fetch 清批(:1298-1301) → 恢复基线(:1305-1309) → 重置三类遥测状态(:1310-1314)。
+- 注册：`drivers` 数组（SpecializedTelemetryRuntime.ts:98-130），每帧 `applyFrame`（:137-195），由 `SceneRuntime.applyDeviceTelemetryFrame`（SceneRuntime.ts:5928，`telemetryPreviewActive` 门控）调用。
+- 开始预览：`beginTelemetryPreview`（SceneRuntime.ts:1626） + 基线捕获 `captureReadyTelemetryPreviewBaselines`（SceneRuntime.ts:5953）。
+- 结束预览：`endTelemetryPreview`（SceneRuntime.ts:1648） → **先停 fetch 定时器**（`stopFetchSyncTimer` :1651，必须早于 `hadPreviewState` 早退与 `latestFetchRequestByRow.clear()`：清表后若 tick 重写代际，在途响应会被放行、批次在编辑态复活）→ 销毁全部货物(:1675) → fetch 清批(:1676-1681) → 恢复基线(:1683-1686) → 重置五类遥测状态(:1687-1691)。
 
 ### 共享状态与交接门面
 
@@ -66,7 +66,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
 - 刷出初始朝向：恒为货物模板自身朝向（世界恒等，统一 `createCargoSpawnWorldRotation`，types.ts），不继承载体机体/货格旋转——五类司机的 `lockedWorldRotation ?? …` 回退与 stacker/shuttle fresh 刷出的 `holdRotation` 都走该回退，随后由首次稳定位姿落锁。载货面主动旋转货物朝向的设备后续另行建模，当前不存在。
 - `createCargoHandoffState` 对从未写过位姿的新货物（`root.rotationQuaternion == null`）返回 null 不建插值：新货直接在目标位姿落位，避免从世界原点飞入 / 从 Identity 自旋，同时保证首次写入即稳定位姿。
-- 门面方法：`adoptGlobalCargoByTask`(:239)、`placeCargoIntoConveyorPlatform`(:281)、`deliverRgvCargoToConveyorColumn`(:305)、`adoptConveyorCargoForLift` / `deliverLiftCargoToConveyorLayer` / `resolveConveyorDeckSurfacePoint`（SpecializedTelemetryRuntime.ts）。
+- 门面方法：`adoptGlobalCargoByTask`(:366)、`placeCargoIntoConveyorPlatform`(:424)、`deliverRgvCargoToConveyorColumn`(:463)、`adoptConveyorCargoForLift` / `deliverLiftCargoToConveyorLayer` / `resolveConveyorDeckSurfacePoint`（SpecializedTelemetryRuntime.ts）。
 
 ---
 
@@ -75,47 +75,47 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 ### 参数化配置
 | 配置 | 位置 | 语义 |
 |---|---|---|
-| `dataDriven.cargo.travel.axis` | specializedModelAssets.ts:139-171 | 'x'\|'z'，行程轴（默认 x） |
-| `dataDriven.cargo.travel.speed` | 同上 | m/s，默认 0.3（types.ts:81） |
+| `dataDriven.cargo.travel.axis` | specializedModelAssets.ts:286-318 | 'x'\|'z'，行程轴（默认 x） |
+| `dataDriven.cargo.travel.speed` | 同上 | m/s，默认 0.3（types.ts:101） |
 | `dataDriven.cargo.travel.fields` | 同上 | 方向字段（默认 `['movement_x']`） |
-| `dataDriven.cargo.travel.actionMap` | :213-225 | 字段值→方向（默认 {0:0,1:1,2:-1}） |
+| `dataDriven.cargo.travel.actionMap` | specializedModelAssets.ts:360-371 | 字段值→方向（默认 {0:0,1:1,2:-1}） |
 | `dataDriven.cargo.travel.nodes` / `fallbackPattern` | 同上 | 行程节点名 / 兜底正则 |
-| `dataDriven.cargo.surfaceOffset` | :185-194 | 支撑面微调 |
-| `dataDriven.cargo.front/backHasGoodsField` | :197-210 | 光电字段名（默认 front/back_has_goods） |
-| `telemetryBinding.trajectoryDirection` | telemetryBinding.ts:51 | 'x'\|'-x'\|'-z'\|'z'，正转=movement_x 正值时的模型本地方向，换算 `forwardSign`（conveyorDriver.ts:1197-1202） |
+| `dataDriven.cargo.surfaceOffset` | specializedModelAssets.ts:331-341 | 支撑面微调 |
+| `dataDriven.cargo.front/backHasGoodsField` | specializedModelAssets.ts:343-357 | 光电字段名（默认 front/back_has_goods） |
+| `telemetryBinding.trajectoryDirection` | telemetryBinding.ts:59 | 'x'\|'-x'\|'-z'\|'z'，正转=movement_x 正值时的模型本地方向，换算 `forwardSign`（conveyorDriver.ts:1225-1227） |
 | `telemetryBinding.cargoOriginDevice` | :273 | 起点刷货 |
 | `telemetryBinding.cargoAutoDispose` | :209 | 缺省 false；恒 mode:2 且无 hasGoods 的设备勾选后会每帧销毁滞留货（配置陷阱，勿改代码） |
-| `metadata.conveyorSurfaceY` | :1167-1179 | 链面顶高 |
+| `metadata.conveyorSurfaceY` | conveyorDriver.ts:1194-1207 | 链面顶高 |
 
 ### 编辑态轨迹线（Toolbar「动画」）
 
-- 链路：Toolbar `trajectoryVisible` → `SceneRuntime.syncConveyorTrajectory`（:5577）→ `resolveConveyorTrajectoryContext`（:5632）→ GreasedLine 虚线+箭头（`createConveyorTrajectory` :5675）。
+- 链路：Toolbar `trajectoryVisible` → `SceneRuntime.syncConveyorTrajectory`（:6902）→ `resolveConveyorTrajectoryContext`（:6957）→ GreasedLine 虚线+箭头（`createConveyorTrajectory` :7000）。
 - 位置口径：中心/面高/行程全部来自 `cargo.travel.nodes` 行程节点包围盒（中心、行走轴投影跨度、顶投影+surfaceOffset），与 conveyorDriver 同源——轨迹线高度即货物支撑面高度。
 - 行程节点选型（辊道输送线 = `["GD_7","GD_4"]`）：GD_7 辊面提供面高、GD_4 主轨提供行程跨度；**勿用父节点 GD**——其下挡板 GD_3 顶（+0.12m）会抬升轨迹线悬浮，电机 DG 拉偏横向中心；`filterTopLevelMotionNodes` 会让 GD 吞掉 GD_7。
 - 注意：`getNodesWorldBounds` 不过滤隐藏/非对称部件（电机、隐藏的克隆源原件、薄实例 host 包围盒），行程节点须选几何干净的对称件。
 
 ### MQTT 消费
-`task`(:167 数值身份)、`mode`（0 空闲退订 / 2 销货 :207）、`movement_x`(:852-872)、光电字段(:148-149)、`containerCode`(:257,:848)。
+`task`(:171 数值身份)、`mode`（0 空闲退订 / 2 销货 :210）、`movement_x`(:875-925)、光电字段(:152-153)、`containerCode`(:261,:871)。
 
-**不消费 fetch**。仅经 `findBuiltInSlotLocatorForHostModel`(:765-768) 解析内置 1×1 站台货格支撑位。
+**不消费 fetch**。仅经 `findBuiltInSlotLocatorForHostModel`(:790) 解析内置 1×1 站台货格支撑位。
 
 ### 动画
-仅货物平移，**本体滚筒/链条不驱动**（:98）。每帧 `cargoTravelOffset += direction × forwardSign × speed × dt`（:342-346），`getConveyorCargoPosition`(:1182-1190) = 中心 + surfaceLift + 轴向偏移。
+仅货物平移，**本体滚筒/链条不驱动**（:102）。每帧 `cargoTravelOffset += direction × forwardSign × speed × dt`（:347-349），`getConveyorCargoPosition`(:1210-1221) = 中心 + surfaceLift + 轴向偏移。
 
 ### 时序
-无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1116-1124)。实测半长按生成器输出类型取世界包围盒在行走轴投影；**组合输出的阵列批次网格必须走 `getThinInstanceMeshWorldBounds` 逐实例矩阵测量**——批次几何保留成员原始坐标（单位换算烘在逐实例矩阵内、网格自身世界矩阵不含缩放），走 `getMeshWorldBounds` 的几何×网格世界矩阵路径会按原始单位放大长度（如厘米箱测出 18m），行程半径被压到下限、货物冻结在输送线中心。端点容差 1e-3（:51）。自驱续行在 movement 归 0 后接管(:331-341)。
+无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1144-1152)。实测半长按生成器输出类型取世界包围盒在行走轴投影；**组合输出的阵列批次网格必须走 `getThinInstanceMeshWorldBounds` 逐实例矩阵测量**——批次几何保留成员原始坐标（单位换算烘在逐实例矩阵内、网格自身世界矩阵不含缩放），走 `getMeshWorldBounds` 的几何×网格世界矩阵路径会按原始单位放大长度（如厘米箱测出 18m），行程半径被压到下限、货物冻结在输送线中心。端点容差 1e-3（:55）。自驱续行在 movement 归 0 后接管(:335-343)。
 
-### 状态机（ConveyorModelTelemetryState, types.ts:290-329）
-`cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/订阅(:227-296)；mode=2+双光电空→销毁(:207-222)；交付 settle(:663-699)。
+### 状态机（ConveyorModelTelemetryState, types.ts:320-360）
+`cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/订阅(:231-298)；mode=2+双光电空→销毁(:210-226)；交付 settle(:672-704)。
 
 ### 交接
-- **conveyor→conveyor**：探测邻居(:805-838) + `available/taken` 下行泛洪、`subscribe/unsubscribe` 上行传递（`dispatchLinkMessage` :397）；越级直达 `runCargoDeliveryRelay`(:621-655)，K 跳仅终点发一次 taken+available，`visited` 防环。
-- **外部持货（rgv/stacker）**：无链路能力，经 `externalPulls` 帧尾 `pullExternalHolderCargo` 代交付(:363-394)，门控 `isRgvCargoReadyForExternalPull` / `isStackerCargoPendingPlatformHandoff`(:379-381)。
-- **stacker↔conveyor 站台**：locator 事件驱动不经链路 — `adoptPlatformCargoForStacker`(:973)、`acceptPlatformPlacedCargo`(:1000)。
-- **rgv 列放货**：`acceptRgvColumnPlacedCargo`(:1069)，由 rgvDriver.ts:537-550 发起。
+- **conveyor→conveyor**：探测邻居(:814-861) + `available/taken` 下行泛洪、`subscribe/unsubscribe` 上行传递（`dispatchLinkMessage` :406）；越级直达 `runCargoDeliveryRelay`(:630-664)，K 跳仅终点发一次 taken+available，`visited` 防环。
+- **外部持货（rgv/stacker）**：无链路能力，经 `externalPulls` 帧尾 `pullExternalHolderCargo` 代交付(:370-405)，门控 `isRgvCargoReadyForExternalPull` / `isStackerCargoPendingPlatformHandoff`(:386-390)。
+- **stacker↔conveyor 站台**：locator 事件驱动不经链路 — `adoptPlatformCargoForStacker`(:978)、`acceptPlatformPlacedCargo`(:1011)。
+- **rgv 列放货**：`acceptRgvColumnPlacedCargo`(:1058)，由 rgvDriver.ts:586-600 发起。
 
 ### 扩展点
-新 MQTT 字段 → `applyConveyorCargoMotion`(:141) 内 read 系列；新配置键 → specializedModelAssets.ts 读取器 + `ConveyorCargoTravelConfig`（types.ts:375-382）；新交接对象 → `SpecializedTelemetryDriverContext`（types.ts:467-502）加方法经门面接入。
+新 MQTT 字段 → `applyConveyorCargoMotion`(:145) 内 read 系列；新配置键 → specializedModelAssets.ts 读取器 + `ConveyorCargoTravelConfig`（types.ts:494-502）；新交接对象 → `SpecializedTelemetryDriverContext`（types.ts:596-647）加方法经门面接入。
 
 ### 变体：虚拟输送线（内置模型包）
 针对复杂复合模型承载多个上报设备的拆分场景，编辑器内置「虚拟输送线」：长方形平面（GLB 1×0.05×1 m，单 mesh `VCConveyorBelt`），运行时行为与真实 conveyor 完全一致（conveyorDriver 零改动）。详见 `docs/virtual-conveyor-design.md`。
@@ -131,34 +131,34 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 ### 参数化配置
 | 配置 | 位置 | 语义 |
 |---|---|---|
-| `telemetryBinding.columnBindings` | telemetryBinding.ts:48 | 协议列号字符串 → 同列 conveyor 实体 ID 数组（可多对多） |
-| `telemetryBinding.expectedIntervalMs` | :197-199 | staleAfterMs = ×3 且 ≥2000ms |
-| `dataDriven.fixedNodes` | rgvDriver.ts:290-295 | 固定轨道节点，缺失回退正则 `/^A(?:3[7-9]\|4[0-6])/i` |
-| `dataDriven.cargo.front/backNodes` | :212-219 | 载货台面节点 |
-| `dataDriven.motion.travel.speed` | :131-132 | 默认 0.8 m/s（types.ts:82） |
+| `telemetryBinding.columnBindings` | telemetryBinding.ts:53 | 协议列号字符串 → 同列 conveyor 实体 ID 数组（可多对多） |
+| `telemetryBinding.expectedIntervalMs` | :48（阈值计算 :211-213） | staleAfterMs = ×3 且 ≥2000ms |
+| `dataDriven.fixedNodes` | rgvDriver.ts:321-326 | 固定轨道节点，缺失回退正则 `/^A(?:3[7-9]\|4[0-6])/i` |
+| `dataDriven.cargo.front/backNodes` | rgvDriver.ts:244-251 | 载货台面节点 |
+| `dataDriven.motion.travel.speed` | rgvDriver.ts:154-155 | 默认 0.8 m/s（types.ts:102） |
 
 ### MQTT 消费
-`front_y/back_y` 当前列(:750-753)、`go_column` 目标列（非 0 优先，:93,:108）、`front/back_command`（0 待机/1 取货/2 放货/3 取货准备，:327）、`front/back_movement_z` 滚筒起停转、`front/back_task`、`front_containerCode`(:340)、`faulted/errorCode`(:345,:874)。RGV 无字段归一化（deviceTelemetry.ts:363-381 仅 stacker/conveyor）。
+`front_y/back_y` 当前列(:107-108)、`go_column` 目标列（非 0 优先，:116,:131）、`front/back_command`（0 待机/1 取货/2 放货/3 取货准备，:369）、`front/back_movement_z` 滚筒起停转、`front/back_task`、`front_containerCode`(:372)、`faulted/errorCode`(:380)。RGV 无字段归一化（`normalizeDeviceCompatibleFields` 仅 stacker/conveyor/lift，deviceTelemetry.ts:506-545）。
 
 **不消费 fetch**。
 
 ### 动画
-车体行走 `applyRgvTravelMotion`(:79-141)：`moveVectorTowards` 按 speed×Δt 逼近目标(:133)，轨道约束 `constrainRgvTravelPosition`(:222-236)；行走节点按基线写回(:260-287)。货箱交接插值 `advanceRgvTransfer`(:499-509)，时长 1.5s（`RGV_CARGO_TRANSFER_SECONDS`，types.ts:84），`updateRgvCargoPose` 每帧 Lerp/Slerp(:570-595)。无载货台升降动画——工位锚点取台面包围盒顶面 y(:602-626)。
+车体行走 `applyRgvTravelMotion`(:101-173)：`moveVectorTowards` 按 speed×Δt 逼近目标(:158)，轨道约束 `constrainRgvTravelPosition`(:254-268)；行走节点按基线写回(:305-307)。货箱交接插值 `advanceRgvTransfer`(:545)，时长 1.5s（`RGV_CARGO_TRANSFER_SECONDS`，types.ts:104），`updateRgvCargoPose` 每帧 Lerp/Slerp(:616-643)。无载货台升降动画——工位锚点取台面包围盒顶面 y(:650-674)。
 
 ### 时序
-go_column/列号边沿锁行走目标(:112-123) → 滑向目标列 → movement_z 起转=到位 → 取货：command 1/3 `beginRgvFetchTransfer` 侧缘刷出(:403-440) → 插值上车 → command 归 0 `completeRgvFetch`(:376-382)；放货：command 2 `beginRgvPlaceTransfer`(:443-477) → 起转边沿即交付(:360-362) → 停转边沿兜底(:370-374)。
+go_column/列号边沿锁行走目标(:135-146) → 滑向目标列 → movement_z 起转=到位 → 取货：command 1/3 `beginRgvFetchTransfer` 侧缘刷出(:445) → 插值上车 → command 归 0 `completeRgvFetch`(:558)；放货：command 2 `beginRgvPlaceTransfer`(:487) → 起转边沿即交付(:398-402) → 停转边沿兜底(:410-414)。
 
-### 状态机（RgvModelTelemetryState, types.ts:343-370）
-`frontCargoKey`、`frontCargoOnBoard`、`frontTransferProgress`、`frontLastCommand/frontLastMovementZ`（边沿基线）。迁移全在 `applyRgvForkCargoMotion` 边沿块(:345-389)；faulted 冻结(:345)。
+### 状态机（RgvModelTelemetryState, types.ts:373-401）
+`frontCargoKey`、`frontCargoOnBoard`、`frontTransferProgress`、`frontLastCommand/frontLastMovementZ`（边沿基线）。迁移全在 `applyRgvForkCargoMotion` 边沿块(:362-433)；faulted 冻结(:380)。
 
 ### 交接（同列多台仲裁：推送交付而非订阅传播）
-- 同列取全部候选 `resolveRgvColumnCandidates`(:659-682)；偏好选择 `selectRgvColumnCandidateByPreference`(:703-723)：place 匹配 conveyor `pendingTask/waitingTask` 且无货，fetch 匹配持货 task。
-- 交付链：`tryDeliverRgvPlaceCargo`(:540-553) → 门面 `deliverRgvCargoToConveyorColumn`(SpecializedTelemetryRuntime.ts:305-319) → conveyor 预检+settle+广播入链。放货在起转边沿即推送，不等订阅传播。
-- pull 门控：conveyor 订阅波触达非 conveyor 邻居时登记 `externalPulls`（conveyorDriver.ts:487-501），RGV 持货须 `command==2 且 travelTargetPosition===null`（rgvDriver.ts:556-567）才被拉取。
-- 坐标：conveyor 对齐取载货面中心 `resolveConveyorDeckCenterWorld`（conveyorDriver.ts:999）；交接侧缘 `getRgvTransferEdgePose` 沿局部 X 偏移整台面宽(:632-651)。
+- 同列取全部候选 `resolveRgvColumnCandidates`(:738)；偏好选择 `selectRgvColumnCandidateByPreference`(:782)：place 匹配 conveyor `pendingTask/waitingTask` 且无货，fetch 匹配持货 task。
+- 交付链：`tryDeliverRgvPlaceCargo`(:586) → 门面 `deliverRgvCargoToConveyorColumn`(SpecializedTelemetryRuntime.ts:463-483) → conveyor 预检+settle+广播入链。放货在起转边沿即推送，不等订阅传播。
+- pull 门控：conveyor 订阅波触达非 conveyor 邻居时登记 `externalPulls`（conveyorDriver.ts:503-510），RGV 持货须 `command==2 且 travelTargetPosition===null`（rgvDriver.ts:606-609）才被拉取。
+- 坐标：conveyor 对齐取载货面中心 `resolveCargoDeckCenterWorld`（conveyorDriver.ts:988）；交接侧缘 `getRgvTransferEdgePose` 沿局部 X 偏移整台面宽(:680)。
 
 ### 扩展点
-新 MQTT 字段 → `applyRgvTravelMotion`/`applyRgvForkCargoMotion` + 状态结构；新 dataDriven 配置 → `readRgvDataDrivenNumber`/`readRgvCargoNodeNames`(:889-906)；新仲裁策略 → `resolveRgvColumnCandidates` + 门面；列绑定编辑 UI → TelemetryBindingInspector.tsx:214-228。
+新 MQTT 字段 → `applyRgvTravelMotion`/`applyRgvForkCargoMotion` + 状态结构；新 dataDriven 配置 → `readRgvDataDrivenNumber`/`readRgvCargoNodeNames`(:968/:244)；新仲裁策略 → `resolveRgvColumnCandidates` + 门面；列绑定编辑 UI → TelemetryBindingInspector.tsx:211-234。
 
 ---
 
@@ -167,42 +167,42 @@ go_column/列号边沿锁行走目标(:112-123) → 滑向目标列 → movement
 ### 参数化配置
 | 配置 | 位置 | 语义 |
 |---|---|---|
-| Inspector `travelSpeed/liftSpeed/forkSpeed` | stackerDriver.ts:1580 `readStackerInspectorSpeed` | 读 modelAsset.parameterValues，优先级最高 |
-| `dataDriven.motion.{travel,lift,fork}.speed` | :1593 | 回退链第二级 |
+| Inspector `travelSpeed/liftSpeed/forkSpeed` | stackerDriver.ts:1620 `readStackerInspectorSpeed` | 读 modelAsset.parameterValues，优先级最高 |
+| `dataDriven.motion.{travel,lift,fork}.speed` | :1633 | 回退链第二级 |
 | 常量默认 0.8 / 0.3 / 0.25 m/s | types.ts:15-17 | 最终回退 |
-| MQTT `rpm_*` × `rpmToMetersPerSecond` | :1596-1599 | 实际速度优先（默认 0.01） |
-| Locator `rowNumber/startColumn/startLayer/columns/layers/columnReversed/cellSteps/cellSize` | SceneRuntime.ts:458-483 | 巷道/列/层网格不在 stacker 配置，在绑定货格 |
-| `travelConstraint` / `liftConstraint` + `dataDriven.motion.lift.limits` | :90,:1344,:1378-1390 | 行走/升降行程钳制 |
-| `dataDriven.motion.*.nodes` / `fixedNodes` / `fallbackPattern` | :1478,:1522,:1505 | 轴节点映射；兜底硬编码 huocha2.10(一段叉)/huocha.9(二段叉)(:1450) |
-| `telemetryBinding.stackerCargoGapY` | telemetryBinding.ts:56,236，读于 :989 | 货叉瞄准基点相对货格支撑位的竖直偏移 -1~1：只计入升降目标（:395-404），叉顶面定位到支撑位+间隙（插入货物底部货槽）；货物落位保持支撑位不变 |
+| MQTT `rpm_*` × `rpmToMetersPerSecond` | :1638 | 实际速度优先（默认 0.01） |
+| Locator `rowNumber/startColumn/startLayer/columns/layers/columnReversed/cellSteps/cellSize` | SceneRuntime.ts:555-584 | 巷道/列/层网格不在 stacker 配置，在绑定货格 |
+| `travelConstraint` / `liftConstraint` + `dataDriven.motion.lift.limits` | :1386-1401,:1418-1420 | 行走/升降行程钳制 |
+| `dataDriven.motion.*.nodes` / `fixedNodes` / `fallbackPattern` | :1561,:1549,:1504 | 轴节点映射；兜底硬编码 huocha2.10(一段叉)/huocha.9(二段叉)(:1489-1491) |
+| `telemetryBinding.stackerCargoGapY` | telemetryBinding.ts:71,262，读于 :1030 | 货叉瞄准基点相对货格支撑位的竖直偏移 -1~1：只计入升降目标（:420），叉顶面定位到支撑位+间隙（插入货物底部货槽）；货物落位保持支撑位不变 |
 
 ### MQTT 消费
-- `front_x/front_y/front_z` = 列/层/排当前库位(:120-122，全 0=空闲)；`to_x/to_y/to_z` = 目标库位(:147)，仅决定行走/升降终点。
+- `front_x/front_y/front_z` = 列/层/排当前库位(:140-147，全 0=空闲)；`to_x/to_y/to_z` = 目标库位(:167)，仅决定行走/升降终点。
 - `front/back_command`：1 取货中 / 2 取货完成 / 3,4 放货中 / 5 放货完成 / 8 急停(faulted)。
-- `front/back_movement_z`：1/3 伸、2/4 收(:483-484)；`front/back_rpm_z` 叉速。
-- **mode==4 时 command 不可靠**：改用 `front_signalBits` 第 17 位（2^17=131072，types.ts:27）前一帧样本锁存取/放(:192-228)。
-- `${side}_task`（全局货物身份）、`${side}_containerCode`(:1080-1089)。
+- `front/back_movement_z`：1/3 伸、2/4 收(:522,:681)；`front/back_rpm_z` 叉速。
+- **mode==4 时 command 不可靠**：改用 `front_signalBits` 第 17 位（2^17=131072，types.ts:27）前一帧样本锁存取/放(:204-220)。
+- `${side}_task`（全局货物身份）、`${side}_containerCode`(:1120)。
 
 ### fetch 响应（唯二消费 fetch 的设备之一）
-放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排 POST(SceneRuntime.ts:947-968) → 响应应用后 `clearSuppressedCells` 并销毁保留货(:961-966)，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:770)。
+放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排 POST(SceneRuntime.ts:1367-1393) → 响应应用后 `clearSuppressedCells` 并销毁保留货(:1386-1388)，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:790)。
 
 ### 动画
-每帧 `applyToModel`(:79)。行走/升降/叉伸缩均为**速度插值**（非直接定位）：`moveVectorTowards`(:429)、`moveNumberTowards`(:462)；例外：首帧吸附 `snapStackerToTargetOffsets`(:275)、catch-up 强制收尾。货叉总偏移 50/50 拆一/二段(`splitForkOffset` :616)。货物绑定叉尖时每帧锚定二段叉顶面中心（:968-977）；`stackerCargoGapY` 只计入升降瞄准基点（:395-404），叉顶面定位到支撑位+间隙（插入货物底部货槽），货格落位保持支撑位（:1008-1013，与货架/站台自身渲染同源）。取货绑定时锁存「持货位 − 叉面锚点」偏移、放货携带固定挂槽偏移 −gapY（`bindStackerCargo`/`beginStackerPlaceWithCargo`）：货叉插入货槽不推动货物，绑定/落货全程零跳变。**本体移动与伸叉互斥**(:492-496)。世界偏移经 `offsetNodesFromBaselineByWorldOffsets` 转父级本地(:1561)。
+每帧 `applyToModel`(:80)。行走/升降/叉伸缩均为**速度插值**（非直接定位）：`moveVectorTowards`(:449)、`moveNumberTowards`(:543)；例外：首帧吸附 `snapStackerToTargetOffsets`(:295)、catch-up 强制收尾。货叉总偏移 50/50 拆一/二段(`splitForkOffset` :636)。货物绑定叉尖时每帧锚定二段叉顶面中心（:1007）；`stackerCargoGapY` 只计入升降瞄准基点（:420），叉顶面定位到支撑位+间隙（插入货物底部货槽），货格落位保持支撑位（:1033，与货架/站台自身渲染同源）。取货绑定时锁存「持货位 − 叉面锚点」偏移、放货携带固定挂槽偏移 −gapY（`bindStackerCargo`/`beginStackerPlaceWithCargo`）：货叉插入货槽不推动货物，绑定/落货全程零跳变。**本体移动与伸叉互斥**(:493-522)。世界偏移经 `offsetNodesFromBaselineByWorldOffsets` 转父级本地(:1601)。
 
 ### 时序（取/放节拍）
-command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:669-671) → 叉到目标行程（余量 2cm :734-740）→ `bindStackerCargo`(:694-696) → command 相位离开 `completeStackerFetch`(:888-902) → 运载 → command 3/4 伸叉到位 → 解绑落入箱位 `unbindStackerCargo`(:696) → 收叉（收叉期叉未到位则每帧幂等重试 :702-708）→ 相位退出 `completeStackerPlace`(:903-907)。模拟器节拍：8s 周期（StackerTelemetrySimulator.ts:273-287）。
+command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:763) → 叉到目标行程（余量 2cm :753-759）→ `bindStackerCargo`(:832) → command 相位离开 `completeStackerFetch`(:944) → 运载 → command 3/4 伸叉到位 → 解绑落入箱位 `unbindStackerCargo`(:866) → 收叉（收叉期叉未到位则每帧幂等重试 :725-727）→ 相位退出 `completeStackerPlace`(:950)。模拟器节拍：8s 周期（StackerTelemetrySimulator.ts:251，节拍函数 :273-287）。
 
 ### 状态机
-每侧货叉独立：`frontCargoKey`(无货) → 刷货滞留格 → `frontCargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`forkCatchUp`（库位跳变强制收尾，收叉前冻结平移/升降，:99-105,:235-272）、`frontSignalAction/Extended`(mode4 锁存)、`mismatch`（库位失配禁伸叉 :131）、`frontCargoPendingPlatformLocatorId`(mode4 延后站台交接)。全量字段见 `StackerModelTelemetryState`（types.ts:175-243）。
+每侧货叉独立：`frontCargoKey`(无货) → 刷货滞留格 → `frontCargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`forkCatchUp`（库位跳变强制收尾，收叉前冻结平移/升降，:109-116,:280-289）、`frontSignalAction/Extended`(mode4 锁存)、`mismatch`（库位失配禁伸叉 :134-156）、`frontCargoPendingPlatformLocatorId`(mode4 延后站台交接)。全量字段见 `StackerModelTelemetryState`（types.ts:202-275）。
 
 ### 交接
-- **conveyor→stacker**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`(:761) → 门面 → conveyorDriver `adoptPlatformCargoForStacker`(:973)，无视 task 接管并广播 taken。
-- **stacker→conveyor**：放货解绑 `placeCargoIntoConveyorPlatform`(:877/:935)，预检 `canAcceptPlatformPlacedCargo`（conveyorDriver.ts:1010）；mode4 延后到收叉停止边沿(:712-717)。
-- **全局按 task**：`adoptGlobalCargoByTask`(:1081) 扫全部货物表跨设备接管；conveyor 拉货受 `isStackerCargoPendingPlatformHandoff` 门控（conveyorDriver.ts:383）。
-- 库位键 `JSON.stringify([frontX,frontY,frontZ])`(:127)；排-列-层经 `resolveLocatorBoxIndex`（stackerStorageLocation.ts:45）换算，支撑位=格底面中心世界坐标(:139)，与叉锚点对齐保证交接无跳变。
+- **conveyor→stacker**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`(:781) → 门面 → conveyorDriver `adoptPlatformCargoForStacker`(:978)，无视 task 接管并广播 taken。
+- **stacker→conveyor**：放货解绑 `placeCargoIntoConveyorPlatform`(:910/:968)，预检 `canAcceptPlatformPlacedCargo`（conveyorDriver.ts:999）；mode4 延后到收叉停止边沿(:736)。
+- **全局按 task**：`adoptGlobalCargoByTask`(:1121) 扫全部货物表跨设备接管；conveyor 拉货受 `isStackerCargoPendingPlatformHandoff` 门控（conveyorDriver.ts:390）。
+- 库位键 `JSON.stringify([frontX,frontY,frontZ])`(:147)；排-列-层经 `resolveLocatorBoxIndex`（stackerStorageLocation.ts:45）换算，支撑位=格底面中心世界坐标(:139)，与叉锚点对齐保证交接无跳变。
 
 ### 扩展点
-新 MQTT 字段无需改解析层（e/p/v 通用），在 `applyToModel`(:79) 增消费点；新动作时序改 `applyStackerForkCargoMotion`(:651) 与 `completeStackerCargoOnPhaseExit`(:888)；新交接对象在 `SpecializedTelemetryDriverContext`（types.ts:467-502）加方法。
+新 MQTT 字段无需改解析层（e/p/v 通用），在 `applyToModel`(:80) 增消费点；新动作时序改 `applyStackerForkCargoMotion`(:671) 与 `completeStackerCargoOnPhaseExit`(:921)；新交接对象在 `SpecializedTelemetryDriverContext`（types.ts:596-647）加方法。
 
 ---
 
@@ -258,7 +258,7 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 ### 参数化配置（模型脚本 `shelf.model.ts`）
 | 配置 | 位置 | 默认 |
 |---|---|---|
-| `layerCount` / `columnCount` | :30/:33 | 1 / 1（上限 20/100，:180-181） |
+| `layerCount` / `columnCount` | :30/:33 | 1 / 1（上限 20/100，:186-187） |
 | `cellWidth` / `cellHeight` / `cellDepth` | :36/:39/:42 | 0.801 / 4.525 / 1.183 m |
 | `supportLegHeight` | :45 | 0.904 m |
 | `doubleDeepEnabled` / `deepSlotGap` | :52/:55 | false / 0.2（双排深位） |
@@ -266,30 +266,30 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 | `slotColumnRatio` | :61 | 1（1..8），1 个实物货格列向分裂的逻辑列数：逻辑列数 = columnCount × ratio、逻辑格宽 = cellWidth / ratio，物理结构不变；`to_x` 按连续逻辑列号寻址 |
 | `bodyColor` / `beamColor` | — | 本体/横梁颜色 |
 
-货格 LocatorComponent（components.ts:58-78）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:140-154，`dimensionMapping` 派生维度，`columnSplitParam` 声明列向分裂比例参数）。
+货格 LocatorComponent（components.ts:62-84）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:141-156，`dimensionMapping` 派生维度，`columnSplitParam` 声明列向分裂比例参数）。
 
-**共享实例策略**：带脚本的 shelf 走 **owned-container 独占**（`resolveModelAssetSharedInstancingPolicy`，SharedModelAssetCache.ts:157-180）；仅无脚本纯静态模型才 shared-instance。
+**共享实例策略**：带脚本的 shelf 走 **owned-container 独占**（`resolveModelAssetSharedInstancingPolicy`，SharedModelAssetCache.ts:275-284）；仅无脚本纯静态模型才 shared-instance。
 
 ### 数据源
-**不消费 MQTT**。泊位货物状态全部来自 HTTP fetch；MQTT 仅驱动 stacker，stacker 的 `front_x/front_y/front_z` 经 `findLocatorByDevice`（SceneRuntime.ts:3861）按 `deviceAssetCode + rowNumber + 列/层范围` 命中货格。
+**不消费 MQTT**。泊位货物状态全部来自 HTTP fetch；MQTT 仅驱动 stacker，stacker 的 `front_x/front_y/front_z` 经 `findLocatorByDevice`（SceneRuntime.ts:4365）按 `deviceAssetCode + rowNumber + 列/层范围` 命中货格。
 
 ### fetch 响应驱动
-- 记录格式 `FetchContainerRecord`（LocatorFetchRuntime.ts:16-28）：`containerCode/containerType/isEmpty/row/column/layer/tier/stackingRow/stackingColumn/stackingLayer`。
+- 记录格式 `FetchContainerRecord`（LocatorFetchRuntime.ts:21-33）：`containerCode/containerType/isEmpty/row/column/layer/tier/stackingRow/stackingColumn/stackingLayer`。
 - `applyRecords`(:89-135)：按 `rowNumber` 过滤 + `!isEmpty` + 排除抑制格口；`matchRule`(:138-151) 按 `attributeName`（空则比 `containerType`）匹配 `ModelGeneratorRule` → 目标模板，缺省 `defaultTarget`，无生成器回退内置 cube。
-- 映射：`column/layer` → `getLocatorBoxWorldMatrix`（SceneRuntime.ts:3953）→ 格口底面中心世界矩阵；越界跳过(:298-311)。
+- 映射：`column/layer` → `getLocatorBoxWorldMatrix`（SceneRuntime.ts:4457）→ 格口底面中心世界矩阵；越界跳过(:342-360)。
 - 渲染：按 `targetSignature` 分组合批（`syncBatches` :161-188），逐 mesh 抽顶点烘焙（`createBatch` :191-250），`thinInstanceSetBuffer` 全量重建(:299-325)。
 
 ### 动画与时序
 货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**更新 thinInstance buffer，无过渡；数据未变时按 `targetSignature` 命中已有批次只重写矩阵，不重建 mesh、不闪烁。时序 = 预览开始一次全量 + stacker 放货单排同步 + 按 `syncIntervalSeconds` 的定时全量（秒，默认 60、最小 10，`0` 关闭）。
 
 ### 状态机
-格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:69，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:793）。无"锁定"态。
+格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:78，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:893）。无"锁定"态。
 
 ### 交接（与 stacker 联动）
-取货：command 1 + movement 1/3 伸叉瞬间 `beginStackerFetch`（stackerDriver.ts:743-787）刷货并 `suppressFetchCellForLocator`(:770)。放货：command 3/4 锁 `frontCargoFetchRow`(:682-691) → 解绑落箱位 → `completeStackerPlace` → 保留货 → 单排 fetch 拉回 → 解除抑制 → 销毁保留货。
+取货：command 1 + movement 1/3 伸叉瞬间 `beginStackerFetch`（stackerDriver.ts:763）刷货并 `suppressFetchCellForLocator`(:790)。放货：command 3/4 锁 `frontCargoFetchRow`(:702-709) → 解绑落箱位 → `completeStackerPlace` → 保留货 → 单排 fetch 拉回 → 解除抑制 → 销毁保留货。
 
 **格口抑制的解除有两条路径**（抑制集合无 TTL，仅在运行预览期有效）：
-1. **单排同步全清**：放货完成的单排同步响应应用后 `clearSuppressedCells()`（SceneRuntime.ts:1070），整批抑制一次性解除。
+1. **单排同步全清**：放货完成的单排同步响应应用后 `clearSuppressedCells()`（SceneRuntime.ts:1386），整批抑制一次性解除。
 2. **数据确认逐格解除**：任何 fetch 响应应用时，若某抑制格口在本排最新 records 中无记录，说明服务端已确认该格为空、设备交接完成，该格抑制自动解除（`LocatorFetchRuntime.applyRecords` 的 `releaseAbsentSuppressedCells`）。取货不留存排号、不触发单排同步，其抑制靠这条路径解除，否则该格会永久屏蔽后续入库的新货。**该排仍存在待清算保留货箱（`fetchKeptCargoByRow` 非空）时禁用路径 2**——此刻服务端尚未确认放货结果，"本排无该格记录"不可信，解除会与保留货箱双显。抑制集合变化触发的重放（`suppressCell` / `clearSuppressedCells`）恒不解除，沿用旧数据重画。
 
 ### 扩展点
@@ -458,13 +458,13 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 | 交接 | 发起方 | 仲裁/门面 | 接收方 |
 |---|---|---|---|
 | conveyor→conveyor | 链路协议 available/taken | 下行泛洪+越级直达 | conveyorDriver settle |
-| conveyor→stacker | stacker 取货相位 | adoptConveyorPlatformCargo | conveyorDriver:989 |
-| stacker→conveyor | stacker 放货解绑 | placeCargoIntoConveyorPlatform | conveyorDriver:1022 |
+| conveyor→stacker | stacker 取货相位 | adoptConveyorPlatformCargo | conveyorDriver:978 |
+| stacker→conveyor | stacker 放货解绑 | placeCargoIntoConveyorPlatform | conveyorDriver:1011 |
 | conveyor→shuttle | shuttle 取货相位 | adoptConveyorPlatformCargo | conveyorDriver |
 | shuttle→conveyor | shuttle 放货解绑 | placeShuttleCargoIntoConveyorPlatform | conveyorDriver |
-| rgv→conveyor 列 | rgv 起转边沿推送 | deliverRgvCargoToConveyorColumn | conveyorDriver:1069 |
+| rgv→conveyor 列 | rgv 起转边沿推送 | deliverRgvCargoToConveyorColumn | conveyorDriver:1058 |
 | conveyor→lift 来料层 | lift 到位自动拉取 | adoptConveyorCargoForLift | liftDriver |
-| lift→conveyor 送料层 | lift 到位推送+持续重试 | deliverLiftCargoToConveyorLayer | conveyorDriver:1069 |
+| lift→conveyor 送料层 | lift 到位推送+持续重试 | deliverLiftCargoToConveyorLayer | conveyorDriver:1058 |
 | conveyor→rgv/stacker/shuttle/lift | conveyor externalPulls 帧尾拉取 | isRgvCargoReadyForExternalPull 等门控 | rgvDriver/stackerDriver/shuttleDriver/liftDriver |
 | stacker↔shelf 泊位 | stacker 取/放相位 + fetch 单排同步 | suppressFetchCell + keepCargoForFetchRowSync | LocatorFetchRuntime |
 | shuttle↔shelf 泊位 | shuttle 取/放相位 + fetch 单排同步 | suppressFetchCell + keepCargoForFetchRowSync | LocatorFetchRuntime |
@@ -473,11 +473,11 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 4. 检查结束预览清理（`endTelemetryPreview`）是否覆盖新状态。
 
 ### 新增设备类型
-1. `telemetryBinding.ts:32` 类型表 + `specializedTelemetryBinding.ts:11` 联合类型。
+1. `telemetryBinding.ts:36` 类型表 + `specializedTelemetryBinding.ts:11` 联合类型。
 2. `specializedModelAssets.ts` 加识别函数 + 状态工厂。
 3. `types.ts` 加状态结构、货物表字段、`SpecializedTelemetryDriverContext` 方法。
-4. 新建 driver，在 SpecializedTelemetryRuntime.ts:60 `drivers` 数组注册。
-5. SceneRuntime 加 reset 调用(:1143 起) 与遍历清单(:4620-4637)。
+4. 新建 driver，在 SpecializedTelemetryRuntime.ts:98 `drivers` 数组注册。
+5. SceneRuntime 加 reset 调用（:4906-4910 等同步/脚本路径）与遍历清单（:1682-1716）。
 6. TelemetryBindingInspector 加绑定编辑 UI。
 7. 同步更新本文档新增章节。
 8. 若设备实例个数编辑期不确定（AGV/穿梭车集群等），不要走静态实体——用 deviceSpawner 产生器（见第 7 章），消息 `s` 字段路由。
