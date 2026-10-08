@@ -200,6 +200,7 @@ import {
   getNodeWorldRotation,
   getNodesProjectedBounds,
   getNodesWorldBounds,
+  getThinInstanceMeshWorldBounds,
   isFiniteVector3,
   lerpNumber,
   lerpVector,
@@ -792,7 +793,8 @@ function isChainConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 
 /**
  * 从生成物网格元数据解析点击命中；非生成物或缺关键字段返回 null。
- * 动态设备实例自带资产编号，上报自身；货箱没有编号，上报承运它的宿主设备。
+ * 动态设备实例自带资产编号，上报自身；货箱高亮/聚焦落在货物输出宿主自身，
+ * 同时透传箱号与点击瞬间的承运设备，供事件载荷说明归属。
  */
 function readGeneratedUnitClickTarget(mesh: AbstractMesh): GeneratedUnitClickHit | null {
   const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
@@ -806,17 +808,44 @@ function readGeneratedUnitClickTarget(mesh: AbstractMesh): GeneratedUnitClickHit
       bindingEntityId: spawnerEntityId,
       assetCode: typeof metadata.spawnedAssetCode === 'string' ? metadata.spawnedAssetCode : '',
       highlightEntityId: spawnedEntityId,
+      unitKind: 'spawned-device',
     };
   }
 
   const generatorEntityId = typeof metadata.generatorEntityId === 'string' ? metadata.generatorEntityId : '';
   if (!generatorEntityId) return null;
+  const hostEntityId = typeof metadata.hostEntityId === 'string' ? metadata.hostEntityId : '';
+  const containerCode = typeof metadata.containerCode === 'string' ? metadata.containerCode : '';
   return {
     bindingEntityId: generatorEntityId,
     assetCode: typeof metadata.sourceAssetCode === 'string' ? metadata.sourceAssetCode : '',
-    // 宿主缺失时留空：高亮与会话聚焦对空 id 安全跳过，不误打到生成器标记本身。
-    highlightEntityId: typeof metadata.hostEntityId === 'string' ? metadata.hostEntityId : '',
+    // 货物输出宿主缺失时留空：高亮与会话聚焦对空 id 安全跳过，不误打到生成器标记本身。
+    highlightEntityId: typeof metadata.generatedUnitEntityId === 'string' ? metadata.generatedUnitEntityId : '',
+    unitKind: 'cargo',
+    ...(containerCode ? { containerCode } : {}),
+    ...(hostEntityId ? { hostEntityId } : {}),
   };
+}
+
+/** 收集生成输出宿主的全部网格；与 applyGeneratedOutputMetadata 的下发范围一致。 */
+function collectGeneratedOutputMeshes(output: ModelGeneratorOutputRuntimeEntry | null): AbstractMesh[] {
+  if (!output) return [];
+  if (output.kind === 'mesh') return [output.mesh];
+  if (output.kind === 'model') return [...output.model.meshes];
+  const meshes: AbstractMesh[] = [];
+  for (const member of output.members) {
+    if (member.model) meshes.push(...member.model.meshes);
+    if (member.mesh) meshes.push(member.mesh);
+    // 阵列成员的源 Mesh 已退出场景，几何由 thinInstance 批次承载。
+    if (member.arrayBatch) meshes.push(...member.arrayBatch.meshes);
+  }
+  return meshes;
+}
+
+/** 读取生成产物网格的世界包围盒；thinInstance 批次网格必须逐实例取并集而非基座几何。 */
+function getGeneratedOutputMeshWorldBounds(mesh: AbstractMesh): RuntimeWorldBounds | null {
+  if (mesh instanceof Mesh && mesh.thinInstanceCount > 0) return getThinInstanceMeshWorldBounds(mesh);
+  return getMeshWorldBounds(mesh);
 }
 
 export class SceneRuntime {
@@ -3053,6 +3082,19 @@ export class SceneRuntime {
 
     const model = this.resolveRuntimeModelByEntityId(entityId);
     if (model) return this.getModelWorldBounds(model);
+
+    // 生成货物的输出宿主：聚焦目标为产物自身全部网格的合并包围盒。
+    const generatedOwner = this.generatedOutputOwners.get(entityId);
+    if (generatedOwner) {
+      let mergedBounds: RuntimeWorldBounds | null = null;
+      for (const mesh of collectGeneratedOutputMeshes(generatedOwner.output)) {
+        if (mesh.isDisposed()) continue;
+        const bounds = getGeneratedOutputMeshWorldBounds(mesh);
+        if (!bounds) continue;
+        mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
+      }
+      if (mergedBounds) return mergedBounds;
+    }
 
     const modelGenerator = this.modelGenerators.get(entityId);
     if (modelGenerator) return this.getModelGeneratorWorldBounds(modelGenerator);
@@ -5570,6 +5612,8 @@ export class SceneRuntime {
         }
 
         activeEntry.output = output;
+        // 组合成员模型在 buildCompositionGeneratorOutput 内各自加载，统一在此补齐产物点击元数据。
+        this.refreshModelGeneratorModelMeshes(activeEntry);
         this.applyGeneratedOutputPresentation(activeEntry);
       })
       .catch((error) => {
@@ -5773,7 +5817,6 @@ export class SceneRuntime {
 
     for (const mesh of batch.meshes) {
       mesh.parent = tree.root;
-      mesh.isPickable = false;
     }
     member.arrayBatch = batch;
     // 源成员几何已由批次承载（含源自身实例），原始 Mesh 退出场景避免重复渲染。
@@ -6139,6 +6182,7 @@ export class SceneRuntime {
         containerCode: cargo.containerCode,
         generatorEntityId: cargo.generatorEntityId,
         hostEntityId: cargo.hostEntityId,
+        generatedUnitEntityId: runtimeId,
       },
       onTerminalLoadFailure: () => {
         if (cargo.outputOwner === owner) this.ensureGeneratedCargoFallback(cargo, kind);
@@ -6168,6 +6212,7 @@ export class SceneRuntime {
     for (const member of output.members) {
       for (const mesh of member.model?.meshes ?? []) apply(mesh);
       apply(member.mesh);
+      for (const mesh of member.arrayBatch?.meshes ?? []) apply(mesh);
     }
   }
 
@@ -7710,7 +7755,8 @@ export class SceneRuntime {
   /**
    * 统一同步生成输出可视状态。
    * 生成产物一律可拾取：常规实体拾取按元数据里的 editorEntityId 过滤，产物本来就不带，
-   * 可拾取只为生成器产物点击链路服务；组合里的阵列成员由 thinInstance 批次承载，暂不开放。
+   * 可拾取只为生成器产物点击链路服务；组合里的阵列成员由 thinInstance 批次承载，
+   * 批次网格同样开放实例级拾取（refreshModelGeneratorModelMeshes 已下发产物元数据）。
    */
   private applyGeneratedOutputPresentation(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind === 'mesh') {
@@ -7745,7 +7791,8 @@ export class SceneRuntime {
         }
         if (member.arrayBatch) {
           for (const mesh of member.arrayBatch.meshes) {
-            mesh.isPickable = false;
+            mesh.isPickable = true;
+            mesh.thinInstanceEnablePicking = true;
           }
         }
       }
@@ -8209,10 +8256,25 @@ export class SceneRuntime {
   private refreshModelGeneratorModelMeshes(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     if (runtimeEntry.output?.kind === 'composition') {
       for (const member of runtimeEntry.output.members) {
-        if (!member.model) continue;
-        this.refreshModelMeshes(member.model, runtimeEntry.metadata);
-        for (const mesh of member.model.meshes) {
-          mesh.isPickable = true;
+        if (member.model) {
+          this.refreshModelMeshes(member.model, runtimeEntry.metadata);
+          for (const mesh of member.model.meshes) {
+            mesh.isPickable = true;
+          }
+        }
+        if (member.mesh && !member.mesh.isDisposed()) {
+          member.mesh.metadata = { ...(member.mesh.metadata ?? {}), ...runtimeEntry.metadata };
+          member.mesh.isPickable = true;
+        }
+        // 阵列成员的源 Mesh 已退出场景：拾取元数据与包围盒必须落在承载几何的批次网格上。
+        if (member.arrayBatch) {
+          for (const mesh of member.arrayBatch.meshes) {
+            if (mesh.isDisposed()) continue;
+            mesh.metadata = { ...(mesh.metadata ?? {}), ...runtimeEntry.metadata };
+            mesh.isPickable = true;
+            mesh.thinInstanceEnablePicking = true;
+            mesh.thinInstanceRefreshBoundingInfo(true);
+          }
         }
       }
       return;
@@ -9885,6 +9947,14 @@ export class SceneRuntime {
           ? excludeFixedTrackMeshes(meshes, getFixedTrackNodes(spawnedModel, this.scene))
           : meshes;
         if (highlightMeshes.length > 0) selectedModelGroups.push(highlightMeshes);
+      }
+
+      // 生成货物的输出宿主同样是合成 id：点击事件的高亮目标是产物自身而非承运设备。
+      const generatedOwner = this.generatedOutputOwners.get(entityId);
+      if (generatedOwner) {
+        const ownerMeshes = collectGeneratedOutputMeshes(generatedOwner.output)
+          .filter((mesh) => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+        if (ownerMeshes.length > 0) selectedModelGroups.push(ownerMeshes);
       }
 
       const batch = this.resolveModelArrayBatchForEntityId(entityId);

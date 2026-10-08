@@ -329,32 +329,48 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     assert.deepEqual(resolveClickEventBindingClick(scene, 'stacker-1'), { kind: 'pass-through' });
   });
 
-  await t.test('生成器产物命中：货箱报宿主设备编号并高亮宿主，动态设备报自身编号', () => {
+  await t.test('生成器产物命中：货箱高亮自身并随事件上报承运设备，动态设备报自身编号', () => {
     const generatorScene = createScene(
+      { id: 'conveyor-1', name: '宿主输送线', components: { modelAsset: { sourceUrl: OTHER_URL, assetCode: '001005' } } },
       createBindingEntity('generator-1', createBindingComponent({
         deviceSlots: [],
         events: [{ id: 'event-1', eventType: 'click', effects: ['highlight', 'focus'] }],
       })),
     );
-    // 货箱没有自己的资产编号：上报并高亮承运它的宿主设备实体。
+    // 货箱没有自己的资产编号：assetCode 上报承运设备编号，高亮/聚焦目标是产物自身合成 id。
     assert.deepEqual(
       resolveGeneratedUnitClick(generatorScene, {
         bindingEntityId: 'generator-1',
         assetCode: '001005',
-        highlightEntityId: 'conveyor-1',
+        highlightEntityId: 'runtime_conveyor_cargo:1',
+        unitKind: 'cargo',
+        containerCode: '000317',
+        hostEntityId: 'conveyor-1',
       }),
-      { kind: 'trigger', entityId: 'conveyor-1', effects: ['highlight', 'focus'], reportAssetCode: '001005' },
+      {
+        kind: 'trigger',
+        entityId: 'runtime_conveyor_cargo:1',
+        effects: ['highlight', 'focus'],
+        reportAssetCode: '001005',
+        generatedUnit: {
+          kind: 'cargo',
+          containerCode: '000317',
+          host: { entityId: 'conveyor-1', assetCode: '001005', name: '宿主输送线' },
+        },
+      },
     );
     // 动态设备实例自带编号：上报自身，高亮目标是实例合成 id。
     const spawned = resolveGeneratedUnitClick(generatorScene, {
       bindingEntityId: 'generator-1',
       assetCode: 'AGV-77',
       highlightEntityId: 'spawned:spawn-1 AGV-77',
+      unitKind: 'spawned-device',
     });
     assert.equal(spawned.kind, 'trigger');
     if (spawned.kind !== 'trigger') return;
     assert.equal(spawned.entityId, 'spawned:spawn-1 AGV-77');
     assert.equal(spawned.reportAssetCode, 'AGV-77');
+    assert.deepEqual(spawned.generatedUnit, { kind: 'spawned-device', assetCode: 'AGV-77' });
   });
 
   await t.test('生成器未配绑定或未配 click 事件时返回 null，点击回落到常规拾取', () => {
@@ -399,8 +415,8 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     assert.deepEqual(resolution.screen, { projectId: 'project-9', screenId: 'screen-9' });
   });
 
-  await t.test('show-chart 载荷优先使用产物上报编号，覆盖命中实体的 modelAsset 编号', () => {
-    // highlightEntityId 是宿主设备实体：它自己的 assetCode 与产物上报编号不是一回事。
+  await t.test('show-chart 载荷优先使用产物上报编号，并说明产物身份与承运设备', () => {
+    // 产物的高亮目标已不是场景实体，载荷里的承运设备信息只能来自拾取上下文透传的 hostEntityId。
     const scene = createScene(
       { id: 'conveyor-1', name: 'conveyor-1', components: { modelAsset: { sourceUrl: OTHER_URL, assetCode: '999999' } } },
       createBindingEntity('generator-1', createBindingComponent({
@@ -409,14 +425,28 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
       })),
     );
     const resolution = resolveGeneratedUnitClick(scene, {
-      bindingEntityId: 'generator-1', assetCode: '001005', highlightEntityId: 'conveyor-1',
+      bindingEntityId: 'generator-1',
+      assetCode: '001005',
+      highlightEntityId: 'runtime_conveyor_cargo:1',
+      unitKind: 'cargo',
+      containerCode: '000317',
+      hostEntityId: 'conveyor-1',
     });
-    assert.deepEqual(buildClickEventAssetClickedPayload(scene, resolution), { assetCode: '001005', chartId: 'chart-9' });
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, resolution), {
+      assetCode: '001005',
+      chartId: 'chart-9',
+      unit: { kind: 'cargo', containerCode: '000317' },
+      host: { entityId: 'conveyor-1', assetCode: '999999', name: 'conveyor-1' },
+    });
 
     // 动态设备实例的合成 id 不是场景实体，上报编号只能来自 reportAssetCode。
     const spawned = resolveGeneratedUnitClick(scene, {
-      bindingEntityId: 'generator-1', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1',
+      bindingEntityId: 'generator-1', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1', unitKind: 'spawned-device',
     });
-    assert.deepEqual(buildClickEventAssetClickedPayload(scene, spawned), { assetCode: 'AGV-77', chartId: 'chart-9' });
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, spawned), {
+      assetCode: 'AGV-77',
+      chartId: 'chart-9',
+      unit: { kind: 'spawned-device', assetCode: 'AGV-77' },
+    });
   });
 });

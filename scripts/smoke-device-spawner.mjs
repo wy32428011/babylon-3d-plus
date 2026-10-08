@@ -221,6 +221,7 @@ try {
   assert.equal(generatedHit.hit.bindingEntityId, SPAWNER_ENTITY_ID, '命中必须回指设备产生器实体');
   assert.equal(generatedHit.hit.assetCode, 'AGV-01', '动态实例上报自身资产编号');
   assert.equal(generatedHit.hit.highlightEntityId, spawnedKey, '高亮目标是实例合成实体 id');
+  assert.equal(generatedHit.hit.unitKind, 'spawned-device', '命中必须标记为动态设备实例');
   assert.equal(
     runtime.pickRuntimeModelEntityIdAtCanvasPoint(clickPoint.x, clickPoint.y, canvas) === spawnedKey,
     false,
@@ -232,6 +233,7 @@ try {
     entityId: spawnedKey,
     effects: ['highlight', 'focus'],
     reportAssetCode: 'AGV-01',
+    generatedUnit: { kind: 'spawned-device', assetCode: 'AGV-01' },
   });
   runtime.setLocalHighlightEntityIds([spawnedKey]);
   scene.render();

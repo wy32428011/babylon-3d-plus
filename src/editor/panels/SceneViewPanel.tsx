@@ -307,6 +307,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const performanceRunSessionRef = useRef<EditorPerformanceRunSession | null>(null);
   const sceneFocusPerformanceRef = useRef<SceneFocusPerformanceMetrics | null>(null);
   const clickSnapshotRef = useRef<SceneModelSelectionPointerSnapshot | null>(null);
+  // 预览下产物高亮走运行时本地通道（合成 id），记录目标以便点击转入常规选择路径时清除。
+  const clickProductHighlightIdRef = useRef<string | null>(null);
   const effectDrawingPointerRef = useRef<number | null>(null);
   const effectDrawing = useSyncExternalStore(subscribeEffectPathDrawing, getEffectPathDrawing, getEffectPathDrawing);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
@@ -1047,9 +1049,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           const slotText = assetClickedPayload.slot
             ? `，库位 ${assetClickedPayload.slot.row}-${assetClickedPayload.slot.column}-${assetClickedPayload.slot.layer}`
             : '';
+          const unitText = assetClickedPayload.unit
+            ? assetClickedPayload.unit.kind === 'cargo'
+              ? `，产物货箱 ${assetClickedPayload.unit.containerCode || '匿名'}`
+              : `，产物设备 ${assetClickedPayload.unit.assetCode || '未知编号'}`
+            : '';
+          const hostText = assetClickedPayload.host
+            ? `，承运设备 ${assetClickedPayload.host.name ?? assetClickedPayload.host.entityId}（${assetClickedPayload.host.assetCode ?? '未设置'}）`
+            : '';
           const framed = window.parent !== window;
           state.pushLog(
-            `点击事件绑定：展示图表事件（资产编号 ${assetClickedPayload.assetCode ?? '未设置'}${slotText}，图表id ${assetClickedPayload.chartId ?? '未配置'}）${framed ? '已发送至宿主页面' : '未嵌入宿主页面，仅记录'}`,
+            `点击事件绑定：展示图表事件（资产编号 ${assetClickedPayload.assetCode ?? '未设置'}${slotText}${unitText}${hostText}，图表id ${assetClickedPayload.chartId ?? '未配置'}）${framed ? '已发送至宿主页面' : '未嵌入宿主页面，仅记录'}`,
           );
           if (framed) {
             window.parent.postMessage({
@@ -1085,10 +1095,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
               resolution.highlightExcludeFixedTrack ? [resolution.entityId] : [],
             );
             if (hasEntityTarget) {
+              clickProductHighlightIdRef.current = null;
               runtimeRef.current?.setLocalHighlightEntityIds([]);
               state.selectEntity(resolution.entityId);
             } else {
+              clickProductHighlightIdRef.current = resolution.entityId;
               runtimeRef.current?.setLocalHighlightEntityIds([resolution.entityId]);
+              // 产物高亮与编辑器选区互斥：旧选中设备不清掉会残留双高亮，也表现为切不回产物。
+              state.selectEntity(null);
             }
           }
           if (resolution.effects.includes('focus')) {
@@ -1109,12 +1123,18 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             }
           }
         } else if (resolution.kind === 'clear') {
+          clickProductHighlightIdRef.current = null;
           runtimeRef.current?.setLocalSlotHighlight('', null);
           runtimeRef.current?.setLocalHighlightEntityIds([]);
           state.selectEntity(null);
         }
         return;
       }
+    }
+    // 预览下点击转入常规选择路径（点空白或未接管模型）时，产物本地高亮一并清除。
+    if (isRuntimePreview && clickProductHighlightIdRef.current) {
+      clickProductHighlightIdRef.current = null;
+      runtimeRef.current?.setLocalHighlightEntityIds([]);
     }
     if (selectionClick.toggleSelection) {
       if (!pickedEntityId) return;

@@ -415,35 +415,35 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 ### 编辑期
 
 - 生成器实体工厂（`createModelGeneratorEntity` / `createDeviceSpawnerEntity`）默认挂 `clickEventBinding = { deviceSlots: [], events: [] }`（`createGeneratorClickEventBindingComponent`，clickEventBinding.ts）。**事件为空即未接管**，点击回落到常规拾取；配了 `click` 事件才接管产物点击。
-- 生成器变体不渲染设备类型段（作用域由生成器本身确定）、不渲染事件类型下拉（产物没有货格概念，恒为 `click`）；「忽略固定轨道」参数保留——货箱的高亮目标是宿主设备，仍需该参数。
+- 生成器变体不渲染设备类型段（作用域由生成器本身确定）、不渲染事件类型下拉（产物没有货格概念，恒为 `click`）；「忽略固定轨道」参数对产物无意义（产物没有固定轨道网格），仅影响同事件内的其他目标。
 - 生成器实体不生成编辑态点击标记：`isClickEventBindingMarkerEntity`（SceneRuntime.ts）把 `modelGenerator`/`deviceSpawner` 实体从标记的同步与销毁管理中排除。
 - 旧场景里已存在的生成器没有该组件，加载后不出现栏目（需重新创建生成器）。
 
 ### 运行期：捕获
 
-- 产物网格一律 `isPickable = true`（`applyGeneratedOutputPresentation` / `refreshModelGeneratorModelMeshes` / `refreshSpawnedDeviceModelMeshes`）。常规实体拾取的谓词要求元数据带已注册的 `editorEntityId`，产物不带，因此可拾取性**只**服务本链路，不改变原有拾取结果；回退 Box 是「模板不可用」占位，仍保持 `isPickable = false`。
+- 产物网格一律 `isPickable = true`（`applyGeneratedOutputPresentation` / `refreshModelGeneratorModelMeshes` / `refreshSpawnedDeviceModelMeshes`）。常规实体拾取的谓词要求元数据带已注册的 `editorEntityId`，产物不带，因此可拾取性**只**服务本链路，不改变原有拾取结果；回退 Box 是「模板不可用」占位，仍保持 `isPickable = false`。组合产物里普通模型成员与内置几何体成员直接可拾取；**阵列成员**的源 Mesh 退出场景、几何由 thinInstance 批次承载，产物元数据与实例级拾取（`thinInstanceEnablePicking`）下放到批次网格，并刷新一次覆盖全实例的包围盒供射线求交。
 - `pickGeneratedUnitClickTargetAtCanvasPoint`（SceneRuntime.ts）单独做一次射线：命中网格的元数据经 `readGeneratedUnitClickTarget` 解析为 `GeneratedUnitClickHit`。任一生成器未配置 `click` 事件时（`hasGeneratedUnitClickBinding`）直接返回 null，不为普通点击加射线。
-- 元数据来源：货箱 `generatorEntityId` + `hostEntityId` + `sourceAssetCode`；动态实例 `spawnerEntityId` + `spawnedEntityId` + `spawnedAssetCode`。
+- 元数据来源：货箱 `generatorEntityId` + `hostEntityId` + `sourceAssetCode` + `containerCode` + `generatedUnitEntityId`（产物输出宿主合成 id，高亮/聚焦目标）；动态实例 `spawnerEntityId` + `spawnedEntityId` + `spawnedAssetCode`。
 - 优先级（Viewer 与编辑器预览一致）：产物**精确三角面命中优先**，常规命中是包围盒兜底（`precise=false`）时按距离比较。
 
 ### 运行期：决策与上报
 
-- `resolveGeneratedUnitClick`（clickEventBinding.ts）读生成器实体上第一条 `click` 事件，产出 `trigger` 决议：
-  - **货箱**（模型生成器产物）：没有自身资产编号 → 上报 `sourceAssetCode`（= 承运设备的 assetCode），高亮/聚焦目标是宿主设备实体。
-  - **动态设备**（设备产生器产物）：自带编号 → 上报 `spawnedAssetCode`，高亮/聚焦目标是合成实体 id `spawned:{key}`。
-- `ClickEventBindingClickResolution.trigger.reportAssetCode` 是产物的上报编号覆盖位：产物没有 `modelAsset`，`buildClickEventAssetClickedPayload` 优先取它，取不到才回落命中实体的 `modelAsset.assetCode`。
+- `resolveGeneratedUnitClick`（clickEventBinding.ts）读生成器实体上第一条 `click` 事件，产出 `trigger` 决议；两类产物的高亮/聚焦目标都是**产物自身**的合成 id，决议同时携带 `generatedUnit`（产物身份 + 点击瞬间承运设备）：
+  - **货箱**（模型生成器产物）：没有自身资产编号 → 上报 `assetCode` = `sourceAssetCode`（承运设备编号），高亮/聚焦目标是货物输出宿主 `generatedUnitEntityId`；`generatedUnit.host` 记录点击瞬间的承运设备（entityId/assetCode/name，承运关系随交接每帧刷新）。
+  - **动态设备**（设备产生器产物）：自带编号 → 上报 `spawnedAssetCode`，高亮/聚焦目标是合成实体 id `spawned:{key}`；`generatedUnit.kind = 'spawned-device'`，无 host。
+- `ClickEventBindingClickResolution.trigger.reportAssetCode` 是产物的上报编号覆盖位：产物没有 `modelAsset`，`buildClickEventAssetClickedPayload` 优先取它，取不到才回落命中实体的 `modelAsset.assetCode`。产物命中时载荷附加 `unit`（kind + containerCode/assetCode）与 `host`（货箱的承运设备），`assetCode` 字段保持原语义不动。
 - 宿主随交接变化：`syncGeneratedCargoVisual` 每帧写入 `cargo.hostEntityId`（取自宿主模型 `entitySnapshot.id`）；owner 元数据变化时经 `applyGeneratedOutputMetadata` 重新下发到已加载网格，避免接管后上报旧宿主。
-- 动态实例没有文档实体，高亮/聚焦走运行时的合成 id 通道：`resolveSpawnedDeviceModel` 接入 `getEntityWorldBounds` / `isEntityWorldBoundsReady` / `rebuildModelSelectionOutline`（不经 `applyModelSelection`，按合成 id 直接命中）/ `getEntitiesFocusBounds`。编辑器预览侧对非场景实体的目标改用 `setLocalHighlightEntityIds` + `getEntitiesFocusBounds`，不写编辑器选区。
+- 产物没有文档实体，高亮/聚焦走运行时的合成 id 通道：动态实例经 `resolveSpawnedDeviceModel`、货物输出宿主经 `generatedOutputOwners` 分别接入 `getEntityWorldBounds` 与 `rebuildModelSelectionOutline`（不经 `applyModelSelection`，按合成 id 直接命中）。编辑器预览侧对非场景实体的目标改用 `setLocalHighlightEntityIds` + `getEntitiesFocusBounds`，不写编辑器选区，且产物高亮与编辑器选区互斥（命中产物时清空旧选中设备，避免双高亮）；生成器绑定不参与全场接管，点空白或未接管模型转入常规选择路径时，产物本地高亮随之清除（SceneViewPanel 用 `clickProductHighlightIdRef` 记录目标）。
 
 ### 回归
 
-- `npm run smoke:generated-cargo-click`（NullEngine）：货箱模板生成 → 网格元数据（生成器/宿主/宿主编号）→ 生成物拾取回落宿主 → 上报编号与高亮目标 → 未配置事件时短路。
+- `npm run smoke:generated-cargo-click`（NullEngine）：货箱模板生成 → 网格元数据（生成器/宿主/宿主编号/产物 id）→ 生成物拾取高亮产物自身 → 载荷携带产物身份与承运设备 → 未配置事件时短路 → 组合（箱子组）目标的单箱成员、内置方块成员与阵列批次网格全链路。
 - `npm run smoke:device-spawner`（NullEngine）：动态实例的生成物拾取、合成实体 id 高亮与常规实体拾取隔离。
 - `tests/editor/clickEventBinding.test.mjs`（决策与载荷）、`tests/digitalTwin/viewerModelClick.test.ts`（Viewer 接线）。
 
 ### 已知边界
 
-- 组合模板里的**阵列实例成员**由 thinInstance 批次承载，暂不参与产物点击（可点击的是组合内的普通模型成员与内置几何体成员）。
+- 组合模板里的**阵列实例成员**由 thinInstance 批次承载：高亮/聚焦收集网格时取批次网格（源 Mesh 已退出场景），聚焦包围盒走 `getThinInstanceMeshWorldBounds` 逐实例并集——`getMeshWorldBounds` 对 thinInstance 网格只回基座几何，直接用会漏掉阵列跨度。
 - **fetch 驱动**放在货架货格上的货箱走 `LocatorFetchRuntime` 的独立放置链路，不带生成物元数据，暂不参与产物点击。
 - 产物点击不参与 `resolveClickEventBindingClick` 的「全场接管」判定：只有 `deviceSlots` 注册过设备类型的 POI 才让点空白变成清除选中。
 

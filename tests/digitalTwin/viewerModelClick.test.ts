@@ -185,27 +185,39 @@ function generatorFixture(events: unknown[] | null) {
   return { handler, selections, focuses, emitted, scene };
 }
 
-test('生成器产物命中：货箱高亮宿主设备并上报宿主编号，而不是宿主自己的 modelAsset 编号', () => {
+test('生成器产物命中：货箱高亮产物自身，事件载荷说明箱号与承运设备', () => {
   const f = generatorFixture([{
     eventType: 'click',
     effects: ['highlight', 'focus', 'show-chart'],
     chart: { id: 'chart-cargo', name: '货物大屏' },
   }]);
   f.handler(null, null, {
-    generatedUnit: { bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'host' },
+    generatedUnit: {
+      bindingEntityId: 'generator',
+      assetCode: '001005',
+      highlightEntityId: 'runtime_conveyor_cargo:1',
+      unitKind: 'cargo',
+      containerCode: '000317',
+      hostEntityId: 'host',
+    },
   });
-  assert.deepEqual(f.selections, [['host']]);
-  assert.deepEqual(f.focuses, [{ id: 'host', cell: undefined }]);
-  assert.deepEqual(f.emitted, [{ assetCode: '001005', chartId: 'chart-cargo' }]);
+  assert.deepEqual(f.selections, [['runtime_conveyor_cargo:1']]);
+  assert.deepEqual(f.focuses, [{ id: 'runtime_conveyor_cargo:1', cell: undefined }]);
+  assert.deepEqual(f.emitted, [{
+    assetCode: '001005',
+    chartId: 'chart-cargo',
+    unit: { kind: 'cargo', containerCode: '000317' },
+    host: { entityId: 'host', assetCode: '999999' },
+  }]);
 });
 
 test('生成器产物命中：动态设备实例上报自身编号并高亮合成实体 id', () => {
   const f = generatorFixture([{ eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-agv', name: 'AGV 大屏' } }]);
   f.handler(null, null, {
-    generatedUnit: { bindingEntityId: 'generator', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1' },
+    generatedUnit: { bindingEntityId: 'generator', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1', unitKind: 'spawned-device' },
   });
   assert.deepEqual(f.selections, [['spawned:spawn-1']]);
-  assert.deepEqual(f.emitted, [{ assetCode: 'AGV-77', chartId: 'chart-agv' }]);
+  assert.deepEqual(f.emitted, [{ assetCode: 'AGV-77', chartId: 'chart-agv', unit: { kind: 'spawned-device', assetCode: 'AGV-77' } }]);
 });
 
 test('生成器未配置点击事件时产物命中回落到常规点击', () => {

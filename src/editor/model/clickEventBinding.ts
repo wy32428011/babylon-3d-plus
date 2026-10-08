@@ -268,12 +268,16 @@ export type ClickEventBindingPickedCell = {
 /**
  * 运行/发布态点击决策：场景存在已注册设备类型的绑定时点击行为全接管。screen 为发布 Viewer 可请求宿主切换的大屏标识。
  * reportAssetCode 用于实体自身取不到资产编号的场合（生成器产物）：命中实体不是 modelAsset 载体时覆盖上报编号。
+ * generatedUnit 标记命中的是生成器产物：高亮/聚焦落在产物自身，事件载荷据此说明产物身份与承运设备。
  */
+/** trigger 决议的具体形状，供生成器产物路径在创建后附加 generatedUnit。 */
+export type ClickEventBindingTriggerResolution = { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; highlightExcludeFixedTrack?: boolean; chartId?: string; screen?: { projectId: string; screenId: string }; reportAssetCode?: string; generatedUnit?: ClickEventGeneratedUnitInfo };
+
 export type ClickEventBindingClickResolution =
   | { kind: 'pass-through' }
   | { kind: 'clear' }
   | { kind: 'ignore' }
-  | { kind: 'trigger'; entityId: string; effects: ClickEventBindingEffect[]; highlightExcludeFixedTrack?: boolean; chartId?: string; screen?: { projectId: string; screenId: string }; reportAssetCode?: string }
+  | ClickEventBindingTriggerResolution
   | {
     kind: 'trigger-cell';
     entityId: string;
@@ -342,7 +346,7 @@ function createClickEventTriggerResolution(
   event: ClickEventBindingEvent,
   entityId: string,
   reportAssetCode?: string,
-): ClickEventBindingClickResolution {
+): ClickEventBindingTriggerResolution {
   return {
     kind: 'trigger',
     entityId,
@@ -360,10 +364,27 @@ function createClickEventTriggerResolution(
 export type GeneratedUnitClickHit = {
   /** 携带 clickEventBinding 的生成器实体：模型生成器或设备产生器。 */
   bindingEntityId: string;
-  /** 上报给宿主页面的资产编号：产物自身编号，或货箱的宿主设备编号。 */
+  /** 上报给宿主页面的资产编号：动态设备实例为自身编号，货箱为承运设备编号。 */
   assetCode: string;
-  /** 高亮与聚焦目标：货箱取宿主设备实体，动态设备实例取合成实体 id。 */
+  /** 高亮与聚焦目标：产物自身的运行态合成 id（货箱输出宿主或动态设备实例）。 */
   highlightEntityId: string;
+  /** 产物类别：模型生成器货箱 / 设备产生器动态实例。 */
+  unitKind: 'cargo' | 'spawned-device';
+  /** 货箱箱号；匿名货缺失。 */
+  containerCode?: string;
+  /** 货箱点击瞬间的承运设备实体 id。 */
+  hostEntityId?: string;
+};
+
+/** 命中生成器产物时附着在决议上的产物身份与承运设备信息，供事件载荷与日志使用。 */
+export type ClickEventGeneratedUnitInfo = {
+  kind: 'cargo' | 'spawned-device';
+  /** 货箱箱号（匿名货缺失）。 */
+  containerCode?: string;
+  /** 动态设备实例自身编号。 */
+  assetCode?: string;
+  /** 货箱点击瞬间的承运设备；动态设备实例无承运关系时缺失。 */
+  host?: { entityId: string; assetCode?: string; name?: string };
 };
 
 /**
@@ -379,14 +400,40 @@ export function resolveGeneratedUnitClick(
   const matchedEvent = component.events.find((event) => event.eventType === 'click');
   if (!matchedEvent) return null;
   const assetCode = hit.assetCode.trim();
-  return createClickEventTriggerResolution(matchedEvent, hit.highlightEntityId, assetCode || undefined);
+  const hostEntity = hit.hostEntityId ? scene.entities[hit.hostEntityId] : undefined;
+  const hostAssetCode = hostEntity?.components.modelAsset?.assetCode?.trim();
+  const generatedUnit: ClickEventGeneratedUnitInfo = hit.unitKind === 'cargo'
+    ? {
+      kind: 'cargo',
+      ...(hit.containerCode ? { containerCode: hit.containerCode } : {}),
+      ...(hit.hostEntityId
+        ? {
+          host: {
+            entityId: hit.hostEntityId,
+            ...(hostAssetCode ? { assetCode: hostAssetCode } : {}),
+            ...(hostEntity?.name ? { name: hostEntity.name } : {}),
+          },
+        }
+        : {}),
+    }
+    : { kind: 'spawned-device', ...(assetCode ? { assetCode } : {}) };
+  return {
+    ...createClickEventTriggerResolution(matchedEvent, hit.highlightEntityId, assetCode || undefined),
+    generatedUnit,
+  };
 }
 
-/** 命中后需通知宿主页面的点击事件载荷：模型资产编号、货格库位（点击单元时的 排-列-层）与 show-chart 图表id。 */
+/**
+ * 命中后需通知宿主页面的点击事件载荷：模型资产编号、货格库位（点击单元时的 排-列-层）与 show-chart 图表id。
+ * 命中生成器产物时 unit 说明被点击产物身份（货箱箱号/动态设备编号），host 为点击瞬间的承运设备；
+ * assetCode 保持原语义（货箱场景为承运设备编号），host 是其结构化补充。
+ */
 export type ClickEventAssetClickedPayload = {
   assetCode?: string;
   slot?: { row: number; column: number; layer: number };
   chartId?: string;
+  unit?: { kind: 'cargo' | 'spawned-device'; containerCode?: string; assetCode?: string };
+  host?: { entityId: string; assetCode?: string; name?: string };
 };
 
 /**
@@ -402,9 +449,20 @@ export function buildClickEventAssetClickedPayload(
   // 生成器产物的上报编号来自拾取上下文（产物自身或宿主设备），不落在命中实体的 modelAsset 上。
   const assetCode = resolution.reportAssetCode?.trim()
     || scene.entities[resolution.entityId]?.components.modelAsset?.assetCode?.trim();
+  const generatedUnit = resolution.kind === 'trigger' ? resolution.generatedUnit : undefined;
   return {
     ...(assetCode ? { assetCode } : {}),
     ...(resolution.kind === 'trigger-cell' ? { slot: { ...resolution.cell } } : {}),
     ...(resolution.chartId ? { chartId: resolution.chartId } : {}),
+    ...(generatedUnit
+      ? {
+        unit: {
+          kind: generatedUnit.kind,
+          ...(generatedUnit.containerCode ? { containerCode: generatedUnit.containerCode } : {}),
+          ...(generatedUnit.assetCode ? { assetCode: generatedUnit.assetCode } : {}),
+        },
+        ...(generatedUnit.host ? { host: { ...generatedUnit.host } } : {}),
+      }
+      : {}),
   };
 }
