@@ -4,7 +4,7 @@ import {
   clampNumber,
   filterTopLevelMotionNodes,
   findModelNodesByName,
-  getModelAxis,
+  getHorizontalModelAxis,  getModelAxis,
   getModelTransformNodes,
   getNodesProjectedBounds,
   getNodesWorldBounds,
@@ -12,7 +12,7 @@ import {
   projectWorldBoundsOntoAxis,
   worldDeltaToParentLocalDelta,
 } from '../../runtimeNodeGeometry';
-import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
+import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import { readIntegerField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
@@ -20,10 +20,13 @@ import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
+  normalizeCargoTask,
   resolveCargoHandoffPose,
   type GeneratedCargoRuntimeEntry,
   LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
   type LiftCargoRuntimeEntry,
+  type LiftStationState,
+  type LiftTravelAxisCache,
   RGV_CARGO_TRANSFER_SECONDS,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
@@ -34,12 +37,18 @@ import {
 /** 层候选：绑定实体 + 货物支撑面世界坐标 + 已确认为 conveyor 的模型条目。 */
 type LiftLayerCandidate = { entityId: string; surfacePoint: Vector3; conveyor: ModelRuntimeEntry };
 
+/** work_state ∈ {1 取货中, 3 卸货中} 且载货台未到位时的赶位速度倍率。 */
+const LIFT_RUSH_SPEED_MULTIPLIER = 4;
+
 /**
  * 物料提升机（lift）遥测驱动：RGV 的垂直版——载货台沿模型 Y 轴升降，层绑定分来料/送料两张表。
  * reference_upper_step（1=来料侧/2=送料侧）+ level_upper（该侧目标层号）组成目标键做边沿检测，
  * 目标层绑定 conveyor 的货物支撑面世界 Y 决定载货台目标偏移；movement_y 字段不消费。
- * 到位自动交接：来料层到位且台上无货→从绑定 conveyor 取货上台；送料层到位且台上有货→向绑定 conveyor 放货；
- * 送料侧无等待方时货物滞留台上持续重试，不销毁。单车单货，货箱全程只平移不旋转。
+ * work_state 存在时交接动作由状态机门控（1 取货/3 卸货，未到位 4 倍速赶位；2/5 补齐交接动画；
+ * 0/6/7/11 只移动不交接；10 急停冻结）；字段缺失走旧的到位自动交接兼容路径。
+ * 双工位载货：载物台按货物轨迹轴分前（step1，stations[0]）后（step2，stations[1]）两区，
+ * 来料先收进 step2、后收进 step1；送料侧 step2 先出，step1 先平移到 step2 再出。
+ * 目标层不在绑定表内则不响应不移动（一次性 Console 提示）。货箱全程只平移不旋转。
  */
 export class LiftTelemetryDriver {
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -56,21 +65,48 @@ export class LiftTelemetryDriver {
     return this.context.host;
   }
 
-  /** 对单台提升机应用载货台升降与到位自动交接的遥测驱动。 */
+  /** 对单台提升机应用载货台升降与交接的遥测驱动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     this.reportLiftRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
+    this.applyLiftWorkState(model, snapshot);
     this.applyLiftMotion(model, snapshot, deltaSeconds);
     this.applyLiftNodeMotionOffsets(model);
     this.applyLiftCargoHandoff(model, snapshot, deltaSeconds);
   }
 
+  /** 每帧读入 work_state 原始值（缺失为 null，走兼容路径），并按 task_num_fin_* 标注对应工位货物身份。 */
+  private applyLiftWorkState(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+    const state = model.liftTelemetry;
+    state.workState = readIntegerField(snapshot.fields, 'work_state');
+    this.applyStationTaskAnnotation(model, snapshot, 0, 'task_num_fin_first_up');
+    this.applyStationTaskAnnotation(model, snapshot, 1, 'task_num_fin_second_up');
+  }
+
+  /** task_num_fin_first_up/second_up 仅标注对应工位货物的 cargo.task（值变化才写），不驱动状态机；字段缺失不清除。 */
+  private applyStationTaskAnnotation(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, stationIndex: 0 | 1, field: string): void {
+    const raw = readIntegerField(snapshot.fields, field);
+    if (raw === null) return;
+    const cargoKey = model.liftTelemetry.stations[stationIndex].cargoKey;
+    if (!cargoKey) return;
+    const cargo = this.state.liftCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+    const task = normalizeCargoTask(raw);
+    if (cargo.task !== task) cargo.task = task;
+  }
+
+  /** 急停（work_state=10）与 faulted 同等冻结：不寻址、不移动、不交接。 */
+  private isLiftFrozen(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): boolean {
+    return snapshot.faulted || model.liftTelemetry.workState === 10;
+  }
+
   // ===== 载货台升降 =====
 
-  /** 目标层信号驱动载货台沿 Y 轴升降；目标键变化时重解析层绑定并换算目标偏移。 */
+  /** 目标层信号驱动载货台沿 Y 轴升降；目标键变化时重解析层绑定并换算目标偏移。work_state=1/3 且未到位时 4 倍速赶位。 */
   private applyLiftMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
     const upAxis = getModelAxis(model.root, 'y');
+    const frozen = this.isLiftFrozen(model, snapshot);
 
     // 协议侧别映射：reference_upper_step 1=来料侧（内部 0），2=送料侧（内部 1），其它值无目标
     const sideValue = readIntegerField(snapshot.fields, 'reference_upper_step');
@@ -79,7 +115,7 @@ export class LiftTelemetryDriver {
     const layer = layerValue !== null && layerValue > 0 ? layerValue : null;
     const targetKey = side !== null && layer !== null ? `${side}:${layer}` : null;
 
-    if (!snapshot.faulted && targetKey !== null && targetKey !== state.targetKey) {
+    if (!frozen && targetKey !== null && targetKey !== state.targetKey) {
       const candidate = this.resolveLiftLayerCandidate(model, side as 0 | 1, layer as number);
       if (candidate) {
         const deckTopBase = this.resolveLiftDeckTopBaseCoordinate(model, upAxis);
@@ -98,8 +134,9 @@ export class LiftTelemetryDriver {
       // 解析失败不记录目标键，后续帧持续重试（告警一次性）
     }
 
-    if (!snapshot.faulted && state.liftTargetOffset !== null) {
-      const speed = this.readLiftSpeed(model);
+    if (!frozen && state.liftTargetOffset !== null) {
+      const rushing = (state.workState === 1 || state.workState === 3) && state.arrivedTargetKey !== state.targetKey;
+      const speed = this.readLiftSpeed(model) * (rushing ? LIFT_RUSH_SPEED_MULTIPLIER : 1);
       state.liftOffset = moveNumberTowards(state.liftOffset, state.liftTargetOffset, speed * deltaSeconds);
       if (state.liftOffset === state.liftTargetOffset && state.arrivedTargetKey !== state.targetKey) {
         state.arrivedTargetKey = state.targetKey;
@@ -223,138 +260,316 @@ export class LiftTelemetryDriver {
     return normalizedName || null;
   }
 
-  // ===== 到位自动交接 =====
+  // ===== 双工位交接状态机 =====
 
   /**
-   * 到位锁命中后按目标侧自动交接：
-   * 来料层（side 0）到位且台上无货→每帧幂等尝试从绑定 conveyor 取货，成功后进入取货插值（0→1）；
-   * 送料层（side 1）到位且台上有货→当场先试交付，无等待方进入放货插值（1→0），插值结束仍未交付持续重试，不销毁。
+   * 到位锁命中后按目标侧交接：
+   * 来料层（side 0）到位→从绑定 conveyor 取货上台，工位分配 step2（后）优先、其次 step1（前），双满拒取下帧重试；
+   * 送料层（side 1）到位→step2 先出，step2 空且 step1 有货时先平移到 step2 锚点（rekey）再交付；
+   * 送料侧接收方未空闲时货物滞留台上持续重试，不销毁。
+   * work_state 存在时动作门控：1 允许取货、3 允许卸货、2/5 补齐对应交接动画、0/6/7/11 只移动不交接；
+   * 缺失（null）走兼容路径——到位即自动交接。
    */
   private applyLiftCargoHandoff(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
-    const arrived = !snapshot.faulted
+    const frozen = this.isLiftFrozen(model, snapshot);
+    const arrived = !frozen
       && state.arrivedTargetKey !== null
       && state.arrivedTargetKey === state.targetKey
       && state.targetEntityId !== null;
+    const workState = state.workState;
 
-    if (arrived && state.targetSide === 0 && state.cargoKey === null && !state.transferActive) {
-      this.tryAdoptIncomingCargo(model, state.targetEntityId as string);
+    const pickupAllowed = arrived && state.targetSide === 0 && (workState === null || workState === 1);
+    const deliveryAllowed = arrived && state.targetSide === 1 && (workState === null || workState === 3);
+    const transferAdvancing = !frozen
+      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5);
+
+    if (pickupAllowed) {
+      const stationIndex = state.stations[1].cargoKey === null ? 1 : state.stations[0].cargoKey === null ? 0 : null;
+      if (stationIndex !== null) this.tryAdoptIncomingCargo(model, state.targetEntityId as string, stationIndex);
     }
 
-    if (state.cargoKey !== null && !state.cargoOnBoard && state.transferActive) {
-      const direction = state.targetSide === 1 ? -1 : 1;
-      state.transferProgress = clampNumber(
-        state.transferProgress + (direction * deltaSeconds) / RGV_CARGO_TRANSFER_SECONDS,
-        0,
-        1,
-      );
-      if (state.transferProgress >= 1 && direction === 1) {
-        state.cargoOnBoard = true;
-        state.transferActive = false;
-        state.cargoHoldPosition = null;
-        state.cargoHoldRotation = null;
-      }
-    }
+    // work_state 2（取货完成）/5（卸货完成）：补齐对应方向的交接动画；交付仍走正常接收重试
+    if (workState === 2) this.forceCompleteStationTransfers(state, 1);
+    if (workState === 5) this.forceCompleteStationTransfers(state, -1);
 
-    if (arrived && state.targetSide === 1 && state.cargoKey !== null) {
-      if (state.cargoOnBoard) {
-        // 到位当场先试交付：等待方已就绪则直接放行，否则进入放货插值
-        if (!this.tryDeliverOutgoingCargo(model, state.targetEntityId as string)) {
-          const surfacePoint = this.context.resolveConveyorDeckSurfacePoint(state.targetEntityId as string);
-          if (surfacePoint) {
-            state.cargoOnBoard = false;
-            state.cargoHoldPosition = surfacePoint;
-            state.transferProgress = 1;
-            state.transferActive = true;
-          }
+    if (transferAdvancing) {
+      for (const station of state.stations) {
+        if (station.cargoKey === null || !station.transferActive) continue;
+        station.transferProgress = clampNumber(
+          station.transferProgress + (station.transferDirection * deltaSeconds) / RGV_CARGO_TRANSFER_SECONDS,
+          0,
+          1,
+        );
+        if (station.transferDirection === 1 && station.transferProgress >= 1) {
+          station.cargoOnBoard = true;
+          station.transferActive = false;
+          station.cargoHoldPosition = null;
+          station.cargoHoldRotation = null;
         }
-      } else if (state.transferActive) {
-        // 放货插值进行中/已到输送线侧：每帧重试交付，无等待方货物滞留不销毁
-        this.tryDeliverOutgoingCargo(model, state.targetEntityId as string);
       }
     }
 
-    this.updateLiftCargoPose(model, snapshot, deltaSeconds);
+    if (deliveryAllowed) {
+      this.processOutgoingDelivery(model, state.targetEntityId as string);
+    }
+
+    this.updateLiftCargoPoses(model, snapshot, deltaSeconds);
   }
 
-  /** 来料层取货：从目标 conveyor 接管当前持货，成功则以货物当前实际位置为起点进入取货插值；无货下帧重试。 */
-  private tryAdoptIncomingCargo(model: ModelRuntimeEntry, entityId: string): void {
+  /** work_state 2/5 补齐交接动画：取货方向直接推满上台，放货方向直接推到输送线端（transferActive 保持，交付重试由到位分支继续）。 */
+  private forceCompleteStationTransfers(state: ModelRuntimeEntry['liftTelemetry'], direction: 1 | -1): void {
+    for (const station of state.stations) {
+      if (station.cargoKey === null || !station.transferActive || station.transferDirection !== direction) continue;
+      if (direction === 1) {
+        station.transferProgress = 1;
+        station.cargoOnBoard = true;
+        station.transferActive = false;
+        station.cargoHoldPosition = null;
+        station.cargoHoldRotation = null;
+      } else {
+        station.transferProgress = 0;
+      }
+    }
+  }
+
+  /** 送料层卸货：step1 货先平移到 step2（rekey 到后工位，从前工位锚点插值），随后 step2 出货交付。 */
+  private processOutgoingDelivery(model: ModelRuntimeEntry, entityId: string): void {
+    const state = model.liftTelemetry;
+    const front = state.stations[0];
+    const back = state.stations[1];
+
+    if (back.cargoKey === null && front.cargoKey !== null && front.cargoOnBoard && !front.transferActive) {
+      const cargo = this.state.liftCargoMeshes.get(front.cargoKey);
+      if (cargo) {
+        const newKey = this.getLiftCargoKey(model.assetCode, 1);
+        this.state.liftCargoMeshes.delete(front.cargoKey);
+        this.state.liftCargoMeshes.set(newKey, cargo);
+        this.clearLiftStationState(front);
+        back.cargoKey = newKey;
+        back.cargoOnBoard = false;
+        back.cargoHoldPosition = this.getLiftStationPose(model, 0, cargo.lockedWorldRotation).position;
+        back.cargoHoldRotation = null;
+        back.transferProgress = 0;
+        back.transferDirection = 1;
+        back.transferActive = true;
+      }
+    }
+
+    if (back.cargoKey === null) return;
+    if (back.cargoOnBoard) {
+      // 到位当场先试交付：接收方空闲则直接放行，否则进入放货插值
+      if (!this.tryDeliverOutgoingCargo(model, entityId, 1)) {
+        const surfacePoint = this.context.resolveConveyorDeckSurfacePoint(entityId);
+        if (surfacePoint) {
+          back.cargoOnBoard = false;
+          back.cargoHoldPosition = surfacePoint;
+          back.cargoHoldRotation = null;
+          back.transferProgress = 1;
+          back.transferDirection = -1;
+          back.transferActive = true;
+        }
+      }
+    } else if (back.transferActive && back.transferDirection === -1) {
+      // 放货插值进行中/已到输送线侧：每帧重试交付，接收方未空闲货物滞留不销毁
+      //（排队平移 direction=1 是台内移动，未平移到 step2 锚点前不得交付）
+      this.tryDeliverOutgoingCargo(model, entityId, 1);
+    }
+  }
+
+  /** 来料层取货：从目标 conveyor 接管当前持货进指定工位，成功则以货物当前实际位置为起点进入取货插值；无货下帧重试。 */
+  private tryAdoptIncomingCargo(model: ModelRuntimeEntry, entityId: string, stationIndex: 0 | 1): void {
     const state = model.liftTelemetry;
     const adopted = this.context.adoptConveyorCargoForLift(entityId, model.assetCode);
     if (!adopted) return;
 
-    const cargoKey = this.getLiftCargoKey(model.assetCode);
+    const cargoKey = this.getLiftCargoKey(model.assetCode, stationIndex);
     this.disposeLiftCargoByKey(cargoKey);
     adopted.assetCode = model.assetCode;
     adopted.handoff = createCargoHandoffState(adopted);
     this.state.liftCargoMeshes.set(cargoKey, adopted);
 
-    state.cargoKey = cargoKey;
-    state.cargoOnBoard = false;
+    const station = state.stations[stationIndex];
+    station.cargoKey = cargoKey;
+    station.cargoOnBoard = false;
     // 锚点取货物在来料输送线上的实际位置（通常停在紧靠提升机的末端）；
     // 若取输送线台面中心，插值起点会落在货物后方半个机身，先向后滑再上台（后摇）。
-    state.cargoHoldPosition = adopted.root.getAbsolutePosition().clone();
-    state.cargoHoldRotation = null;
-    state.transferProgress = 0;
-    state.transferActive = true;
+    station.cargoHoldPosition = adopted.root.getAbsolutePosition().clone();
+    station.cargoHoldRotation = null;
+    station.transferProgress = 0;
+    station.transferDirection = 1;
+    station.transferActive = true;
   }
 
-  /** 送料层放货交付：目标 conveyor 接收（settle+广播）后清理本机持货状态；预检不过返回 false 保持重试。 */
-  private tryDeliverOutgoingCargo(model: ModelRuntimeEntry, entityId: string): boolean {
+  /** 送料层放货交付：目标 conveyor 仅查空闲接收（无视 task）后清理本工位持货状态；预检不过返回 false 保持重试。 */
+  private tryDeliverOutgoingCargo(model: ModelRuntimeEntry, entityId: string, stationIndex: 0 | 1): boolean {
     const state = model.liftTelemetry;
-    const cargoKey = state.cargoKey;
+    const station = state.stations[stationIndex];
+    const cargoKey = station.cargoKey;
     if (!cargoKey) return false;
-    const task = this.state.liftCargoMeshes.get(cargoKey)?.task ?? '';
     // 对齐 RGV 滞后承接语义（rgvDriver.tryDeliverRgvCargoToColumn）：放货插值已推进（progress<1，
-    // 货物在离台途中/已到输送线侧）属接收方 task 消息滞后的兜底交付，按货物当前轴向投影落地；
+    // 货物在离台途中/已到输送线侧）属接收方消息滞后的兜底交付，按货物当前轴向投影落地；
     // 到位当场交付（progress=1，货仍在台上）保持进入端落地。否则交付成功瞬间货物被拽回进入端（后摇）。
-    const preserveAxialPosition = state.transferProgress < 1;
-    if (!this.context.deliverLiftCargoToConveyorLayer(entityId, cargoKey, task, preserveAxialPosition)) return false;
+    const preserveAxialPosition = station.transferProgress < 1;
+    if (!this.context.deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)) return false;
 
-    this.clearLiftCargoState(model);
+    this.clearLiftStationState(station);
     return true;
   }
 
-  /** 每帧刷新货箱外观与位姿：台上跟随载货台顶面锚点（台升货自升），交接中在输送线支撑点与台工位间插值；朝向恒锁定朝向。 */
-  private updateLiftCargoPose(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+  /** 每帧刷新双工位货箱外观与位姿：台上跟随本工位锚点（台升货自升），交接/排队平移中在另一端与工位锚点间插值；朝向恒锁定朝向。 */
+  private updateLiftCargoPoses(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
-    const cargoKey = state.cargoKey;
-    if (!cargoKey) return;
-    const cargo = this.state.liftCargoMeshes.get(cargoKey);
-    if (!cargo) {
-      this.clearLiftCargoState(model);
-      return;
-    }
+    for (let stationIndex = 0 as 0 | 1; stationIndex < 2; stationIndex++) {
+      const station = state.stations[stationIndex];
+      if (station.cargoKey === null) continue;
+      const cargo = this.state.liftCargoMeshes.get(station.cargoKey);
+      if (!cargo) {
+        this.clearLiftStationState(station);
+        continue;
+      }
 
-    this.host.syncGeneratedCargoVisual(
-      cargo, 'lift', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
-    );
-    const station = this.getLiftStationPose(model, cargo.lockedWorldRotation);
-    let targetPosition = station.position;
-    if (!state.cargoOnBoard && state.cargoHoldPosition) {
-      targetPosition = Vector3.Lerp(state.cargoHoldPosition, station.position, state.transferProgress);
-    }
+      this.host.syncGeneratedCargoVisual(
+        cargo, 'lift', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
+      );
+      const anchor = this.getLiftStationPose(model, stationIndex, cargo.lockedWorldRotation);
+      let targetPosition = anchor.position;
+      if (!station.cargoOnBoard && station.cargoHoldPosition) {
+        targetPosition = Vector3.Lerp(station.cargoHoldPosition, anchor.position, station.transferProgress);
+      }
 
-    const pose = resolveCargoHandoffPose(cargo, targetPosition, station.rotation, deltaSeconds);
-    this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, null);
+      const pose = resolveCargoHandoffPose(cargo, targetPosition, anchor.rotation, deltaSeconds);
+      this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, null);
+    }
   }
 
-  /** 台工位锚点：载货面节点包围盒顶面中心；朝向取货箱锁定朝向，未锁定（fresh 刷出）取货物模板自身朝向（世界恒等），不继承机体旋转。 */
-  private getLiftStationPose(model: ModelRuntimeEntry, lockedRotation: Quaternion | null): { position: Vector3; rotation: Quaternion } {
+  /**
+   * 工位锚点：载货面节点包围盒顶面中心沿货物轨迹轴前后错开跨度的四分位（step1=前/来料侧取负，step2=后/送料侧取正）；
+   * 轨迹轴不可解析时两工位同取中心。朝向取货箱锁定朝向，未锁定（fresh 刷出）取货物模板自身朝向（世界恒等），不继承机体旋转。
+   */
+  private getLiftStationPose(model: ModelRuntimeEntry, stationIndex: 0 | 1, lockedRotation: Quaternion | null): { position: Vector3; rotation: Quaternion } {
     const rotation = lockedRotation ?? createCargoSpawnWorldRotation();
+    const upAxis = getModelAxis(model.root, 'y');
     const bounds = getNodesWorldBounds(this.findLiftCargoDeckNodes(model));
-    if (!bounds) {
-      const upAxis = getModelAxis(model.root, 'y');
-      return { position: model.liftTelemetry.rootBasePosition.add(upAxis.scale(model.liftTelemetry.liftOffset)), rotation };
+    const center = bounds
+      ? bounds.minimum.add(bounds.maximum).scale(0.5)
+      : model.liftTelemetry.rootBasePosition.add(upAxis.scale(model.liftTelemetry.liftOffset));
+    if (bounds) center.y = bounds.maximum.y;
+    const travel = this.resolveLiftTravelAxis(model);
+    if (!travel) return { position: center, rotation };
+    const sign = stationIndex === 0 ? -1 : 1;
+    return { position: center.add(travel.axis.scale(sign * travel.stationOffset)), rotation };
+  }
+
+  // ===== 货物轨迹轴（工位锚点分区） =====
+
+  /**
+   * 解析载物台货物轨迹轴并缓存：dataDriven.motion.lift.travelAxis 声明优先（'x'/'-x'/'z'/'-z' 或模型局部向量），
+   * 否则从来料/送料绑定表各取首个可解析 conveyor 支撑点，水平差向量（来料→送料为正）归一为轴；
+   * 按两表实体集签名缓存，绑定变化失效重建；不可解析时缓存空轴（两工位锚点退化为台面中心）。
+   */
+  private resolveLiftTravelAxis(model: ModelRuntimeEntry): LiftTravelAxisCache | null {
+    const state = model.liftTelemetry;
+    const signature = this.computeLiftBindingsSignature(model);
+    if (state.travelAxis && state.travelAxis.bindingsSignature === signature) {
+      return state.travelAxis.axis.lengthSquared() > 1e-8 ? state.travelAxis : null;
     }
-    const position = bounds.minimum.add(bounds.maximum).scale(0.5);
-    position.y = bounds.maximum.y;
-    return { position, rotation };
+
+    const axis = this.readLiftTravelAxisOverride(model) ?? this.inferLiftTravelAxisFromBindings(model);
+    if (!axis) {
+      state.travelAxis = { axis: Vector3.Zero(), stationOffset: 0, bindingsSignature: signature };
+      return null;
+    }
+
+    let stationOffset = 0;
+    const bounds = getNodesWorldBounds(this.findLiftCargoDeckNodes(model));
+    if (bounds) {
+      const projected = projectWorldBoundsOntoAxis(bounds, axis);
+      stationOffset = Math.max((projected.max - projected.min) / 4, 0);
+    }
+    state.travelAxis = { axis, stationOffset, bindingsSignature: signature };
+    return state.travelAxis;
+  }
+
+  /** 绑定表实体集签名：来料+送料两表「层号:实体列表」排序序列化，供轨迹轴缓存失效判定。 */
+  private computeLiftBindingsSignature(model: ModelRuntimeEntry): string {
+    const flatten = (table: Record<string, string[]> | undefined): string => Object.keys(table ?? {})
+      .sort((a, b) => Number(a) - Number(b))
+      .map((layer) => `${layer}:${[...(table?.[layer] ?? [])].sort().join(',')}`)
+      .join('|');
+    return `${flatten(model.telemetryBinding?.incomingLayerBindings)}#${flatten(model.telemetryBinding?.outgoingLayerBindings)}`;
+  }
+
+  /** 从绑定表推断轨迹轴：来料/送料侧各取首个可解析 conveyor 支撑点，水平差向量（来料→送料）归一；任一侧不可解析返回 null。 */
+  private inferLiftTravelAxisFromBindings(model: ModelRuntimeEntry): Vector3 | null {
+    const incoming = this.firstLayerSurfacePoint(model, 0);
+    const outgoing = this.firstLayerSurfacePoint(model, 1);
+    if (!incoming || !outgoing) return null;
+    const delta = outgoing.subtract(incoming);
+    delta.y = 0;
+    return delta.lengthSquared() > 1e-8 ? delta.normalize() : null;
+  }
+
+  /** 取指定侧绑定表中首个可解析 conveyor 支撑点世界坐标（层号升序、表内顺序）。 */
+  private firstLayerSurfacePoint(model: ModelRuntimeEntry, side: 0 | 1): Vector3 | null {
+    const table = side === 0
+      ? model.telemetryBinding?.incomingLayerBindings
+      : model.telemetryBinding?.outgoingLayerBindings;
+    for (const layer of Object.keys(table ?? {}).sort((a, b) => Number(a) - Number(b))) {
+      for (const entityId of table?.[layer] ?? []) {
+        const point = this.context.resolveConveyorDeckSurfacePoint(entityId);
+        if (point) return point;
+      }
+    }
+    return null;
+  }
+
+  /** 读取模型脚本 dataDriven.motion.lift.travelAxis 覆盖声明：'x'/'-x'/'z'/'-z' 或模型局部三分量向量，归一到世界水平轴。 */
+  private readLiftTravelAxisOverride(model: ModelRuntimeEntry): Vector3 | null {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const value = this.readPath(dataDriven, ['motion', 'lift', 'travelAxis']);
+      const axis = this.parseLiftTravelAxisValue(model, value);
+      if (axis) return axis;
+    }
+    return null;
+  }
+
+  /** 解析 travelAxis 声明值：字符串轴向取模型水平轴（负号反向），数组按模型局部向量变换到世界后取水平投影。 */
+  private parseLiftTravelAxisValue(model: ModelRuntimeEntry, value: unknown): Vector3 | null {
+    let local: Vector3 | null = null;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      const negative = normalized.startsWith('-');
+      const axisName = normalized.replace(/^-/, '');
+      if (axisName !== 'x' && axisName !== 'z') return null;
+      local = getHorizontalModelAxis(model.root, axisName);
+      if (negative) local = local.negate();
+      return local.lengthSquared() > 1e-8 ? local : null;
+    }
+    if (Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      const world = Vector3.TransformNormal(
+        new Vector3(value[0] as number, value[1] as number, value[2] as number),
+        model.root.computeWorldMatrix(true),
+      );
+      world.y = 0;
+      return world.lengthSquared() > 1e-8 ? world.normalize() : null;
+    }
+    return null;
+  }
+
+  /** 按路径读取任意配置值，供模型脚本 dataDriven 扩展字段使用。 */
+  private readPath(source: unknown, path: string[]): unknown {
+    let current: unknown = source;
+    for (const key of path) {
+      if (!isPlainRecord(current)) return undefined;
+      current = current[key];
+    }
+    return current;
   }
 
   // ===== 层绑定解析 =====
 
-  /** 解析层绑定候选并按交接语义仲裁：来料侧取持货方，送料侧取等待/空闲方，无匹配回退首个候选。 */
+  /** 解析层绑定候选并按交接语义仲裁：来料侧取持货方，送料侧取空闲方（无视 task——lift task 号与输送线无关），无匹配回退首个候选。 */
   private resolveLiftLayerCandidate(model: ModelRuntimeEntry, side: 0 | 1, layer: number): LiftLayerCandidate | null {
     const candidates = this.resolveLiftLayerCandidates(model, side, layer);
     if (candidates.length === 0) return null;
@@ -364,13 +579,7 @@ export class LiftTelemetryDriver {
         ?? candidates[0];
     }
 
-    const state = model.liftTelemetry;
-    const task = state.cargoKey ? this.state.liftCargoMeshes.get(state.cargoKey)?.task ?? '' : '';
-    return candidates.find((candidate) => {
-      const conveyorState = candidate.conveyor.conveyorTelemetry;
-      if (conveyorState.cargoCode !== null) return false;
-      return task === '' || conveyorState.pendingTask === task || conveyorState.waitingTask === task;
-    }) ?? candidates.find((candidate) => candidate.conveyor.conveyorTelemetry.cargoCode === null)
+    return candidates.find((candidate) => candidate.conveyor.conveyorTelemetry.cargoCode === null)
       ?? candidates[0];
   }
 
@@ -384,7 +593,7 @@ export class LiftTelemetryDriver {
     if (!bindings || bindings.length === 0) {
       this.reportLiftIssueOnce(
         `lift-layer-unbound:${model.assetCode}:${side}:${layer}`,
-        `提升机 ${model.assetCode} ${sideLabel}层 ${layer} 未绑定场景实体，已忽略该层定位。`,
+        `提升机 ${model.assetCode} ${sideLabel}层 ${layer} 未绑定场景实体，该层不响应不移动。`,
       );
       return [];
     }
@@ -416,32 +625,9 @@ export class LiftTelemetryDriver {
 
   // ===== 货箱生命周期 =====
 
-  /** 生成提升机运行时货箱的唯一键：每台设备同时最多携带一箱。 */
-  getLiftCargoKey(assetCode: string): string {
-    return JSON.stringify([assetCode]);
-  }
-
-  /** 创建或复用提升机运行时货箱。 */
-  getOrCreateLiftCargo(assetCode: string): LiftCargoRuntimeEntry {
-    const key = this.getLiftCargoKey(assetCode);
-    const existing = this.state.liftCargoMeshes.get(key);
-    if (existing) return existing;
-
-    const root = new TransformNode(`lift_cargo_root_${sanitizeBabylonName(assetCode)}`, this.scene);
-    const entry: LiftCargoRuntimeEntry = {
-      assetCode,
-      containerCode: '',
-      task: '',
-      root,
-      outputOwner: null,
-      fallback: null,
-      generatorEntityId: null,
-      handoff: null,
-      axialLengthCache: null,
-      lockedWorldRotation: null,
-    };
-    this.state.liftCargoMeshes.set(key, entry);
-    return entry;
+  /** 生成提升机工位货箱的唯一键：每台设备双工位（0=step1 前，1=step2 后）各最多一箱。 */
+  getLiftCargoKey(assetCode: string, stationIndex: 0 | 1): string {
+    return JSON.stringify([assetCode, stationIndex]);
   }
 
   /** 按键销毁提升机运行时货箱，map 中不存在时幂等跳过。 */
@@ -452,12 +638,14 @@ export class LiftTelemetryDriver {
     this.state.liftCargoMeshes.delete(key);
   }
 
-  /** 其他设备凭同一 task 接管本货箱：清理引用该货箱的模型遥测引用后从表中取出（不销毁），实例交给接管方保持视觉连续。 */
+  /** 其他设备凭同一 task 接管本货箱：清理引用该货箱的工位遥测引用后从表中取出（不销毁），实例交给接管方保持视觉连续。 */
   detachClaimedCargoByKey(key: string): LiftCargoRuntimeEntry | null {
     const cargo = this.state.liftCargoMeshes.get(key);
     if (!cargo) return null;
     for (const { model } of this.host.collectModels()) {
-      if (model.liftTelemetry.cargoKey === key) this.clearLiftCargoState(model);
+      for (const station of model.liftTelemetry.stations) {
+        if (station.cargoKey === key) this.clearLiftStationState(station);
+      }
     }
     this.state.liftCargoMeshes.delete(key);
     return cargo;
@@ -476,25 +664,27 @@ export class LiftTelemetryDriver {
   isLiftCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean {
     for (const { model } of this.host.collectModels()) {
       const state = model.liftTelemetry;
-      if (state.cargoKey && this.state.liftCargoMeshes.get(state.cargoKey) === cargo) {
-        return state.arrivedTargetKey !== null
-          && state.arrivedTargetKey === state.targetKey
-          && state.cargoOnBoard
-          && !state.transferActive;
+      for (const station of state.stations) {
+        if (station.cargoKey && this.state.liftCargoMeshes.get(station.cargoKey) === cargo) {
+          return state.arrivedTargetKey !== null
+            && state.arrivedTargetKey === state.targetKey
+            && station.cargoOnBoard
+            && !station.transferActive;
+        }
       }
     }
     return false;
   }
 
-  /** 清空本机全部货箱状态。 */
-  private clearLiftCargoState(model: ModelRuntimeEntry): void {
-    const state = model.liftTelemetry;
-    state.cargoKey = null;
-    state.cargoOnBoard = false;
-    state.cargoHoldPosition = null;
-    state.cargoHoldRotation = null;
-    state.transferProgress = 0;
-    state.transferActive = false;
+  /** 清空单个工位的货箱状态。 */
+  private clearLiftStationState(station: LiftStationState): void {
+    station.cargoKey = null;
+    station.cargoOnBoard = false;
+    station.cargoHoldPosition = null;
+    station.cargoHoldRotation = null;
+    station.transferProgress = 0;
+    station.transferDirection = 1;
+    station.transferActive = false;
   }
 
   // ===== 诊断与配置读取 =====

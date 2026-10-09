@@ -6,6 +6,7 @@ import {
   type ConveyorCargoTravelConfig,
   type ConveyorModelTelemetryState,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
+  createLiftStationState,
   type LiftModelTelemetryState,
   type RgvModelTelemetryState,
   type ShuttleModelTelemetryState,
@@ -124,12 +125,9 @@ export function createLiftTelemetryState(root: TransformNode): LiftModelTelemetr
     targetLayer: null,
     targetEntityId: null,
     arrivedTargetKey: null,
-    cargoKey: null,
-    cargoOnBoard: false,
-    cargoHoldPosition: null,
-    cargoHoldRotation: null,
-    transferProgress: 0,
-    transferActive: false,
+    workState: null,
+    stations: [createLiftStationState(), createLiftStationState()],
+    travelAxis: null,
     nodeBaselines: new Map(),
   };
 }
@@ -145,12 +143,9 @@ export function resetLiftTelemetryState(model: ModelRuntimeEntry): void {
   model.liftTelemetry.targetLayer = null;
   model.liftTelemetry.targetEntityId = null;
   model.liftTelemetry.arrivedTargetKey = null;
-  model.liftTelemetry.cargoKey = null;
-  model.liftTelemetry.cargoOnBoard = false;
-  model.liftTelemetry.cargoHoldPosition = null;
-  model.liftTelemetry.cargoHoldRotation = null;
-  model.liftTelemetry.transferProgress = 0;
-  model.liftTelemetry.transferActive = false;
+  model.liftTelemetry.workState = null;
+  model.liftTelemetry.stations = [createLiftStationState(), createLiftStationState()];
+  model.liftTelemetry.travelAxis = null;
   model.liftTelemetry.nodeBaselines.clear();
 }
 

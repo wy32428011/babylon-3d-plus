@@ -1042,11 +1042,12 @@ export class ConveyorTelemetryDriver {
     return true;
   }
 
-  /** RGV 列放货预检：本机空闲且正在等待该 task（pendingTask/waitingTask 匹配）才允许接收；纯读无副作用。 */
-  canAcceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, task: string): boolean {
-    if (!task) return false;
+  /** RGV 列放货预检：本机空闲且正在等待该 task（pendingTask/waitingTask 匹配）才允许接收；纯读无副作用。requireTaskMatch=false（lift 送料层放货：lift task 号与输送线协议无关）时仅要求本机完全空闲（无货且无等待中的 task 仲裁），不清空他人订阅。 */
+  canAcceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, task: string, requireTaskMatch = true): boolean {
     const state = model.conveyorTelemetry;
     if (state.cargoCode !== null) return false;
+    if (!requireTaskMatch) return state.pendingTask === null && state.waitingTask === null;
+    if (!task) return false;
     return state.pendingTask === task || state.waitingTask === task;
   }
 
@@ -1054,9 +1055,10 @@ export class ConveyorTelemetryDriver {
    * RGV 列放货交付（订阅仲裁）：货物落地本机并自驱，等价的 taken/available 波接入链路广播，
    * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
    * preserveAxialPosition=true（承接方消息滞后、交接插值已推进）时按货物当前轴向位置落地，不回进入端。
+   * requireTaskMatch=false 供 lift 送料层使用：task 号只作货物身份标注，不参与仲裁。
    */
-  acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false): boolean {
-    if (!this.canAcceptRgvColumnPlacedCargo(model, task)) return false;
+  acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false, requireTaskMatch = true): boolean {
+    if (!this.canAcceptRgvColumnPlacedCargo(model, task, requireTaskMatch)) return false;
     const holderAssetCode = cargo.assetCode;
     const direction = this.resolveFlowDirection(model);
     this.settleCargoTransfer(cargo, model, task, 1, direction, preserveAxialPosition);

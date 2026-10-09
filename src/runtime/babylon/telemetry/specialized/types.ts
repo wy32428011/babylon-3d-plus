@@ -403,7 +403,9 @@ export type RgvCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
 /**
  * 提升机遥测运行态：RGV 的垂直版——载货台沿模型 Y 轴升降，层绑定分来料/送料两张表。
- * 单车单货；载货台运动完全由 reference_upper_step（1=来料侧/2=送料侧）+ level_upper 目标层驱动。
+ * 双工位载货：载物台按货物轨迹轴分前（step1，stations[0]）后（step2，stations[1]）两区；
+ * 载货台运动由 reference_upper_step（1=来料侧/2=送料侧）+ level_upper 目标层驱动，
+ * work_state 存在时交接动作由状态机门控（缺失走旧的到位自动交接兼容路径）。
  */
 export type LiftModelTelemetryState = {
   rootBasePosition: Vector3;
@@ -423,19 +425,54 @@ export type LiftModelTelemetryState = {
   targetEntityId: string | null;
   /** 到位锁：liftOffset 到达 liftTargetOffset 后等于 targetKey，防止重复触发交接。 */
   arrivedTargetKey: string | null;
-  /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示本机持有货箱。 */
-  cargoKey: string | null;
-  /** true=货箱在载货台上随台升降；false=正在交接插值（静止端）。 */
-  cargoOnBoard: boolean;
-  /** 交接插值另一端（输送线侧支撑点世界坐标）。 */
-  cargoHoldPosition: Vector3 | null;
-  cargoHoldRotation: Quaternion | null;
-  /** 0=输送线侧支撑点，1=载货台工位（交接插值进度）。 */
-  transferProgress: number;
-  /** 交接插值进行中。 */
-  transferActive: boolean;
+  /** work_state 原始值（0 空闲/1 取货中/2 取货完成/3 卸货中/5 卸货完成/6 移动中/7 移动完成/10 急停/11 未知）；null=协议未提供，走兼容路径。 */
+  workState: number | null;
+  /** 双工位：[0]=step1 前端（来料侧），[1]=step2 后端（送料侧）。 */
+  stations: [LiftStationState, LiftStationState];
+  /** 载物台货物轨迹轴缓存（来料→送料水平方向 + 工位锚点偏移），按绑定表签名失效重建。 */
+  travelAxis: LiftTravelAxisCache | null;
   nodeBaselines: Map<TransformNode, Vector3>;
 };
+
+/** 提升机单工位货物状态。 */
+export type LiftStationState = {
+  /** 货物键（JSON.stringify([assetCode, stationIndex])）；非 null 表示该工位持有货箱。 */
+  cargoKey: string | null;
+  /** true=货箱在载货台上随台升降；false=正在交接/排队平移插值（静止端）。 */
+  cargoOnBoard: boolean;
+  /** 交接插值另一端（输送线侧支撑点世界坐标），或排队平移起点。 */
+  cargoHoldPosition: Vector3 | null;
+  cargoHoldRotation: Quaternion | null;
+  /** 0=交接另一端，1=本工位锚点（交接/排队平移插值进度）。 */
+  transferProgress: number;
+  /** 插值方向：1=取货/排队平移（向工位锚点），-1=放货（向输送线支撑点）。 */
+  transferDirection: 1 | -1;
+  /** 交接或排队平移插值进行中。 */
+  transferActive: boolean;
+};
+
+/** 载物台货物轨迹轴缓存：绑定表实体集签名变化时失效重建。 */
+export type LiftTravelAxisCache = {
+  /** 货物在载物台上的运行方向（世界水平单位向量，来料→送料为正）。 */
+  axis: Vector3;
+  /** 工位锚点相对载货面中心的轴向偏移（米）：step1=−offset、step2=+offset。 */
+  stationOffset: number;
+  /** 推断时的来料+送料绑定表实体集签名。 */
+  bindingsSignature: string;
+};
+
+/** 创建空工位状态。 */
+export function createLiftStationState(): LiftStationState {
+  return {
+    cargoKey: null,
+    cargoOnBoard: false,
+    cargoHoldPosition: null,
+    cargoHoldRotation: null,
+    transferProgress: 0,
+    transferDirection: 1,
+    transferActive: false,
+  };
+}
 
 export type LiftCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
@@ -635,11 +672,12 @@ export interface SpecializedTelemetryDriverContext {
   /** lift 从来料层 conveyor 取货：无视 task 接管该 conveyor 当前持货（无货返回 null）。 */
   adoptConveyorCargoForLift(entityId: string, liftAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /**
-   * lift 向送料层 conveyor 放货：目标 conveyor 等待该 task（或匿名可收）时交付（settle+广播）；
-   * 预检不过返回 false，不拆除 lift 侧引用（货物滞留台上持续重试，不销毁）。
+   * lift 向送料层 conveyor 放货：仅查目标完全空闲（cargo/pending/waiting 全空），不做 task 匹配
+   *（lift 的 task 号与输送线无必然联系，货物带匿名 task 交付）；预检不过返回 false，
+   * 不拆除 lift 侧引用（货物滞留台上持续重试，不销毁）。
    * preserveAxialPosition 语义同 RGV 列放货：放货插值已推进（滞后承接）时按货物当前轴向投影落地，不回进入端。
    */
-  deliverLiftCargoToConveyorLayer(entityId: string, cargoKey: string, task: string, preserveAxialPosition?: boolean): boolean;
+  deliverLiftCargoToConveyorLayer(entityId: string, cargoKey: string, preserveAxialPosition?: boolean): boolean;
   /** lift 持货外部拉取就绪门控：到位锁 + 货在台上 + 非交接中才允许 pull 摘除，防止升降中途摘货。 */
   isLiftCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
   /** lift 层对齐/交接落点用：层绑定实体为 conveyor 时返回其货物支撑点世界坐标（deck center + upAxis×surfaceLift）；非 conveyor 或实体不存在返回 null。 */
