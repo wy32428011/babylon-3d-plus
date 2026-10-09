@@ -40,6 +40,8 @@ const {
   resolveDeploymentSkyboxReference,
 } = require(`./deploymentSkyboxCache${runtimeExtension}`) as DeploymentSkyboxCacheModule;
 
+const { builtinSkyboxPackageForPath, validateBuiltinSkyboxPackage, BUILTIN_SKYBOX_FILE_NAME, BUILTIN_SKYBOX_FILE_SIZE, BUILTIN_SKYBOX_SHA256 } = require(`./builtinSkyboxAssets${runtimeExtension}`) as typeof import('./builtinSkyboxAssets.js');
+
 const MAX_SCENE_FILES = 1_000;
 const MAX_SCENE_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_FILES = 200_000;
@@ -747,6 +749,10 @@ async function validateResourceBundleSourcePaths(
         ? sharedResourcesRoot
         : legacyWorkspaceRoot && isPathInsideOrEqual(path.join(legacyWorkspaceRoot, 'Assets'), bundle.sourcePath)
           ? legacyWorkspaceRoot : null;
+    if (!allowedRoot && builtinSkyboxPackageForPath(bundle.sourcePath) === bundle.sourcePath) {
+      await validateBuiltinSkyboxPackage(bundle.sourcePath);
+      continue;
+    }
     if (!allowedRoot) throw new Error(`源工程资源不在允许目录内：${bundle.destinationRelativePath}`);
     await assertTrustedPathWithinRoot(
       allowedRoot,
@@ -785,6 +791,19 @@ function resolveResourceBundle(
     candidate = path.resolve(projectRoot, ...portable.split('/'));
   }
   const normalized = path.resolve(candidate);
+  const builtinPackage = builtinSkyboxPackageForPath(normalized);
+  if (builtinPackage) {
+    return {
+      sourcePath: builtinPackage,
+      destinationRelativePath: 'Assets/Skyboxes/Builtin-partly-cloudy-light',
+      integrityFiles: [{
+        relativePath: BUILTIN_SKYBOX_FILE_NAME,
+        expectedSize: BUILTIN_SKYBOX_FILE_SIZE,
+        expectedSha256: BUILTIN_SKYBOX_SHA256,
+        label: '内置天空盒',
+      }],
+    };
+  }
   const nativeSegments = normalized.slice(path.parse(normalized).root.length).split(path.sep).filter(Boolean);
   const environmentCachePath = parseDataPlatformEnvironmentCachePath(nativeSegments);
   if (environmentCachePath) {

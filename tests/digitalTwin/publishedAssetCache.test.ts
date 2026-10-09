@@ -14,6 +14,46 @@ function session(store: PublishedCacheStore, revision = 'release-1', base = 'htt
     documentUrls: [new URL('project/scene.json', base).href], store });
 }
 
+test('发布缓存分阶段报告冷读和热读，计时不重复计算共享下载并保留有界文件名', async t => {
+  const url = 'https://viewer.test/release/project/assets/model.glb';
+  const store = memoryStore();
+  const cache = new PublishedAssetCache({ baseUrl: 'https://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [],
+    resources: new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]), rawStore: store });
+  t.mock.method(globalThis, 'fetch', async () => new Response('abc'));
+  try {
+    await Promise.all([cache.fetch(url), cache.fetch(url + '?token=secret')]);
+    await cache.fetch(url);
+    const snapshot = cache.getLoadDiagnostics();
+    assert.equal(snapshot.scope, 'published-cache-session');
+    assert.equal(snapshot.stages.rawCacheRead.count, 2);
+    assert.equal(snapshot.stages.networkRequest.count, 1);
+    assert.equal(snapshot.stages.networkBodyRead.count, 1);
+    assert.equal(snapshot.stages.integrityCheck.count, 2);
+    assert.equal(snapshot.stages.cacheWrite.count, 1);
+    assert.equal(snapshot.active.length, 0);
+    assert.equal(snapshot.slowestAssets.every(value => value.fileName === 'model.glb'), true);
+    assert.equal(JSON.stringify(snapshot).includes('secret'), false);
+  } finally { cache.dispose(); }
+});
+
+test('存储降级和不匹配资源会记录阶段失败，保留原来的恢复和拒绝行为', async t => {
+  const url = 'http://viewer.test/release/project/assets/model.glb';
+  const warning = t.mock.method(console, 'warn', () => undefined);
+  t.mock.method(globalThis, 'fetch', async () => new Response('bad'));
+  const cache = new PublishedAssetCache({ baseUrl: 'http://viewer.test/release/', revision: 'r1', assetBase: 'project/assets/', documentUrls: [],
+    resources: new Map([[url, { size: 3, sha256: createHash('sha256').update('abc').digest('hex') }]]),
+    rawStore: { async get() { throw new Error('denied'); }, async put() { throw new Error('unexpected'); } } });
+  try {
+    await assert.rejects(cache.fetch(url), /资源与清单不一致/);
+    const snapshot = cache.getLoadDiagnostics();
+    assert.equal(snapshot.stages.rawCacheRead.failedCount, 1);
+    assert.equal(snapshot.stages.integrityCheck.failedCount, 1);
+    assert.equal(snapshot.stages.cacheWrite, undefined);
+    assert.equal(snapshot.active.length, 0);
+    assert.equal(warning.mock.callCount(), 1);
+  } finally { cache.dispose(); }
+});
+
 test('刷新创建新会话后，同版本天空盒只下载一次，新版本重新下载，回滚复用旧版本', async () => {
   const original = globalThis.fetch;
   const store = memoryStore();

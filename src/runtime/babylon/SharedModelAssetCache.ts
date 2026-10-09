@@ -56,6 +56,7 @@ export class SharedModelAssetCache {
     key: string,
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     signal?: AbortSignal,
+    onClone?: (durationMs: number, failed: boolean) => void,
   ): Promise<AssetContainer> {
     this.assertAvailable(signal);
     const entry = this.acquireEntry(key, loader);
@@ -64,10 +65,16 @@ export class SharedModelAssetCache {
       this.assertAvailable(signal);
       if (entry.disposed) throw new Error('模型解析模板已失效。');
       const startedAt = performance.now();
-      const container = cloneModelAssetContainer(source);
-      this.ownedCloneCount += 1;
-      this.ownedCloneMs += performance.now() - startedAt;
-      return container;
+      let failed = true;
+      try {
+        const container = cloneModelAssetContainer(source);
+        this.ownedCloneCount += 1;
+        this.ownedCloneMs += performance.now() - startedAt;
+        failed = false;
+        return container;
+      } finally {
+        this.observeClone(onClone, performance.now() - startedAt, failed);
+      }
     } finally {
       this.releaseEntry(key, entry);
     }
@@ -79,6 +86,7 @@ export class SharedModelAssetCache {
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     nameFunction: (sourceName: string) => string,
     signal?: AbortSignal,
+    onClone?: (durationMs: number, failed: boolean) => void,
   ): Promise<SharedModelInstantiation> {
     this.assertAvailable(signal);
 
@@ -91,38 +99,44 @@ export class SharedModelAssetCache {
       }
 
       const startedAt = performance.now();
-      // 即使组件没有脚本元数据，GLB 仍可能自带动画；动画目标必须指向独立资源。
-      const animatedContainer = container.animationGroups.length > 0 ? cloneModelAssetContainer(container) : null;
-      if (animatedContainer) {
-        for (const root of animatedContainer.rootNodes) {
-          for (const node of [root, ...root.getDescendants()]) node.name = nameFunction(node.name);
-        }
-        for (const group of animatedContainer.animationGroups) group.name = nameFunction(group.name);
-        for (const skeleton of animatedContainer.skeletons) skeleton.name = nameFunction(skeleton.name);
-        animatedContainer.addAllToScene();
-      }
-      const instantiatedEntries: InstantiatedEntries = animatedContainer ? {
-        rootNodes: animatedContainer.rootNodes,
-        skeletons: animatedContainer.skeletons,
-        animationGroups: animatedContainer.animationGroups,
-        dispose: () => animatedContainer.dispose(),
-      } : container.instantiateModelsToScene(nameFunction, false, { doNotInstantiate: false });
-      this.instantiationCount += 1;
-      this.instantiationMs += performance.now() - startedAt;
-      let instanceDisposed = false;
-
-      return {
-        entries: instantiatedEntries,
-        dispose: () => {
-          if (instanceDisposed) return;
-          instanceDisposed = true;
-          try {
-            instantiatedEntries.dispose();
-          } finally {
-            this.releaseEntry(key, entry);
+      let failed = true;
+      try {
+        // 即使组件没有脚本元数据，GLB 仍可能自带动画；动画目标必须指向独立资源。
+        const animatedContainer = container.animationGroups.length > 0 ? cloneModelAssetContainer(container) : null;
+        if (animatedContainer) {
+          for (const root of animatedContainer.rootNodes) {
+            for (const node of [root, ...root.getDescendants()]) node.name = nameFunction(node.name);
           }
-        },
-      };
+          for (const group of animatedContainer.animationGroups) group.name = nameFunction(group.name);
+          for (const skeleton of animatedContainer.skeletons) skeleton.name = nameFunction(skeleton.name);
+          animatedContainer.addAllToScene();
+        }
+        const instantiatedEntries: InstantiatedEntries = animatedContainer ? {
+          rootNodes: animatedContainer.rootNodes,
+          skeletons: animatedContainer.skeletons,
+          animationGroups: animatedContainer.animationGroups,
+          dispose: () => animatedContainer.dispose(),
+        } : container.instantiateModelsToScene(nameFunction, false, { doNotInstantiate: false });
+        this.instantiationCount += 1;
+        this.instantiationMs += performance.now() - startedAt;
+        failed = false;
+        let instanceDisposed = false;
+
+        return {
+          entries: instantiatedEntries,
+          dispose: () => {
+            if (instanceDisposed) return;
+            instanceDisposed = true;
+            try {
+              instantiatedEntries.dispose();
+            } finally {
+              this.releaseEntry(key, entry);
+            }
+          },
+        };
+      } finally {
+        this.observeClone(onClone, performance.now() - startedAt, failed);
+      }
     } catch (error) {
       this.releaseEntry(key, entry);
       throw error;
@@ -198,6 +212,11 @@ export class SharedModelAssetCache {
       entry.idleOrder = ++this.idleOrder;
       this.trimIdleEntries();
     }
+  }
+
+  private observeClone(callback: ((durationMs: number, failed: boolean) => void) | undefined, durationMs: number, failed: boolean): void {
+    try { callback?.(durationMs, failed); }
+    catch (error) { console.warn('[Scene load] 模型克隆计时观察器失败。', error); }
   }
 
   private trimIdleEntries(): void {

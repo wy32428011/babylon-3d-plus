@@ -2,6 +2,7 @@ import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
 import { OpeningAnimationOverlay } from '../../shared/ui/OpeningAnimationOverlay';
 import { useEditorOpeningAnimation } from '../opening/useEditorOpeningAnimation';
 import { SceneModelEntrancePlayback } from '../../shared/opening/SceneModelEntrancePlayback';
+import { SceneLoadingMask } from '../../shared/ui/SceneLoadingMask';
 import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
@@ -629,32 +630,53 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const scenePreparationNaturallyCompleted = (
     preparationState.completed && !preparationState.runtime.forcedSettled
   ) || sceneRuntimeNaturallyReady;
-  const sceneReadyForAutoPatrol = preparationState.sceneSessionId === sceneSessionId
+  const sceneResourcesReady = preparationState.sceneSessionId === sceneSessionId
     && preparationState.assetRefreshStatus === 'settled'
     && scenePreparationNaturallyCompleted
     && (!sceneDocument.sceneSettings.environment || environmentRuntimePhase === 'ready');
+  const [entrancePreparation, setEntrancePreparation] = useState<ReturnType<SceneRuntime['getModelEntranceSnapshot']> | null>(null);
+  const [entranceReadySession, setEntranceReadySession] = useState<string | null>(null);
+  const [entrancePreparationError, setEntrancePreparationError] = useState<string | null>(null);
+  const entranceRequired = isRuntimePreview && normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance).enabled;
+  const sceneReadyForAutoPatrol = sceneResourcesReady && (!entranceRequired || entranceReadySession === sceneSessionId);
   const opening = useEditorOpeningAnimation({
     viewport: viewportRef.current, ready: sceneReadyForAutoPatrol,
     sceneDocument, sceneSessionId, isRuntimePreview,
   });
   const modelEntrancePlayback = useRef<SceneModelEntrancePlayback | null>(null);
   useEffect(() => {
-    return () => { modelEntrancePlayback.current?.dispose(); modelEntrancePlayback.current = null; };
-  }, [sceneSessionId, isRuntimePreview]);
-  useEffect(() => {
-    if (!isRuntimePreview || !sceneReadyForAutoPatrol) return;
+    setEntranceReadySession(null); setEntrancePreparation(null); setEntrancePreparationError(null);
+    if (!isRuntimePreview || !sceneResourcesReady || !entranceRequired) return;
     const runtime = runtimeRef.current;
     const container = viewportRef.current?.engine.getRenderingCanvas()?.parentElement;
     if (!runtime || !container) return;
-    if (!modelEntrancePlayback.current) {
-      modelEntrancePlayback.current = new SceneModelEntrancePlayback({ runtime, container,
-        settings: normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance),
-        isReady: () => runtime.isModelEntranceReady(),
-        onError: error => pushLog('模型入场未播放，已恢复正常模型：' + getErrorMessage(error)),
-      });
-    }
-    if (opening.settled) modelEntrancePlayback.current.start();
-  }, [isRuntimePreview, sceneReadyForAutoPatrol, sceneSessionId, opening.settled, sceneDocument.sceneSettings.modelEntrance, pushLog]);
+    const controller = new AbortController();
+    const playback = new SceneModelEntrancePlayback({ runtime, container, signal: controller.signal,
+      settings: normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance),
+      isReady: () => runtime.isModelEntranceReady(),
+      onError: error => pushLog('模型入场未播放，已恢复正常模型：' + getErrorMessage(error)),
+    });
+    modelEntrancePlayback.current = playback;
+    const sample = () => { if (!controller.signal.aborted) setEntrancePreparation(runtime.getModelEntranceSnapshot()); };
+    sample(); const timer = window.setInterval(sample, 100);
+    void playback.ready.then(async () => {
+      if (controller.signal.aborted) return;
+      sample(); await runtime.waitForInitialRenderReady(controller.signal);
+      if (!controller.signal.aborted) setEntranceReadySession(sceneSessionId);
+    }).catch(error => {
+      if (!controller.signal.aborted) {
+        playback.dispose(); pushLog('入场首帧验证失败，已恢复正常模型：' + getErrorMessage(error));
+        setEntrancePreparationError(getErrorMessage(error));
+      }
+    }).finally(() => { window.clearInterval(timer); sample(); });
+    return () => {
+      controller.abort(); window.clearInterval(timer); playback.dispose();
+      if (modelEntrancePlayback.current === playback) modelEntrancePlayback.current = null;
+    };
+  }, [isRuntimePreview, sceneResourcesReady, entranceRequired, sceneSessionId, sceneDocument.sceneSettings.modelEntrance, pushLog]);
+  useEffect(() => {
+    if (sceneReadyForAutoPatrol && opening.settled) modelEntrancePlayback.current?.start();
+  }, [sceneReadyForAutoPatrol, opening.settled]);
 
   /** 发布当前单模型尺寸和 Hierarchy 群组世界包围盒，二者都只进入临时 Inspector 状态。 */
   const publishSelectedInspectorSpatialInfo = useCallback((runtime: SceneRuntime, entityId: string | null): void => {
@@ -3039,6 +3061,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           onPointerCancelCapture={handleCanvasPointerCancel}
           onWheel={handleCanvasWheel}
         />
+        {sceneResourcesReady && entranceRequired && entranceReadySession !== sceneSessionId ? <SceneLoadingMask
+          label={entrancePreparationError ? '场景首帧验证失败' : entrancePreparation?.status === 'preparing' ? '正在准备入场材质' : '正在验证场景首帧'}
+          detail={entrancePreparationError ?? (entrancePreparation?.status === 'preparing'
+            ? `入场网格 ${entrancePreparation.preparedBindingCount}/${entrancePreparation.totalBindingCount}`
+            : '等待入场材质与实际渲染完成…')}
+          percent={99}
+        /> : null}
         {opening.active && isRuntimePreview ? <OpeningAnimationOverlay settings={opening.settings} snapshot={opening.snapshot} preview={!isRuntimePreview} onSkip={isRuntimePreview ? opening.skip : opening.stop} /> : null}
         {overlayViewport && overlayRuntime ? (
           <DataPlatformScreenOverlay

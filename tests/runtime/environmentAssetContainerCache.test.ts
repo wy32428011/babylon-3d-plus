@@ -122,3 +122,26 @@ test('源加载失败后允许按同一键重新加载', async () => {
     engine.dispose();
   }
 });
+
+test('环境克隆阶段记录真实工作副本与失败，加载失败不计入克隆', async () => {
+  const engine = new NullEngine(); const scene = new Scene(engine);
+  const cache = new EnvironmentAssetContainerCache();
+  const observations: { duration: number; failed: boolean }[] = [];
+  const onClone = (duration: number, failed: boolean) => { observations.push({ duration, failed }); };
+  try {
+    const copy = await cache.acquireWorkingContainer({ cacheKey: 'good', scene,
+      loadSource: async () => createBoxContainer(scene, 'factory'), onClone });
+    assert.equal(copy.meshes.length, 1);
+    assert.equal(copy.meshes[0].isDisposed(), false);
+    assert.equal(observations[0].failed, false);
+    assert.ok(observations[0].duration >= 0);
+    copy.dispose();
+    await assert.rejects(cache.acquireWorkingContainer({ cacheKey: 'empty', scene,
+      loadSource: async () => new AssetContainer(scene), onClone }), /没有可渲染网格/);
+    assert.equal(observations[1].failed, true);
+    await assert.rejects(cache.acquireWorkingContainer({ cacheKey: 'read-failure', scene,
+      loadSource: async () => { throw new Error('read failure'); }, onClone }), /read failure/);
+    assert.equal(observations.length, 2);
+    assert.equal(cache.getMetrics().cloneCount, 1);
+  } finally { cache.dispose(); scene.dispose(); engine.dispose(); }
+});

@@ -488,7 +488,7 @@ export type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
-  source: 'project' | 'data-platform';
+  source: 'project' | 'data-platform' | 'builtin';
   availability: 'active' | 'orphaned';
   dataPlatformResourceId?: string;
   dataPlatformRevision?: string;

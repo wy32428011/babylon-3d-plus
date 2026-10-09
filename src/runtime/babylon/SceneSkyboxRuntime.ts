@@ -1,8 +1,6 @@
 import {
   Color3,
-  EXRCubeTexture,
   EnvCubeTexture,
-  HDRCubeTexture,
   HDRFiltering,
   Material,
   Mesh,
@@ -23,6 +21,7 @@ import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import { loadSkyboxTexture, type SkyboxLoadStage } from './skyboxTextureLoad';
 import { prepareSkyboxData, type SkyboxDecodeMetrics } from './skyboxDecodedData';
 import { PreparedSkyboxTexture } from './PreparedSkyboxTexture';
+import { BilinearHDRCubeTexture, BilinearEXRCubeTexture } from './BilinearSkyboxTexture';
 import { waitForSkyboxPrefilter } from './skyboxPrefilter';
 import type { CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap.js';
 import {
@@ -264,8 +263,8 @@ export class SceneSkyboxRuntime {
         const texture = preparedData
           ? new PreparedSkyboxTexture(blobUrl, engine, target.skybox.resolution, preparedData, target.skybox.format, onLoad, onError)
           : target.skybox.format === 'exr'
-          ? new EXRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError)
-          : new HDRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError);
+          ? new BilinearEXRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError)
+          : new BilinearHDRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError);
         texture.name = `SceneSkyboxTexture:${signature}`;
         texture.isBlocking = false;
         return texture;

@@ -11,15 +11,23 @@ if (!host) throw new Error('此测试需要非 loopback IPv4 地址验证真实 
 const output = await mkdtemp(path.join(os.tmpdir(), 'skybox-http-cache-'));
 const html = `<!doctype html><script type="module">
 import { prepareSkyboxData, getSkyboxDecodeMetrics } from '/src/runtime/babylon/skyboxDecodedData.ts';
-import { hashSkyboxCubeFaces, openSkyboxDecodedCache } from '/src/runtime/babylon/skyboxDecodedCache.ts';
-import { GetCubeMapTextureData } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
+import { hashSkyboxCubeFaces, openSkyboxDecodedCache, writeSkyboxDecodedCache } from '/src/runtime/babylon/skyboxDecodedCache.ts';
+import { hashSkyboxContent } from '/src/runtime/babylon/skyboxContentHash.ts';
+import { RGBE_ReadHeader, RGBE_ReadPixels } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
+import { convertSkyboxPanoramaToCubemap } from '/src/runtime/babylon/skyboxPanoramaSampling.ts';
 window.runChecks = async () => {
   const results = { secure: isSecureContext, subtle: Boolean(crypto.subtle), randomUUID: Boolean(crypto.randomUUID) };
   const header = new TextEncoder().encode('#?RADIANCE\\nFORMAT=32-bit_rle_rgbe\\n\\n-Y 4 +X 8\\n');
   const rows = Uint8Array.from(Array.from({ length: 4 }, () => [2, 2, 0, 8, 136, 128, 136, 64, 136, 32, 136, 129]).flat());
   const blob = new Blob([header, rows]);
-  const original = GetCubeMapTextureData(await blob.arrayBuffer(), 4, false);
+  const bytes = new Uint8Array(await blob.arrayBuffer()), info = RGBE_ReadHeader(bytes);
+  const original = convertSkyboxPanoramaToCubemap(RGBE_ReadPixels(bytes, info), info.width, info.height, 4, true);
   results.original = await hashSkyboxCubeFaces(original);
+  const legacyDatabase = await openSkyboxDecodedCache();
+  const legacyKey = 'babylon-9.12.0-panorama-v1:hdr:4:' + await hashSkyboxContent(bytes);
+  const legacyCube = { ...original };
+  for (const face of ['front', 'back', 'left', 'right', 'up', 'down']) legacyCube[face] = new Float32Array(original[face].length).fill(99);
+  await writeSkyboxDecodedCache(legacyDatabase, legacyKey, legacyCube); legacyDatabase.close();
   results.cold = await hashSkyboxCubeFaces(await prepareSkyboxData(blob, 'hdr', 4));
   results.coldMetrics = getSkyboxDecodeMetrics();
   results.hot = await hashSkyboxCubeFaces(await prepareSkyboxData(blob, 'hdr', 4));
@@ -57,11 +65,11 @@ try {
   const url = `http://${host}:${server.httpServer.address().port}/http-cache-check`;
   console.log(JSON.stringify({ url, output }));
   if (process.env.SKYBOX_TEST_SERVE_ONLY === '1') await new Promise(() => {});
-  browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
+  browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--no-proxy-server', '--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets'] });
   const page = await browser.newPage();
   page.on('pageerror', error => console.error(error.message));
   await page.goto(`http://${host}:${server.httpServer.address().port}/http-cache-check`, { waitUntil: 'commit' });
-  await page.waitForFunction(() => window.ready, undefined, { timeout: 30_000 });
+  await page.waitForFunction(() => window.ready, undefined, { timeout: 30_000 }).catch(async error => { console.error('HTTP缓存入口未就绪：', (await page.locator('body').innerText()).slice(0,500)); throw error; });
   let timer;
   const results = await Promise.race([page.evaluate(() => window.runChecks()), new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error('HTTP Worker 缓存验证超过 30 秒。')), 30_000);
@@ -69,6 +77,7 @@ try {
   assert.equal(results.secure, false); assert.equal(results.subtle, false); assert.equal(results.randomUUID, false);
   for (const kind of ['cold', 'hot', 'repaired']) assert.deepEqual(results[kind], results.original);
   assert.equal(results.coldMetrics.cache, 'miss'); assert.equal(results.hotMetrics.cache, 'hit');
+  assert.match(results.coldMetrics.decoderVersion, /panorama-bilinear-v2$/);
   assert.equal(results.repairedMetrics.cache, 'miss'); assert.equal(results.repairedHotMetrics.cache, 'hit');
   assert.equal(results.hotMetrics.stages.decode, undefined);
   assert.deepEqual(results.coldMetrics.warnings, []); assert.deepEqual(results.hotMetrics.warnings, []);

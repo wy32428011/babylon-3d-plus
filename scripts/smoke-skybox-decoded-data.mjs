@@ -13,10 +13,10 @@ const sourceInfo = await stat(source);
 const sha = createHash('sha256');
 for await (const chunk of createReadStream(source)) sha.update(chunk);
 const sourceHash = sha.digest('hex');
-const html = `<!doctype html><html><body>天空盒 Worker 原算法对照<script type="module">
+const html = `<!doctype html><html><body>天空盒 Worker 平滑算法对照<script type="module">
 import { ReadExrDataAsync } from '@babylonjs/core/Materials/Textures/Loaders/exrTextureLoader';
-import { PanoramaToCubeMapTools } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap';
-import { GetCubeMapTextureData } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
+import { convertSkyboxPanoramaToCubemap } from '/src/runtime/babylon/skyboxPanoramaSampling.ts';
+import { RGBE_ReadHeader, RGBE_ReadPixels } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
 import { prepareSkyboxData, getSkyboxDecodeMetrics } from '/src/runtime/babylon/skyboxDecodedData.ts';
 import { SKYBOX_CACHE_DATABASE, SKYBOX_CUBE_FACES, openSkyboxDecodedCache, writeSkyboxDecodedCache, readSkyboxDecodedCache } from '/src/runtime/babylon/skyboxDecodedCache.ts';
 let blob;
@@ -55,7 +55,7 @@ window.runSkyboxBenchmark = async () => {
   log('主线程 Babylon 原算法解码和转换');
   const direct = await measured(async () => {
     const exr = await ReadExrDataAsync(await blob.arrayBuffer());
-    return PanoramaToCubeMapTools.ConvertPanoramaToCubemap(exr.data, exr.width, exr.height, 512, false, false);
+    return convertSkyboxPanoramaToCubemap(exr.data, exr.width, exr.height, 512, false);
   });
   results.direct = { totalMs: direct.totalMs, maximumGapMs: direct.maximumGapMs, beats: direct.beats, hashes: await digest(direct.cube) };
   direct.cube = null;
@@ -93,11 +93,12 @@ window.runSkyboxBenchmark = async () => {
   if (index < 0) throw new Error('未找到 EXR compression 属性');
   original[index] = 3;
   results.zipFallback = await prepareSkyboxData(new Blob([original]), 'exr', 512) === null;
-  log('HDR 原算法和 Worker 对照');
+  log('HDR 平滑采样算法和 Worker 对照');
   const hdrHeader = new TextEncoder().encode('#?RADIANCE\\nFORMAT=32-bit_rle_rgbe\\n\\n-Y 4 +X 8\\n');
   const hdrRows = Uint8Array.from(Array.from({ length: 4 }, () => [2, 2, 0, 8, 136, 128, 136, 64, 136, 32, 136, 129]).flat());
   const hdrBlob = new Blob([hdrHeader, hdrRows]);
-  const hdrDirect = GetCubeMapTextureData(await hdrBlob.arrayBuffer(), 4, false);
+  const hdrBytes = new Uint8Array(await hdrBlob.arrayBuffer()), hdrInfo = RGBE_ReadHeader(hdrBytes);
+  const hdrDirect = convertSkyboxPanoramaToCubemap(RGBE_ReadPixels(hdrBytes, hdrInfo), hdrInfo.width, hdrInfo.height, 4, true);
   const hdrWorker = await prepareSkyboxData(hdrBlob, 'hdr', 4);
   const hdrCached = await prepareSkyboxData(hdrBlob, 'hdr', 4);
   results.hdr = { direct: await digest(hdrDirect), worker: await digest(hdrWorker), cached: await digest(hdrCached), metrics: getSkyboxDecodeMetrics() };
@@ -165,7 +166,7 @@ try {
   assert.equal(result.hdr.metrics.cache, 'hit');
   assert.deepEqual(external, [], 'Worker 与基线算法均不得请求 CDN');
   await mkdir(output, { recursive: true });
-  const report = { scope: 'real-exr-original-babylon-vs-worker-and-indexeddb', sourceBytes: sourceInfo.size, sourceSha256: sourceHash, externalRequests: external, ...result };
+  const report = { scope: 'real-exr-bilinear-reference-vs-worker-and-indexeddb', sourceBytes: sourceInfo.size, sourceSha256: sourceHash, externalRequests: external, ...result };
   await writeFile(path.join(output, 'result.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } finally { await browser?.close(); await server.close(); }

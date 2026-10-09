@@ -32,12 +32,14 @@ test('首帧验证成功主动发布完成状态，无 FPS、MQTT 或用户事�
   const render = () => runInNewContext(loadingMaskExpression, {
     computePlayerLoadingProgress, initialLoadCompletedRef, initialLoadCompleted, phase: 'ready', startupPercent: 50,
     modelLoadProgress: { loading: false, percent: 1, completedCount: 98, totalCount: 98, currentFile: null }, message: '场景加载中',
+    entrancePreparation: null,
   });
   const onComplete = runInNewContext(`(${completeCallback})`, {
     initialLoadCompletedRef,
     setInitialLoadCompleted: (value: boolean) => { initialLoadCompleted = value; frames.push(render()); },
     initialLoadMonitorRef: { current: null }, checkInitialLoad() {}, initialLoadCompletedForSession: false, setInitialLoadNotice() {},
     interactionController: { markInitialLoadComplete: () => { handshake += 1; } },
+    runtime: null, autoPatrolStartGate: { markReady() {} }, publishedCache: null,
   });
   let nextFrame: (() => void) | undefined;
   let finishVerification!: () => void;

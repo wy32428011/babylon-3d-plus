@@ -256,3 +256,29 @@ test('模板身份不受参数、单位影响，但隔离修订、中台、包�
   assert.notEqual(createModelAssetTemplateKey({ ...asset, assetRevision: undefined, sourceUrl: 'editor-asset://old/a.glb' }),
     createModelAssetTemplateKey({ ...asset, assetRevision: undefined, sourceUrl: 'editor-asset://new/a.glb' }));
 });
+
+test('克隆计时仅在模板读取结束后记录，观察器错误不影响工作副本', async t => {
+  const f = fixture();
+  const observations: { duration: number; failed: boolean }[] = [];
+  t.mock.method(console, 'warn', () => undefined);
+  try {
+    const copy = await f.cache.acquireOwnedContainer('timed', f.loader, undefined, (duration, failed) => {
+      observations.push({ duration, failed });
+      throw new Error('observer failure');
+    });
+    assert.equal(copy.meshes.length, 1);
+    assert.notEqual(copy.meshes[0], f.sources[0].meshes[0]);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].failed, false);
+    assert.ok(observations[0].duration >= 0);
+    copy.dispose();
+    await assert.rejects(f.cache.instantiate('static-failure', async () => {
+      const source = await f.loader();
+      for (const group of source.animationGroups) group.dispose();
+      source.animationGroups = [];
+      return source;
+    }, () => { throw new Error('instance name failure'); }, undefined, (duration, failed) => observations.push({ duration, failed })), /instance name failure/);
+    assert.equal(observations[1].failed, true);
+    assert.equal(f.cache.getMetrics().instantiationCount, 0);
+  } finally { f.dispose(); }
+});

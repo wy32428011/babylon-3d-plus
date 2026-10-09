@@ -47,3 +47,24 @@ test('editor-asset编码的本地路径也只保留文件名，在途任务完�
   assert.equal(diagnostics.snapshot().slowestAssets[0].fileName, 'asset');
   assert.equal(JSON.stringify(diagnostics.snapshot()).includes('demo-password'), false);
 });
+
+test('同步与异步阶段保留资源和实体关联，活动数量及快照相互独立', async () => {
+  let now = 0;
+  const diagnostics = new SceneLoadDiagnostics(() => now);
+  let finish!: () => void;
+  const context = { resource: 'https://u:secret@example.test/private/LED.glb?token=secret', entityId: 'LED1' };
+  const pending = diagnostics.measureAsync('entrancePrepare', () => new Promise<void>(resolve => { finish = resolve; }), context);
+  now = 5;
+  const active = diagnostics.snapshot();
+  assert.equal(active.stages.entrancePrepare.activeCount, 1);
+  assert.equal(active.active[0].entityId, 'LED1');
+  assert.equal(active.active[0].fileName, 'LED.glb');
+  diagnostics.measure('modelClone', () => { now += 2; }, context);
+  finish(); await pending;
+  assert.equal(diagnostics.snapshot().stages.entrancePrepare.activeCount, 0);
+  assert.equal(diagnostics.snapshot().slowestAssets[0].entityId, 'LED1');
+  assert.equal(diagnostics.snapshot().stages.modelClone.totalMs, 2);
+  assert.equal(JSON.stringify(diagnostics.snapshot()).includes('secret'), false);
+  active.stages.entrancePrepare.activeCount = 200;
+  assert.equal(diagnostics.snapshot().stages.entrancePrepare.activeCount, 0);
+});

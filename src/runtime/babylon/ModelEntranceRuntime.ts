@@ -5,6 +5,7 @@ import {
 } from '@babylonjs/core';
 import type { SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
+import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard';
 import { isTargetModelEffectSuspended, registerTargetModelEffectSuspension, suspendTargetModelEffects } from './effects/TargetModelEffects';
 
 type Target = { id: string; node: TransformNode | AbstractMesh; meshes?: readonly AbstractMesh[] };
@@ -16,10 +17,17 @@ type Binding = {
   minimum: Vector3; maximum: Vector3; wireframes: Map<Material, boolean>;
 };
 export type ModelEntranceSnapshot = {
-  status: 'idle' | 'prepared' | 'playing' | 'completed' | 'cancelled'; elapsedSeconds: number;
+  status: 'idle' | 'preparing' | 'prepared' | 'playing' | 'completed' | 'cancelled'; elapsedSeconds: number;
   progress: number; targetCount: number; meshCount: number; unsupportedMeshCount: number;
   interruptedMeshCount: number; cycle: number;
+  preparedBindingCount: number; totalBindingCount: number;
 };
+const PREPARATION_BATCH_MS = 8;
+async function yieldPreparation(): Promise<void> {
+  const scheduler = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  if (scheduler?.yield) await scheduler.yield();
+  else await new Promise<void>(resolve => setTimeout(resolve, 0));
+}
 const ATTRIBUTE = 'dtEntranceInstance';
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));
 const modes = { fade: 0, scan: 1, dissolve: 2, hologram: 3, particles: 4, assembly: 5, radial: 6, stagger: 7 };
@@ -125,18 +133,28 @@ export class ModelEntranceRuntime {
   private cycle = 0;
   private unsupported = 0;
   private interrupted = 0;
+  private preparationGeneration = 0;
+  private preparedBindingCount = 0;
+  private totalBindingCount = 0;
+  private readonly removeSceneDisposeObserver: () => void;
   private status: ModelEntranceSnapshot['status'] = 'idle';
-  constructor(private readonly scene: Scene) {}
-  get isActive() { return this.status === 'prepared' || this.status === 'playing'; }
+  constructor(private readonly scene: Scene) {
+    const observer = scene.onDisposeObservable.addOnce(() => this.dispose());
+    this.removeSceneDisposeObserver = () => { scene.onDisposeObservable.remove(observer); };
+  }
+  get isActive() { return this.status === 'preparing' || this.status === 'prepared' || this.status === 'playing'; }
   getSnapshot(): ModelEntranceSnapshot {
     return { status: this.status, elapsedSeconds: this.elapsed, progress: this.progress, targetCount: this.targets.length,
-      meshCount: this.bindings.length, unsupportedMeshCount: this.unsupported, interruptedMeshCount: this.interrupted, cycle: this.cycle };
+      meshCount: this.bindings.length, unsupportedMeshCount: this.unsupported, interruptedMeshCount: this.interrupted, cycle: this.cycle,
+      preparedBindingCount: this.preparedBindingCount, totalBindingCount: this.totalBindingCount };
   }
-  prepare(settings: SceneModelEntranceSettings, targets: Target[]): void {
+  async prepare(settings: SceneModelEntranceSettings, targets: Target[], signal?: AbortSignal): Promise<void> {
     this.cancel(); this.elapsed = 0; this.progress = 0; this.cycle = 0; this.unsupported = 0; this.interrupted = 0;
+    const generation = this.preparationGeneration;
+    this.preparedBindingCount = 0; this.totalBindingCount = 0;
     this.settings = { ...settings, targetEntityIds: [...settings.targetEntityIds] };
     this.status = 'idle'; this.targets = [];
-    if (!settings.enabled) return;
+    if (!settings.enabled || signal?.aborted || this.scene.isDisposed) return;
     const selected = new Set(settings.targetEntityIds);
     this.targets = targets.filter(target => !target.node.isDisposed() && (settings.scope !== 'selected' || selected.has(target.id)));
     const bySource = new Map<Mesh, Binding>();
@@ -152,26 +170,42 @@ export class ModelEntranceRuntime {
         if (!binding.targets.has(node)) binding.targets.set(node, index);
       }
     });
+    this.totalBindingCount = bySource.size;
+    this.status = 'preparing';
+    const cancelOnAbort = () => { if (generation === this.preparationGeneration) this.cancel(); };
+    signal?.addEventListener('abort', cancelOnAbort, { once: true });
+    const current = () => generation === this.preparationGeneration && !signal?.aborted && !this.scene.isDisposed;
+    let batchStarted = performance.now();
     try {
       for (const binding of bySource.values()) {
+        if (!current()) return;
+        if (binding.mesh.isDisposed()) { this.preparedBindingCount++; continue; }
         const nodes = new Set([binding.mesh, ...binding.targets.keys()]);
-        if ([...nodes].some(isTargetModelEffectSuspended)) { this.interrupted += binding.targets.size; continue; }
+        if ([...nodes].some(isTargetModelEffectSuspended)) { this.interrupted += binding.targets.size; this.preparedBindingCount++; continue; }
         for (const node of nodes) binding.releases.push(suspendTargetModelEffects(node));
         binding.original = binding.mesh.material;
-        if (!this.supported(binding.original)) { this.unsupported += binding.targets.size; binding.releases.forEach(release => release()); continue; }
+        if (!this.supported(binding.original)) { this.unsupported += binding.targets.size; binding.releases.forEach(release => release()); this.preparedBindingCount++; continue; }
         this.bindings.push(binding);
-        binding.replacement = this.cloneMaterial(binding.original, binding);
+        binding.replacement = this.cloneMaterial(binding.original, binding, new Map());
         this.installInstances(binding);
         binding.mesh.material = binding.replacement;
         for (const node of nodes) binding.unsubscribe.push(registerTargetModelEffectSuspension(node, () => {
           if (!this.bindings.includes(binding)) return;
           this.interrupted++; this.releaseBinding(binding); this.bindings.splice(this.bindings.indexOf(binding), 1);
         }));
+        this.preparedBindingCount++;
+        if (this.preparedBindingCount < this.totalBindingCount && performance.now() - batchStarted >= PREPARATION_BATCH_MS) {
+          await yieldPreparation();
+          if (!current()) return;
+          batchStarted = performance.now();
+        }
       }
-      if (!this.bindings.length) return;
+      if (!current()) return;
+      if (!this.bindings.length) { this.status = 'idle'; return; }
       this.status = 'prepared'; this.update(0);
       if (settings.effect === 'particles') this.createParticles();
-    } catch (error) { this.cancel(); throw error; }
+    } catch (error) { if (generation === this.preparationGeneration) this.cancel(); throw error; }
+    finally { signal?.removeEventListener('abort', cancelOnAbort); }
   }
   start(): void { if (this.status === 'prepared') { this.status = 'playing'; this.update(0); } }
   tick(deltaSeconds: number, visible = true): void {
@@ -186,27 +220,33 @@ export class ModelEntranceRuntime {
       this.progress = 1; this.release(); this.status = 'completed';
     }
   }
-  cancel(): void { this.release(); this.status = 'cancelled'; }
-  dispose(): void { this.cancel(); this.settings = null; this.targets = []; }
+  cancel(): void { this.preparationGeneration++; this.release(); this.status = 'cancelled'; }
+  dispose(): void { this.removeSceneDisposeObserver(); this.cancel(); this.settings = null; this.targets = []; }
   private supported(material: Material | null): boolean {
     if (material instanceof MultiMaterial) return material.subMaterials.every(child => this.supported(child));
     return !material || material instanceof StandardMaterial || material instanceof PBRBaseMaterial;
   }
-  private cloneMaterial(original: Material | null, binding: Binding): Material {
-    if (original instanceof MultiMaterial) {
-      const multi = new MultiMaterial(`${original.name}_entrance`, this.scene); binding.materials.push(multi);
-      multi.subMaterials = original.subMaterials.map(material => this.cloneMaterial(material, binding)); return multi;
-    }
-    const material = original ? cloneEnvironmentMaterial(original, `${original.name}_entrance`) : new StandardMaterial('entrance_default', this.scene);
-    if (!material) throw new Error(`无法克隆入场材质: ${original?.name ?? 'default'}`);
-    binding.materials.push(material);
-    const originalTextures = new Set(original?.getActiveTextures() ?? []);
-    for (const texture of material.getActiveTextures()) if (!originalTextures.has(texture)) binding.textures.add(texture);
-    material.unfreeze(); binding.wireframes.set(material, material.wireframe);
-    if (['fade', 'stagger', 'assembly', 'hologram'].includes(this.settings!.effect)) {
-      material.transparencyMode = original?.needAlphaTesting() ? Material.MATERIAL_ALPHATESTANDBLEND : Material.MATERIAL_ALPHABLEND;
-    }
-    binding.plugins.push(new EntrancePlugin(material, binding, this.settings!)); return material;
+  private cloneMaterial(original: Material | null, binding: Binding, copies: Map<Material | null, Material>): Material {
+    const existing = copies.get(original);
+    if (existing) return existing;
+    return withNewMaterialDirtyGuard(this.scene, () => {
+      if (original instanceof MultiMaterial) {
+        const multi = new MultiMaterial(`${original.name}_entrance`, this.scene); binding.materials.push(multi);
+        copies.set(original, multi);
+        multi.subMaterials = original.subMaterials.map(material => this.cloneMaterial(material, binding, copies)); return multi;
+      }
+      const material = original ? cloneEnvironmentMaterial(original, `${original.name}_entrance`) : new StandardMaterial('entrance_default', this.scene);
+      if (!material) throw new Error(`无法克隆入场材质: ${original?.name ?? 'default'}`);
+      copies.set(original, material);
+      binding.materials.push(material);
+      const originalTextures = new Set(original?.getActiveTextures() ?? []);
+      for (const texture of material.getActiveTextures()) if (!originalTextures.has(texture)) binding.textures.add(texture);
+      material.unfreeze(); binding.wireframes.set(material, material.wireframe);
+      if (['fade', 'stagger', 'assembly', 'hologram'].includes(this.settings!.effect)) {
+        material.transparencyMode = original?.needAlphaTesting() ? Material.MATERIAL_ALPHATESTANDBLEND : Material.MATERIAL_ALPHABLEND;
+      }
+      binding.plugins.push(new EntrancePlugin(material, binding, this.settings!)); return material;
+    });
   }
   private installInstances(binding: Binding): void {
     const mesh = binding.mesh;

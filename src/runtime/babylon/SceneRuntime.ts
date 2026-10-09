@@ -228,6 +228,7 @@ import { telemetryRuntimeDiagnosticsStore, type TelemetryRuntimeDiagnosticStatus
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import { AssetLoadScheduler } from './AssetLoadScheduler';
 import { SceneLoadDiagnostics } from './SceneLoadDiagnostics';
+import type { PublishedAssetCache } from '../assets/publishedAssetCache';
 import { EnvironmentAssetContainerCache } from './environmentAssetContainerCache';
 import {
   resolveModelAssetSharedInstancingPolicy,
@@ -696,6 +697,8 @@ export type SceneRuntimePerformanceMetrics = {
     failedModelAcquisitions: number;
     modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
     environmentCache: ReturnType<EnvironmentAssetContainerCache['getMetrics']>;
+    entrance: ReturnType<ModelEntranceRuntime['getSnapshot']>;
+    resources: ReturnType<PublishedAssetCache['getLoadDiagnostics']> | null;
   };
   fullSyncCount: number;
   selectionSyncCount: number;
@@ -1011,6 +1014,7 @@ export class SceneRuntime {
     private readonly onModelMeasurementChanged: (entityId: string) => void = () => undefined,
     onEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void = () => undefined,
     private readonly onModelLoadProgress?: (progress: SceneRuntimeModelLoadProgress) => void,
+    private readonly getResourceLoadDiagnostics?: () => ReturnType<PublishedAssetCache['getLoadDiagnostics']> | null,
   ) {
     this.modelEntranceRuntime = new ModelEntranceRuntime(scene);
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(scene, undefined, this.pushLog);
@@ -1611,7 +1615,7 @@ export class SceneRuntime {
   }
 
   /** 收集就绪的环境和业务模型；阵列按来源批次处理，不拆实例、不包含编辑标记。 */
-  prepareModelEntrance(settings: SceneModelEntranceSettings): void {
+  async prepareModelEntrance(settings: SceneModelEntranceSettings, signal?: AbortSignal): Promise<void> {
     const config = normalizeSceneModelEntranceSettings(settings);
     const targets: Array<{ id: string; node: TransformNode | AbstractMesh; meshes: AbstractMesh[] }> = [];
     const selected = new Set(config.targetEntityIds);
@@ -1636,13 +1640,10 @@ export class SceneRuntime {
       }
       targets.push({ id, node, meshes: [...new Set(meshes)].filter(candidate => !candidate.isDisposed() && candidate.getTotalVertices() > 0) });
     }
-    try {
-      if (config.enabled && !targets.length) throw new Error('没有可播放入场的就绪模型，请检查作用范围和模型可见性。');
-      this.modelEntranceRuntime.prepare(config, targets);
-      const unsupported = this.modelEntranceRuntime.getSnapshot().unsupportedMeshCount;
-      if (unsupported) this.pushLog(`模型入场：${unsupported} 个网格材质不支持入场覆盖，保留原外观。`);
-    }
-    catch (error) { this.modelEntranceRuntime.cancel(); throw error; }
+    if (config.enabled && !targets.length) throw new Error('没有可播放入场的就绪模型，请检查作用范围和模型可见性。');
+    await this.loadDiagnostics.measureAsync('entrancePrepare', () => this.modelEntranceRuntime.prepare(config, targets, signal));
+    const unsupported = this.modelEntranceRuntime.getSnapshot().unsupportedMeshCount;
+    if (unsupported) this.pushLog(`模型入场：${unsupported} 个网格材质不支持入场覆盖，保留原外观。`);
   }
 
   startModelEntrance(): void { this.modelEntranceRuntime.start(); }
@@ -1650,6 +1651,11 @@ export class SceneRuntime {
   setModelEntranceVisible(visible: boolean): void { this.modelEntranceVisible = visible; }
   isModelEntranceReady(): boolean { return this.scene.isReady(); }
   getModelEntranceSnapshot() { return this.modelEntranceRuntime.getSnapshot(); }
+
+  /** 入场准备完成后仍需验证材质就绪与实际渲染；两个阶段独立计量。 */
+  waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
+    return this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.scene, signal));
+  }
 
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
@@ -3511,7 +3517,8 @@ export class SceneRuntime {
         pendingModelCount: [...this.models.values()].filter((model) => !model.measurementReady).length,
         failedModelAcquisitions: this.failedModelAcquisitions,
         modelCache: this.sharedModelAssetCache.getMetrics(),
-        environmentCache: this.environmentAssetCache.getMetrics() },
+        environmentCache: this.environmentAssetCache.getMetrics(),
+        entrance: this.getModelEntranceSnapshot(), resources: this.getResourceLoadDiagnostics?.() ?? null },
       modelArrayInstanceEntityCount: this.modelArrayInstanceEntities.size,
       modelArrayParameterVariantCount: this.modelArrayParameterVariants.size,
       modelArrayBatchCount: modelArrayBatches.size,
@@ -5022,7 +5029,7 @@ export class SceneRuntime {
     this.applyModelSelection(pending, selected);
     this.applyModelInteractivity(pending, entity.id);
 
-    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal)
+    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal, entity.id)
       .then((loadedAssets) => this.loadDiagnostics.measure('modelInitialize', () => {
         const activeEntry = this.models.get(entity.id);
         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
@@ -5067,6 +5074,7 @@ export class SceneRuntime {
     modelAsset: ModelAssetComponent,
     _assetSignature: string,
     loadSignal?: AbortSignal,
+    entityId?: string,
   ): Promise<LoadedModelRuntimeAssets> {
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
@@ -5083,6 +5091,7 @@ export class SceneRuntime {
           }),
           (sourceName) => sourceName,
           loadSignal,
+          (ms, failed) => this.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }),
         );
         return {
           kind: 'shared-instance',
@@ -5101,6 +5110,7 @@ export class SceneRuntime {
           this.updateModelLoadProgressUnit(loadSequence, event);
         }),
         loadSignal,
+        (ms, failed) => this.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }),
       );
       try {
         container.addAllToScene();
@@ -5264,7 +5274,9 @@ export class SceneRuntime {
       if (reason) { error = describe(owner.editorEntityId ?? owner.entityId, reason); break; }
     }
     const resourceBytes = [...this.activeModelLoadProgress.values()].reduce((sum, item) => sum + item.loaded, 0);
-    return { progress: this.computeModelLoadProgress(), skybox: this.skyboxRuntime.getLoadDiagnostics(), resourceBytes, error };
+    const entrance = this.getModelEntranceSnapshot();
+    return { progress: this.computeModelLoadProgress(), skybox: this.skyboxRuntime.getLoadDiagnostics(), resourceBytes, error, entrance,
+      startupStage: entrance.status === 'preparing' ? `准备入场材质 ${entrance.preparedBindingCount}/${entrance.totalBindingCount}` : undefined };
   }
 
   /** 严格加载门控单独读取失败信息，保留本地编辑对基础几何的容错显示。 */
@@ -5544,7 +5556,7 @@ export class SceneRuntime {
     const generatorLoadToken = runtimeEntry.loadToken;
     this.applyGeneratedOutputPresentation(runtimeEntry);
 
-    void this.loadModelRuntimeAssets(modelAsset, model.assetSignature)
+    void this.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name)
       .then((loadedAssets) => {
         const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
         const activeOutput = activeEntry?.output;
@@ -5736,7 +5748,7 @@ export class SceneRuntime {
         throw error;
       }
     } else {
-      const loadedAssets = await this.loadModelRuntimeAssets(modelAsset, model.assetSignature);
+      const loadedAssets = await this.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name);
       model.assetHandle = loadedAssets.handle;
       if (loadedAssets.kind === 'owned-container') {
         model.meshes = loadedAssets.meshes;
@@ -7458,7 +7470,7 @@ export class SceneRuntime {
     };
     this.spawnedDeviceModels.set(key, model);
 
-    void this.loadModelRuntimeAssets(modelAsset, model.assetSignature)
+    void this.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name)
       .then((loadedAssets) => {
         if (this.spawnedDeviceModels.get(key) !== model || model.loadToken !== modelLoadToken) {
           loadedAssets.handle.dispose();
@@ -8849,7 +8861,7 @@ export class SceneRuntime {
     };
     this.modelArrayParameterVariants.set(key, variant);
 
-    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal)
+    void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal, sourceEntity.id)
       .then((loadedAssets) => {
         const activeVariant = this.modelArrayParameterVariants.get(key);
         if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) {
@@ -9418,7 +9430,10 @@ export class SceneRuntime {
 
       const runtime = model.externalScriptRuntime;
       const loadToken = model.loadToken;
-      void runtime.start()
+      // 此阶段为脚本 start 的整体等待；不将其误报为纯 CPU 初始化或解码时间。
+      void this.loadDiagnostics.measureAsync('scriptInitialize', () => runtime.start(), {
+        resource: modelAsset.sourceUrl, entityId: model.entitySnapshot?.id ?? model.root.name,
+      })
         .then(() => {
           const current = this.findActiveModelRuntimeEntry(runtime);
           if (!current || current.loadToken !== loadToken) return;
@@ -10084,6 +10099,7 @@ export class SceneRuntime {
             this.updateModelLoadProgressUnit(loadSequence, event);
             onProgress?.(event);
           }), fileName),
+          onClone: (ms, failed) => this.loadDiagnostics.record('environmentClone', ms, failed, fileName),
         });
         },
         loadSignal,

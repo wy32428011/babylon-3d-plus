@@ -1,9 +1,25 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AssetContainer, MeshBuilder, NullEngine, PBRMaterial, RawTexture, Scene, StandardMaterial, Texture, type InternalTexture } from '@babylonjs/core';
+import { AssetContainer, MeshBuilder, NullEngine, PBRMaterial, RawTexture, Scene, StandardMaterial, Texture, type InternalTexture, type Material } from '@babylonjs/core';
 import { cloneModelAssetContainer } from '../../src/runtime/babylon/cloneModelAssetContainer.ts';
 import { cloneEnvironmentMaterial } from '../../src/runtime/babylon/cloneEnvironmentMaterial.ts';
 import { cloneMaterialWithSharedTexturePixels } from '../../src/runtime/babylon/cloneMaterialWithSharedTexturePixels.ts';
+
+test('300 个网格的 40 次环境材质克隆不重复扫描全场景子网格', () => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const material = new PBRMaterial('source', scene);
+  let queries = 0;
+  for (let i = 0; i < 300; i++) {
+    const mesh = MeshBuilder.CreateBox(`mesh-${i}`, {}, scene); mesh.material = material;
+    const subMesh = mesh.subMeshes[0], native = subMesh.getMaterial.bind(subMesh);
+    subMesh.getMaterial = (...args) => { queries++; return native(...args); };
+  }
+  try {
+    for (let i = 0; i < 40; i++) cloneEnvironmentMaterial(material, `copy-${i}`);
+    assert.equal(queries, 0, '新材质初始化不能逐属性扫描场景');
+    assert.equal(scene.blockMaterialDirtyMechanism, false);
+  } finally { scene.dispose(); engine.dispose(); }
+});
 
 function fixture(kind: 'standard' | 'pbr') {
   const engine = new NullEngine(), scene = new Scene(engine);
@@ -32,6 +48,7 @@ function fixture(kind: 'standard' | 'pbr') {
   if (material instanceof PBRMaterial) material.albedoTexture = texture;
   else material.diffuseTexture = texture;
   material.alpha = .7;
+  material.stencil.enabled = true; material.stencil.funcRef = 3; material.stencil.mask = 0x7f;
   material.detailMap.isEnabled = true; material.detailMap.texture = texture; material.detailMap.diffuseBlendLevel = .25;
   const source = new AssetContainer(scene);
   const mesh = MeshBuilder.CreateBox('device', {}, scene); mesh.material = material;
@@ -101,6 +118,19 @@ test('自定义 RawTexture clone 保留；安全副本再次 clone 保持属性�
   } finally { again?.dispose(); copy?.dispose(false, false); f.dispose(); }
 });
 
+test('环境只读纹理不生成临时副本，保留原 clone descriptor 和共享引用', () => {
+  const f = fixture('pbr');
+  let copy: Material | null = null;
+  const clone = () => { throw new Error('禁止创建异步纹理副本'); };
+  f.texture.clone = clone;
+  try {
+    copy = cloneEnvironmentMaterial(f.material, 'display');
+    assert.equal(f.texture.clone, clone);
+    assert.equal(copy!.getActiveTextures()[0], f.texture);
+    assert.equal(copy!.getScene().blockMaterialDirtyMechanism, false);
+  } finally { copy?.dispose(false, false); f.dispose(); }
+});
+
 function textureState(texture: Texture) {
   return Object.fromEntries(['name', 'uScale', 'vScale', 'uOffset', 'vOffset', 'uAng', 'vAng', 'wAng',
     'uRotationCenter', 'vRotationCenter', 'wRotationCenter', 'wrapU', 'wrapV', 'coordinatesIndex', 'coordinatesMode',
@@ -154,9 +184,29 @@ for (const kind of ['standard', 'pbr'] as const) {
       const texture = copy.getActiveTextures()[0] as Texture;
       assert.equal(texture, f.texture); assert.deepEqual(textureState(texture), textureState(f.texture));
       assert.equal(copy.alpha, .7); assert.equal(copy.detailMap.texture, f.texture);
+      assert.equal(copy.stencil.enabled, true); assert.equal(copy.stencil.funcRef, 3); assert.equal(copy.stencil.mask, 0x7f);
       assert.equal(copy.detailMap.diffuseBlendLevel, .25); assertNoExtraStorage(f);
       const internal = texture.getInternalTexture()!;
       copy.dispose(false, false); assert.equal(f.texture.isReady(), true); assert.equal(f.released.has(internal), false);
     } finally { copy?.dispose(false, false); f.dispose(); }
   });
 }
+
+test('PBR 显示副本共享不在 activeTextures 中的 BRDF，避免临时 RGBD 解码副本', () => {
+  const f = fixture('pbr'); const brdf = new Texture(null, f.scene);
+  const descriptor = Object.getOwnPropertyDescriptor(brdf, 'clone');
+  brdf.clone = () => { throw new Error('BRDF must remain shared'); };
+  (f.material as PBRMaterial).environmentBRDFTexture = brdf;
+  const before = Object.getOwnPropertyDescriptor(brdf, 'clone');
+  let display: PBRMaterial | null = null;
+  try {
+    assert.equal(f.material.getActiveTextures().includes(brdf), false);
+    display = cloneEnvironmentMaterial(f.material, 'shared-brdf') as PBRMaterial;
+    assert.ok(display.environmentBRDFTexture === brdf, 'BRDF 必须保留源纹理引用');
+    assert.deepEqual(Object.getOwnPropertyDescriptor(brdf, 'clone'), before);
+  } finally {
+    display?.dispose(false, false);
+    if (descriptor) Object.defineProperty(brdf, 'clone', descriptor); else Reflect.deleteProperty(brdf, 'clone');
+    f.dispose();
+  }
+});

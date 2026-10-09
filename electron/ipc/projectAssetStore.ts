@@ -32,6 +32,7 @@ import {
   mergeSkyboxAssets,
   type DataPlatformSkyboxAssetDiagnostic,
 } from './dataPlatformSkyboxIndex.js';
+import { listBuiltinSkyboxAssets } from './builtinSkyboxAssets.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
@@ -895,7 +896,7 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
       skyboxSyncContextKey: null,
       environmentSyncContextKey: null,
       assets: [],
-      skyboxes: [],
+      skyboxes: await listBuiltinSkyboxAssets(),
       orphanedSkyboxes: [],
     };
   }
@@ -960,7 +961,7 @@ async function loadProjectSkyboxAssets(
   }
 
   for (const skybox of [...skyboxes, ...orphanedSkyboxes]) authorizeAssetFile(skybox.path);
-  return { skyboxes, orphanedSkyboxes, localSkyboxes };
+  return { skyboxes: [...await listBuiltinSkyboxAssets(), ...skyboxes], orphanedSkyboxes, localSkyboxes };
 }
 
 function reportDataPlatformSkyboxDiagnostics(errors: readonly DataPlatformSkyboxAssetDiagnostic[]): void {

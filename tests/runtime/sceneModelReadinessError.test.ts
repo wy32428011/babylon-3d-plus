@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { NullEngine, Scene, TransformNode } from '@babylonjs/core';
+import { SceneLoadDiagnostics } from '../../src/runtime/babylon/SceneLoadDiagnostics.ts';
 
 // 预编译大模块图，避免按需SSR传输超时掩盖真实运行时断言。
 const output = await mkdtemp(path.resolve('node_modules/.scene-readiness-'));
@@ -31,8 +32,9 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function runtimeFixture() {
   const runtime = Object.create(SceneRuntime.prototype);
   Object.assign(runtime, { scene, models: new Map(), modelReadinessErrors: new Map(), modelArrayParameterVariants: new Map(),
-    generatedOutputOwners: new Map(), selectedEntityIds: new Set(), modelLoadSequence: 0,
-    loadDiagnostics: { measure: (_label: string, action: () => unknown) => action() },
+    generatedOutputOwners: new Map(), spawnedDeviceModels: new Map(), selectedEntityIds: new Set(), modelLoadSequence: 0,
+    loadDiagnostics: new SceneLoadDiagnostics(),
+    modelEntranceRuntime: { getSnapshot: () => ({ status: 'idle', preparedBindingCount: 0, totalBindingCount: 0 }) },
     applyTransform: () => {}, applyModelUnitScale: () => {}, applyModelSelection: () => {}, applyModelInteractivity: () => {},
     restoreModelArrayHostMeshes: () => {}, syncModelScriptMetadata: () => {}, updateModelExternalScriptRuntimeContext: () => {},
     endModelArrayHostRenderSuppression: () => {}, pushLog: () => {},
@@ -51,7 +53,8 @@ function modelFixture() {
   return { root, contentRoot: root, loadToken: 1, assetHandle: {}, externalScriptRuntime: null, externalScriptSignature: '',
     externalScriptStarting: false, measurementReady: false, modelArraySuspendedMeshes: new Set(),
     stackerTelemetry: telemetry.createStackerTelemetryState(root), conveyorTelemetry: telemetry.createConveyorTelemetryState(),
-    rgvTelemetry: telemetry.createRgvTelemetryState(root) };
+    rgvTelemetry: telemetry.createRgvTelemetryState(root), shuttleTelemetry: telemetry.createShuttleTelemetryState(root),
+    liftTelemetry: telemetry.createLiftTelemetryState(root) };
 }
 
 test('script failure remains visible to strict readiness while local fallback stays usable; new script revision recovers', async () => {

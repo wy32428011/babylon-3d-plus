@@ -13,6 +13,13 @@ import { preparePublishedReleaseCache } from './publishedReleaseCache';
 import type { PublishedReleaseCacheState } from './publishedReleasePrefetch';
 import { loadPublishedCacheVersion, verifyPublishedCacheVersion } from './publishedCacheVersion';
 
+let installedCache: PublishedAssetCache | null = null;
+
+/** 发布资源阶段按缓存会话累计，并行阶段不能相加作为场景总耗时。 */
+export function getPublishedAssetLoadDiagnostics() {
+  return installedCache?.getLoadDiagnostics() ?? null;
+}
+
 function isMeshData(value: unknown): value is MeshData {
   if (!value || typeof value !== 'object') return false;
   const mesh = value as MeshData;
@@ -107,6 +114,7 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
     documentUrls: version.resources ? [] : [config.paths.scene, config.paths.assetManifest].map(url => new URL(url, baseUrl).href),
     verifyRevision: version.resources ? undefined : verifyRevision });
   const restoreFetch = installPublishedAssetCache(cache);
+  installedCache = cache;
   const provider = new PublishedOfflineProvider(cache);
   const previousFactory = AbstractEngine.OfflineProviderFactory;
   const factory: typeof previousFactory = (_url, checked) => { queueMicrotask(() => checked(true)); return provider; };
@@ -140,6 +148,7 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
     prefetch() { release?.prefetch(cache, verifyRevision); },
     attach(scene) { scene.getEngine().enableOfflineSupport = true; scene.offlineProvider = provider; },
     dispose() {
+      if (installedCache === cache) installedCache = null;
       revisionController.abort();
       if (AbstractEngine.OfflineProviderFactory === factory) AbstractEngine.OfflineProviderFactory = previousFactory;
       if (DracoDecoder.prototype.decodeMeshToMeshDataAsync === draco) DracoDecoder.prototype.decodeMeshToMeshDataAsync = originalDraco;

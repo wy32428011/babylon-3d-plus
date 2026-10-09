@@ -13,6 +13,7 @@ export type AcquireEnvironmentWorkingContainerOptions = {
   cacheKey: string;
   scene: Scene;
   loadSource: () => Promise<AssetContainer>;
+  onClone?: (durationMs: number, failed: boolean) => void;
 };
 
 type CachedEnvironmentSource = {
@@ -48,10 +49,17 @@ export class EnvironmentAssetContainerCache {
     if (this.disposed) throw new Error('环境资源缓存已释放，无法加载环境模型。');
     const source = await this.acquireSource(options);
     const startedAt = performance.now();
-    const working = createWorkingContainer(options.scene, source);
-    this.cloneCount += 1;
-    this.cloneMs += performance.now() - startedAt;
-    return working;
+    let failed = true;
+    try {
+      const working = createWorkingContainer(options.scene, source);
+      this.cloneCount += 1;
+      this.cloneMs += performance.now() - startedAt;
+      failed = false;
+      return working;
+    } finally {
+      try { options.onClone?.(performance.now() - startedAt, failed); }
+      catch (error) { console.warn('[Scene load] 环境克隆计时观察器失败。', error); }
+    }
   }
 
   /** 释放全部源容器。工作副本仍由 SceneEnvironmentRuntime 各自 dispose。 */

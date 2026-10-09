@@ -7,11 +7,13 @@ import { createEmptySceneDocument, createMeshEntity, sanitizeSceneEnvironment } 
 import { serializeScene } from '../../src/editor/project/SceneSerializer';
 import { useEditorStore } from '../../src/editor/store/editorStore';
 import { SceneRuntime } from '../../src/runtime/babylon/SceneRuntime';
+import { normalizeSceneModelEntranceSettings } from '../../src/editor/model/sceneModelEntrance';
 import { installDeploymentAssetManifest } from '../../src/runtime/assets/editorAssetUrl';
 import '../../src/styles/global.css';
 
 const scene = createEmptySceneDocument('模型入场配置与运行验收');
 scene.sceneSettings.shadows.enabled = false;
+scene.sceneSettings.modelEntrance = normalizeSceneModelEntranceSettings({ enabled: true, effect: 'dissolve', durationSeconds: .5 });
 scene.mqttConfig.enabled = true;
 scene.mqttConfig.simulatorEnabled = true;
 if (new URLSearchParams(location.search).has('environment')) {
@@ -30,7 +32,7 @@ useEditorStore.getState().loadSceneFromContent(serializeScene(scene),'model-entr
 let runtime:SceneRuntime|null=null, starts=0, saved='';
 const prepare=SceneRuntime.prototype.prepareModelEntrance;
 const start=SceneRuntime.prototype.startModelEntrance;
-SceneRuntime.prototype.prepareModelEntrance=function(settings){runtime=this;return prepare.call(this,settings);};
+SceneRuntime.prototype.prepareModelEntrance=function(settings,signal){runtime=this;return prepare.call(this,settings,signal);};
 SceneRuntime.prototype.startModelEntrance=function(){starts++;return start.call(this);};
 function Fixture() {
   const state=useEditorStore();
