@@ -491,7 +491,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return null;
   }
 
-  /** lift 向送料层 conveyor 放货交付：仅查目标完全空闲（cargo/pending/waiting 全空），不做 task 匹配；lift 的 task 号与输送线无关，货物以匿名 task 交付（波函数空 task 自然跳过广播）。先预检再拆引用，任一步失败 lift 侧货物状态保持完好，由调用方保持滞留重试（不销毁）。preserveAxialPosition 语义同 RGV 列放货（滞后承接按当前轴向投影落地）。 */
+  /** lift 向送料层 conveyor 放货交付：仅查目标当前无货，不做 task 匹配；lift 的 task 号与输送线无关，货物改标接收方等待中的 task（无等待则匿名）。先预检再拆引用，任一步失败 lift 侧货物状态保持完好，由调用方保持滞留重试（不销毁）。preserveAxialPosition 语义同 RGV 列放货（滞后承接按当前轴向投影落地）。 */
   deliverLiftCargoToConveyorLayer(entityId: string, cargoKey: string, preserveAxialPosition = false): boolean {
     for (const { entityId: id, model } of this.host.collectModels()) {
       if (id !== entityId) continue;

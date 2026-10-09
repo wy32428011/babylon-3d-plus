@@ -28,7 +28,7 @@ import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
 import { readConveyorMotionSignal, resolveConveyorTrajectoryForwardSign } from '../conveyorMotionSignal';
 import { resolveLocatorCellSupportWorldPosition } from '../stackerStorageLocation';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
-import { readConveyorCargoSignalFields, readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel } from './specializedModelAssets';
+import { readConveyorCargoSignalFields, readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig, isConveyorRuntimeModel, isRgvRuntimeModel, isLiftRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -836,7 +836,7 @@ export class ConveyorTelemetryDriver {
     );
   }
 
-  /** 探测点落在哪个专用设备（conveyor/stacker/rgv）的世界包围盒内；多个命中取盒中心最近者。 */
+  /** 探测点落在哪个专用设备（conveyor/stacker/rgv/lift）的世界包围盒内；多个命中取盒中心最近者。 */
   private findProbeNeighborAssetCode(model: ModelRuntimeEntry, direction: number): string | null {
     const probePoint = this.resolveProbePoint(model, direction);
     const epsilon = 0.05;
@@ -844,7 +844,7 @@ export class ConveyorTelemetryDriver {
     let nearestDistance = Infinity;
     for (const { model: candidate } of this.host.collectModels()) {
       if (candidate === model || candidate.assetCode === model.assetCode) continue;
-      if (!isConveyorRuntimeModel(candidate) && !isRgvRuntimeModel(candidate) && !candidate.stackerCapable) continue;
+      if (!isConveyorRuntimeModel(candidate) && !isRgvRuntimeModel(candidate) && !candidate.stackerCapable && !isLiftRuntimeModel(candidate)) continue;
       const bounds = this.host.getModelWorldBounds(candidate);
       if (!bounds) continue;
       const { minimum, maximum } = bounds;
@@ -1042,11 +1042,11 @@ export class ConveyorTelemetryDriver {
     return true;
   }
 
-  /** RGV 列放货预检：本机空闲且正在等待该 task（pendingTask/waitingTask 匹配）才允许接收；纯读无副作用。requireTaskMatch=false（lift 送料层放货：lift task 号与输送线协议无关）时仅要求本机完全空闲（无货且无等待中的 task 仲裁），不清空他人订阅。 */
+  /** RGV 列放货预检：本机空闲且正在等待该 task（pendingTask/waitingTask 匹配）才允许接收；纯读无副作用。requireTaskMatch=false（lift 送料层放货：lift task 号与输送线协议无关）时仅要求本机当前无货——等待中的 task 不挡交付，交付瞬间由 accept 改标接收方 task。 */
   canAcceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, task: string, requireTaskMatch = true): boolean {
     const state = model.conveyorTelemetry;
     if (state.cargoCode !== null) return false;
-    if (!requireTaskMatch) return state.pendingTask === null && state.waitingTask === null;
+    if (!requireTaskMatch) return true;
     if (!task) return false;
     return state.pendingTask === task || state.waitingTask === task;
   }
@@ -1055,16 +1055,19 @@ export class ConveyorTelemetryDriver {
    * RGV 列放货交付（订阅仲裁）：货物落地本机并自驱，等价的 taken/available 波接入链路广播，
    * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
    * preserveAxialPosition=true（承接方消息滞后、交接插值已推进）时按货物当前轴向位置落地，不回进入端。
-   * requireTaskMatch=false 供 lift 送料层使用：task 号只作货物身份标注，不参与仲裁。
+   * requireTaskMatch=false 供 lift 送料层使用：lift task 号不参与仲裁，货物改标接收方正在等待的 task（无等待则匿名）接入链路。
    */
   acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false, requireTaskMatch = true): boolean {
     if (!this.canAcceptRgvColumnPlacedCargo(model, task, requireTaskMatch)) return false;
     const holderAssetCode = cargo.assetCode;
     const direction = this.resolveFlowDirection(model);
-    this.settleCargoTransfer(cargo, model, task, 1, direction, preserveAxialPosition);
+    const effectiveTask = requireTaskMatch
+      ? task
+      : model.conveyorTelemetry.pendingTask ?? model.conveyorTelemetry.waitingTask ?? '';
+    this.settleCargoTransfer(cargo, model, effectiveTask, 1, direction, preserveAxialPosition);
     // 以接收方为波起点、原持货方记 RGV：沿下行链清除 upstreamLinks 中 holder=RGV 的残留登记
-    this.sendTakenWave(model, holderAssetCode, task, model.assetCode, direction);
-    this.notifyAvailable(model, task, direction);
+    this.sendTakenWave(model, holderAssetCode, effectiveTask, model.assetCode, direction);
+    this.notifyAvailable(model, effectiveTask, direction);
     this.tryDeliverHeldCargo(model);
     return true;
   }

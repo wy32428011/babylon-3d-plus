@@ -672,8 +672,8 @@ export interface SpecializedTelemetryDriverContext {
   /** lift 从来料层 conveyor 取货：无视 task 接管该 conveyor 当前持货（无货返回 null）。 */
   adoptConveyorCargoForLift(entityId: string, liftAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /**
-   * lift 向送料层 conveyor 放货：仅查目标完全空闲（cargo/pending/waiting 全空），不做 task 匹配
-   *（lift 的 task 号与输送线无必然联系，货物带匿名 task 交付）；预检不过返回 false，
+   * lift 向送料层 conveyor 放货：仅查目标当前无货，不做 task 匹配（lift 的 task 号与输送线无必然联系，
+   * 货物改标接收方等待中的 pendingTask/waitingTask 接入仲裁链，无等待则匿名）；预检不过返回 false，
    * 不拆除 lift 侧引用（货物滞留台上持续重试，不销毁）。
    * preserveAxialPosition 语义同 RGV 列放货：放货插值已推进（滞后承接）时按货物当前轴向投影落地，不回进入端。
    */
