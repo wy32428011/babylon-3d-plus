@@ -171,10 +171,12 @@ export function assertViewerTemplateSupportsScene(scene: string, files: readonly
 
 /** DIST 仅使用已绑定包内素材；模板能力清单与旧内置参考图片是构建期资源。 */
 export async function selectRuntimeTemplateFiles<T extends TemplateFile>(files: readonly T[], signal: AbortSignal): Promise<T[]> {
-  const source = files.find(file => file.destinationRelativePath === VIEWER_TEMPLATE_CAPABILITIES_PATH);
-  if (!source) return [...files];
+  // 内置天空盒随编辑器分发，发布包只复制场景实际引用的那份资源。
+  const runtimeFiles = files.filter(file => !file.destinationRelativePath.startsWith('builtin-skyboxes/'));
+  const source = runtimeFiles.find(file => file.destinationRelativePath === VIEWER_TEMPLATE_CAPABILITIES_PATH);
+  if (!source) return runtimeFiles;
   assertNotAborted(signal);
   const manifest = parseCapabilities(JSON.parse(await fs.readFile(source.sourcePath, { encoding: 'utf8', signal })));
   const excluded = new Set([VIEWER_TEMPLATE_CAPABILITIES_PATH, ...manifest.openingAnimation.assets.map(asset => asset.path)]);
-  return files.filter(file => !excluded.has(file.destinationRelativePath));
+  return runtimeFiles.filter(file => !excluded.has(file.destinationRelativePath));
 }

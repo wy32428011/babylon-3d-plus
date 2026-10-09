@@ -148,6 +148,11 @@
     ],
     "extraResources": [
       {
+        "from": "public/builtin-skyboxes",
+        "to": "builtin-skyboxes",
+        "filter": ["**/*"]
+      },
+      {
         "from": "dist-viewer-template",
         "to": "export-viewer",
         "filter": [

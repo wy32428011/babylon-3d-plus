@@ -62,7 +62,7 @@ export type ProjectSkyboxAssetEntry = {
   libraryKind: 'skybox';
   format: SkyboxAssetFormat;
   fileSizeBytes: number;
-  source: 'project' | 'data-platform';
+  source: 'project' | 'data-platform' | 'builtin';
   availability: 'active' | 'orphaned';
   dataPlatformResourceId?: string;
   dataPlatformRevision?: string;
@@ -261,7 +261,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
   }
 }
 
-/** 解码项目天空盒拖拽载荷；旧本地载荷补齐 project/active，中台载荷执行严格来源校验。 */
+/** 解码天空盒拖拽载荷；旧本地载荷补齐 project/active，内置及中台载荷校验来源身份。 */
 export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxAssetEntry | null {
   try {
     const payload: unknown = JSON.parse(rawPayload);
@@ -295,7 +295,7 @@ export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxA
     if (typeof assetRevision !== 'string' || !assetRevision.trim()) return null;
     if (format !== 'hdr' && format !== 'exr') return null;
     if (typeof fileSizeBytes !== 'number' || !Number.isSafeInteger(fileSizeBytes) || fileSizeBytes <= 0) return null;
-    if (source !== 'project' && source !== 'data-platform') return null;
+    if (source !== 'project' && source !== 'data-platform' && source !== 'builtin') return null;
     if (availability !== 'active') return null;
 
     const expectedExtension = format === 'hdr' ? /\.hdr$/i : /\.exr$/i;
@@ -319,8 +319,9 @@ export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxA
 
     const hasDataPlatformMetadata = ['dataPlatformResourceId', 'dataPlatformRevision', 'fileSha256']
       .some((key) => hasOwnDataField(payload, key));
-    if (source === 'project') {
+    if (source === 'project' || source === 'builtin') {
       if (id.startsWith('data-platform-skybox:') || hasDataPlatformMetadata) return null;
+      if (source === 'builtin' && (!id.startsWith('builtin-skybox:') || !LOWERCASE_SHA256.test(assetRevision))) return null;
       return asset;
     }
 

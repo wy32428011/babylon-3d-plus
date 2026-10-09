@@ -1,7 +1,7 @@
 import type { SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
 
 type EntranceRuntime = {
-  prepareModelEntrance(settings: SceneModelEntranceSettings): void;
+  prepareModelEntrance(settings: SceneModelEntranceSettings, signal?: AbortSignal): void | Promise<void>;
   startModelEntrance(): void;
   cancelModelEntrance(): void;
   setModelEntranceVisible(visible: boolean): void;
@@ -14,11 +14,15 @@ type Options = {
   subscribeToHostVisibility?: (listener: () => void) => () => void;
   onError?: (error: unknown) => void;
   isReady?: () => boolean;
+  signal?: AbortSignal;
 };
 
 /** 模型先准备隐藏，再等遮罩撤去后的可见帧；Editor 和 Viewer 共用同一首播边界。 */
 export class SceneModelEntrancePlayback {
+  readonly ready: Promise<void>;
   private readonly options: Options;
+  private readonly controller = new AbortController();
+  private prepared = false;
   private requested = false;
   private started = false;
   private disposed = false;
@@ -31,9 +35,11 @@ export class SceneModelEntrancePlayback {
 
   constructor(options: Options) {
     this.options = options;
-    if (!options.settings.enabled) { this.disposed = true; return; }
+    if (!options.settings.enabled || options.signal?.aborted) { this.disposed = true; this.ready = Promise.resolve(); return; }
+    this.ready = this.prepare();
+    if (this.disposed) return;
     try {
-      options.runtime.prepareModelEntrance(options.settings);
+      options.signal?.addEventListener('abort', this.abort, { once: true });
       document.addEventListener('visibilitychange', this.updateVisibility);
       this.unsubscribeHost = options.subscribeToHostVisibility?.(this.updateVisibility) ?? null;
       if (typeof ResizeObserver !== 'undefined') {
@@ -51,6 +57,8 @@ export class SceneModelEntrancePlayback {
     } catch (error) { this.fail(error); }
   }
 
+  get isDisposed(): boolean { return this.disposed; }
+
   start(): void {
     if (this.disposed || this.requested) return;
     this.requested = true;
@@ -60,12 +68,28 @@ export class SceneModelEntrancePlayback {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.controller.abort();
+    this.options.signal?.removeEventListener('abort', this.abort);
     cancelAnimationFrame(this.frame); this.frame = 0;
     document.removeEventListener('visibilitychange', this.updateVisibility);
     this.unsubscribeHost?.(); this.unsubscribeHost = null;
     this.resize?.disconnect(); this.resize = null;
     this.intersection?.disconnect(); this.intersection = null;
     this.options.runtime.cancelModelEntrance();
+  }
+
+  private readonly abort = (): void => { this.dispose(); };
+
+  private async prepare(): Promise<void> {
+    try {
+      await this.options.runtime.prepareModelEntrance(this.options.settings, this.controller.signal);
+      if (this.disposed || this.controller.signal.aborted) return;
+      this.prepared = true;
+      this.updateVisibility();
+    } catch (error) {
+      // 入场失败沿用普通模型降级；ready 仍结算，首帧门控继续验证真实场景。
+      if (!this.disposed && !this.controller.signal.aborted) this.fail(error);
+    }
   }
 
   private visible(): boolean {
@@ -80,7 +104,7 @@ export class SceneModelEntrancePlayback {
     const visible = this.visible();
     this.options.runtime.setModelEntranceVisible(visible);
     if (!visible) { cancelAnimationFrame(this.frame); this.frame = 0; this.readyWaitStarted = null; return; }
-    if (!this.requested || this.started || this.frame) return;
+    if (!this.prepared || !this.requested || this.started || this.frame) return;
     this.frame = requestAnimationFrame(() => {
       if (this.disposed) return;
       this.frame = requestAnimationFrame(() => {

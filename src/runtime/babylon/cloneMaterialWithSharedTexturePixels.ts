@@ -1,4 +1,5 @@
 import { type Material, RawTexture, SerializationHelper, type Texture } from '@babylonjs/core';
+import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard.ts';
 
 const safeRawTextureCloneMethods = new WeakSet<object>();
 
@@ -32,39 +33,41 @@ function cloneRawTexture(source: RawTexture): Texture {
 
 /** 沿用原生材质及插件克隆，仅在本次同步调用内修正 RawTexture 的克隆。 */
 export function cloneMaterialWithSharedTexturePixels(source: Material, name: string): Material | null {
-  const replacements: { texture: RawTexture; descriptor: PropertyDescriptor | undefined }[] = [];
-  const createdTextures: Texture[] = [];
-  let succeeded = false;
-  try {
-    for (const texture of new Set(source.getActiveTextures())) {
-      if (!(texture instanceof RawTexture)) continue;
-      // 自定义纹理克隆有自己的契约；嵌套调用只接管原生或本 helper 安装的方法。
-      if (texture.clone !== RawTexture.prototype.clone && !safeRawTextureCloneMethods.has(texture.clone)) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(texture, 'clone');
-      if ((!descriptor && !Object.isExtensible(texture))
-        || (descriptor && (!('value' in descriptor) || (!descriptor.configurable && !descriptor.writable)))) {
-        throw new Error(`材质“${source.name}”的 RawTexture“${texture.name}”无法安全克隆：clone 方法不可修改。`);
+  return withNewMaterialDirtyGuard(source.getScene(), () => {
+    const replacements: { texture: RawTexture; descriptor: PropertyDescriptor | undefined }[] = [];
+    const createdTextures: Texture[] = [];
+    let succeeded = false;
+    try {
+      for (const texture of new Set(source.getActiveTextures())) {
+        if (!(texture instanceof RawTexture)) continue;
+        // 自定义纹理克隆有自己的契约；嵌套调用只接管原生或本 helper 安装的方法。
+        if (texture.clone !== RawTexture.prototype.clone && !safeRawTextureCloneMethods.has(texture.clone)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(texture, 'clone');
+        if ((!descriptor && !Object.isExtensible(texture))
+          || (descriptor && (!('value' in descriptor) || (!descriptor.configurable && !descriptor.writable)))) {
+          throw new Error(`材质“${source.name}”的 RawTexture“${texture.name}”无法安全克隆：clone 方法不可修改。`);
+        }
+        const clone = function (this: RawTexture): Texture {
+          const copy = cloneRawTexture(this);
+          createdTextures.push(copy);
+          return copy;
+        };
+        safeRawTextureCloneMethods.add(clone);
+        Object.defineProperty(texture, 'clone', descriptor
+          ? { ...descriptor, value: clone }
+          : { value: clone, configurable: true, writable: true });
+        replacements.push({ texture, descriptor });
       }
-      const clone = function (this: RawTexture): Texture {
-        const copy = cloneRawTexture(this);
-        createdTextures.push(copy);
-        return copy;
-      };
-      safeRawTextureCloneMethods.add(clone);
-      Object.defineProperty(texture, 'clone', descriptor
-        ? { ...descriptor, value: clone }
-        : { value: clone, configurable: true, writable: true });
-      replacements.push({ texture, descriptor });
+      const material = source.clone(name);
+      succeeded = material !== null;
+      return material;
+    } finally {
+      // 重入时恢复外层 descriptor；各调用只释放自己创建的纹理，避免清掉内层成功结果。
+      for (const { texture, descriptor } of replacements.reverse()) {
+        if (descriptor) Object.defineProperty(texture, 'clone', descriptor);
+        else Reflect.deleteProperty(texture, 'clone');
+      }
+      if (!succeeded) for (const texture of createdTextures) texture.dispose();
     }
-    const material = source.clone(name);
-    succeeded = material !== null;
-    return material;
-  } finally {
-    // 重入时恢复外层 descriptor；各调用只释放自己创建的纹理，避免清掉内层成功结果。
-    for (const { texture, descriptor } of replacements.reverse()) {
-      if (descriptor) Object.defineProperty(texture, 'clone', descriptor);
-      else Reflect.deleteProperty(texture, 'clone');
-    }
-    if (!succeeded) for (const texture of createdTextures) texture.dispose();
-  }
+  });
 }

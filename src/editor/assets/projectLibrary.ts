@@ -294,7 +294,7 @@ export function createModelLibraryItems(modelAssets: AssetEntry[]): ImportedProj
 }
 
 function formatSkyboxLibrarySubtitle(asset: ProjectSkyboxAssetEntry): string {
-  const sourceLabel = asset.source === 'data-platform' ? '数据中台' : '项目本地';
+  const sourceLabel = asset.source === 'builtin' ? '内置' : asset.source === 'data-platform' ? '数据中台' : '项目本地';
   return `${sourceLabel} · ${asset.format.toUpperCase()} · ${formatSkyboxFileSize(asset.fileSizeBytes)}`;
 }
 

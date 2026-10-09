@@ -1,6 +1,7 @@
 import { hashPublishedBlob } from './publishedBlobHash.ts';
 import { hashSkyboxContent } from '../babylon/skyboxContentHash.ts';
 import { IndexedDbPublishedCacheStore, PUBLISHED_CACHE_MAX_ENTRY_BYTES } from './publishedCacheStore.ts';
+import { SceneLoadDiagnostics } from '../babylon/SceneLoadDiagnostics.ts';
 
 export interface PublishedCacheStore {
   get(key: string): Promise<unknown>;
@@ -29,6 +30,11 @@ export class PublishedAssetCache {
   private readonly resources?: ReadonlyMap<string, PublishedResourceIdentity>;
   private readonly controller = new AbortController();
   private storageAvailable = true;
+  private readonly loadDiagnostics = new SceneLoadDiagnostics();
+
+  getLoadDiagnostics() {
+    return { ...this.loadDiagnostics.snapshot(), scope: 'published-cache-session' as const };
+  }
 
   constructor(options: CacheOptions) {
     this.base = new URL(options.baseUrl);
@@ -91,11 +97,11 @@ export class PublishedAssetCache {
     signal.throwIfAborted();
     const url = new URL(source, this.base); url.hash = '';
     const key = this.resourceKey(url);
-    const cached = await this.readRaw(key) as CachedResponse | undefined;
+    const cached = await this.readRaw(key, source) as CachedResponse | undefined;
     const identity = this.resources?.get(this.resourceUrl(url));
     signal.throwIfAborted();
     if (cached?.blob instanceof Blob && typeof cached.type === 'string'
-      && (!this.rawStore || !identity || (cached.blob.size === identity.size && await hashPublishedBlob(cached.blob, signal) === identity.sha256))) {
+      && (!this.rawStore || !identity || await this.validateCachedBlob(cached.blob, identity, signal, source))) {
       if (maxBytes !== undefined && cached.blob.size > maxBytes) throw new Error(`资源超过读取上限（${maxBytes} 字节）。`);
       this.metrics.resourceHits++;
       onProgress?.(cached.blob.size, cached.blob.size);
@@ -103,7 +109,8 @@ export class PublishedAssetCache {
     }
     this.metrics.downloads++;
     // 新发布即使复用文件名，也不能读到上一版 HTTP 缓存。
-    const response = await fetch(url.href, { ...init, cache: 'no-store', signal });
+    const response = await this.loadDiagnostics.measureAsync('networkRequest',
+      () => fetch(url.href, { ...init, cache: 'no-store', signal }), source);
     if (response.status !== 200) return response;
     const lengthHeader = response.headers.get('content-length');
     const length = lengthHeader && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
@@ -120,18 +127,22 @@ export class PublishedAssetCache {
       if (maxBytes !== undefined && loaded > maxBytes) throw new Error(`资源超过读取上限（${maxBytes} 字节）。`);
       onProgress?.(loaded, length); controller.enqueue(chunk);
     } }), { signal });
-    const blob = await (stream ? new Response(stream).blob() : response.blob());
+    const blob = await this.loadDiagnostics.measureAsync('networkBodyRead',
+      () => stream ? new Response(stream).blob() : response.blob(), source);
     if (maxBytes !== undefined && blob.size > maxBytes) throw new Error(`资源超过读取上限（${maxBytes} 字节）。`);
     signal.throwIfAborted();
-    if (identity && (blob.size !== identity.size
-      || await hashPublishedBlob(blob, signal) !== identity.sha256)) {
-      throw new Error('发布资源与清单不一致，可能已重新发布，请重新加载场景。');
+    if (identity) {
+      await this.loadDiagnostics.measureAsync('integrityCheck', async () => {
+        if (blob.size !== identity.size || await hashPublishedBlob(blob, signal) !== identity.sha256) {
+          throw new Error('发布资源与清单不一致，可能已重新发布，请重新加载场景。');
+        }
+      }, source);
     }
     // 稳定发布地址可能在下载途中被新版本替换，校验后才允许写入旧版本的缓存空间。
     await this.verifyRevision?.();
     signal.throwIfAborted();
     const record: CachedResponse = { blob, type: response.headers.get('content-type') ?? 'application/octet-stream', sha256: identity?.sha256 };
-    await this.writeRaw(key, record, blob.size);
+    await this.writeRaw(key, record, blob.size, source);
     signal.throwIfAborted();
     return this.response(record);
   }
@@ -163,21 +174,34 @@ export class PublishedAssetCache {
   async hasResource(source: string): Promise<boolean> {
     const url = new URL(source, this.base);
     const identity = this.resources?.get(this.resourceUrl(url));
-    const record = await this.readRaw(this.resourceKey(url)) as CachedResponse | undefined;
+    const record = await this.readRaw(this.resourceKey(url), source) as CachedResponse | undefined;
     return record?.blob instanceof Blob && (!identity || (record.blob.size === identity.size && record.sha256 === identity.sha256));
   }
 
-  private async readRaw(key: string): Promise<unknown> {
-    if (!this.rawStore) return this.read(key);
+  private async validateCachedBlob(blob: Blob, identity: PublishedResourceIdentity, signal: AbortSignal, source: string): Promise<boolean> {
+    const mismatch = new Error('发布缓存资源与清单不一致。');
+    try {
+      await this.loadDiagnostics.measureAsync('integrityCheck', async () => {
+        if (blob.size !== identity.size || await hashPublishedBlob(blob, signal) !== identity.sha256) throw mismatch;
+      }, source);
+      return true;
+    } catch (error) {
+      if (error === mismatch) return false;
+      throw error;
+    }
+  }
+
+  private async readRaw(key: string, resource: string): Promise<unknown> {
+    if (!this.rawStore) return this.read(key, resource);
     if (!this.rawAvailable) return undefined;
-    try { return await this.rawStore.get(key); }
+    try { return await this.loadDiagnostics.measureAsync('rawCacheRead', () => this.rawStore!.get(key), resource); }
     catch (error) { this.rawFailure(error); return undefined; }
   }
 
-  private async writeRaw(key: string, record: CachedResponse, bytes: number): Promise<void> {
-    if (!this.rawStore) return this.write(key, record, bytes);
+  private async writeRaw(key: string, record: CachedResponse, bytes: number, resource: string): Promise<void> {
+    if (!this.rawStore) return this.write(key, record, bytes, resource);
     if (!this.rawAvailable) return;
-    try { await this.rawStore.put(key, record, bytes); }
+    try { await this.loadDiagnostics.measureAsync('cacheWrite', () => this.rawStore!.put(key, record, bytes), resource); }
     catch (error) { this.rawFailure(error); }
   }
 
@@ -193,15 +217,15 @@ export class PublishedAssetCache {
     return resource.href;
   }
 
-  private async read(key: string): Promise<unknown> {
+  private async read(key: string, resource?: string): Promise<unknown> {
     if (!this.storageAvailable) return undefined;
-    try { return await this.store.get(key); }
+    try { return await (resource ? this.loadDiagnostics.measureAsync('rawCacheRead', () => this.store.get(key), resource) : this.store.get(key)); }
     catch (error) { this.storageFailure(error); return undefined; }
   }
 
-  private async write(key: string, value: unknown, bytes: number): Promise<void> {
+  private async write(key: string, value: unknown, bytes: number, resource?: string): Promise<void> {
     if (!this.storageAvailable || bytes > PUBLISHED_CACHE_MAX_ENTRY_BYTES) return;
-    try { await this.store.put(key, value, bytes); }
+    try { await (resource ? this.loadDiagnostics.measureAsync('cacheWrite', () => this.store.put(key, value, bytes), resource) : this.store.put(key, value, bytes)); }
     catch (error) { this.storageFailure(error); }
   }
 

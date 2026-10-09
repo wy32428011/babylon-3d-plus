@@ -43,6 +43,12 @@ function createCase(materialKind: 'standard' | 'pbr') {
 }
 
 async function pixels(scene: Scene) {
+  // PBR 构造会异步解码默认 BRDF，即使本样例没有反射贴图也要等其完成后再销毁场景。
+  const started = performance.now();
+  while (scene.environmentBRDFTexture && !scene.environmentBRDFTexture.isReady()) {
+    if (performance.now() - started > 10_000) throw new Error('默认 BRDF 纹理未完成解码。');
+    scene.render(); await new Promise(requestAnimationFrame);
+  }
   // 固定动画时间，仅等待真实 WebGL 材质准备和渲染。
   for (let frame = 0; frame < 10; frame++) { scene.render(); await new Promise(requestAnimationFrame); }
   return new Uint8Array(await engine.readPixels(0, 0, 640, 480));
@@ -59,23 +65,25 @@ const api = {
   snapshot: () => active?.runtime.getSnapshot(),
   async run(effect: typeof effects[number], materialKind: 'standard' | 'pbr') {
     automatic = false;
+    // 首次展示场景也会创建 BRDF；切换样例前等待其异步资源，不能在解码中销毁它。
+    if (active) await pixels(active.scene);
     const { scene, runtime, targets, material } = createCase(materialKind);
     const baseline = await pixels(scene);
     const settings = normalizeSceneModelEntranceSettings({ enabled: true, effect, durationSeconds: 2, delaySeconds: 0, staggerSeconds: .12 });
-    runtime.prepare(settings, targets); runtime.start(); runtime.tick(1, true);
+    await runtime.prepare(settings, targets); runtime.start(); runtime.tick(1, true);
     const midpoint = changedPixels(baseline, await pixels(scene)); const midpointImage = canvas.toDataURL();
     const beforePause = runtime.getSnapshot(); runtime.tick(10, false); const paused = runtime.getSnapshot();
     runtime.tick(10, true);
     const completed = changedPixels(baseline, await pixels(scene)); const completedImage = canvas.toDataURL();
     const completion = runtime.getSnapshot();
     const materialsRestored = targets.every(target => target.node.getChildMeshes().every(mesh => mesh.material === material));
-    runtime.prepare(settings, targets); runtime.start(); runtime.tick(.3, true); runtime.cancel();
+    await runtime.prepare(settings, targets); runtime.start(); runtime.tick(.3, true); runtime.cancel();
     const cancelled = changedPixels(baseline, await pixels(scene));
     return { effect, materialKind, midpoint, completed, cancelled, beforePause, paused, completion, materialsRestored, midpointImage, completedImage };
   },
-  play(settings?: Partial<SceneModelEntranceSettings>) {
+  async play(settings?: Partial<SceneModelEntranceSettings>) {
     const { runtime, targets } = createCase('pbr');
-    runtime.prepare(normalizeSceneModelEntranceSettings({ enabled: true, effect: select.value, durationSeconds: 3, ...settings }), targets);
+    await runtime.prepare(normalizeSceneModelEntranceSettings({ enabled: true, effect: select.value, durationSeconds: 3, ...settings }), targets);
     runtime.start(); automatic = true;
   },
   cancel() { active?.runtime.cancel(); },

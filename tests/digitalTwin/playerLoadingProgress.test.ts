@@ -2,6 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { computePlayerLoadingProgress } from '../../src/player/playerLoadingProgress.ts';
 
+test('资源完成后的入场准备显示真实网格数量，准备完成才转首帧验证', () => {
+  const input = { phase: 'ready' as const, startupPercent: 50, modelLoadProgress: null,
+    initialLoadCompleted: false, message: '加载中',
+    entrancePreparation: { status: 'preparing' as const, preparedBindingCount: 23, totalBindingCount: 1470 } };
+  const preparing = computePlayerLoadingProgress(input);
+  assert.equal(preparing.visible, true); assert.equal(preparing.percent, 99);
+  assert.equal(preparing.label, '正在准备入场材质'); assert.equal(preparing.detail, '入场网格 23/1470');
+  const rendering = computePlayerLoadingProgress({ ...input, entrancePreparation: { ...input.entrancePreparation, status: 'prepared' } });
+  assert.equal(rendering.label, '正在验证场景首帧');
+});
+
 test('启动阶段尚无加载单元时按启动里程碑显示蒙版', () => {
   const progress = computePlayerLoadingProgress({
     phase: 'loading',

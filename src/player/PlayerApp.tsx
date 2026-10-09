@@ -17,7 +17,7 @@ import { clearDeploymentAssetManifest, installDeploymentAssetManifest } from '..
 import { fetchRuntimeAsset } from '../runtime/assets/runtimeAssetFetch';
 import type { PublishedReleaseCacheState } from './publishedReleasePrefetch';
 import { PublishedCacheStatus } from './PublishedCacheStatus';
-import { installPublishedViewerCache } from './publishedBabylonCache';
+import { getPublishedAssetLoadDiagnostics, installPublishedViewerCache } from './publishedBabylonCache';
 import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
@@ -83,7 +83,6 @@ import {
 import { ManualRoamControls } from '../shared/ui/ManualRoamControls';
 import { useAutoPatrolInspectionHistory } from '../shared/ui/useAutoPatrolInspectionHistory';
 import { SceneLoadingMask } from '../shared/ui/SceneLoadingMask';
-import { waitForSceneRenderReady } from '../runtime/babylon/sceneRenderReadiness';
 import { useDigitalTwinFullscreen } from './useDigitalTwinFullscreen';
 import {
   parseDigitalTwinHostRenderPixelRatioState,
@@ -252,6 +251,7 @@ export function PlayerApp() {
   const [modelLoadProgress, setModelLoadProgress] = useState<SceneRuntimeModelLoadProgress | null>(null);
   /** 首次场景加载全部结算后置位：后续按需加载（如 MQTT 货物模板）不再重新弹出全屏蒙版。 */
   const [initialLoadCompleted, setInitialLoadCompleted] = useState(false);
+  const [entrancePreparation, setEntrancePreparation] = useState<ReturnType<SceneRuntime['getModelEntranceSnapshot']> | null>(null);
   const [openingActive, setOpeningActive] = useState(false);
   const openingActiveRef = useRef(false);
   openingActiveRef.current = openingActive;
@@ -367,15 +367,18 @@ export function PlayerApp() {
     let sceneOpeningSettings = resolvePackageOpeningSettings(undefined);
     let sceneModelEntranceSettings = normalizeSceneModelEntranceSettings(undefined);
     let modelEntrancePlayback: SceneModelEntrancePlayback | null = null;
-    const prepareModelEntrance = (): void => {
-      if (disposed || !runtime || !viewport || modelEntrancePlayback || !sceneModelEntranceSettings.enabled) return;
+    const prepareModelEntrance = (signal?: AbortSignal): Promise<void> => {
+      if (modelEntrancePlayback && !modelEntrancePlayback.isDisposed) return modelEntrancePlayback.ready;
+      if (disposed || !runtime || !viewport || !sceneModelEntranceSettings.enabled) return Promise.resolve();
       modelEntrancePlayback = new SceneModelEntrancePlayback({ runtime, container: canvas.parentElement!, settings: sceneModelEntranceSettings,
+        signal,
         isReady: () => runtime?.isModelEntranceReady() ?? false,
         // 没有可见性能力的旧宿主沿用容器可见性；支持能力的宿主明确隐藏时暂停。
         isHostVisible: () => !openingBridge?.hasHostVisibilitySupport() || openingBridge.isHostVisible(),
         subscribeToHostVisibility: listener => openingBridge?.subscribeVisibility(listener) ?? (() => {}),
         onError: error => console.warn('[模型入场] 已恢复正常模型。', error),
       });
+      return modelEntrancePlayback.ready;
     };
     let openingSuppressed = false;
     let openingFinished = false;
@@ -401,7 +404,6 @@ export function PlayerApp() {
     autoPatrolStartGateRef.current = autoPatrolStartGate;
     const startOpening = (): void => {
       if (disposed || !viewport || !runtime) return;
-      prepareModelEntrance();
       if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; modelEntrancePlayback?.start(); return; }
       const playback = createSceneOpeningPlayback({
         container: canvas.parentElement!, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
@@ -436,6 +438,7 @@ export function PlayerApp() {
       void playback.start();
     };
     setInitialLoadCompleted(false);
+    setEntrancePreparation(null);
     setInitialLoadNotice('');
     setModelLoadProgress(null);
     let initialLoadCompletedForSession = false;
@@ -446,6 +449,7 @@ export function PlayerApp() {
       initialLoadCompletedForSession = true;
       setInitialLoadNotice('');
       setInitialLoadCompleted(true);
+      if (runtime) console.info('[Viewer loading] 场景首帧诊断', runtime.getPerformanceMetrics().loading);
       if (initialLoadMonitorRef.current === checkInitialLoad) initialLoadMonitorRef.current = null;
       interactionController?.markInitialLoadComplete();
       autoPatrolStartGate.markReady();
@@ -457,8 +461,13 @@ export function PlayerApp() {
         if (!viewport || !runtime) throw new Error('场景视图尚未创建。');
         const before = runtime.getInitialLoadSnapshot().error;
         if (before) throw new Error(before);
-        prepareModelEntrance();
-        await waitForSceneRenderReady(viewport.scene, signal);
+        const ready = prepareModelEntrance(signal);
+        const samplePreparation = () => { if (!disposed) setEntrancePreparation(runtime?.getModelEntranceSnapshot() ?? null); };
+        samplePreparation();
+        const preparationTimer = window.setInterval(samplePreparation, 100);
+        try { await ready; } finally { window.clearInterval(preparationTimer); samplePreparation(); }
+        signal.throwIfAborted();
+        await runtime.waitForInitialRenderReady(signal);
         const after = runtime.getInitialLoadSnapshot().error;
         if (after) throw new Error(after);
       },
@@ -473,6 +482,7 @@ export function PlayerApp() {
       setOpeningActive(false);
       if (!runtime) abortController.abort();
       initialLoadGate.dispose();
+      modelEntrancePlayback?.dispose();
       autoPatrolStartGate.dispose();
       setInitialLoadNotice('');
       setPhase('blocked');
@@ -673,6 +683,7 @@ export function PlayerApp() {
             initialLoadGate.update(progress);
             setModelLoadProgress(progress);
           },
+          getPublishedAssetLoadDiagnostics,
         );
         runtimeRef.current = runtime;
         runtime.disableEditorLightMarkers();
@@ -1366,6 +1377,7 @@ export function PlayerApp() {
     modelLoadProgress,
     initialLoadCompleted,
     message,
+    entrancePreparation,
   });
 
   useEffect(() => {

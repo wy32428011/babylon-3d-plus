@@ -36,7 +36,7 @@ export function planSkyboxCacheWrite(entries: unknown[], next: SkyboxCacheEntry,
   return { write: true, deleteKeys };
 }
 
-/** 与 Babylon 原算法完全相同的 Float32 线性 RGB 六面，不接受不完整缓存。 */
+/** 保存当前采样算法的 Float32 线性 RGB 六面，不接受不完整缓存。 */
 export function validateSkyboxCubeData(value: unknown, size: number): value is CubeMapInfo {
   if (!value || typeof value !== 'object') return false;
   const cube = value as CubeMapInfo;

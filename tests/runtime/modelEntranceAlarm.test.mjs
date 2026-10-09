@@ -29,19 +29,19 @@ try {
   ({normalizeSceneModelEntranceSettings:normalize}=await import(new URL('editor/model/sceneModelEntrance.ts',root).href));
 } finally { hooks.deregister(); }
 
-test('报警在捕获材质前中断入场，清除报警恢复真原材质；活动报警不被新入场覆盖', t => {
+test('报警在捕获材质前中断入场，清除报警恢复真原材质；活动报警不被新入场覆盖', async t => {
   const engine=new NullEngine(), scene=new Scene(engine), node=new TransformNode('device',scene);
   const mesh=MeshBuilder.CreateBox('body',{},scene);mesh.parent=node;
   const original=new StandardMaterial('original',scene);mesh.material=original;
   const runtime=new ModelEntranceRuntime(scene), alarms=new AlarmColorOverrides();
   t.after(()=>{runtime.dispose();alarms.clear();scene.dispose();engine.dispose();});
   const targets=[{id:'device',node}], settings=normalize({enabled:true,effect:'scan'});
-  runtime.prepare(settings,targets);runtime.start();runtime.tick(.2);
+  await runtime.prepare(settings,targets);runtime.start();runtime.tick(.2);
   const entranceMaterial=mesh.material;assert.notEqual(entranceMaterial,original);
   alarms.apply(new Map([[mesh,'#ff0000']]));
   const alarmMaterial=mesh.material;assert.notEqual(alarmMaterial,entranceMaterial);
   assert.equal(scene.materials.includes(entranceMaterial),false,'报警必须先释放入场克隆');
   runtime.cancel();assert.equal(mesh.material,alarmMaterial,'入场取消不能覆盖报警');
-  runtime.prepare(settings,targets);assert.equal(mesh.material,alarmMaterial,'活动报警不被重入场接管');
+  await runtime.prepare(settings,targets);assert.equal(mesh.material,alarmMaterial,'活动报警不被重入场接管');
   runtime.cancel();alarms.clear();assert.equal(mesh.material,original,'报警清除必须恢复真正的原材质');
 });

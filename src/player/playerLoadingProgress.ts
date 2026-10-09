@@ -1,4 +1,5 @@
 import type { SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
+import type { ModelEntranceSnapshot } from '../runtime/babylon/ModelEntranceRuntime';
 
 export type PlayerLoadingProgressInput = {
   /** 当前启动阶段。 */
@@ -14,6 +15,7 @@ export type PlayerLoadingProgressInput = {
   initialLoadCompleted: boolean;
   /** 启动阶段文案（runtime-config.json 的 page.loadingText）。 */
   message: string;
+  entrancePreparation?: Pick<ModelEntranceSnapshot, 'status' | 'preparedBindingCount' | 'totalBindingCount'> | null;
 };
 
 export type PlayerLoadingProgress = {
@@ -54,6 +56,7 @@ export function computePlayerLoadingProgress(
     && modelLoadProgress.totalCount > 0
     && !initialLoadCompleted;
   const verifyingRender = phase === 'ready' && !initialLoadCompleted && !loadingInProgress;
+  const preparingEntrance = !initialLoadCompleted && input.entrancePreparation?.status === 'preparing';
   const visible = phase !== 'blocked' && (phase !== 'ready' || loadingInProgress || verifyingRender);
   const currentFile = loadingInProgress ? formatLoadingFileName(modelLoadProgress.currentFile) : '';
   const detail = loadingInProgress
@@ -63,7 +66,8 @@ export function computePlayerLoadingProgress(
   return {
     visible,
     percent: Math.max(0, Math.min(initialLoadCompleted ? 100 : 99, percent)),
-    label: verifyingRender ? '正在验证场景首帧' : loadingInProgress ? '正在加载场景模型' : message,
-    detail: verifyingRender ? '模型资源已准备，等待材质与实际渲染完成…' : detail,
+    label: preparingEntrance ? '正在准备入场材质' : verifyingRender ? '正在验证场景首帧' : loadingInProgress ? '正在加载场景模型' : message,
+    detail: preparingEntrance ? `入场网格 ${input.entrancePreparation!.preparedBindingCount}/${input.entrancePreparation!.totalBindingCount}`
+      : verifyingRender ? '模型资源已准备，等待材质与实际渲染完成…' : detail,
   };
 }

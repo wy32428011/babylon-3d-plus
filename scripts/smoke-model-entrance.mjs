@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 
 const output = path.resolve('output/model-entrance');
 await mkdir(output, { recursive: true });
-const server = await createServer({ cacheDir: 'node_modules/.vite-model-entrance', server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
+const server = await createServer({ cacheDir: 'node_modules/.vite-model-entrance', optimizeDeps: { entries: ['tests/fixtures/modelEntrance.harness.ts'] }, server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
 let browser;
 const errors = [], results = [];
 try {
@@ -15,7 +15,8 @@ try {
   const page = await browser.newPage();
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  const html = await server.transformIndexHtml('/__model_entrance__', '<!doctype html><html><body><script type="module" src="/tests/fixtures/modelEntrance.harness.ts"></script></body></html>');
+  const html = (await server.transformIndexHtml('/__model_entrance__', '<!doctype html><html><body><script type="module" src="/tests/fixtures/modelEntrance.harness.ts"></script></body></html>'))
+    .replace(/<script type="module" src="\/@vite\/client"><\/script>/, '');
   await page.route('**/__model_entrance__', route => route.fulfill({ contentType: 'text/html', body: html }));
   await page.goto(server.resolvedUrls.local[0] + '__model_entrance__', { waitUntil: 'commit' });
   await page.waitForFunction(() => window.modelEntranceHarness, null, { timeout: 180000 });

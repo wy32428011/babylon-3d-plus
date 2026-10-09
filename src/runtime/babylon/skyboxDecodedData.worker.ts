@@ -2,13 +2,14 @@ import { hashSkyboxContent } from './skyboxContentHash.ts';
 import babylonPackage from '@babylonjs/core/package.json' with { type: 'json' };
 import { ReadExrDataAsync } from '@babylonjs/core/Materials/Textures/Loaders/exrTextureLoader';
 import { GetExrHeader } from '@babylonjs/core/Materials/Textures/Loaders/EXR/exrLoader.header';
-import { GetCubeMapTextureData, RGBE_ReadHeader } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
-import { PanoramaToCubeMapTools, type CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap';
+import { RGBE_ReadPixels, RGBE_ReadHeader } from '@babylonjs/core/Misc/HighDynamicRange/hdr';
+import type { CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap';
 import { getSkyboxCubeBytes, openSkyboxDecodedCache, readSkyboxDecodedCache, SKYBOX_CUBE_FACES, writeSkyboxDecodedCache } from './skyboxDecodedCache.ts';
 import type { SkyboxDecodeMetrics, SkyboxDecodeRequest, SkyboxDecodeResponse, SkyboxDecodeStage } from './skyboxDecodedData.ts';
 import { validateSkyboxDecodeInput, validateSkyboxSourceDimensions } from './skyboxDecodedValidation.ts';
+import { convertSkyboxPanoramaToCubemap } from './skyboxPanoramaSampling.ts';
 
-const decoderVersion = `babylon-${babylonPackage.version}-panorama-v1`;
+const decoderVersion = `babylon-${babylonPackage.version}-panorama-bilinear-v2`;
 const send = (message: SkyboxDecodeResponse, transfer: Transferable[] = []) => self.postMessage(message, { transfer });
 
 self.onmessage = async (event: MessageEvent<SkyboxDecodeRequest>) => {
@@ -57,9 +58,12 @@ self.onmessage = async (event: MessageEvent<SkyboxDecodeRequest>) => {
     if (format === 'exr') {
       const decoded = await measure('decode', () => ReadExrDataAsync(buffer));
       if (!decoded.data) throw new Error('EXR 数据无法解码。');
-      cube = await measure('convert', () => PanoramaToCubeMapTools.ConvertPanoramaToCubemap(decoded.data!, decoded.width, decoded.height, size, false, false));
+      cube = await measure('convert', () => convertSkyboxPanoramaToCubemap(decoded.data!, decoded.width, decoded.height, size, false));
     } else {
-      cube = await measure('decode', () => GetCubeMapTextureData(buffer, size, false));
+      const bytes = new Uint8Array(buffer);
+      const header = RGBE_ReadHeader(bytes);
+      const decoded = await measure('decode', () => RGBE_ReadPixels(bytes, header));
+      cube = await measure('convert', () => convertSkyboxPanoramaToCubemap(decoded, header.width, header.height, size, true));
     }
     if (database) {
       try { await measure('cache-write', () => writeSkyboxDecodedCache(database!, key, cube)); }

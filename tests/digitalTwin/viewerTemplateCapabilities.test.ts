@@ -15,6 +15,16 @@ const enabledScene = JSON.stringify({ scene: { sceneSettings: {
   openingAnimation: { enabled: true, template: 'reference-huishan' },
 } } });
 
+test('Viewer 模板不重复携带编辑器内置天空盒，保留场景实际引用的资源', async () => {
+  const files = [
+    { sourcePath: 'index.html', destinationRelativePath: 'index.html', size: 1 },
+    { sourcePath: 'builtin.hdr', destinationRelativePath: 'builtin-skyboxes/partly-cloudy-light/partly-cloudy-light.hdr', size: 1441554 },
+    { sourcePath: 'scene.hdr', destinationRelativePath: 'project/assets/skyboxes/partly-cloudy-light.hdr', size: 1441554 },
+  ];
+  const selected = await selectRuntimeTemplateFiles(files, new AbortController().signal);
+  assert.deepEqual(selected.map(file => file.destinationRelativePath), ['index.html', 'project/assets/skyboxes/partly-cloudy-light.hdr']);
+});
+
 async function fixture(t: { after: (callback: () => Promise<void>) => void }) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'viewer-opening-capabilities-'));
   t.after(async () => {
