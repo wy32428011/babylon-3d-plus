@@ -2,118 +2,124 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  createSpawnSnapshot,
-  dispatchDeviceSpawnMessages,
-  isDeviceSpawnTopic,
-  onDeviceSpawnMessages,
-  parseDeviceSpawnMessages,
-  parseDeviceSpawnTopic,
+  DeviceTelemetryStore,
+  ingestDeviceTelemetryMessage,
+  onDeviceTelemetryMessages,
   parseDeviceTelemetryMessage,
+  type DeviceTelemetrySnapshot,
 } from '../../src/runtime/mqtt/deviceTelemetry';
 
-const SPAWN_TOPIC = 'dt/factory/logistics/agv/AGV-SPAWN/dataspawn/joint';
+const TOPIC = 'dt/factory/logistics/agv/AGV-01/twindatadriven/joint';
 
-test('dataspawn topic 解析产生器 id，且不与 twindatadriven 互相命中', () => {
-  assert.deepEqual(parseDeviceSpawnTopic(SPAWN_TOPIC), { deviceType: 'agv', spawnerCode: 'AGV-SPAWN' });
-  assert.equal(isDeviceSpawnTopic(SPAWN_TOPIC), true);
-  assert.equal(isDeviceSpawnTopic('dt/factory/logistics/stacker/STK-01/twindatadriven/joint'), false);
-  assert.equal(parseDeviceSpawnTopic('dt/factory/logistics/agv/AGV-SPAWN/dataspawn'), null);
-});
-
-test('spawn 消息按 e 拆分多设备，s 缺失用 topic 段兜底，s 不一致与缺 e/p 的点位丢弃', () => {
-  const payloadText = JSON.stringify({
-    seq: 3,
-    ts: 1700000000123,
-    data: [
-      { e: 'AGV-01', p: 'distance_x', v: 4.2 },
-      { e: 'AGV-01', p: 'movement_x', v: 1, s: 'AGV-SPAWN' },
-      { e: 'AGV-02', p: 'normal', v: true, s: 'AGV-SPAWN' },
-      { e: 'AGV-02', p: 'distance_x', v: 9, s: 'OTHER-SPAWNER' },
-      { p: 'distance_x', v: 1 },
-      { e: 'AGV-03', p: '', v: 1 },
-    ],
-  });
-  const payloadTextWithInvalid = payloadText.replace(
-    '"data":[',
-    '"data":[{"e":"AGV-01","p":"bad","v":1e999},',
+test('EPV 解析提取首个有效 s 为 spawnerCode，兼容数字与缺失', () => {
+  const withString = parseDeviceTelemetryMessage(
+    TOPIC,
+    JSON.stringify({ data: [{ p: 'distance_x', v: 1, s: 'AGV-SPAWN' }] }),
   );
+  assert.equal(withString?.spawnerCode, 'AGV-SPAWN');
 
-  const messages = parseDeviceSpawnMessages(SPAWN_TOPIC, payloadTextWithInvalid, 'line-a');
+  const withNumber = parseDeviceTelemetryMessage(
+    TOPIC,
+    JSON.stringify({ data: [{ p: 'distance_x', v: 1, s: 42 }] }),
+  );
+  assert.equal(withNumber?.spawnerCode, '42');
 
-  assert.equal(messages.length, 2);
-  const agv01 = messages.find((message) => message.assetCode === 'AGV-01');
-  const agv02 = messages.find((message) => message.assetCode === 'AGV-02');
-  assert.ok(agv01 && agv02);
-  assert.equal(agv01.spawnerCode, 'AGV-SPAWN');
-  assert.equal(agv01.deviceType, 'agv');
-  assert.equal(agv01.sourceId, 'line-a');
-  assert.equal(agv01.sequence, 3);
-  assert.equal(agv01.sourceTimestamp, 1700000000123);
-  assert.deepEqual(agv01.points, [
-    { p: 'distance_x', v: 4.2 },
-    { p: 'movement_x', v: 1 },
-  ]);
-  assert.deepEqual(agv02.points, [{ p: 'normal', v: true }]);
-});
-
-test('spawn 消息不做 e 与 topic 段相等过滤', () => {
-  const payloadText = JSON.stringify({ data: [{ e: 'ANY-CODE', p: 'normal', v: true }] });
-  const messages = parseDeviceSpawnMessages(SPAWN_TOPIC, payloadText);
-  assert.equal(messages.length, 1);
-  assert.equal(messages[0].assetCode, 'ANY-CODE');
-});
-
-test('createSpawnSnapshot 复用统一归一语义并派生故障状态', () => {
-  const [message] = parseDeviceSpawnMessages(
-    SPAWN_TOPIC,
+  const firstValidWins = parseDeviceTelemetryMessage(
+    TOPIC,
     JSON.stringify({
-      ts: 1700000000123,
       data: [
-        { e: 'AGV-01', p: 'normal', v: false },
-        { e: 'AGV-01', p: 'errorCode', v: 9001 },
-        { e: 'AGV-01', p: 'message', v: '模拟急停' },
+        { p: 'distance_x', v: 1 },
+        { p: 'movement_x', v: 1, s: 'FIRST' },
+        { p: 'normal', v: true, s: 'SECOND' },
       ],
     }),
   );
-  assert.ok(message);
+  assert.equal(firstValidWins?.spawnerCode, 'FIRST');
 
-  const snapshot = createSpawnSnapshot(message);
-
-  assert.equal(snapshot.deviceType, 'agv');
-  assert.equal(snapshot.assetCode, 'AGV-01');
-  assert.deepEqual(snapshot.fields, { normal: false, errorCode: 9001, message: '模拟急停' });
-  assert.equal(snapshot.faulted, true);
+  const missing = parseDeviceTelemetryMessage(
+    TOPIC,
+    JSON.stringify({ data: [{ p: 'distance_x', v: 1 }] }),
+  );
+  assert.equal(missing?.spawnerCode, null);
 });
 
-test('dispatchDeviceSpawnMessages 命中 dataspawn topic 时分发给订阅者并拦截常规解析', () => {
-  const received: string[][] = [];
-  const unsubscribe = onDeviceSpawnMessages((messages) => {
-    received.push(messages.map((message) => message.assetCode));
-  });
-  try {
-    const hit = dispatchDeviceSpawnMessages(
-      SPAWN_TOPIC,
-      JSON.stringify({ data: [{ e: 'AGV-01', p: 'normal', v: true }] }),
-    );
-    assert.equal(hit, true);
-    assert.deepEqual(received, [['AGV-01']]);
+test('twindatadriven 常规消息 e 过滤回归：assetCode 取自 topic，e 不一致的点位丢弃', () => {
+  const snapshot = parseDeviceTelemetryMessage(
+    'dt/factory/logistics/stacker/STK-01/twindatadriven/joint',
+    '{"seq":7,"ts":1700000000123,"data":[{"e":"STK-01","p":"front_x","v":2},{"e":"OTHER","p":"front_x","v":9},{"p":"normal","v":true}]}',
+  );
+  assert.ok(snapshot);
+  assert.equal(snapshot.assetCode, 'STK-01');
+  assert.equal(snapshot.payloadDeviceCode, 'STK-01');
+  assert.deepEqual(snapshot.fields, { front_x: 2, normal: true });
+  assert.equal(snapshot.spawnerCode, null);
+});
 
-    const miss = dispatchDeviceSpawnMessages(
-      'dt/factory/logistics/stacker/STK-01/twindatadriven/joint',
-      JSON.stringify({ data: [{ e: 'STK-01', p: 'normal', v: true }] }),
+test('ingestDeviceTelemetryMessage 完成 解析→写入仓库→通知订阅者 全链路', () => {
+  const store = new DeviceTelemetryStore();
+  const received: DeviceTelemetrySnapshot[] = [];
+  const unsubscribe = onDeviceTelemetryMessages((snapshot) => received.push(snapshot));
+  try {
+    const snapshot = ingestDeviceTelemetryMessage(
+      TOPIC,
+      JSON.stringify({ data: [{ p: 'distance_x', v: 4.2, s: 'AGV-SPAWN' }] }),
+      { store },
     );
-    assert.equal(miss, false);
+    assert.ok(snapshot);
+    assert.equal(store.getSnapshot('AGV-01', 'agv', 'default')?.fields.distance_x, 4.2);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].assetCode, 'AGV-01');
+    assert.equal(received[0].spawnerCode, 'AGV-SPAWN');
+
+    // 退订后不再通知，但仓库仍写入
+    unsubscribe();
+    ingestDeviceTelemetryMessage(TOPIC, JSON.stringify({ data: [{ p: 'distance_x', v: 9 }] }), { store });
+    assert.equal(received.length, 1);
+    assert.equal(store.getSnapshot('AGV-01', 'agv', 'default')?.fields.distance_x, 9);
   } finally {
     unsubscribe();
   }
 });
 
-test('twindatadriven 常规消息不受 spawn 解析影响（回归）', () => {
-  const snapshot = parseDeviceTelemetryMessage(
-    'dt/factory/logistics/stacker/STK-01/twindatadriven/joint',
-    '{"seq":7,"ts":1700000000123,"data":[{"e":"STK-01","p":"front_x","v":2},{"e":"STK-01","p":"normal","v":true}]}',
-  );
-  assert.ok(snapshot);
-  assert.equal(snapshot.assetCode, 'STK-01');
-  assert.deepEqual(snapshot.fields, { front_x: 2, normal: true });
+test('spawnerCode 不进内容签名：同内容带/不带 s 判重，但订阅者仍收到每条消息（保活语义）', () => {
+  const store = new DeviceTelemetryStore();
+  const received: DeviceTelemetrySnapshot[] = [];
+  const unsubscribe = onDeviceTelemetryMessages((snapshot) => received.push(snapshot));
+  try {
+    const first = ingestDeviceTelemetryMessage(
+      TOPIC,
+      JSON.stringify({ data: [{ p: 'distance_x', v: 4.2, s: 'AGV-SPAWN' }] }),
+      { store },
+    );
+    const second = ingestDeviceTelemetryMessage(
+      TOPIC,
+      JSON.stringify({ data: [{ p: 'distance_x', v: 4.2 }] }),
+      { store },
+    );
+    assert.ok(first && second);
+    assert.equal(second.spawnerCode, null);
+    // 内容签名不含 spawnerCode：第二条与第一条同内容，仓库判重不推进（快照仍是带 s 的第一条）
+    assert.equal(store.getSnapshot('AGV-01', 'agv', 'default')?.spawnerCode, 'AGV-SPAWN');
+    // 但订阅者两条都收到（产生器保活依赖每条消息触达）
+    assert.equal(received.length, 2);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('非设备遥测 topic 返回 null，不通知订阅者', () => {
+  const store = new DeviceTelemetryStore();
+  const received: DeviceTelemetrySnapshot[] = [];
+  const unsubscribe = onDeviceTelemetryMessages((snapshot) => received.push(snapshot));
+  try {
+    const snapshot = ingestDeviceTelemetryMessage(
+      'dt/factory/logistics/agv/AGV-01/other/joint',
+      JSON.stringify({ data: [{ p: 'normal', v: true }] }),
+      { store },
+    );
+    assert.equal(snapshot, null);
+    assert.equal(received.length, 0);
+  } finally {
+    unsubscribe();
+  }
 });

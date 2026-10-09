@@ -1,7 +1,6 @@
 import {
   deviceTelemetryStore,
-  dispatchDeviceSpawnMessages,
-  parseDeviceTelemetryMessage,
+  ingestDeviceTelemetryMessage,
   type DeviceTelemetryStore,
   type MqttSubscriptionConfig,
   type TelemetryConnectionState,
@@ -185,15 +184,11 @@ export class ElectronMqttTelemetryClient {
     if (!this.isMessageForCurrentConfig(event)) return;
 
     try {
-      const spawnSourceId = event.subscription.adapter?.sourceId ?? event.sourceId;
-      if (dispatchDeviceSpawnMessages(event.topic, event.payloadText, spawnSourceId)) return;
-      const snapshot = parseDeviceTelemetryMessage(
-        event.topic,
-        event.payloadText,
-        event.subscription.adapter ?? { kind: 'epv', sourceId: event.sourceId },
-      );
-      if (!snapshot) return;
-      this.store.upsert({ ...snapshot, receivedAt: event.receivedAt });
+      ingestDeviceTelemetryMessage(event.topic, event.payloadText, {
+        adapter: event.subscription.adapter ?? { kind: 'epv', sourceId: event.sourceId },
+        store: this.store,
+        receivedAt: event.receivedAt,
+      });
     } catch (error) {
       this.reportParseError(error);
     }

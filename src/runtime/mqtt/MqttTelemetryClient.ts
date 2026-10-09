@@ -1,8 +1,7 @@
 import mqtt, { type IClientSubscribeOptions, type MqttClient } from 'mqtt';
 import {
   deviceTelemetryStore,
-  dispatchDeviceSpawnMessages,
-  parseDeviceTelemetryMessage,
+  ingestDeviceTelemetryMessage,
   type DeviceTelemetryStore,
   type MqttSubscriptionConfig,
   type TelemetryConnectionState,
@@ -140,10 +139,10 @@ export class MqttTelemetryClient {
 
       try {
         const payloadText = payload.toString('utf8');
-        if (dispatchDeviceSpawnMessages(topic, payloadText, subscription.adapter?.sourceId)) return;
-        const snapshot = parseDeviceTelemetryMessage(topic, payloadText, subscription.adapter ?? { kind: 'epv' });
-        if (!snapshot) return;
-        this.store.upsert(snapshot);
+        ingestDeviceTelemetryMessage(topic, payloadText, {
+          adapter: subscription.adapter ?? { kind: 'epv' },
+          store: this.store,
+        });
       } catch (error) {
         this.reportParseError(error);
       }

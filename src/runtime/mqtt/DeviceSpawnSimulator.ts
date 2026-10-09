@@ -1,7 +1,4 @@
-import {
-  DATA_SPAWN_TOPIC_SEGMENT,
-  dispatchDeviceSpawnMessages,
-} from './deviceTelemetry';
+import { ingestDeviceTelemetryMessage } from './deviceTelemetry';
 
 type DeviceSpawnSimulatorLog = (message: string) => void;
 
@@ -24,10 +21,12 @@ export type DeviceSpawnSimulatorConfig = {
 type SimulatedDevice = {
   assetCode: string;
   online: boolean;
+  /** 是否已向上行宣告过产生器 id（s）；下线后重置，重新上线首条消息再次携带。 */
+  announced: boolean;
   phase: number;
 };
 
-/** 无 broker 时本地生成设备产生器消息，走 dispatchDeviceSpawnMessages 与真实 MQTT 同一入口。 */
+/** 无 broker 时本地生成设备产生器消息，走 ingestDeviceTelemetryMessage 与真实 MQTT 同一入口。 */
 export class DeviceSpawnSimulator {
   private configSignature = '';
   private timerId: number | null = null;
@@ -71,6 +70,7 @@ export class DeviceSpawnSimulator {
         pool.push({
           assetCode: `${target.spawnerCode}-${String(index + 1).padStart(2, '0')}`,
           online: true,
+          announced: false,
           phase: index * 0.7,
         });
       }
@@ -97,54 +97,62 @@ export class DeviceSpawnSimulator {
     this.devices.clear();
   }
 
-  /** 生成一帧模拟消息并经统一分发入口投递，保持与真实 MQTT 消息一致的数据通路。 */
+  /** 逐设备生成一帧模拟消息并经统一入口投递，保持与真实 MQTT 消息一致的数据通路。 */
   private emitFrame(config: DeviceSpawnSimulatorConfig): void {
     for (const target of config.targets) {
       const pool = this.devices.get(target.spawnerCode);
       if (!pool) continue;
-      const topic = createDeviceSpawnSimulatorTopic(target.deviceType, target.spawnerCode);
-      const payload = createDeviceSpawnSimulatorPayload(target, pool, this.tick);
-      dispatchDeviceSpawnMessages(topic, JSON.stringify(payload), config.sourceId);
+      for (const device of pool) {
+        const payload = createDeviceSpawnSimulatorPayload(target, device, this.tick);
+        if (!payload) continue;
+        const topic = createDeviceSpawnSimulatorTopic(target.deviceType, device.assetCode);
+        ingestDeviceTelemetryMessage(topic, JSON.stringify(payload), {
+          adapter: { kind: 'epv', sourceId: config.sourceId },
+        });
+      }
     }
   }
 }
 
-/** 根据设备类型和产生器 id 生成真实可解析的 dataspawn topic。 */
-export function createDeviceSpawnSimulatorTopic(deviceType: string, spawnerCode: string): string {
-  return `dt/factory/logistics/${deviceType}/${spawnerCode}/${DATA_SPAWN_TOPIC_SEGMENT}/joint`;
+/** 生成动态设备的常规遥测 topic（与真实设备一致，assetCode 为设备自身编号）。 */
+export function createDeviceSpawnSimulatorTopic(deviceType: string, assetCode: string): string {
+  return `dt/factory/logistics/${deviceType}/${assetCode}/twindatadriven/joint`;
 }
 
-/** 创建一条符合 dataspawn/joint 协议的本地模拟消息，含随机的下线/上线事件。 */
+/**
+ * 创建一台设备的模拟消息，含随机的下线/上线事件；返回 null 表示本帧该设备无消息。
+ * 上线首条消息点位携带 s（产生器 id），后续保活不再携带。
+ */
 export function createDeviceSpawnSimulatorPayload(
   target: DeviceSpawnSimulatorTarget,
-  pool: SimulatedDevice[],
+  device: SimulatedDevice,
   tick: number,
-): { data: { e: string; p: string; v: unknown; s: string }[]; ts: string } {
+): { data: { p: string; v: unknown; s?: string }[]; ts: string } | null {
   const seconds = tick * 0.5;
   const offlineProbability = target.offlineProbability ?? 0.02;
-  const data: { e: string; p: string; v: unknown; s: string }[] = [];
 
-  for (const device of pool) {
-    if (device.online && offlineProbability > 0 && Math.random() < offlineProbability) {
-      device.online = false;
-      data.push({ e: device.assetCode, p: 'status', v: 'offline', s: target.spawnerCode });
-      continue;
-    }
-    if (!device.online) {
-      // 下线后停留一帧再上线，保证销毁可被观察到
-      device.online = true;
-    }
-
-    const wave = Math.sin(seconds * 0.6 + device.phase);
-    data.push(
-      { e: device.assetCode, p: 'deviceCode', v: device.assetCode, s: target.spawnerCode },
-      { e: device.assetCode, p: 'movement_x', v: wave >= 0 ? 1 : 2, s: target.spawnerCode },
-      { e: device.assetCode, p: 'distance_x', v: Math.round((5 + wave * 3 + device.phase) * 10000) / 10000, s: target.spawnerCode },
-      { e: device.assetCode, p: 'normal', v: true, s: target.spawnerCode },
-      { e: device.assetCode, p: 'errorCode', v: 0, s: target.spawnerCode },
-      { e: device.assetCode, p: 'message', v: '模拟运行', s: target.spawnerCode },
-    );
+  if (device.online && offlineProbability > 0 && Math.random() < offlineProbability) {
+    device.online = false;
+    device.announced = false;
+    return { data: [{ p: 'status', v: 'offline' }], ts: new Date().toISOString() };
+  }
+  if (!device.online) {
+    // 下线后停留一帧再上线，保证销毁可被观察到
+    device.online = true;
   }
 
-  return { data, ts: new Date().toISOString() };
+  const s = device.announced ? undefined : target.spawnerCode;
+  device.announced = true;
+  const wave = Math.sin(seconds * 0.6 + device.phase);
+  return {
+    data: [
+      { p: 'deviceCode', v: device.assetCode, s },
+      { p: 'movement_x', v: wave >= 0 ? 1 : 2, s },
+      { p: 'distance_x', v: Math.round((5 + wave * 3 + device.phase) * 10000) / 10000, s },
+      { p: 'normal', v: true, s },
+      { p: 'errorCode', v: 0, s },
+      { p: 'message', v: '模拟运行', s },
+    ],
+    ts: new Date().toISOString(),
+  };
 }

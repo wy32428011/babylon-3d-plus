@@ -45,6 +45,8 @@ export type DeviceTelemetrySnapshot = {
   deviceType: string;
   assetCode: string;
   payloadDeviceCode: string | null;
+  /** 设备产生器 id（payload s 字段，首个有效值）；非产生器消息为 null/缺失。 */
+  spawnerCode?: string | null;
   sourceTimestamp: number | null;
   sequence: number | null;
   receivedAt: number;
@@ -81,14 +83,6 @@ type DeviceTelemetryPayload = {
 
 const DEVICE_TOPIC_PATTERN = /^dt\/factory\/logistics\/([^/]+)\/([^/]+)\/twindatadriven\/joint$/;
 
-/**
- * 设备产生器消息的 topic 段（暂定名，后续按真实协议调整时只改这里）。
- * topic 形如 dt/factory/logistics/{deviceType}/{spawnerCode}/dataspawn/joint。
- */
-export const DATA_SPAWN_TOPIC_SEGMENT = 'dataspawn';
-const DEVICE_SPAWN_TOPIC_PATTERN = new RegExp(
-  `^dt\\/factory\\/logistics\\/([^/]+)\\/([^/]+)\\/${DATA_SPAWN_TOPIC_SEGMENT}\\/joint$`,
-);
 const SAFE_PATH_SEGMENT_PATTERN = /^[A-Za-z_$][\w$]*(?:\[\d+\])*$/;
 
 /** 从 MQTT topic 中解析设备类型和资产编号。 */
@@ -122,137 +116,41 @@ export function parseStackerTelemetryMessage(topic: string, payloadText: string)
   return snapshot?.deviceType === 'stacker' ? snapshot : null;
 }
 
-export type ParsedDeviceSpawnTopic = {
-  deviceType: string;
-  spawnerCode: string;
-};
+type DeviceTelemetryMessageHandler = (snapshot: DeviceTelemetrySnapshot) => void;
 
-/** 设备产生器消息中的单个有效点位。 */
-export type DeviceSpawnMessagePoint = {
-  p: string;
-  v: unknown;
-};
+const deviceTelemetryMessageHandlers = new Set<DeviceTelemetryMessageHandler>();
 
-/** 按 e 字段拆分后的设备产生器消息，一条原始消息可携带多台动态设备的点位。 */
-export type DeviceSpawnMessage = {
-  sourceId: string;
-  topic: string;
-  deviceType: string;
-  spawnerCode: string;
-  assetCode: string;
-  sourceTimestamp: number | null;
-  sequence: number | null;
-  receivedAt: number;
-  points: DeviceSpawnMessagePoint[];
-};
-
-/** 判断 topic 是否为设备产生器消息。 */
-export function isDeviceSpawnTopic(topic: string): boolean {
-  return DEVICE_SPAWN_TOPIC_PATTERN.test(topic.trim());
-}
-
-/** 从设备产生器 topic 中解析设备类型和产生器 id。 */
-export function parseDeviceSpawnTopic(topic: string): ParsedDeviceSpawnTopic | null {
-  const match = topic.trim().match(DEVICE_SPAWN_TOPIC_PATTERN);
-  if (!match) return null;
-
-  return {
-    deviceType: match[1].trim().toLowerCase(),
-    spawnerCode: match[2].trim(),
+/** 订阅每条已解析的设备遥测消息（在写入快照仓库之后触发），返回取消函数；由运行时产生器模块注册。 */
+export function onDeviceTelemetryMessages(handler: DeviceTelemetryMessageHandler): () => void {
+  deviceTelemetryMessageHandlers.add(handler);
+  return () => {
+    deviceTelemetryMessageHandlers.delete(handler);
   };
 }
 
+export type IngestDeviceTelemetryMessageOptions = {
+  adapter?: TelemetryAdapterConfig;
+  store?: DeviceTelemetryStore;
+  receivedAt?: number;
+};
+
 /**
- * 解析设备产生器消息并按 e 字段拆分为每台动态设备一条消息。
- * s 缺失时以 topic 段兜底，s 与 topic 段不一致的点位丢弃；缺 e 或 p 的点位丢弃。
- * 不做 e 与 topic 资产编号相等过滤（产生器 topic 段是产生器 id 而非设备编号）。
+ * 设备遥测消息统一入口：解析 → 写入快照仓库 → 通知订阅者。
+ * upsert 判重不影响通知——设备产生器的保活语义依赖每条消息都触达订阅者。
  */
-export function parseDeviceSpawnMessages(
+export function ingestDeviceTelemetryMessage(
   topic: string,
   payloadText: string,
-  sourceId?: string,
-): DeviceSpawnMessage[] {
-  const topicInfo = parseDeviceSpawnTopic(topic);
-  if (!topicInfo) return [];
-
-  const payload = JSON.parse(payloadText) as DeviceTelemetryPayload;
-  const pointsByDevice = new Map<string, DeviceSpawnMessagePoint[]>();
-  if (Array.isArray(payload.data)) {
-    for (const item of payload.data as DevicePayloadItem[]) {
-      if (!item || typeof item !== 'object') continue;
-      const assetCode = readPayloadItemDeviceCode(item);
-      if (!assetCode) continue;
-      if (typeof item.p !== 'string' || item.p.trim() === '') continue;
-      const spawnerCode = readPayloadItemSpawnerCode(item);
-      if (spawnerCode && spawnerCode !== topicInfo.spawnerCode) continue;
-      if (isInvalidTelemetryFieldValue(item.v)) continue;
-      const points = pointsByDevice.get(assetCode) ?? [];
-      points.push({ p: item.p, v: item.v });
-      pointsByDevice.set(assetCode, points);
-    }
+  options: IngestDeviceTelemetryMessageOptions = {},
+): DeviceTelemetrySnapshot | null {
+  const snapshot = parseDeviceTelemetryMessage(topic, payloadText, options.adapter ?? { kind: 'epv' });
+  if (!snapshot) return null;
+  const effectiveSnapshot = options.receivedAt === undefined ? snapshot : { ...snapshot, receivedAt: options.receivedAt };
+  (options.store ?? deviceTelemetryStore).upsert(effectiveSnapshot);
+  for (const handler of deviceTelemetryMessageHandlers) {
+    handler(effectiveSnapshot);
   }
-
-  if (pointsByDevice.size === 0) return [];
-
-  const receivedAt = Date.now();
-  const sourceTimestamp = readTimestamp(payload.ts);
-  const sequence = readSequence(payload.seq ?? payload.sequence);
-  return [...pointsByDevice.entries()].map(([assetCode, points]) => ({
-    sourceId: normalizeSourceId(sourceId),
-    topic,
-    deviceType: topicInfo.deviceType,
-    spawnerCode: topicInfo.spawnerCode,
-    assetCode,
-    sourceTimestamp,
-    sequence,
-    receivedAt,
-    points,
-  }));
-}
-
-/** 把产生器消息点位表构建设备遥测快照，复用统一归一/故障派生语义。 */
-export function createSpawnSnapshot(message: DeviceSpawnMessage): DeviceTelemetrySnapshot {
-  const fields: DeviceTelemetryFields = {};
-  for (const point of message.points) {
-    fields[point.p] = point.v;
-  }
-
-  return createSnapshot({
-    sourceId: message.sourceId,
-    topic: message.topic,
-    deviceType: message.deviceType,
-    assetCode: message.assetCode,
-    payloadDeviceCode: message.assetCode,
-    sourceTimestamp: message.sourceTimestamp,
-    sequence: message.sequence,
-    fields,
-  });
-}
-
-type DeviceSpawnMessageHandler = (messages: DeviceSpawnMessage[]) => void;
-
-const deviceSpawnMessageHandlers = new Set<DeviceSpawnMessageHandler>();
-
-/** 订阅设备产生器消息，返回取消函数；由运行时产生器模块注册。 */
-export function onDeviceSpawnMessages(handler: DeviceSpawnMessageHandler): () => void {
-  deviceSpawnMessageHandlers.add(handler);
-  return () => {
-    deviceSpawnMessageHandlers.delete(handler);
-  };
-}
-
-/**
- * 尝试按设备产生器协议分发消息；topic 命中 dataspawn 段时返回 true，
- * 调用方应跳过常规遥测解析（即使当前没有已注册的产生器处理器）。
- */
-export function dispatchDeviceSpawnMessages(topic: string, payloadText: string, sourceId?: string): boolean {
-  if (!isDeviceSpawnTopic(topic)) return false;
-  const messages = parseDeviceSpawnMessages(topic, payloadText, sourceId);
-  if (messages.length === 0) return true;
-  for (const handler of deviceSpawnMessageHandlers) {
-    handler(messages);
-  }
-  return true;
+  return effectiveSnapshot;
 }
 
 /** 从标准快照中读取数值字段，调用方可传入多个兼容字段名。 */
@@ -447,6 +345,7 @@ function parseEpvTelemetryMessage(
     deviceType: topicInfo.deviceType,
     assetCode: topicInfo.assetCode,
     payloadDeviceCode: readPayloadDeviceCode(payload.data),
+    spawnerCode: readPayloadSpawnerCode(payload.data),
     sourceTimestamp: readTimestamp(payload.ts),
     sequence: readSequence(payload.seq ?? payload.sequence),
     fields,
@@ -477,6 +376,7 @@ function parseJsonPathTelemetryMessage(
     deviceType,
     assetCode,
     payloadDeviceCode: assetCode,
+    spawnerCode: null,
     sourceTimestamp: adapter.timestampPath ? readTimestamp(readSafeJsonPath(payload, adapter.timestampPath)) : null,
     sequence: adapter.sequencePath ? readSequence(readSafeJsonPath(payload, adapter.sequencePath)) : null,
     fields,
@@ -623,6 +523,18 @@ function readPayloadDeviceCode(data: unknown): string | null {
   return null;
 }
 
+/** 读取 payload 内部 s 字段（设备产生器 id），多点位取首个有效值。 */
+function readPayloadSpawnerCode(data: unknown): string | null {
+  if (!Array.isArray(data)) return null;
+
+  for (const item of data as DevicePayloadItem[]) {
+    const spawnerCode = readPayloadItemSpawnerCode(item);
+    if (spawnerCode) return spawnerCode;
+  }
+
+  return null;
+}
+
 /** 读取单个点位的设备编号，兼容 PLC 把 e 发成数字的情况。 */
 function readPayloadItemDeviceCode(item: DevicePayloadItem | null | undefined): string | null {
   if (!item || typeof item !== 'object') return null;
@@ -636,7 +548,7 @@ function readPayloadItemDeviceCode(item: DevicePayloadItem | null | undefined): 
   return null;
 }
 
-/** 读取单个点位的产生器 id，兼容数字形式；缺失时由 topic 段兜底。 */
+/** 读取单个点位的产生器 id，兼容数字形式。 */
 function readPayloadItemSpawnerCode(item: DevicePayloadItem | null | undefined): string | null {
   if (!item || typeof item !== 'object') return null;
   if (typeof item.s === 'string') {

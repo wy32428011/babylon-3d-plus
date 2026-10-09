@@ -1075,6 +1075,7 @@ export class SceneRuntime {
       pushLog: (message) => this.pushLog(message),
       spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
       disposeDeviceInstance: (key) => this.disposeSpawnedDeviceModel(key),
+      isDeviceKnown: (sourceId, deviceType, assetCode) => this.isTelemetryDeviceKnown(sourceId, deviceType, assetCode),
     });
     this.groupTransformPreviewObserver = this.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.flushGroupTranslationPreview();
@@ -7392,6 +7393,31 @@ export class SceneRuntime {
       });
     }
     this.deviceSpawnerRuntime.configure(configs);
+  }
+
+  /**
+   * topic (sourceId, deviceType, assetCode) 是否已命中既有设备：动态实例（含加载中）直接查产生器运行时；
+   * 静态侧遍历场景文档的遥测绑定（与模型加载进度无关，消除首帧前窗口）。绑定未显式声明设备类型时
+   * 按编号保守视为已占用，避免与自动探测类型的静态设备重号。
+   */
+  private isTelemetryDeviceKnown(sourceId: string, deviceType: string, assetCode: string): boolean {
+    if (this.deviceSpawnerRuntime.hasAssetCode(assetCode)) return true;
+    const document = this.shadowDocument;
+    if (!document) return false;
+    const normalizedSourceId = sourceId.trim() || 'default';
+    const normalizedDeviceType = deviceType.trim().toLowerCase();
+    for (const entityId of document.entityIds) {
+      const entity = document.entities[entityId];
+      const binding = entity?.components.telemetryBinding;
+      if (!entity || !binding || binding.enabled === false) continue;
+      const boundAssetCode = binding.assetCode?.trim() || entity.components.modelAsset?.assetCode?.trim() || '';
+      if (!boundAssetCode || boundAssetCode !== assetCode) continue;
+      if ((binding.sourceId?.trim() || 'default') !== normalizedSourceId) continue;
+      const boundDeviceType = binding.deviceType?.trim().toLowerCase() ?? '';
+      if (boundDeviceType && boundDeviceType !== normalizedDeviceType) continue;
+      return true;
+    }
+    return false;
   }
 
   /** 基于模板实体派生一台动态设备实例；模板模型未加载完成时返回 false，等待下一条消息重试。 */

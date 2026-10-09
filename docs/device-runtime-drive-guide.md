@@ -361,36 +361,40 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 | 配置 | 语义 |
 |---|---|
-| `spawnerCode` | 产生器 id，与消息 `s` 字段严格匹配 |
-| `templateEntityId` | 场景模板实例（带 modelAsset 的实体）；产生个体时深克隆其模型与组件参数，**assetCode 不拷贝**（由消息 e 提供）；模板自身不参与驱动 |
+| `spawnerCode` | 产生器 id，与消息 `s` 字段 + topic 设备类型复合严格匹配 |
+| `templateEntityId` | 场景模板实例（带 modelAsset 的实体）；产生个体时深克隆其模型与组件参数，**assetCode 不拷贝**（由 topic 段提供）；模板自身不参与驱动 |
 | `timeoutSeconds` | 无消息自动销毁超时（clamp 1–3600，默认 30） |
 
-### MQTT 协议（暂定，topic 段后续会改）
+### MQTT 协议
 
-- topic：`dt/factory/logistics/{deviceType}/{assetCode}/{DATA_SPAWN_TOPIC_SEGMENT}/joint`，段常量 `DATA_SPAWN_TOPIC_SEGMENT="dataspawn"` 为唯一真源（deviceTelemetry.ts）。
-- payload `data[].{e,p,v,s}`：s=产生器 id（缺 s 以 topic 段兜底、与 s 不一致丢弃），e=动态设备资产编号（缺失丢弃），p/v 同 EPV 协议。解析**不做** e 与 topic assetCode 相等过滤（一条消息可携带多台设备点位）。
-- 显式下线：固定点位 `p="status"`、`v="offline"` → 销毁该 e 实例（常量固化于 spawner 模块，后续按真实协议调整）。
-- 路由：`MqttTelemetryClient` / `ElectronMqttTelemetryClient` 消息入口先调 `dispatchDeviceSpawnMessages`（deviceTelemetry.ts，订阅式分发），命中 dataspawn 段即拦截并转给已订阅的 `DeviceSpawnerRuntime`，否则走原 twindatadriven 路径——两种 topic 同一连接共存。
+- topic：与常规设备完全一致，`dt/factory/logistics/{deviceType}/{assetCode}/twindatadriven/joint`；assetCode 是动态设备自身的资产编号（不是产生器 id）。
+- payload `data[].{e,p,v,s}`：p/v/e 同常规 EPV 协议（e 过滤规则不变：e 缺失或与 topic assetCode 一致才保留）；**s=产生器 id**，仅用于"无既有设备匹配"时触发生成，多点位取首个有效值，解析进 `DeviceTelemetrySnapshot.spawnerCode`（不进内容签名，不影响去重）。
+- 路由：`MqttTelemetryClient` / `ElectronMqttTelemetryClient` 消息入口统一调 `ingestDeviceTelemetryMessage`（deviceTelemetry.ts）——parse → `store.upsert` → notify `onDeviceTelemetryMessages` 订阅者。`DeviceSpawnerRuntime.handleSnapshot` 三段式判定：
+  1. assetCode 命中实例反查表（`instancesByAssetCode`）→ 含 `status=offline` 则销毁，否则刷新 `lastMessageAt`（**保活不依赖 s**）；
+  2. `spawnerCode` 为空 → 忽略（常规未知设备消息，快照留 store 无候选消费）；
+  3. `(spawnerCode, deviceType)` **严格匹配**已注册产生器 且 `host.isDeviceKnown(sourceId, deviceType, assetCode)` 为 false → `spawnDeviceInstance` 生成；客户端已 upsert 的快照即新设备驱动数据源，无需重键。
+- 显式下线：固定点位 `p="status"`、`v="offline"`（常量固化于 spawner 模块，后续按真实协议调整），同 topic 发送、可不带 s。
 
 ### 生命周期（telemetry/spawner/DeviceSpawnerRuntime.ts）
 
-1. `beginTelemetryPreview`：SceneRuntime `configureDeviceSpawnersFromDocument` 解析各产生器模板实体（deviceType 取模板 telemetryBinding.deviceType 或 dataDrivenConfig.device.devType），`DeviceSpawnerRuntime.configure` 注册 spawnerCode→配置并订阅 spawn 消息。
-2. 消息到达 `handleMessages`：`p=status/v=offline` → 销毁；否则查实例表（`createSpawnedDeviceKey(spawnerCode, assetCode)`，已有则只刷新 `lastMessageAt`），无实例则经 host `spawnDeviceInstance` 生成，成功后 `createSpawnSnapshot` upsert 进 deviceTelemetryStore。
-3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为消息 e**，合成 entitySnapshot 供驱动读 parameterValues；root 位置=模板世界位置；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
+1. `beginTelemetryPreview`：SceneRuntime `configureDeviceSpawnersFromDocument` 解析各产生器模板实体（deviceType 取模板 telemetryBinding.deviceType 或 dataDrivenConfig.device.devType），`DeviceSpawnerRuntime.configure` 以 `(spawnerCode, deviceType)` 复合键注册并订阅遥测消息；同时 `SpecializedTelemetryRuntime.collectResolvedBindingKeys()` eager 构建静态绑定键集合，消除首帧前窗口。
+2. `isDeviceKnown`（SceneRuntime）：静态侧按 `createTelemetryBindingKey(sourceId, deviceType, assetCode)` 查每帧重建的 `resolvedBindingKeys`（含冲突 key）；动态侧查 `deviceSpawnerRuntime.hasAssetCode(assetCode)`（`spawnedDeviceModels` 在 `spawnDeviceInstance` 同步登记，加载中实例也被覆盖，无 in-flight 窗口）。
+3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为 topic 段编号**，合成 entitySnapshot 供驱动读 parameterValues；root 位置=模板世界位置；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
 4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`，常量由 `createSpawnedDeviceEntityId` / `parseSpawnedDeviceEntityId` 维护），**五种现有 driver 零改动**驱动动画；网格 `isPickable=true` 仅为生成器产物点击链路服务，常规实体拾取仍按元数据缺 `editorEntityId` 过滤，动态实例不进编辑选择。
-5. 回收：`applyFrame(nowMs)` 每帧先收集 `now - lastMessageAt > timeoutSeconds` 的实例，**帧尾统一销毁**（禁止边迭代边销毁）；显式下线立即销毁；`endTelemetryPreview` 调 `disposeAll` 清零（在预览态早退判断之前执行）。
+5. 回收：`applyFrame(nowMs)` 每帧先收集 `now - lastMessageAt > timeoutSeconds` 的实例，**帧尾统一销毁**（禁止边迭代边销毁），同步删 assetCode 反查索引；显式下线立即销毁；`endTelemetryPreview` 调 `disposeAll` 清零（在预览态早退判断之前执行）。
 
 ### 调试工具
 
-- 无 broker：`DeviceSpawnSimulator.ts`（runtime/mqtt）按目标产生器池发 `{e,p,v,s}` 消息并随机下线，走 `dispatchDeviceSpawnMessages` 与真实 MQTT 同一入口。
-- 有 broker：`npm run demo:spawn:mqtt`（scripts/simulate-device-spawn-mqtt.mjs）向真实 broker 发 dataspawn 消息，`--spawner` 对齐场景产生器 id。
-- 冒烟：`npm run smoke:device-spawner`（NullEngine 全链路：生成/位置/拾取/快照/去重/下线/超时/退出清理）；单元回归 `tests/telemetry/deviceSpawn.test.ts`（解析）与 `deviceSpawnerRuntime.test.ts`（生命周期）。
+- 无 broker：`DeviceSpawnSimulator.ts`（runtime/mqtt）按 per-device 常规 topic 发 `{e,p,v,s}` 消息（每台设备首条带 s、后续保活不带、下线后重置），走 `ingestDeviceTelemetryMessage` 与真实 MQTT 同一入口。
+- 有 broker：`npm run demo:spawn:mqtt`（scripts/simulate-device-spawn-mqtt.mjs）向真实 broker 按 per-device topic 发消息，`--spawner` 对齐场景产生器 id。
+- 冒烟：`npm run smoke:device-spawner`（NullEngine 全链路：生成/位置/拾取/快照/去重/无 s 保活/下线/带 s 重生/超时/退出清理）；单元回归 `tests/telemetry/deviceSpawn.test.ts`（解析）与 `deviceSpawnerRuntime.test.ts`（生命周期）。
 
 ### 注意事项
 
-- **assetCode 冲突**：动态实例 e 撞静态实体 assetCode 时冲突检测使双方都不驱动，规划编号时需避开。
+- **assetCode 静态优先**：topic (deviceType, assetCode) 命中既有设备（静态实体或任一产生器的实例）时不再生成，消息直达该设备；多产生器同名先到先得，旧的"冲突双停"场景自然消解。
+- **重生必须带 s**：下线/超时销毁后实例反查表已清空，重新上线的**首条消息必须带 s** 才会再次生成；不带 s 的未知设备消息只留快照不生成。
 - **快照残留**：telemetry store 无单 key 删除，超时销毁后快照留存但无候选匹配，endTelemetryPreview 统一 clear。
-- **sourceId 对齐**：spawn 快照 sourceId 必须与实例 binding.sourceId 一致，统一从订阅 adapter 透传。
+- **sourceId 对齐**：快照 sourceId 取订阅 adapter 的 sourceId，必须与模板 binding.sourceId 一致（配置责任）。
 - 动态实例**不写回 SceneDocument**，退出预览全部消失；模板实例的参数修改在下次预览生效。
 
 ---

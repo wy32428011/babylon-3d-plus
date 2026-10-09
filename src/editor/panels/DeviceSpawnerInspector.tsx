@@ -66,8 +66,8 @@ export function DeviceSpawnerInspector({ component, disabled = false }: DeviceSp
       </label>
       {templateMissing ? <p className="telemetry-runtime-error">绑定的模板实体已被删除，运行时该产生器不生效。</p> : null}
       <p className="muted">
-        运行预览时收到携带产生器ID的 dataspawn 消息即克隆模板生成设备实例（assetCode 取消息 e 字段）；
-        超过离线时间无消息或收到 p=status、v=offline 消息时销毁实例。
+        运行预览时收到常规遥测消息（topic 与设备一致）、点位 s 字段命中产生器ID且编号未被占用时，克隆模板生成设备实例（assetCode 取 topic 段）；
+        超过离线时间无消息或收到 p=status、v=offline 消息时销毁实例；重新上线的首条消息必须携带 s 才会再次生成。
       </p>
     </fieldset>
   );
