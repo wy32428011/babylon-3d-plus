@@ -429,6 +429,8 @@ export type LiftModelTelemetryState = {
   workState: number | null;
   /** 双工位：[0]=step1 前端（来料侧），[1]=step2 后端（送料侧）。 */
   stations: [LiftStationState, LiftStationState];
+  /** 出站交付后 step1→step2 排队平移的延迟剩余秒数：让离台货在接收方的承接平滑先播完，避免两货动画同时启动视觉上 step1 先动。 */
+  outgoingHandoffCooldown: number;
   /** 载物台货物轨迹轴缓存（来料→送料水平方向 + 工位锚点偏移），按绑定表签名失效重建。 */
   travelAxis: LiftTravelAxisCache | null;
   nodeBaselines: Map<TransformNode, Vector3>;
@@ -440,12 +442,12 @@ export type LiftStationState = {
   cargoKey: string | null;
   /** true=货箱在载货台上随台升降；false=正在交接/排队平移插值（静止端）。 */
   cargoOnBoard: boolean;
-  /** 交接插值另一端（输送线侧支撑点世界坐标），或排队平移起点。 */
+  /** 交接插值另一端（来料输送线上货物的实际位置），或排队平移起点。 */
   cargoHoldPosition: Vector3 | null;
   cargoHoldRotation: Quaternion | null;
   /** 0=交接另一端，1=本工位锚点（交接/排队平移插值进度）。 */
   transferProgress: number;
-  /** 插值方向：1=取货/排队平移（向工位锚点），-1=放货（向输送线支撑点）。 */
+  /** 插值方向：恒 1（取货/排队平移，向工位锚点）；放货无台上插值——接收方忙时货留 step2 锚点等空闲。 */
   transferDirection: 1 | -1;
   /** 交接或排队平移插值进行中。 */
   transferActive: boolean;

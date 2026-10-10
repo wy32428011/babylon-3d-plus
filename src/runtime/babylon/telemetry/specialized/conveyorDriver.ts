@@ -725,11 +725,16 @@ export class ConveyorTelemetryDriver {
     return false;
   }
 
-  /** 直接探测上游邻居是否持有该 task 的货物（覆盖 stacker/RGV 等无链路能力邻居与通知缺口）。 */
+  /**
+   * 直接探测上游邻居是否持有该 task 的货物（覆盖 stacker/RGV 等无链路能力邻居与通知缺口）。
+   * lift 不参与 task 仲裁（放货无视 task 匹配、task_num_fin_* 仅标注），其持同 task 在途货不触发规则三：
+   * lift 是推送制且只推给空闲机，本机在机货多半正是 lift 刚推送的上一托实物，销毁会丢真实货箱——应走滞留箱复用盖戳。
+   */
   private probeUpstreamHoldsTask(model: ModelRuntimeEntry, direction: number, task: string): boolean {
     if (!task) return false;
     const neighbor = this.resolveProbeNeighbor(model, direction);
-    return neighbor !== null && this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
+    if (neighbor === null || isLiftRuntimeModel(neighbor)) return false;
+    return this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
   }
 
   /** stacker/RGV/shuttle/lift（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */

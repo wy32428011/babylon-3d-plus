@@ -18,6 +18,7 @@ import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
+  CARGO_HANDOFF_SECONDS,
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
   normalizeCargoTask,
@@ -268,12 +269,14 @@ export class LiftTelemetryDriver {
    * 送料层（side 1）到位→step2 先出，step2 空且 step1 有货时先平移到 step2 锚点（rekey）再交付；
    * 送料侧接收方未空闲时货物滞留台上持续重试，不销毁。
    * work_state 存在时动作门控（doing/done 同为门控：允许执行或赶着到位，不死锁货箱）：
-   * 1/2 允许取货、3/5 允许卸货（放了没人接就滞留台上每帧重试，有人接立即给），2/5 同时补齐对应交接动画、
+   * 1/2 允许取货、3/5 允许卸货（接收方被占用则货留 step2 锚点每帧重试，有人接立即给），2 同时补齐取货动画、
    * 0/6/7/11 只移动不交接；缺失（null）走兼容路径——到位即自动交接。
    */
   private applyLiftCargoHandoff(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
     const frozen = this.isLiftFrozen(model, snapshot);
+    // 出站交付冷却逐帧消退：冷却期内 step1 货不得启动向 step2 的排队平移（让离台货的承接平滑先播完）
+    state.outgoingHandoffCooldown = Math.max(0, state.outgoingHandoffCooldown - deltaSeconds);
     const arrived = !frozen
       && state.arrivedTargetKey !== null
       && state.arrivedTargetKey === state.targetKey
@@ -290,9 +293,8 @@ export class LiftTelemetryDriver {
       if (stationIndex !== null) this.tryAdoptIncomingCargo(model, state.targetEntityId as string, stationIndex);
     }
 
-    // work_state 2（取货完成）/5（卸货完成）：补齐对应方向的交接动画；交付仍走正常接收重试
-    if (workState === 2) this.forceCompleteStationTransfers(state, 1);
-    if (workState === 5) this.forceCompleteStationTransfers(state, -1);
+    // work_state 2（取货完成）：补齐取货方向交接动画；交付仍走正常接收重试
+    if (workState === 2) this.forceCompletePickupTransfers(state);
 
     if (transferAdvancing) {
       for (const station of state.stations) {
@@ -318,29 +320,27 @@ export class LiftTelemetryDriver {
     this.updateLiftCargoPoses(model, snapshot, deltaSeconds);
   }
 
-  /** work_state 2/5 补齐交接动画：取货方向直接推满上台，放货方向直接推到输送线端（transferActive 保持，交付重试由到位分支继续）。 */
-  private forceCompleteStationTransfers(state: ModelRuntimeEntry['liftTelemetry'], direction: 1 | -1): void {
+  /** work_state 2（取货完成）补齐取货动画：取货方向直接推满上台。放货无台上插值（接收方忙时货留锚点等空闲），无需补齐。 */
+  private forceCompletePickupTransfers(state: ModelRuntimeEntry['liftTelemetry']): void {
     for (const station of state.stations) {
-      if (station.cargoKey === null || !station.transferActive || station.transferDirection !== direction) continue;
-      if (direction === 1) {
-        station.transferProgress = 1;
-        station.cargoOnBoard = true;
-        station.transferActive = false;
-        station.cargoHoldPosition = null;
-        station.cargoHoldRotation = null;
-      } else {
-        station.transferProgress = 0;
-      }
+      if (station.cargoKey === null || !station.transferActive || station.transferDirection !== 1) continue;
+      station.transferProgress = 1;
+      station.cargoOnBoard = true;
+      station.transferActive = false;
+      station.cargoHoldPosition = null;
+      station.cargoHoldRotation = null;
     }
   }
 
-  /** 送料层卸货：step1 货先平移到 step2（rekey 到后工位，从前工位锚点插值），随后 step2 出货交付。 */
+  /** 送料层卸货：step1 货先平移到 step2（rekey 到后工位，从前工位锚点插值），随后 step2 出货交付。
+   *  上一货刚离台时平移延迟 outgoingHandoffCooldown 秒启动——离台货在接收方侧还有承接平滑，两货动画须先后而非并发。 */
   private processOutgoingDelivery(model: ModelRuntimeEntry, entityId: string): void {
     const state = model.liftTelemetry;
     const front = state.stations[0];
     const back = state.stations[1];
 
-    if (back.cargoKey === null && front.cargoKey !== null && front.cargoOnBoard && !front.transferActive) {
+    if (back.cargoKey === null && front.cargoKey !== null && front.cargoOnBoard && !front.transferActive
+      && state.outgoingHandoffCooldown <= 0) {
       const cargo = this.state.liftCargoMeshes.get(front.cargoKey);
       if (cargo) {
         const newKey = this.getLiftCargoKey(model.assetCode, 1);
@@ -358,24 +358,9 @@ export class LiftTelemetryDriver {
     }
 
     if (back.cargoKey === null) return;
-    if (back.cargoOnBoard) {
-      // 到位当场先试交付：接收方空闲则直接放行，否则进入放货插值
-      if (!this.tryDeliverOutgoingCargo(model, entityId, 1)) {
-        const surfacePoint = this.context.resolveConveyorDeckSurfacePoint(entityId);
-        if (surfacePoint) {
-          back.cargoOnBoard = false;
-          back.cargoHoldPosition = surfacePoint;
-          back.cargoHoldRotation = null;
-          back.transferProgress = 1;
-          back.transferDirection = -1;
-          back.transferActive = true;
-        }
-      }
-    } else if (back.transferActive && back.transferDirection === -1) {
-      // 放货插值进行中/已到输送线侧：每帧重试交付，接收方未空闲货物滞留不销毁
-      //（排队平移 direction=1 是台内移动，未平移到 step2 锚点前不得交付）
-      this.tryDeliverOutgoingCargo(model, entityId, 1);
-    }
+    // 接收方被占用时货留 step2 锚点原位等待、每帧重试（不预播送出动画，避免滑入输送线撞上在机货）；
+    // 接收方一空闲当帧交付，离台动画由接收方侧的承接平滑承担。排队平移（direction=1）未完成前不得交付。
+    if (back.cargoOnBoard) this.tryDeliverOutgoingCargo(model, entityId, 1);
   }
 
   /** 来料层取货：从目标 conveyor 接管当前持货进指定工位，成功则以货物当前实际位置为起点进入取货插值；无货下帧重试。 */
@@ -402,17 +387,14 @@ export class LiftTelemetryDriver {
     station.transferActive = true;
   }
 
-  /** 送料层放货交付：目标 conveyor 仅查空闲接收（无视 task）后清理本工位持货状态；预检不过返回 false 保持重试。 */
+  /** 送料层放货交付：目标 conveyor 仅查空闲接收（无视 task）后清理本工位持货状态；预检不过返回 false 保持重试。
+   *  交付只在货在台上（锚点原位）时发起，恒进入端落地（preserveAxialPosition=false）。 */
   private tryDeliverOutgoingCargo(model: ModelRuntimeEntry, entityId: string, stationIndex: 0 | 1): boolean {
     const state = model.liftTelemetry;
     const station = state.stations[stationIndex];
     const cargoKey = station.cargoKey;
     if (!cargoKey) return false;
-    // 对齐 RGV 滞后承接语义（rgvDriver.tryDeliverRgvCargoToColumn）：放货插值已推进（progress<1，
-    // 货物在离台途中/已到输送线侧）属接收方消息滞后的兜底交付，按货物当前轴向投影落地；
-    // 到位当场交付（progress=1，货仍在台上）保持进入端落地。否则交付成功瞬间货物被拽回进入端（后摇）。
-    const preserveAxialPosition = station.transferProgress < 1;
-    if (!this.context.deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)) return false;
+    if (!this.context.deliverLiftCargoToConveyorLayer(entityId, cargoKey, false)) return false;
 
     this.clearLiftStationState(station);
     return true;
@@ -639,13 +621,17 @@ export class LiftTelemetryDriver {
     this.state.liftCargoMeshes.delete(key);
   }
 
-  /** 其他设备凭同一 task 接管本货箱：清理引用该货箱的工位遥测引用后从表中取出（不销毁），实例交给接管方保持视觉连续。 */
+  /** 其他设备凭同一 task 接管本货箱：清理引用该货箱的工位遥测引用后从表中取出（不销毁），实例交给接管方保持视觉连续。
+   *  出站离台时启动承接冷却：step1→step2 排队平移须等离台货在接收方侧的承接平滑播完再启动。 */
   detachClaimedCargoByKey(key: string): LiftCargoRuntimeEntry | null {
     const cargo = this.state.liftCargoMeshes.get(key);
     if (!cargo) return null;
     for (const { model } of this.host.collectModels()) {
       for (const station of model.liftTelemetry.stations) {
-        if (station.cargoKey === key) this.clearLiftStationState(station);
+        if (station.cargoKey === key) {
+          this.clearLiftStationState(station);
+          model.liftTelemetry.outgoingHandoffCooldown = CARGO_HANDOFF_SECONDS;
+        }
       }
     }
     this.state.liftCargoMeshes.delete(key);

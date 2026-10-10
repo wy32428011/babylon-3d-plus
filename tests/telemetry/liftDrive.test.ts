@@ -333,10 +333,16 @@ test('送料侧 step2 先出，step1 平移到后端锚点后再出', () => {
     assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null);
     h.models.COUT.conveyorTelemetry.cargoCode = null; // 模拟下游把 A 运走
 
-    // 下一帧：step2 空 + step1 有货 → B rekey 到 step2，从 step1 锚点平移
+    // 下一帧：step2 空 + step1 有货，但承接冷却（CARGO_HANDOFF_SECONDS）未结束 → B 不得立即平移，
+    // 等离台的 A 在接收方侧承接平滑播完再启动，避免两货动画并发（视觉上 step1 先动）
     h.applyLift(outgoing);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null, '承接冷却期内不得启动 step1→step2 平移');
+    assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, JSON.stringify(['LIFT1', 0]), 'B 必须仍在 step1');
+
+    // 冷却结束后：B rekey 到 step2，从 step1 锚点平移
+    runFrames(h, outgoing, 10);
     const back = h.liftModel.liftTelemetry.stations[1];
-    assert.equal(back.cargoKey, JSON.stringify(['LIFT1', 1]), 'step1 货必须 rekey 到 step2');
+    assert.equal(back.cargoKey, JSON.stringify(['LIFT1', 1]), '冷却结束后 step1 货必须 rekey 到 step2');
     assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, null, 'step1 必须已清空');
     assert.ok(back.transferActive && !back.cargoOnBoard, '平移插值必须进行中');
 
@@ -412,30 +418,31 @@ test('work_state=2 补齐取货动画：取货插值直接推满上台', () => {
   }
 });
 
-test('work_state=3 接收方忙时滞留重试，work_state=5 补齐放货动画，接收方空闲后交付', () => {
+test('work_state=3 接收方忙时货留 step2 锚点原位等待（不预播送出动画），接收方空闲后交付', () => {
   const h = makeHarness();
   try {
     const { a } = adoptTwoCargos(h);
 
-    // 送料层到位（work_state=3），但 COUT 被占用：A 进入放货插值并滞留
+    // 送料层到位（work_state=3），但 COUT 被占用：A 滞留 step2 锚点原位，不进入任何送出插值
     h.models.COUT.conveyorTelemetry.cargoCode = 'cargo';
     const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
     runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
     const back = h.liftModel.liftTelemetry.stations[1];
     assert.equal(h.delivered.length, 0, '接收方忙不得交付');
-    assert.ok(back.transferActive && back.transferDirection === -1, '必须进入放货插值');
-    const progressAfterArrival = back.transferProgress;
+    assert.equal(back.cargoOnBoard, true, '货必须留在 step2 锚点');
+    assert.equal(back.transferActive, false, '接收方忙时不得启动送出插值（避免滑入输送线撞上在机货）');
 
-    runFrames(h, outgoing, 3);
-    assert.ok(back.transferProgress < progressAfterArrival, '放货插值必须向输送线端推进');
+    runFrames(h, outgoing, 5);
+    assert.equal(h.delivered.length, 0, '接收方忙持续不得交付');
     assert.equal(h.state.liftCargoMeshes.size, 2, '滞留期间货物不得销毁');
+    assert.ok(Math.abs(a.root.position.x - STATION_OFFSET) < 1e-6, '滞留期间货必须停在 step2 锚点原位');
 
-    // work_state=5：放货动画补齐到输送线端，接收方仍忙则继续滞留
-    h.applyLift({ reference_upper_step: 2, level_upper: 2, work_state: 5 });
-    assert.equal(back.transferProgress, 0, 'work_state=5 必须把放货进度推到输送线端');
+    // work_state=5 同为卸货门控：接收方忙仍锚点等待
+    runFrames(h, { reference_upper_step: 2, level_upper: 2, work_state: 5 }, 3);
     assert.equal(h.delivered.length, 0, '接收方忙仍不得交付');
+    assert.equal(back.cargoOnBoard, true, 'work_state=5 下仍须留锚点等待');
 
-    // 接收方空闲 + 回到 work_state=3：交付成功（A 先出，B 仍在 step1）
+    // 接收方空闲 + 回到 work_state=3：当帧交付（A 先出，B 仍在 step1——承接冷却期内不平移）
     h.models.COUT.conveyorTelemetry.cargoCode = null;
     h.applyLift(outgoing);
     assert.deepEqual(h.delivered, [a], '接收方空闲后必须交付 step2 的 A');
@@ -630,15 +637,16 @@ test('输送线先取（订阅波 pull）：探测登记触达 lift，step2 货�
     // COUT 接手走行：A 走到轨迹终点
     runConveyorToEnd(h, a);
 
-    // ws=3：B 平移到 step2，COUT 仍占货 → 进入放货插值滞留（不丢货不悬空）
+    // ws=3：承接冷却（A 被拉走时触发）期内 B 不得启动平移；冷却随帧消退后 B 平移到 step2，
+    // COUT 仍占货 → B 在 step2 锚点原位等待（不丢货不悬空不预滑）
     const delivering = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
     h.applyLift(delivering);
-    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, JSON.stringify(['LIFT1', 1]), 'ws=3 必须触发 B 平移到 step2');
-    runUntil(
-      h,
-      delivering,
-      () => h.liftModel.liftTelemetry.stations[1].transferDirection === -1 && h.liftModel.liftTelemetry.stations[1].transferActive,
-    );
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null, '承接冷却期内不得启动 step1→step2 平移');
+    runFrames(h, lifting, 10);
+    h.applyLift(delivering);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, JSON.stringify(['LIFT1', 1]), '冷却结束后 ws=3 必须触发 B 平移到 step2');
+    runUntil(h, delivering, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].transferActive, false, '接收方忙时不得启动送出插值');
     assert.equal(h.delivered.length, 0, 'COUT 占用期间 B 不得交付');
     assert.equal(h.state.liftCargoMeshes.size, 1, 'B 滞留期间不得销毁');
 
@@ -678,6 +686,38 @@ test('提升机先给 + 输送线后接 task：匿名交付滞留，新 task 复
     runUntil(h, delivering, () => h.delivered.length === 2);
     assert.deepEqual(h.delivered, [a, b], '交付顺序必须 step2 先、step1 后');
     assert.equal(h.state.liftCargoMeshes.size, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('回归：lift 持同 task 标注在途货不触发规则三销毁——先交付的匿名滞留货必须复用盖戳', () => {
+  const h = makeHarness();
+  try {
+    const { a, b } = adoptTwoCargos(h);
+
+    // ws=5 升送料层：step2 的 A 当场匿名交付给无 task 的 COUT（交付早于接收方 task 边沿）
+    const delivering = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
+    runUntil(h, delivering, () => h.delivered.length === 1);
+    assert.equal(a.task, '');
+    assert.equal(h.models.COUT.conveyorTelemetry.cargoCode, 'cargo');
+
+    // lift 滞留的 B 被 task_num_fin 标注为 12（实测数据：step1 货 rekey 到 step2 后被 task_num_fin_second_up 改写）
+    h.applyLift({ ...delivering, task_num_fin_first_up: 12 });
+    assert.equal(b.task, '12');
+
+    // COUT 后接到 task 12：上游探测命中 lift 的同 task 标注货也不得销毁 A，必须复用盖戳
+    h.applyConveyor('COUT', { task: 12 });
+    assert.equal(h.models.COUT.conveyorTelemetry.cargoCode, 'cargo', 'lift 持同 task 标注货不得触发规则三销毁在机货');
+    assert.equal(a.task, '12', '滞留箱必须复用盖新 task');
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '不得销毁或新建货箱');
+    assert.ok(h.state.liftCargoMeshes.size > 0, 'lift 上的 B 必须保持原状');
+
+    // A 走到轨迹终点 → 被下游取走 → B 接续交付：实物排队顺序不丢
+    runConveyorToEnd(h, a);
+    ejectConveyorCargo(h);
+    runUntil(h, delivering, () => h.delivered.length === 2);
+    assert.deepEqual(h.delivered, [a, b], '交付顺序必须 step2 先、step1 后');
   } finally {
     h.dispose();
   }
