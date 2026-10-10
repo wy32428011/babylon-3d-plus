@@ -61,7 +61,8 @@ async function createFactoryFixture() {
 }
 
 const modelPath = await createFactoryFixture();
-const server = await createServer({ server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
+const server = await createServer({ cacheDir: 'node_modules/.vite-scene-theme-smoke', optimizeDeps: { entries: ['tests/fixtures/sceneTheme.harness.tsx'] },
+  server: { host: '127.0.0.1', port: 0, strictPort: false, hmr: false } });
 // 预览仅连接本地 MQTT 握手 fixture，证明预览链路而不代表业务 Broker 验收。
 const broker = new WebSocketServer({ noServer: true });
 server.httpServer.on('upgrade', (request, socket, head) => {
@@ -148,6 +149,34 @@ try {
       }
       return { visiblePixels, meanBrightness: totalBrightness / (pixels.length / 4), brightnessRange: max - min };
     }, png.toString('base64'));
+  }
+  async function environmentPixelEvidence(normal) {
+    let background;
+    await page.evaluate(() => window.sceneThemeHarness.environmentRoot().setEnabled(false));
+    try { background = await canvasImage(); }
+    finally { await page.evaluate(() => window.sceneThemeHarness.environmentRoot().setEnabled(true)); await waitForFrame(); }
+    const evidence = await page.evaluate(async images => {
+      const decoded = await Promise.all(images.map(async data => {
+        const image = new Image(); image.src = 'data:image/png;base64,' + data; await image.decode();
+        const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+        const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+        return ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      }));
+      let maskPixels = 0, visiblePixels = 0, clippedPixels = 0, min = 255, max = 0;
+      for (let i = 0; i < decoded[0].length; i += 4) {
+        const difference = Math.abs(decoded[0][i] - decoded[1][i]) + Math.abs(decoded[0][i + 1] - decoded[1][i + 1])
+          + Math.abs(decoded[0][i + 2] - decoded[1][i + 2]);
+        if (difference <= 18) continue;
+        const brightness = (decoded[0][i] + decoded[0][i + 1] + decoded[0][i + 2]) / 3;
+        maskPixels++; if (brightness > 20) visiblePixels++;
+        if (decoded[0][i] > 250 && decoded[0][i + 1] > 250 && decoded[0][i + 2] > 250) clippedPixels++;
+        min = Math.min(min, brightness); max = Math.max(max, brightness);
+      }
+      return { maskPixels, visiblePixels, brightnessRange: max - min, clippedFraction: maskPixels ? clippedPixels / maskPixels : 1 };
+    }, [normal.toString('base64'), background.toString('base64')]);
+    assert.ok(evidence.maskPixels > 5000 && evidence.visiblePixels > evidence.maskPixels * .5
+      && evidence.brightnessRange > 20 && evidence.clippedFraction < .1, '环境模型实际像素可辨认且不过曝：' + JSON.stringify(evidence));
+    return evidence;
   }
 
   await page.evaluate(() => window.sceneThemeHarness.camera());
@@ -326,15 +355,131 @@ try {
   await page.evaluate(() => window.sceneThemeHarness.store.getState().undo());
   await page.waitForFunction(() => window.sceneThemeHarness.meshes().every(mesh => !mesh.material?.unlit && !mesh.material?.disableLighting));
   await page.screenshot({ path: path.join(output, 'final.png') });
+
+  const presets = await page.evaluate(async () => (await import('/src/editor/model/sceneTheme.ts')).SCENE_THEME_PRESETS);
+  assert.equal(presets.length, 5);
+  const presetResults = [];
+  async function renderSnapshot() {
+    return page.evaluate(() => {
+      const scene = window.sceneThemeHarness.scene(), main = scene.lights.filter(light => light.name === '__SceneThemeMain');
+      return { mainLights: main.length, mainColor: main[0]?.diffuse.toHexString().toLowerCase(),
+        backgroundColor: scene.clearColor.toHexString().slice(0, 7).toLowerCase(),
+        exposure: scene.imageProcessingConfiguration.exposure, fogMode: scene.fogMode,
+        lightCount: scene.lights.length, pipelines: scene.postProcessRenderPipelineManager.supportedPipelines
+          .filter(pipeline => pipeline.name === 'sceneThemeBloom').length,
+        root: window.sceneThemeHarness.environmentRoot().uniqueId };
+    });
+  }
+  for (const [index, preset] of presets.entries()) {
+    const search = page.locator('#project-library-search');
+    await search.fill(preset.name);
+    const presetCard = page.getByRole('button', { name: new RegExp(preset.name) });
+    await presetCard.waitFor();
+    for (const other of presets.filter(other => other.id !== preset.id))
+      assert.equal(await page.getByRole('button', { name: new RegExp(other.name) }).count(), 0, '搜索只显示匹配主题');
+    await search.fill('');
+    const before = await page.evaluate(() => {
+      const harness = window.sceneThemeHarness, state = harness.store.getState();
+      return { theme: state.scene.sceneSettings.theme, history: state.history.undoStack.length,
+        entities: JSON.stringify(state.scene.entities), root: harness.environmentRoot().uniqueId };
+    });
+    const beforeLoads = glbRequests;
+    if (index % 2) await presetCard.dragTo(page.locator('canvas').first());
+    else await presetCard.click();
+    await page.waitForFunction(id => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme?.presetId === id, preset.id);
+    await waitForFrame();
+    assert.match(await presetCard.innerText(), /当前使用/);
+    assert.equal(await page.evaluate(() => JSON.stringify(window.sceneThemeHarness.store.getState().scene.entities)), before.entities);
+    const rendered = await renderSnapshot();
+    assert.equal(rendered.root, before.root); assert.equal(rendered.mainLights, 1);
+    assert.equal(rendered.mainColor, preset.settings.mainColor); assert.equal(rendered.backgroundColor, preset.settings.backgroundColor);
+    assert.equal(rendered.exposure, preset.settings.exposure); assert.equal(rendered.fogMode !== 0, preset.settings.fogEnabled);
+    assert.equal(rendered.pipelines, 0, '切换主题清除上一套 Bloom');
+    assert.equal(glbRequests, beforeLoads, '切换主题复用已加载模型');
+    const history = await page.evaluate(() => window.sceneThemeHarness.store.getState().history.undoStack.length);
+    assert.equal(history, before.history + (before.theme?.presetId === preset.id ? 0 : 1));
+    await presetCard.click();
+    assert.equal(await page.evaluate(() => window.sceneThemeHarness.store.getState().history.undoStack.length), history);
+    assert.equal((await renderSnapshot()).lightCount, rendered.lightCount);
+    if (before.theme?.presetId !== preset.id) {
+      await page.evaluate(() => window.sceneThemeHarness.store.getState().undo());
+      assert.deepEqual(await page.evaluate(() => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme), before.theme);
+      await page.evaluate(() => window.sceneThemeHarness.store.getState().redo());
+      await page.waitForFunction(id => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme?.presetId === id, preset.id);
+    }
+    const png = await canvasImage('editor-' + preset.id + '.png'), visibility = await environmentPixelEvidence(png);
+    const exposureInput = page.getByLabel('曝光', { exact: true });
+    if (!await exposureInput.isVisible()) await page.locator('.scene-theme-group > summary').filter({ hasText: '画面与光晕' }).click();
+    const adjustedExposure = Number((preset.settings.exposure + .15).toFixed(2));
+    await exposureInput.fill(String(adjustedExposure)); await exposureInput.press('Enter');
+    assert.match(await presetCard.innerText(), /已调整/);
+    const content = await page.evaluate(() => window.sceneThemeHarness.save());
+    await page.evaluate(value => window.sceneThemeHarness.reopen(value), content);
+    await page.waitForFunction(() => window.sceneThemeHarness.ready());
+    await page.evaluate(() => { window.sceneThemeHarness.store.getState().selectEntity(null); window.sceneThemeHarness.camera(); });
+    assert.equal(await page.evaluate(() => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme.exposure), adjustedExposure);
+    await page.getByRole('button', { name: '恢复主题默认值', exact: true }).click();
+    assert.deepEqual(await page.evaluate(() => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme), preset.settings);
+    assert.doesNotMatch(await presetCard.innerText(), /已调整/);
+    await page.evaluate(() => window.sceneThemeHarness.setReadOnly(true)); await waitForFrame();
+    assert.equal(await presetCard.isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '恢复主题默认值', exact: true }).isDisabled(), true);
+    await page.evaluate(() => window.sceneThemeHarness.setReadOnly(false));
+    // 单独注入忙状态验证入口约束，实际静态阴影更新另在下方走完整渲染流程。
+    await page.evaluate(() => window.sceneThemeHarness.store.setState({ shadowBakeStatus: { phase: 'baking', message: 'fixture' } }));
+    await waitForFrame(); assert.equal(await presetCard.isDisabled(), true);
+    await page.evaluate(id => window.sceneThemeHarness.store.getState().applySceneTheme(id), presets[(index + 1) % presets.length].id);
+    assert.equal(await page.evaluate(() => window.sceneThemeHarness.store.getState().scene.sceneSettings.theme.presetId), preset.id);
+    await page.evaluate(() => window.sceneThemeHarness.store.setState({ shadowBakeStatus: { phase: 'idle', message: null } }));
+    const started = await page.evaluate(() => window.sceneThemeHarness.store.getState().startRuntimePreview());
+    assert.equal(started.ok, true, JSON.stringify(started));
+    await page.waitForFunction(() => window.sceneThemeHarness.store.getState().runtimeMode === 'preview');
+    assert.equal(await presetCard.isDisabled(), true);
+    await page.evaluate(() => window.sceneThemeHarness.camera());
+    const previewImage = await canvasImage('preview-' + preset.id + '.png');
+    const previewVisibility = await environmentPixelEvidence(previewImage);
+    assert.equal((await renderSnapshot()).mainColor, preset.settings.mainColor);
+    await page.evaluate(() => window.sceneThemeHarness.store.getState().stopRuntimePreview());
+    await page.waitForFunction(() => window.sceneThemeHarness.store.getState().runtimeMode === 'edit');
+    presetResults.push({ id: preset.id, rendered, visibility, previewVisibility });
+  }
+
+  // 检查真实阴影像素，并验证改变主题的太阳方向会使已有静态快照过期。
+  await page.evaluate(() => window.sceneThemeHarness.store.getState().updateShadowSettings({ enabled: true, mode: 'realtime', quality: 'quality' }));
+  const shadowOn = await canvasImage('realtime-shadow.png');
+  const realShadowMaps = await page.evaluate(() => window.sceneThemeHarness.scene().lights
+    .filter(light => light.isEnabled() && light.getShadowGenerator?.()?.getShadowMap()?.renderList?.length > 0).length);
+  assert.ok(realShadowMaps > 0, '实时阴影必须有实际投射物和阴影贴图');
+  await page.evaluate(() => window.sceneThemeHarness.store.getState().updateShadowSettings({ enabled: false }));
+  const shadowOff = await canvasImage('realtime-no-shadow.png');
+  const shadowDifference = await compareImages(shadowOn, shadowOff);
+  assert.ok(shadowDifference.changedPixels > 50, '实时阴影在实际画布可见：' + JSON.stringify(shadowDifference));
+  await page.evaluate(() => window.sceneThemeHarness.store.getState().updateShadowSettings({ enabled: true, mode: 'baked' }));
+  await page.getByRole('button', { name: '更新阴影', exact: true }).click();
+  await page.waitForFunction(() => window.sceneThemeHarness.store.getState().shadowBakeStatus.phase !== 'baking', null, { timeout: 90000 });
+  const firstBake = await page.evaluate(() => ({ status: window.sceneThemeHarness.store.getState().shadowBakeStatus,
+    bake: window.sceneThemeHarness.store.getState().scene.sceneSettings.shadows.bake }));
+  assert.equal(firstBake.status.phase, 'idle', JSON.stringify(firstBake.status)); assert.ok(firstBake.bake?.surfaces.length > 0);
+  await canvasImage('baked-dusk.png');
+  await page.getByRole('button', { name: /工业日光/ }).click();
+  await page.getByText('已过期', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '更新阴影', exact: true }).click();
+  await page.waitForFunction(() => window.sceneThemeHarness.store.getState().shadowBakeStatus.phase !== 'baking', null, { timeout: 90000 });
+  const secondBake = await page.evaluate(() => ({ status: window.sceneThemeHarness.store.getState().shadowBakeStatus,
+    bake: window.sceneThemeHarness.store.getState().scene.sceneSettings.shadows.bake }));
+  assert.equal(secondBake.status.phase, 'idle', JSON.stringify(secondBake.status));
+  assert.notEqual(secondBake.bake.signature, firstBake.bake.signature);
+  await page.getByText('可用', { exact: true }).waitFor(); await canvasImage('baked-daylight-updated.png');
   assert.deepEqual(errors, []);
   await writeFile(path.join(output, 'result.json'), JSON.stringify({ ok: true, nightDifference, exposureDifference, zeroBloomDifference, bloomDifference,
     bloomOn, bloomOff, originalPipeline, disabledPipeline, cameraSwitches, warmLight,
-    originalLoads, glbRequests, errors, checks: ['real-glb-pbr', 'theme-card-click', 'real-card-drag', 'no-extra-entities',
+    presetResults, shadowDifference, bakeSignatures: [firstBake.bake.signature, secondBake.bake.signature],
+    originalLoads, glbRequests, errors, checks: ['five-theme-search-click-drag-preview-reopen-reset', 'baking-lock', 'realtime-shadow-pixels', 'static-shadow-theme-expiry-update', 'real-glb-pbr', 'theme-card-click', 'real-card-drag', 'no-extra-entities',
       'single-undo', 'idempotent-apply', 'exposure-pixels', 'bloom-on-off-visible', 'bloom-zero-no-double-processing',
       'bloom-background-preserved', 'active-camera-switch-no-pipeline-leak', 'warm-work-light-ui', 'environment-lighting-toggle', 'no-glb-reload',
       'save-reopen', 'read-only', 'preview-lock', 'reset-defaults', 'disable-restores-light-count', 'disable-undo'] }, null, 2));
   await page.evaluate(() => window.sceneThemeHarness.dispose());
-  console.log('PASS: 科技蓝夜景主题点击/拖放、可见画面、参数、撤销、保存重开、只读与运行预览。');
+  console.log('PASS: 五主题搜索/点击/拖放、固定相机画面、撤销、保存重开、只读/烘焙/预览限制及实时/静态阴影。');
 } catch (error) {
   if (page) await page.screenshot({ path: path.join(output, 'failure.png') }).catch(() => undefined);
   throw error;

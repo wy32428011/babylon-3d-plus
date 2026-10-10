@@ -2,7 +2,11 @@ import { getConveyorArrowThumbnail } from './conveyorArrowThumbnails';
 import { getLightThumbnail } from './lightThumbnails';
 import { LIGHT_DESCRIPTIONS } from '../model/lightSettings';
 import techBlueNightThumbnailUrl from '../../assets/images/tech-blue-night.svg';
-import { SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
+import industrialDaylightThumbnailUrl from '../../assets/images/industrial-daylight.svg';
+import graphiteNeutralThumbnailUrl from '../../assets/images/graphite-neutral.svg';
+import tealNightThumbnailUrl from '../../assets/images/teal-night.svg';
+import warmGoldDuskThumbnailUrl from '../../assets/images/warm-gold-dusk.svg';
+import { SCENE_THEME_PRESETS, isSceneThemePresetId, type SceneThemePresetId } from '../model/sceneTheme';
 import type { BuiltInImageAsset } from '../../assets/imageAssets';
 import autoPatrolThumbnailUrl from '../../assets/images/auto-patrol.png';
 import { BUILT_IN_IMAGE_ASSETS } from '../../assets/imageAssets';
@@ -35,7 +39,7 @@ export type ImportedProjectLibraryItem = ProjectLibraryItemBase & {
 };
 
 export type SceneThemeProjectLibraryItem = ProjectLibraryItemBase & {
-  sceneThemePresetId: typeof SCENE_THEME_PRESET_ID;
+  sceneThemePresetId: SceneThemePresetId;
 };
 
 export type EnvironmentLightProjectLibraryItem = ProjectLibraryItemBase & {
@@ -142,6 +146,14 @@ const EXISTING_EFFECT_COMPONENT_ITEMS: BuiltInProjectLibraryItem[] = [
   { id: 'effect-camera-flight', name: '镜头飞行', icon: 'ring', subtitle: '镜头动画 · 自动巡检', thumbnailUrl: autoPatrolThumbnailUrl, builtIn: { kind: 'auto-patrol' } },
 ];
 
+const SCENE_THEME_THUMBNAILS: Record<SceneThemePresetId, string> = {
+  'tech-blue-night': techBlueNightThumbnailUrl,
+  'industrial-daylight': industrialDaylightThumbnailUrl,
+  'graphite-neutral': graphiteNeutralThumbnailUrl,
+  'teal-night': tealNightThumbnailUrl,
+  'warm-gold-dusk': warmGoldDuskThumbnailUrl,
+};
+
 export const PROJECT_LIBRARIES: ProjectLibrary[] = [
   {
     key: 'model',
@@ -183,7 +195,14 @@ export const PROJECT_LIBRARIES: ProjectLibrary[] = [
     searchLabel: '主题名称',
     searchPlaceholder: '请输入主题名称...',
     items: [
-      { id: 'theme-tech-blue', name: '科技蓝夜景', icon: 'panel', subtitle: '冷蓝底光 · 清晰夜景', thumbnailUrl: techBlueNightThumbnailUrl, sceneThemePresetId: SCENE_THEME_PRESET_ID },
+      ...SCENE_THEME_PRESETS.map((preset): SceneThemeProjectLibraryItem => ({
+        id: preset.id === 'tech-blue-night' ? 'theme-tech-blue' : `theme-${preset.id}`,
+        name: preset.name,
+        icon: 'panel',
+        subtitle: preset.subtitle,
+        thumbnailUrl: SCENE_THEME_THUMBNAILS[preset.id],
+        sceneThemePresetId: preset.id,
+      })),
       { id: 'theme-dark-city', name: '暗色城市', icon: 'ring' },
       { id: 'theme-energy', name: '能源监控', icon: 'marker' },
       { id: 'theme-command', name: '指挥中心', icon: 'panel' },
@@ -313,7 +332,7 @@ export function createSkyboxLibraryItems(skyboxAssets: ProjectSkyboxAssetEntry[]
 
 /** 主题卡片应用场景配置，不创建层级实体。 */
 export function isSceneThemeProjectLibraryItem(item: ProjectLibraryItem): item is SceneThemeProjectLibraryItem {
-  return 'sceneThemePresetId' in item && item.sceneThemePresetId === SCENE_THEME_PRESET_ID;
+  return 'sceneThemePresetId' in item && isSceneThemePresetId(item.sceneThemePresetId);
 }
 
 export function isEnvironmentLightProjectLibraryItem(item: ProjectLibraryItem): item is EnvironmentLightProjectLibraryItem {

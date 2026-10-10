@@ -3,7 +3,8 @@ import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } 
 import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from '../model/sceneOpeningAnimation';
 import { updateSceneOpeningAnimationCommand } from '../commands/sceneOpeningAnimationCommands';
 import { compositionDescendants } from '../composition/composition';
-import { createTechBlueNightTheme, normalizeSceneTheme, TECH_BLUE_NIGHT_SHADOWS, type SceneThemeSettings } from '../model/sceneTheme';
+import { createSceneTheme, getSceneThemePreset, normalizeSceneTheme, type SceneThemePresetId, type SceneThemeSettings } from '../model/sceneTheme';
+import { isScenePreparationActive } from '../loading/scenePreparationProgress';
 import { updateSceneThemeCommand } from '../commands/sceneThemeCommands';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../assets/mergeModelAssetUpdate';
 import { restoreFailedSceneResources, type FailedSceneResources } from '../assets/restoreFailedSceneResources';
@@ -629,7 +630,7 @@ type EditorState = {
   consumeGroupInspectorTransformRequest: (requestId: string) => void;
   createMesh: (meshKind: MeshKind, placementPosition?: Vector3Data) => void;
   createLocator: (placementPosition?: Vector3Data) => void;
-  applySceneTheme: () => void;
+  applySceneTheme: (presetId?: SceneThemePresetId) => void;
   updateSceneTheme: (patch: Partial<SceneThemeSettings>) => void;
   clearSceneTheme: () => void;
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
@@ -731,6 +732,15 @@ function guardRuntimePreviewMutation(state: EditorState, actionLabel: string): E
     ...state,
     logs: prependLog(state.logs, `运行预览只读：已阻止${actionLabel}。`),
   };
+}
+
+/** 主题会同时改变全局光照，资源准备或阴影烘焙期间保持参数快照稳定。 */
+function guardSceneThemeMutation(state: EditorState, actionLabel: string): EditorState | null {
+  if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, actionLabel);
+  const reason = isScenePreparationActive() || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading'
+    ? '场景准备中'
+    : state.shadowBakeStatus.phase === 'baking' ? '静态阴影烘焙中' : null;
+  return reason ? { ...state, logs: prependLog(state.logs, reason + '：已阻止' + actionLabel + '。') } : null;
 }
 
 function createLog(message: string): EditorLog {
@@ -2973,20 +2983,30 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     });
   },
-  applySceneTheme: () => {
+  applySceneTheme: presetId => {
     set(state => {
-      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '应用场景主题');
+      const blocked = guardSceneThemeMutation(state, '应用场景主题');
+      if (blocked) return blocked;
+      let theme: SceneThemeSettings;
+      let preset: ReturnType<typeof getSceneThemePreset>;
+      try {
+        theme = createSceneTheme(presetId);
+        preset = getSceneThemePreset(theme.presetId);
+      } catch (error) {
+        return { logs: prependLog(state.logs, error instanceof Error ? error.message : String(error)) };
+      }
       const settings = state.scene.sceneSettings;
       const before = { theme: settings.theme ?? null, shadows: settings.shadows };
-      const after = { theme: createTechBlueNightTheme(), shadows: { ...settings.shadows, ...TECH_BLUE_NIGHT_SHADOWS } };
+      const after = { theme, shadows: { ...settings.shadows, ...preset.shadows } };
       if (JSON.stringify(before) === JSON.stringify(after)) return state;
-      return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(before, after, '应用科技蓝夜景')),
-        logs: prependLog(state.logs, '已应用科技蓝夜景，场景属性可继续微调；局部作业灯按位置放置。') };
+      return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(before, after, '应用' + preset.name)),
+        logs: prependLog(state.logs, '已应用' + preset.name + '，场景属性可继续微调；局部作业灯按位置放置。') };
     });
   },
   updateSceneTheme: patch => {
     set(state => {
-      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '调整场景主题');
+      const blocked = guardSceneThemeMutation(state, '调整场景主题');
+      if (blocked) return blocked;
       const settings = state.scene.sceneSettings;
       if (!settings.theme) return state;
       let theme: SceneThemeSettings | null;
@@ -2999,7 +3019,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   clearSceneTheme: () => {
     set(state => {
-      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '停用场景主题');
+      const blocked = guardSceneThemeMutation(state, '停用场景主题');
+      if (blocked) return blocked;
       const settings = state.scene.sceneSettings;
       if (!settings.theme) return state;
       return { ...executeCommand(state.scene, state.history, updateSceneThemeCommand(

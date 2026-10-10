@@ -21,6 +21,7 @@ import {
   getScenePreparationSnapshot,
   subscribeScenePreparation,
   isScenePreparationSettled,
+  isScenePreparationActive,
   reportSceneModelSyncProgress,
   settleSceneModelAssetRefresh,
   settleSceneRuntimeWithWarning,
@@ -95,7 +96,7 @@ import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE } from '../assets/dataPlatfor
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
-import { isTechBlueNightThemeAdjusted, SCENE_THEME_DRAG_MIME_TYPE } from '../model/sceneTheme';
+import { isSceneThemeAdjusted, SCENE_THEME_DRAG_MIME_TYPE } from '../model/sceneTheme';
 
 type LibraryStatus = {
   message: string;
@@ -279,6 +280,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const applySceneTheme = useEditorStore(state => state.applySceneTheme);
   const runtimeMode = useEditorStore(state => state.runtimeMode);
   const shadowBakePhase = useEditorStore(state => state.shadowBakeStatus.phase);
+  const environmentApplyPending = useEditorStore(state => Boolean(state.environmentApplyRequest));
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -295,6 +297,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const explicitSceneSyncRef = useRef<string | null>(null);
   const explicitSceneSyncHandlerRef = useRef<((syncLibrary?: boolean) => Promise<void>) | null>(null);
   const preparation = useSyncExternalStore(subscribeScenePreparation, getScenePreparationSnapshot, getScenePreparationSnapshot);
+  const scenePreparationActive = !preparation.completed && !preparation.editingAllowed;
   const autoLibrarySyncSessionRef = useRef<string | null>(null);
   const [isStartingLibrarySync, setIsStartingLibrarySync] = useState(false);
   const startingLibrarySyncSessionRef = useRef<string | null>(null);
@@ -1921,9 +1924,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
       return;
     }
     if (isSceneThemeProjectLibraryItem(item)) {
-      if (runtimeMode === 'edit' && shadowBakePhase !== 'baking') {
-        applySceneTheme();
-        useEditorStore.getState().selectEntity(null);
+      const state = useEditorStore.getState();
+      if (state.runtimeMode === 'edit' && state.shadowBakeStatus.phase !== 'baking' && !isScenePreparationActive()
+        && !state.environmentApplyRequest && state.environmentRuntimeSnapshot.phase !== 'loading') {
+        applySceneTheme(item.sceneThemePresetId);
+        state.selectEntity(null);
       }
       return;
     }
@@ -2013,7 +2018,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     if (isSceneThemeProjectLibraryItem(item)) {
-      if (runtimeMode !== 'edit' || shadowBakePhase === 'baking') { event.preventDefault(); return; }
+      const state = useEditorStore.getState();
+      if (state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking' || isScenePreparationActive()
+        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading') { event.preventDefault(); return; }
       event.dataTransfer.effectAllowed = 'copy';
       event.dataTransfer.setData(SCENE_THEME_DRAG_MIME_TYPE, item.sceneThemePresetId);
       event.dataTransfer.setData('text/plain', item.name);
@@ -2326,10 +2333,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const currentTheme = sceneDocument.sceneSettings.theme;
           const isCurrentTheme = isTheme && currentTheme?.presetId === item.sceneThemePresetId;
           const themeStatus = isCurrentTheme && currentTheme
-            ? isTechBlueNightThemeAdjusted(currentTheme, sceneDocument.sceneSettings.shadows) ? '当前使用 · 已调整' : '当前使用'
+            ? isSceneThemeAdjusted(currentTheme, sceneDocument.sceneSettings.shadows) ? '当前使用 · 已调整' : '当前使用'
             : item.subtitle;
           const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart || isTheme || isEnvironmentLight);
-          const isCardDisabled = props.readOnly || !isActionableItem || (isTheme && (runtimeMode !== 'edit' || shadowBakePhase === 'baking'));
+          const isCardDisabled = props.readOnly || !isActionableItem || (isTheme && (runtimeMode !== 'edit' || shadowBakePhase === 'baking'
+            || scenePreparationActive || environmentApplyPending || environmentRuntimeSnapshot.phase === 'loading'));
 
           return (
             <ResourceCard

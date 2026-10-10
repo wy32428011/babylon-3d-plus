@@ -75,6 +75,23 @@ Object.assign(window, { sceneThemeHarness: {
     const camera = scene()?.activeCamera as ArcRotateCamera;
     camera.setTarget(new Vector3(0, 2, 0));
     camera.alpha = -1.2; camera.beta = 1.15; camera.radius = 30;
+    if ((window as unknown as { sceneThemeFixtureFit?: boolean }).sceneThemeFixtureFit) {
+      const meshes = environmentRoot()?.getChildMeshes().filter(mesh => mesh.getTotalVertices() > 0) ?? [];
+      let min = new Vector3(Infinity, Infinity, Infinity), max = new Vector3(-Infinity, -Infinity, -Infinity);
+      for (const mesh of meshes) {
+        mesh.computeWorldMatrix(true);
+        const bounds = mesh.getBoundingInfo().boundingBox;
+        min = Vector3.Minimize(min, bounds.minimumWorld); max = Vector3.Maximize(max, bounds.maximumWorld);
+      }
+      if (meshes.length) {
+        camera.setTarget(min.add(max).scale(0.5));
+        const size = max.subtract(min);
+        // setTarget 会根据旧相机位置重算角度，适配中心后再固定俯视角。
+        camera.alpha = -1.2; camera.beta = 1.05;
+        camera.radius = Math.max(size.x, size.y, size.z) * 1.25;
+        camera.maxZ = Math.max(camera.maxZ, camera.radius * 10);
+      }
+    }
   },
   switchCamera,
   disposeAlternateCamera,

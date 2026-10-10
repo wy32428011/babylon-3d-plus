@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { isTechBlueNightThemeAdjusted, type SceneThemeSettings } from '../model/sceneTheme';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { getSceneThemePreset, isSceneThemeAdjusted, type SceneThemeSettings } from '../model/sceneTheme';
 import { useEditorStore } from '../store/editorStore';
+import { getScenePreparationSnapshot, subscribeScenePreparation } from '../loading/scenePreparationProgress';
 import './SceneThemePanel.css';
 import { CollapsibleFieldset } from '../ui/CollapsibleFieldset';
 
@@ -44,11 +45,17 @@ export function SceneThemePanel({ readOnly = false }: { readOnly?: boolean }) {
   const shadows = useEditorStore(state => state.scene.sceneSettings.shadows);
   const runtimeMode = useEditorStore(state => state.runtimeMode);
   const shadowBakePhase = useEditorStore(state => state.shadowBakeStatus.phase);
+  const environmentApplyPending = useEditorStore(state => Boolean(state.environmentApplyRequest));
+  const environmentRuntimePhase = useEditorStore(state => state.environmentRuntimeSnapshot.phase);
   const applyTheme = useEditorStore(state => state.applySceneTheme);
   const updateTheme = useEditorStore(state => state.updateSceneTheme);
   const clearTheme = useEditorStore(state => state.clearSceneTheme);
-  const disabled = readOnly || runtimeMode === 'preview' || shadowBakePhase === 'baking';
-  const adjusted = theme ? isTechBlueNightThemeAdjusted(theme, shadows) : false;
+  const preparation = useSyncExternalStore(subscribeScenePreparation, getScenePreparationSnapshot, getScenePreparationSnapshot);
+  const disabled = readOnly || runtimeMode === 'preview' || shadowBakePhase === 'baking'
+    || (!preparation.completed && !preparation.editingAllowed)
+    || environmentApplyPending || environmentRuntimePhase === 'loading';
+  const preset = theme ? getSceneThemePreset(theme.presetId) : null;
+  const adjusted = theme ? isSceneThemeAdjusted(theme, shadows) : false;
 
   function renderColor(key: ThemeColorKey, label: string) {
     if (!theme) return null;
@@ -73,15 +80,15 @@ export function SceneThemePanel({ readOnly = false }: { readOnly?: boolean }) {
   return (
     <CollapsibleFieldset title="场景主题" className="scene-theme-panel" disabled={disabled}>
       <div className="scene-theme-heading">
-        <strong>{theme ? '科技蓝夜景' : '保持当前配置'}</strong>
+        <strong>{preset ? preset.name : '保持当前配置'}</strong>
         {theme ? <span className="scene-theme-state">{adjusted ? '已调整' : '当前使用'}</span> : null}
       </div>
       {!theme ? (
-        <p className="muted">从主题库点击“科技蓝夜景”，或将主题卡片拖入场景，即可应用冷蓝底光与夜景氛围。</p>
+        <p className="muted">从主题库点击主题卡片，或将卡片拖入场景，即可应用对应的光照与环境氛围。</p>
       ) : (
         <>
           <div className="scene-settings-button-row">
-            <button type="button" onClick={applyTheme}>恢复主题默认值</button>
+            <button type="button" onClick={() => applyTheme(theme.presetId)}>恢复主题默认值</button>
             <button type="button" onClick={clearTheme}>停用主题</button>
           </div>
           <p className="muted">参数随场景保存。主光方向、强度、补光强度和阴影浓度在下方“阴影”中调整；主题接管半球光与方向光，点光源保持独立。</p>

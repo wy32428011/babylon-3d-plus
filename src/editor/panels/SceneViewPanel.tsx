@@ -97,7 +97,7 @@ import {
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
 import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
 import { getLightEditorCapabilities } from '../model/lightEditor';
-import { SCENE_THEME_DRAG_MIME_TYPE, SCENE_THEME_PRESET_ID } from '../model/sceneTheme';
+import { SCENE_THEME_DRAG_MIME_TYPE, isSceneThemePresetId } from '../model/sceneTheme';
 import {
   createAutoPatrolWaypointFromWorldPose,
   getAutoPatrolWaypointWorldPose,
@@ -1201,7 +1201,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (event.dataTransfer.types.includes(SCENE_THEME_DRAG_MIME_TYPE)) {
       event.preventDefault();
       const state = useEditorStore.getState();
-      event.dataTransfer.dropEffect = isScenePreparationActive() || state.shadowBakeStatus.phase === 'baking' ? 'none' : 'copy';
+      event.dataTransfer.dropEffect = isScenePreparationActive() || state.shadowBakeStatus.phase === 'baking'
+        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading' ? 'none' : 'copy';
       return;
     }
 
@@ -1236,9 +1237,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       event.preventDefault();
       clickSnapshotRef.current = null;
       const state = useEditorStore.getState();
-      if (isScenePreparationActive() || state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking') return;
-      if (event.dataTransfer.getData(SCENE_THEME_DRAG_MIME_TYPE) === SCENE_THEME_PRESET_ID) {
-        state.applySceneTheme();
+      if (isScenePreparationActive() || state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking'
+        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading') return;
+      const presetId = event.dataTransfer.getData(SCENE_THEME_DRAG_MIME_TYPE);
+      if (isSceneThemePresetId(presetId)) {
+        state.applySceneTheme(presetId);
         state.selectEntity(null);
       }
       return;

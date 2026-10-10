@@ -24,7 +24,7 @@ const deadline = setTimeout(() => {
   console.error('场景主题 SOURCE/DIST 双包验证超时');
   abortController.abort();
   void cleanup().catch(console.error).finally(() => app.exit(1));
-}, 120_000);
+}, 180_000);
 
 function lightSnapshot(scene) {
   return Object.values(scene.entities)
@@ -36,9 +36,9 @@ async function loadSceneModules() {
   // 仅构建本测试私有模块，不改写共享 dist 或 Viewer 构建产物。
   const entry = path.join(root, 'entry.mjs');
   await writeFile(entry, [
-    "export { createEmptySceneDocument, createMeshEntity, createLightEntity } from '../../src/editor/model/SceneDocument.ts';",
+    "export { createEmptySceneDocument, createMeshEntity, createLightEntity, sanitizeSceneEnvironment } from '../../src/editor/model/SceneDocument.ts';",
     "export { serializeScene, deserializeScene } from '../../src/editor/project/SceneSerializer.ts';",
-    "export { createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS } from '../../src/editor/model/sceneTheme.ts';",
+    "export { createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS, SCENE_THEME_PRESETS, createSceneTheme } from '../../src/editor/model/sceneTheme.ts';",
     "export { WARM_WORK_LIGHT_SETTINGS } from '../../src/editor/model/lightSettings.ts';",
   ].join('\n'));
   const { build } = await import('vite');
@@ -61,15 +61,31 @@ async function run() {
     }
     const { buildDigitalTwinSourcePackage } = await import('../../dist-electron/ipc/digitalTwinSourcePackage.js');
     const { buildDigitalTwinDistPackage } = await import('../../dist-electron/ipc/digitalTwinDistPackage.js');
+    const { authorizeAssetFile } = await import('../../dist-electron/ipc/assetRegistry.js');
     const {
-      createEmptySceneDocument, createMeshEntity, createLightEntity, serializeScene, deserializeScene,
-      createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS, WARM_WORK_LIGHT_SETTINGS,
+      createEmptySceneDocument, createMeshEntity, createLightEntity, sanitizeSceneEnvironment, serializeScene, deserializeScene,
+      createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS, SCENE_THEME_PRESETS, createSceneTheme, WARM_WORK_LIGHT_SETTINGS,
     } = await loadSceneModules();
+    const projectRoot = path.join(root, 'project');
+    const environmentPath = path.join(projectRoot, 'Assets/Environments/theme-fixture/factory.glb');
+    await mkdir(path.dirname(environmentPath), { recursive: true });
+    const factoryFixture = path.resolve('output/playwright/scene-theme/factory.glb');
+    try { await writeFile(environmentPath, await readFile(factoryFixture)); }
+    catch { throw new Error('缺少编辑器厂房 GLB，请先运行 node scripts/smoke-scene-theme.mjs。'); }
+    authorizeAssetFile(environmentPath);
+    const environmentUrl = 'editor-asset://local/' + encodeURIComponent(environmentPath);
     const scene = createEmptySceneDocument('科技蓝夜景双包验收');
+    scene.sceneSettings.environment = sanitizeSceneEnvironment({
+      packagePath: path.dirname(environmentPath), lengthUnit: 'meter', unitScaleToMeters: 1,
+      displayName: '主题验收厂房', placementMode: 'scene-base', visible: true, opacity: 1,
+      activeVariantUrl: environmentUrl, variants: [{ name: '默认厂房', sourcePath: environmentPath, sourceUrl: environmentUrl }],
+    });
+    scene.sceneSettings.shadows.enabled = false;
     scene.sceneSettings.theme = { ...createTechBlueNightTheme(), exposure: 1.27, fogStart: 125, fogEnd: 820, backgroundColor: '#0a1731' };
     scene.sceneSettings.shadows = { ...scene.sceneSettings.shadows, ...TECH_BLUE_NIGHT_SHADOWS };
-    const building = createMeshEntity('cube', { x: 0, y: 3, z: 0 });
-    building.components.transform.scale = { x: 12, y: 6, z: 9 };
+    const building = createMeshEntity('cube', { x: 0, y: 1, z: -6 });
+    building.components.transform.scale = { x: 2, y: 2, z: 2 };
+    building.components.meshRenderer.materialColor = '#87939f';
     const warmLight = createLightEntity('point', { x: 4, y: 5, z: -6 });
     warmLight.components.light = { ...WARM_WORK_LIGHT_SETTINGS, range: 24 };
     const hemiLight = createLightEntity('hemispheric');
@@ -91,13 +107,19 @@ async function run() {
     legacy.entityIds = [oldLight.id];
     legacy.entities = { [oldLight.id]: structuredClone(oldLight) };
 
-    const projectRoot = path.join(root, 'project');
     const scenesRoot = path.join(projectRoot, 'Scenes');
     await mkdir(scenesRoot, { recursive: true });
     const fixtures = [
       { name: 'main.scene.json', scene, content: serializeScene(scene) },
       { name: 'second.scene.json', scene: second, content: serializeScene(second) },
       { name: 'legacy.scene.json', scene: legacy, content: serializeScene(legacy) },
+      ...SCENE_THEME_PRESETS.filter(preset => preset.id !== 'tech-blue-night').map(preset => {
+        const themed = structuredClone(scene);
+        themed.name = preset.name + '双包验收';
+        themed.sceneSettings.theme = createSceneTheme(preset.id);
+        themed.sceneSettings.shadows = { ...themed.sceneSettings.shadows, ...preset.shadows };
+        return { name: preset.id + '.scene.json', scene: themed, content: serializeScene(themed) };
+      }),
     ];
     for (const fixture of fixtures) await writeFile(path.join(scenesRoot, fixture.name), fixture.content);
     const sourcePackage = await buildDigitalTwinSourcePackage({
@@ -107,7 +129,7 @@ async function run() {
       isPlatformImageReference: () => false, findSyncedImageForReference: async () => null,
       skyboxCacheDependencies: { getSharedProjectSkyboxRoot: () => null },
     });
-    assert.equal(sourcePackage.sceneCount, 3);
+    assert.equal(sourcePackage.sceneCount, 7);
     const distPackage = await buildDigitalTwinDistPackage({
       projectId: '123', publishName: '科技蓝夜景验收', sceneContent: sourcePackage.entrySceneContent,
       sourceResourceFiles: sourcePackage.resourceFiles, outputRoot: path.join(root, 'dist-output'), signal: abortController.signal,
@@ -143,13 +165,31 @@ async function run() {
     await mkdir(outputRoot, { recursive: true });
     const viewerRoot = path.join(outputRoot, 'viewer-' + Date.now());
     await distArchive.extract({ path: viewerRoot });
+    const viewerFixtures = [{ id: scene.sceneSettings.theme.presetId, viewerRoot, theme: scene.sceneSettings.theme }];
+    for (const fixture of fixtures.slice(3)) {
+      const built = await buildDigitalTwinDistPackage({
+        // 每套从打包前保存的完整本地快照导出；SOURCE ZIP 的便携相对路径不能当作本地项目路径重新导出。
+        projectId: '123', publishName: fixture.scene.name, sceneContent: fixture.content,
+        sourceResourceFiles: sourcePackage.resourceFiles, outputRoot: path.join(root, fixture.scene.sceneSettings.theme.presetId),
+        signal: abortController.signal,
+      });
+      const archive = await unzipper.Open.file(built.filePath);
+      const exported = JSON.parse(await readEntry(archive, 'project/scene.json')).scene;
+      assert.deepEqual(exported.sceneSettings.theme, fixture.scene.sceneSettings.theme, fixture.name + ' DIST 快照');
+      assert.deepEqual(exported.sceneSettings.shadows, fixture.scene.sceneSettings.shadows, fixture.name + ' DIST 光照和阴影');
+      assert.deepEqual(lightSnapshot(exported), lightSnapshot(fixture.scene), fixture.name + ' DIST 灯光');
+      const themedRoot = viewerRoot + '-' + fixture.scene.sceneSettings.theme.presetId;
+      await archive.extract({ path: themedRoot });
+      viewerFixtures.push({ id: fixture.scene.sceneSettings.theme.presetId, viewerRoot: themedRoot, theme: exported.sceneSettings.theme });
+    }
+    assert.equal(viewerFixtures.length, 5, '五套主题均使用实际生成的 DIST');
     await writeFile(path.join(outputRoot, 'packages-result.json'), JSON.stringify({
-      ok: true, viewerRoot, sourceScenes: fixtures.length, lightCount: lightSnapshot(scene).length,
+      ok: true, viewerRoot, viewerFixtures, sourceScenes: fixtures.length, lightCount: lightSnapshot(scene).length,
       distFiles: distPackage.fileCount, sourceBytes: sourcePackage.fileSize, distBytes: distPackage.fileSize,
       checks: ['source-main-theme-snapshot', 'source-second-zero-values', 'source-legacy-theme-absent',
-        'source-reopen', 'dist-theme-and-light-fields', 'dist-viewer-entry', 'source-not-mutated'],
+        'source-reopen', 'dist-theme-and-light-fields', 'dist-viewer-entry', 'source-not-mutated', 'five-theme-source-and-dist'],
     }, null, 2));
-    console.log('科技蓝夜景 SOURCE 三场景与 DIST 实际 ZIP：主题快照、零值、旧场景、扩展灯光和 SOURCE 重开验证通过');
+    console.log('五主题 SOURCE 七场景与五个实际 DIST ZIP：主题快照、零值、旧场景、扩展灯光和 SOURCE 重开验证通过');
     code = 0;
   } catch (error) {
     console.error(error);

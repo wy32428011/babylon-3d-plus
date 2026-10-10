@@ -31,7 +31,8 @@ await writeFile(entry, [
   "export { createEmptySceneDocument, sanitizeSceneEnvironment } from '../../src/editor/model/SceneDocument.ts';",
   "export { createCommandHistory } from '../../src/editor/commands/CommandHistory.ts';",
   "export { serializeScene, deserializeScene } from '../../src/editor/project/SceneSerializer.ts';",
-  "export { createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS } from '../../src/editor/model/sceneTheme.ts';",
+  "export { createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS, getSceneThemePreset } from '../../src/editor/model/sceneTheme.ts';",
+  "export { beginScenePreparation, skipSceneModelSync, beginSceneModelAssetRefresh, settleSceneModelAssetRefresh, settleSceneRuntimeWithWarning, allowScenePreparationEditing, getScenePreparationSnapshot } from '../../src/editor/loading/scenePreparationProgress.ts';",
   "export { WARM_WORK_LIGHT_SETTINGS } from '../../src/editor/model/lightSettings.ts';",
 ].join('\n'));
 await build({
@@ -44,18 +45,26 @@ await build({
 });
 const {
   useEditorStore, createEmptySceneDocument, sanitizeSceneEnvironment, createCommandHistory,
-  serializeScene, deserializeScene, createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS,
-  WARM_WORK_LIGHT_SETTINGS,
+  serializeScene, deserializeScene, createTechBlueNightTheme, TECH_BLUE_NIGHT_SHADOWS, getSceneThemePreset,
+  WARM_WORK_LIGHT_SETTINGS, beginScenePreparation, skipSceneModelSync, beginSceneModelAssetRefresh, settleSceneModelAssetRefresh, settleSceneRuntimeWithWarning, allowScenePreparationEditing, getScenePreparationSnapshot,
 } = await import(pathToFileURL(path.join(temporaryRoot, 'ssr/modules.mjs')).href);
 store = useEditorStore;
 originalState = store.getState();
 beforeEach(() => {
+  settlePreparationForFixture(getScenePreparationSnapshot().sceneSessionId);
   store.setState(originalState, true);
   store.setState({
     scene: createEmptySceneDocument('科技蓝夜景验收'), history: createCommandHistory(),
     runtimeMode: 'edit', hierarchySelectionIds: [], entityClipboard: null, logs: [],
   });
 });
+
+function settlePreparationForFixture(sessionId) {
+  skipSceneModelSync(sessionId, null);
+  beginSceneModelAssetRefresh(sessionId, 'theme-fixture-refresh');
+  settleSceneModelAssetRefresh(sessionId, null, 'theme-fixture-refresh');
+  settleSceneRuntimeWithWarning(sessionId, 'Node 夹具无需等待 WebGL 首帧', true);
+}
 
 function historyLength() { return store.getState().history.undoStack.length; }
 function selectedLight() {
@@ -79,6 +88,105 @@ test('应用主题只产生一次历史记录，重复应用不增加实体或�
   store.getState().applySceneTheme();
   assert.equal(historyLength(), 1);
   assert.deepEqual(store.getState().scene, applied);
+});
+
+const presetIds = ['tech-blue-night', 'industrial-daylight', 'graphite-neutral', 'teal-night', 'warm-gold-dusk'];
+
+for (const presetId of presetIds) {
+  test('应用主题并保存重开具体预设：' + presetId, () => {
+    store.getState().applySceneTheme(presetId);
+    assert.equal(store.getState().scene.sceneSettings.theme.presetId, presetId);
+    assert.equal(historyLength(), 1);
+    const applied = structuredClone(store.getState().scene.sceneSettings);
+    const preset = getSceneThemePreset(presetId);
+    assert.deepEqual(applied.theme, preset.settings);
+    for (const [key, value] of Object.entries(preset.shadows)) assert.equal(applied.shadows[key], value);
+    assert.equal(store.getState().history.undoStack[0].label, '应用' + preset.name);
+    assert.ok(store.getState().logs[0].message.includes(preset.name));
+    store.getState().applySceneTheme(presetId);
+    assert.equal(historyLength(), 1);
+    store.getState().updateSceneTheme({ exposure: 1.7, fogStart: 60, fogEnd: 1600 });
+    const adjusted = structuredClone(store.getState().scene.sceneSettings);
+    const reopened = deserializeScene(serializeScene(store.getState().scene));
+    assert.ok(adjusted.theme);
+    assert.deepEqual(reopened.sceneSettings.theme, adjusted.theme);
+    assert.deepEqual(reopened.sceneSettings.shadows, adjusted.shadows);
+    store.getState().applySceneTheme(presetId);
+    assert.deepEqual(store.getState().scene.sceneSettings, applied, '当前主题恢复对应默认值');
+    assert.equal(historyLength(), 3);
+    store.getState().undo();
+    assert.deepEqual(store.getState().scene.sceneSettings, adjusted);
+    store.getState().redo();
+    assert.deepEqual(store.getState().scene.sceneSettings, applied);
+  });
+}
+
+test('五套主题连续切换各产生一次历史，并保留阴影模式与质量', () => {
+  const customShadows = { ...store.getState().scene.sceneSettings.shadows, enabled: false, mode: 'realtime', quality: 'quality', catcherEnabled: false, distanceMeters: 300, bias: 0.002, normalBias: 0.015 };
+  store.setState({ scene: { ...store.getState().scene, sceneSettings: { ...store.getState().scene.sceneSettings, shadows: customShadows } } });
+  const snapshots = [structuredClone(store.getState().scene.sceneSettings)];
+  for (const presetId of presetIds) {
+    store.getState().applySceneTheme(presetId);
+    const settings = store.getState().scene.sceneSettings;
+    for (const key of ['enabled', 'mode', 'quality', 'catcherEnabled', 'distanceMeters', 'bias', 'normalBias', 'bake']) assert.deepEqual(settings.shadows[key], customShadows[key], key);
+    assert.equal(settings.theme.presetId, presetId);
+    snapshots.push(structuredClone(settings));
+  }
+  assert.equal(historyLength(), presetIds.length);
+  for (let i = snapshots.length - 2; i >= 0; i--) {
+    store.getState().undo();
+    assert.deepEqual(store.getState().scene.sceneSettings, snapshots[i]);
+  }
+  for (let i = 1; i < snapshots.length; i++) {
+    store.getState().redo();
+    assert.deepEqual(store.getState().scene.sceneSettings, snapshots[i]);
+  }
+});
+
+for (const statePatch of [
+  { environmentApplyRequest: { id: 'theme-guard-request' } },
+  { environmentRuntimeSnapshot: { phase: 'loading' } },
+  { shadowBakeStatus: { phase: 'baking', message: '正在生成静态阴影' } },
+]) {
+  test('准备中或阴影烘焙中保护主题和历史：' + Object.keys(statePatch)[0], () => {
+    store.getState().applySceneTheme();
+    const before = structuredClone(store.getState().scene);
+    const count = historyLength();
+    assert.ok(before.sceneSettings.theme);
+    assert.equal(count, 1);
+    store.setState(statePatch);
+    store.getState().applySceneTheme('industrial-daylight');
+    store.getState().updateSceneTheme({ exposure: 2 });
+    store.getState().clearSceneTheme();
+    assert.deepEqual(store.getState().scene, before);
+    assert.equal(historyLength(), count);
+    for (const [key, value] of Object.entries(statePatch)) assert.deepEqual(store.getState()[key], value);
+  });
+}
+
+test('全局模型准备期间阻止主题入口，允许继续编辑后恢复', () => {
+  store.getState().applySceneTheme();
+  const before = structuredClone(store.getState().scene);
+  const count = historyLength();
+  beginScenePreparation('theme-model-preparation');
+  store.getState().applySceneTheme('teal-night');
+  store.getState().updateSceneTheme({ exposure: 2 });
+  store.getState().clearSceneTheme();
+  assert.deepEqual(store.getState().scene, before);
+  assert.equal(historyLength(), count);
+  settlePreparationForFixture('theme-model-preparation');
+  allowScenePreparationEditing('theme-model-preparation', true);
+  store.getState().applySceneTheme('teal-night');
+  assert.equal(store.getState().scene.sceneSettings.theme.presetId, 'teal-night');
+  assert.equal(historyLength(), count + 1);
+});
+
+test('非法预设不会破坏场景和历史，错误信息明确', () => {
+  const before = structuredClone(store.getState().scene);
+  store.getState().applySceneTheme('unknown-theme');
+  assert.deepEqual(store.getState().scene, before);
+  assert.equal(historyLength(), 0);
+  assert.match(store.getState().logs[0].message, /主题|预设/);
 });
 
 test('应用、参数微调和停用都可单步撤销重做，微调不修改原始预设', () => {
@@ -110,6 +218,7 @@ test('主题保存实际快照，重开保留手动曝光、雾和背景配置',
   store.getState().applySceneTheme();
   store.getState().updateSceneTheme({ exposure: 1.3, fogStart: 75, fogEnd: 850, backgroundColor: '#0c1b30', skyboxVisible: true });
   const expected = structuredClone(store.getState().scene.sceneSettings.theme);
+  assert.ok(expected);
   const content = serializeScene(store.getState().scene);
   const reopened = deserializeScene(content);
   assert.deepEqual(reopened.sceneSettings.theme, expected);

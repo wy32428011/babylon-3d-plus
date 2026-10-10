@@ -21,9 +21,10 @@ const hooks = registerHooks({
 });
 const { SceneEnvironmentEffects } = await import('../../src/runtime/babylon/effects/SceneEnvironmentEffects.ts');
 const { createDefaultPoiEffectComponent } = await import('../../src/editor/model/poiEffect.ts');
-const { createTechBlueNightTheme } = await import('../../src/editor/model/sceneTheme.ts');
+const { createTechBlueNightTheme, SCENE_THEME_PRESETS } = await import('../../src/editor/model/sceneTheme.ts');
+const { SceneThemeRuntime } = await import('../../src/runtime/babylon/SceneThemeRuntime.ts');
 hooks.deregister();
-const { NullEngine, Scene, ArcRotateCamera, Vector3, MeshBuilder, HemisphericLight } = await import('@babylonjs/core');
+const { NullEngine, Scene, ArcRotateCamera, Vector3, MeshBuilder, HemisphericLight, Color3 } = await import('@babylonjs/core');
 function setup(t) {
   const engine = new NullEngine(); const scene = new Scene(engine);
   const camera = new ArcRotateCamera('camera', 1, 1, 20, Vector3.Zero(), scene);
@@ -130,3 +131,56 @@ for (const order of ['fog-theme-clear-theme-clear-fog', 'fog-theme-clear-fog-cle
     assert.deepEqual({ mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity }, initial);
   });
 }
+
+test('五套固定主题暂停昼夜时间与亮度，停用主题恢复并最终还原场景基线', t => {
+  const { scene, effects } = setup(t);
+  const fill = new HemisphericLight('EditorLight', Vector3.Up(), scene); fill.intensity = 1.4;
+  scene.environmentIntensity = .85;
+  const runtime = new SceneThemeRuntime(scene);
+  t.after(() => runtime.dispose());
+  const day = createDefaultPoiEffectComponent('day-night');
+  day.visual.loop = true; day.visual.duration = 4;
+  effects.sync('day', day, true);
+  effects.tick(1);
+  assert.ok(Math.abs(fill.intensity - 1.4 * .54) < 1e-6);
+  effects.setThemeActive(true);
+  for (const preset of SCENE_THEME_PRESETS) {
+    runtime.sync(preset.settings, preset.shadows);
+    effects.setThemeFog(preset.settings);
+    for (let i = 0; i < 3; i++) effects.tick(.5);
+    assert.equal(fill.intensity, preset.shadows.fillIntensity);
+    assert.equal(runtime.mainLight.intensity, preset.shadows.sunIntensity);
+    assert.equal(scene.environmentIntensity, preset.settings.environmentIntensity);
+    assert.equal(effects.getStatus('day').status, 'occupied');
+  }
+  runtime.sync(null, SCENE_THEME_PRESETS[0].shadows);
+  effects.setThemeActive(false); effects.setThemeFog(null); effects.tick(1);
+  assert.ok(Math.abs(fill.intensity - 1.4 * .08) < 1e-6);
+  assert.ok(Math.abs(scene.environmentIntensity - .85 * .08) < 1e-6);
+  assert.equal(effects.getStatus('day').status, 'active');
+  effects.sync('day', day, false); effects.tick(.1);
+  assert.equal(fill.intensity, 1.4);
+  assert.equal(scene.environmentIntensity, .85);
+});
+
+test('显式雾覆盖五套主题，释放后恢复每套最新雾配置且完全停用回到原始值', t => {
+  const { scene, effects } = setup(t);
+  scene.fogStart = 29; scene.fogEnd = 1900; scene.fogDensity = .032;
+  const baseline = { mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity };
+  const fog = createDefaultPoiEffectComponent('environment-fog');
+  fog.primaryColor = '#eeaabb'; fog.visual.radius = 37;
+  for (const preset of SCENE_THEME_PRESETS) {
+    effects.sync('fog', fog, true); effects.tick(.1);
+    effects.setThemeFog(preset.settings); effects.tick(.1);
+    assert.equal(scene.fogMode, Scene.FOGMODE_LINEAR);
+    assert.equal(scene.fogStart, fog.visual.radius);
+    assert.deepEqual(scene.fogColor.asArray(), Color3.FromHexString(fog.primaryColor).asArray());
+    effects.sync('fog', fog, false); effects.tick(.1);
+    assert.equal(scene.fogMode, preset.settings.fogEnabled ? Scene.FOGMODE_LINEAR : Scene.FOGMODE_NONE);
+    assert.equal(scene.fogStart, preset.settings.fogStart);
+    assert.equal(scene.fogEnd, preset.settings.fogEnd);
+    assert.deepEqual(scene.fogColor.asArray(), Color3.FromHexString(preset.settings.fogColor).asArray());
+  }
+  effects.setThemeFog(null); effects.tick(.1);
+  assert.deepEqual({ mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity }, baseline);
+});
