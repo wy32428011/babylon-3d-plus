@@ -32,6 +32,47 @@ test('持续资源变化最多尝试三轮', async () => {
   assert.equal(calls, 3);
 });
 
+test('资源快照凭据失效后重新捕获场景并使用新的发布请求 ID', async () => {
+  const events: string[] = [];
+  let sequence = 0;
+  const outcome = await publishWithResourceRetry({
+    createRequestId: () => `snapshot-${++sequence}`, assertCurrent: () => {},
+    prepare: async id => { events.push(`capture:${id}`); return `builtin-skybox-${sequence}`; },
+    publish: async (id, scene) => {
+      events.push(`publish:${id}:${scene}`);
+      if (sequence === 1) throw new Error("Error invoking remote method 'digital-twin-publish:start': DigitalTwinApiError: DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID: 资源快照无效、已过期或不属于当前项目，请重新同步");
+      return { status: 'completed', errorCode: null };
+    },
+  });
+  assert.equal(outcome.result.status, 'completed');
+  assert.equal(outcome.sceneContent, 'builtin-skybox-2');
+  assert.deepEqual(events, ['capture:snapshot-1', 'publish:snapshot-1:builtin-skybox-1',
+    'capture:snapshot-2', 'publish:snapshot-2:builtin-skybox-2']);
+});
+
+test('失效快照作为发布结果返回时也重新准备，持续失效最多三轮', async () => {
+  let calls = 0;
+  const outcome = await publishWithResourceRetry({ createRequestId: () => String(++calls), assertCurrent: () => {},
+    prepare: async () => 'builtin-skybox',
+    publish: async () => ({ status: 'conflict', errorCode: 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID' }) });
+  assert.equal(calls, 3);
+  assert.equal(outcome.result.errorCode, 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID');
+});
+
+test('重新捕获时快照持续失效会保留错误，取消后不会再准备', async () => {
+  let calls = 0;
+  await assert.rejects(publishWithResourceRetry({ createRequestId: () => String(++calls), assertCurrent: () => {},
+    prepare: async () => { throw new Error('DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID: 请重新同步'); },
+    publish: async () => { assert.fail('无有效快照不能上传'); } }), /DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID/);
+  assert.equal(calls, 3);
+  calls = 0;
+  let canceled = false;
+  await assert.rejects(publishWithResourceRetry({ createRequestId: () => String(++calls),
+    assertCurrent: () => { if (canceled) throw new Error('canceled'); }, prepare: async () => 'skybox',
+    publish: async () => { canceled = true; return { status: 'conflict', errorCode: 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID' }; } }), /canceled/);
+  assert.equal(calls, 1);
+});
+
 test('准备期间取消或切换场景不会上传', async () => {
   let canceled = false;
   await assert.rejects(publishWithResourceRetry({ createRequestId: () => 'one', assertCurrent: () => { if (canceled) throw Error('canceled'); },

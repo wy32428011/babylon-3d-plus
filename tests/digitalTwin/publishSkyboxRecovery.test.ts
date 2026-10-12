@@ -29,6 +29,24 @@ test('未授权外部文件不能复制', async t => {
   const f = await fixture(t); const sourcePath = path.join(f.root, 'old.hdr'); await fs.writeFile(sourcePath, hdr);
   await assert.rejects(recoverPublishSkyboxReference({ ...f, isAuthorizedLocalFile: () => false, skybox: { sourcePath, format: 'hdr' } }), /授权/);
 });
+
+test('本地有效天空盒替换旧版本与旧中台身份，不查询远端且保留显示参数', async t => {
+  const f = await fixture(t);
+  const sourcePath = path.join(f.root, 'Skybox-12', 'current.hdr');
+  await fs.mkdir(path.dirname(sourcePath)); await fs.writeFile(sourcePath, hdr);
+  const skybox = { sourcePath, sourceUrl: 'old', packagePath: path.dirname(sourcePath),
+    dataPlatformResourceId: '99', assetRevision: 'a'.repeat(64), format: 'exr', intensity: 0.7, resolution: 256, rotationY: 1.3 };
+  const before = structuredClone(skybox);
+  const result = await recoverPublishSkyboxReference({ ...f, skybox,
+    dependencies: { queryRecords: async () => { assert.fail('本地文件有效时无需查询中台'); } } });
+  assert.ok(result.sourcePath.startsWith(f.sharedResourcesRoot + path.sep));
+  assert.equal(result.skybox.assetRevision, hash);
+  assert.equal(result.skybox.format, 'hdr');
+  assert.equal(Object.hasOwn(result.skybox, 'dataPlatformResourceId'), false);
+  assert.equal(result.skybox.intensity, 0.7); assert.equal(result.skybox.resolution, 256); assert.equal(result.skybox.rotationY, 1.3);
+  assert.deepEqual(await fs.readFile(result.sourcePath), hdr); assert.deepEqual(await fs.readFile(sourcePath), hdr);
+  assert.deepEqual(skybox, before);
+});
 test('缺失但无稳定身份不能凭文件名下载', async t => {
   const f = await fixture(t);
   await assert.rejects(recoverPublishSkyboxReference({ ...f, skybox: { sourcePath: path.join(f.root, '天空盒.hdr'), format: 'hdr' } }), /身份|对应/);
@@ -51,7 +69,8 @@ test('稳定资源缺失可从同源接口下载并校验SHA', async t => {
   assert.equal(remote.sourcePath, result.sourcePath);
   const withoutId = { ...result.skybox }; delete (withoutId as Record<string, unknown>).dataPlatformResourceId;
   const inferred = await recoverPublishSkyboxReference({ ...f, skybox: withoutId, dependencies });
-  assert.equal(inferred.recovered, true); assert.equal(inferred.skybox.dataPlatformResourceId, '12');
+  assert.equal(inferred.recovered, true); assert.equal(Object.hasOwn(inferred.skybox, 'dataPlatformResourceId'), false);
+  assert.deepEqual(await fs.readFile(inferred.sourcePath), hdr);
   assert.equal(downloads, 1, '内容匹配的已完整校验缓存不得再次触发全库同步');
 });
 test('重复稳定ID和不符合旧SHA的远端版本均拒绝', async t => {

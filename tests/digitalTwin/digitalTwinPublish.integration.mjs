@@ -6,6 +6,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { app } from 'electron';
 import unzipper from 'unzipper';
+import { createServer as createViteServer } from 'vite';
 
 const PROJECT_ID = '2054201280000000001';
 const EDITOR_PROJECT_ID = '2054201280000000101';
@@ -293,6 +294,7 @@ class DigitalTwinMockServer {
     this.resourceDetailIdOverride = null;
     this.resourceSnapshotsSupported = false;
     this.resourceSnapshots = new Map();
+    this.invalidateNextSnapshotAt = null;
     this.snapshotResourceFixtures = [];
     this.rawRemoteModelData = null;
   }
@@ -380,6 +382,7 @@ class DigitalTwinMockServer {
         this.resourceSnapshots.set(snapshot.resourceSnapshotToken, snapshot);
         this.sendSuccess(response, snapshot);
       } else {
+        if (this.rejectInvalidSnapshot(response, body, 'validate')) return;
         const snapshot = this.resourceSnapshots.get(body.resourceSnapshotToken);
         assert.ok(snapshot, 'validate只能验证capture得到的token');
         assert.equal(snapshot.projectId, body.projectId);
@@ -534,6 +537,7 @@ class DigitalTwinMockServer {
     assert.match(body.distPackage.sha256, SHA256_PATTERN);
     assert.ok(body.sourcePackage.fileSize > 0);
     assert.ok(body.distPackage.fileSize > 0);
+    if (body.resourceSnapshotToken && this.rejectInvalidSnapshot(response, body, 'prepare')) return;
 
     if (body.requestId === MISSING_CONFIRM_REQUEST_ID && body.confirmResourceBindings !== true) {
       this.sendJson(response, {
@@ -588,7 +592,20 @@ class DigitalTwinMockServer {
       task.projectId = '2054201280000000999';
     }
     this.tasks.set(taskId, { task, sourceUploadId: sourceUpload.uploadId, distUploadId: distUpload.uploadId });
+    if (body.resourceSnapshotToken) this.resourceSnapshots.delete(body.resourceSnapshotToken);
     this.sendSuccess(response, task);
+  }
+
+  rejectInvalidSnapshot(response, body, action) {
+    if (this.invalidateNextSnapshotAt === action) {
+      this.invalidateNextSnapshotAt = null;
+      this.resourceSnapshots.delete(body.resourceSnapshotToken);
+    }
+    const snapshot = this.resourceSnapshots.get(body.resourceSnapshotToken);
+    if (snapshot?.projectId === body.projectId) return false;
+    this.sendJson(response, { success: false, code: 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID',
+      message: '资源快照无效、已过期或不属于当前项目，请重新同步', data: null }, 409);
+    return true;
   }
 
   createSession(requestId, packageType, descriptor) {
@@ -1909,6 +1926,86 @@ async function run() {
       progress => { if (progress.phase === 'saving' && progress.percent === 2) writeFileSync(scenePath, concurrentContent); }), /发生变化/);
     assert.equal(await readFile(scenePath, 'utf8'), concurrentContent, '长时间资源校验后的并发保存不能被发布旧快照覆盖');
     assert.equal(mock.requests.some(item => item.path.endsWith('/publish-tasks/prepare')), false);
+
+    // 使用实际内置 HDR 和 renderer 编排，覆盖空模型集合、凭据失效和完整双包上传。
+    const rendererModules = await createViteServer({ configFile: false, logLevel: 'error',
+      server: { watch: null }, optimizeDeps: { noDiscovery: true } });
+    try {
+      const { publishWithResourceRetry } = await rendererModules.ssrLoadModule('/src/editor/deployment/publishOrchestration.ts');
+      const { createEmptySceneDocument, createSkyboxEntity } = await rendererModules.ssrLoadModule('/src/editor/model/SceneDocument.ts');
+      const { serializeScene } = await rendererModules.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
+      const { repairPublishSceneSkyboxes } = await rendererModules.ssrLoadModule('/src/editor/deployment/repairPublishSceneSkyboxes.ts');
+      const { recoverPublishSceneResources } = await import('../../dist-electron/ipc/digitalTwinPublishResourceRecovery.js');
+      const { listBuiltinSkyboxAssets } = await import('../../dist-electron/ipc/builtinSkyboxAssets.js');
+      const [builtin] = await listBuiltinSkyboxAssets();
+      const builtinScene = createEmptySceneDocument('内置天空盒快照发布');
+      builtinScene.sceneSettings.shadows.enabled = false;
+      const skybox = createSkyboxEntity({ packagePath: builtin.packagePath, sourcePath: builtin.path,
+        sourceUrl: builtin.sourceUrl, format: builtin.format, assetRevision: builtin.assetRevision,
+        rotationDegrees: 37, intensity: 0.8, resolution: 256 });
+      builtinScene.entityIds.push(skybox.id);
+      builtinScene.entities[skybox.id] = skybox;
+      Object.assign(skybox.components.skybox, { assetRevision: 'a'.repeat(64), dataPlatformResourceId: PRIMARY_SKYBOX_ID });
+      const builtinContent = serializeScene(builtinScene);
+      mock.snapshotResourceFixtures = [];
+      mock.rawRemoteModelData = null;
+      for (const failureAt of ['validate', 'prepare', null]) {
+        await resetBinding(); mock.setRemoteStatus(createRemoteStatus()); mock.resetRequests();
+        await writeFile(scenePath, builtinContent);
+        await writeFile(secondaryPath, builtinContent);
+        mock.invalidateNextSnapshotAt = failureAt;
+        const builtinContext = await publishModule.getDigitalTwinPublishContext();
+        let attempt = 0;
+        let preparation;
+        let preparedScenes;
+        const outcome = await publishWithResourceRetry({
+          createRequestId: () => `builtin-snapshot-${failureAt ?? 'valid'}-${++attempt}`,
+          assertCurrent: () => {},
+          prepare: async requestId => {
+            preparation = await publishModule.prepareDigitalTwinPublishSceneSnapshots({ requestId,
+              targetToken: builtinContext.targetToken, projectId: PROJECT_ID, sceneContent: builtinContent }, new AbortController().signal);
+            preparedScenes = [];
+            for (const item of preparation.scenes) {
+              const recovery = await recoverPublishSceneResources(item.sceneContent, { baseUrl: mock.baseUrl,
+                projectRoot, sharedResourcesRoot, legacyWorkspaceRoot: workspaceRoot }, new AbortController().signal, () => {});
+              const repaired = repairPublishSceneSkyboxes(JSON.parse(item.sceneContent).scene, recovery);
+              assert.equal(repaired.restoredCount, 1, '旧天空盒身份及摘要应直接替换为当前本地发布副本');
+              preparedScenes.push({ sceneId: item.sceneId, sceneContent: serializeScene(repaired.scene) });
+            }
+            return preparedScenes.find(item => item.sceneId === preparation.scenes.find(scene => scene.isEntry).sceneId).sceneContent;
+          },
+          publish: (requestId, content) => publishModule.publishDigitalTwin(createPublishRequest(requestId, content,
+            { targetToken: builtinContext.targetToken, preparationId: preparation.preparationId, preparedScenes }), new AbortController().signal, () => {}),
+        });
+        assert.equal(outcome.result.status, 'completed');
+        assert.equal(attempt, failureAt ? 2 : 1, '失效凭据必须以新requestId重新准备，正常凭据只发布一次');
+        const captures = mock.requests.filter(item => item.path.endsWith('/resource-snapshots/capture'));
+        assert.equal(captures.length, attempt);
+        assert.equal(new Set(captures.map(item => JSON.stringify(item.body))).size, 1, '重试仍限定原项目和空资源集合');
+        assert.deepEqual([captures[0].body.modelIds, captures[0].body.envModelIds, captures[0].body.comboModelIds], [[], [], []]);
+        const successfulRequestId = `builtin-snapshot-${failureAt ?? 'valid'}-${attempt}`;
+        const uploadedRequestIds = [...new Set(mock.requests.filter(item => item.path.includes('/chunks/'))
+          .map(item => mock.getSession(/\/uploads\/(\d+)\//.exec(item.path)[1]).requestId))];
+        assert.ok([...mock.tasks.values()].filter(item => item.task.requestId.startsWith(`builtin-snapshot-${failureAt ?? 'valid'}-`))
+          .every(item => item.task.requestId === successfulRequestId), '失效凭据不能创建发布任务');
+        assert.deepEqual(uploadedRequestIds, [successfulRequestId], '仅新凭据允许上传');
+        for (const type of ['SOURCE', 'DIST']) {
+          const entries = await readZipEntries(mock.getUploadedPackage(successfulRequestId, type));
+          const hdrs = [...entries].filter(([name]) => /\.hdr$/i.test(name));
+          assert.equal(hdrs.length, 1, `${type}只包含一份实际引用的内置天空盒`);
+          assert.equal(sha256(hdrs[0][1]), builtin.assetRevision);
+          const packed = JSON.parse(entries.get(type === 'SOURCE' ? 'Scenes/main.scene.json' : 'project/scene.json').toString('utf8'));
+          const packedSkybox = packed.scene.entities[skybox.id];
+          assert.equal(packedSkybox.components.skybox.intensity, 0.8);
+          assert.equal(packedSkybox.components.skybox.resolution, 256);
+          assert.equal(Object.hasOwn(packedSkybox.components.skybox, 'dataPlatformResourceId'), false);
+          assert.equal(packedSkybox.components.skybox.assetRevision, builtin.assetRevision);
+          assert.deepEqual(packedSkybox.components.transform.rotation, skybox.components.transform.rotation);
+        }
+        assert.equal(await readFile(secondaryPath, 'utf8'), builtinContent, '重试不写回其他场景');
+        assert.equal(mock.requests.some(item => item.path.endsWith('/skyboxes/query')), false, '本地文件有效时不因旧中台资源匹配阻断');
+      }
+    } finally { await rendererModules.close(); }
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
@@ -1919,6 +2016,11 @@ async function run() {
         'snapshot-rejects-stale-http-bytes-with-unchanged-url-and-metadata',
         'snapshot-proves-uploaded-managed-model-payload-sha256',
         'snapshot-late-scene-save-cas-preserves-user-edit',
+        'builtin-skybox-empty-resource-snapshot-full-publish',
+        'builtin-skybox-invalid-validate-snapshot-recaptured',
+        'builtin-skybox-invalid-prepare-snapshot-new-request',
+        'builtin-skybox-source-dist-sha256-parameters-preserved',
+        'builtin-skybox-stale-platform-id-and-revision-replaced-by-local-file',
         'missing-target-resource-blocks-scene-save-runtime-config-package-and-upload',
         'mismatched-target-resource-id-rejected-before-save',
         'publish-target-token-same-target-confirmation-retry',

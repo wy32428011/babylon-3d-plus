@@ -6,6 +6,8 @@ import { createTimelineOpeningVisual, type OpeningControlledVisual, type Opening
 import { getPackageTimelineFrame, resolveOpeningStage } from './openingPackageTimeline.ts';
 import { createReferenceOpening } from './reference';
 import { getReferenceOpeningFrame } from './referenceOpeningTimeline.ts';
+import { createPrismaticOpeningVisual } from './PrismaticOpeningVisual';
+import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
 
 type Frame = ReturnType<typeof getReferenceOpeningFrame> | ReturnType<typeof getPackageTimelineFrame>;
 export type OpeningVisualPlan = {
@@ -33,7 +35,8 @@ function referenceSettings(settings: SceneOpeningAnimationSettings, binding: Ope
 }
 
 /** 只有内置受控渲染器可被包选中；资源及实例参数均经协议验证。 */
-export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings, reducedMotion: boolean): OpeningVisualPlan {
+export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings, reducedMotion: boolean,
+  getEnvironmentSnapshot?: () => OpeningEnvironmentSnapshot): OpeningVisualPlan {
   if (settings.template !== 'package') {
     const frameAt = (seconds: number) => getReferenceOpeningFrame(seconds, settings.reference);
     return {
@@ -68,7 +71,11 @@ export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings,
       let visual: OpeningControlledVisual | null = null;
       let disposed = false;
       const ready = (async () => {
-        if (reference) {
+        if (binding.definition.manifest.renderer === 'prismatic-genesis') {
+          if (!getEnvironmentSnapshot) throw new Error('当前播放器尚未提供场景环境模型，无法播放棱镜创生开场。');
+          visual = createPrismaticOpeningVisual(container, { stages, values: binding.config.values,
+            environment: getEnvironmentSnapshot(), allowSkip: settings.allowSkip, reducedMotion, controls });
+        } else if (reference) {
           const urls: string[] = [];
           let next = 1;
           await Promise.all(Array.from({ length: 4 }, async () => {

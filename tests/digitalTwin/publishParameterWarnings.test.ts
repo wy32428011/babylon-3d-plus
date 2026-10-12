@@ -30,7 +30,7 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
     '../model/sceneShadowBake': 'export const getSceneShadowBakeError=()=>null;',
     '../project/SceneSerializer': 'export const deserializeScene=s=>JSON.parse(s).scene; export const serializeScene=scene=>JSON.stringify({version:5,scene});',
     '../../runtime/babylon/sceneRenderReadiness': 'export const waitForSceneRenderReady=async()=>{};',
-    '../../runtime/babylon/SceneRuntime': 'export class SceneRuntime { constructor(_scene,_log,_third,onEnvironment){onEnvironment({phase:"ready"});} sync(){} syncEnvironment(){} isModelReady(){return true;} getInitialLoadSnapshot(){return {progress:{loading:false}};} getPerformanceMetrics(){return {modelArrayBatchEntityCount:0};} dispose(){} }',
+    '../../runtime/babylon/SceneRuntime': 'export class SceneRuntime { constructor(_scene,_log,_third,onEnvironment){onEnvironment({phase:"ready"});} sync(document){globalThis.__publishWarningsTest.renderedScene=document;} syncEnvironment(){} isModelReady(){return true;} getInitialLoadSnapshot(){return {progress:{loading:false}};} getPerformanceMetrics(){return {modelArrayBatchEntityCount:0};} dispose(){} }',
     '@babylonjs/core': 'export class ArcRotateCamera{} export class Engine { runRenderLoop(callback){callback();} stopRenderLoop(){} dispose(){} } export class Scene { render(){} dispose(){} } export class Vector3 { static Zero(){return {};} }',
   };
   try {
@@ -48,6 +48,23 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
     logs.length = 0;
     await module.preparePublishSceneSnapshot(JSON.stringify({ version: 5, scene: state.scene }), () => {}, state.pushLog);
     assert.equal(logs.length, 2); assert.deepEqual(state.sceneResourceIssues, []);
+    const skyboxScene = { ...state.scene, entityIds: ['sky'], entities: { sky: { id: 'sky', components: {
+      skybox: { sourcePath: 'old.hdr', assetRevision: 'old', dataPlatformResourceId: '99', intensity: 0.7 },
+    } } } };
+    const preparedSkybox = JSON.parse(await module.preparePublishSceneSnapshot(JSON.stringify({ version: 5, scene: skyboxScene }),
+      () => {}, state.pushLog, async (scene: any) => {
+        const next = structuredClone(scene);
+        Object.assign(next.entities.sky.components.skybox, { sourcePath: 'current.hdr', assetRevision: 'current' });
+        delete next.entities.sky.components.skybox.dataPlatformResourceId;
+        return next;
+      })).scene.entities.sky.components.skybox;
+    assert.equal(preparedSkybox.sourcePath, 'current.hdr');
+    assert.equal(preparedSkybox.assetRevision, 'current');
+    assert.equal(preparedSkybox.intensity, 0.7);
+    assert.equal(Object.hasOwn(preparedSkybox, 'dataPlatformResourceId'), false);
+    assert.equal((globalThis as any).__publishWarningsTest.renderedScene.entities.sky.components.skybox.sourcePath, 'current.hdr',
+      '其他SOURCE场景必须在渲染与烘焙前替换本地天空盒');
+    assert.equal(skyboxScene.entities.sky.components.skybox.sourcePath, 'old.hdr');
     resources.issues = [{ resourceKind: 'model', resourceId: '42', message: '真实模型文件下载失败' }];
     await assert.rejects(module.synchronizePublishScene('session', () => {}, state.pushLog), /真实模型文件下载失败/);
     await assert.rejects(module.preparePublishSceneSnapshot(JSON.stringify({ version: 5, scene: state.scene }), () => {}, state.pushLog), /真实模型文件下载失败/);

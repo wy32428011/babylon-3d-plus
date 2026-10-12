@@ -37,6 +37,7 @@ assets/
 
 - `reference-huishan`：保留原地球展开和九阶段参考效果，使用包内 `asset-1` 至 `asset-10`。阶段顺序固定；全球和国内业务停留可以为零，其余阶段至少 0.1 秒。参考底图中原有的烘焙文字仍属于图片像素，替换品牌时应提供干净底图。
 - `timeline`：按阶段列表组合图片、文字、Logo、UV 飞线、缩放平移和淡入淡出。支持不同阶段数量、顺序和时长；阶段时长为零表示略过该阶段。
+- `prismatic-genesis`：棱光核心、数据隧道、粒子汇聚与仓储展示四段开场。仓库由当前场景环境模型渲染，包不携带固定仓库图片或模型。四段 ID 和顺序固定为 `core / tunnel / assembly / showcase`，默认时长为 4 / 3 / 7 / 8 秒，另有 0.8 秒交接。可以调整时长，零秒略过该段，但至少保留一个非零分镜；不支持增删或重排。品牌文案、青色/品红/金色光效、播放器界面和画质可由包参数编辑。
 
 包只声明数据，不运行外部 JavaScript、HTML、CSS 或任意自定义 Shader。全新绘制算法需要新增受支持的渲染器和相应播放器版本。不得将支持声明式包描述为可运行任意网页插件。
 
@@ -103,3 +104,17 @@ node scripts/smoke-opening-package-runtime.mjs
 重点覆盖两种包与多场景配置隔离、保存重开和撤销、工程迁移、真实 SOURCE/DIST、版本冲突、损坏素材、编辑器与发布 Viewer 的实际中间画面、暂停/跳过/切场景后的相机与资源清理。
 
 本地夹具、构建和浏览器验证不等同于现场业务工程、中台线上部署或安装版验收。
+
+## 棱光创生开场包
+
+单独构建新包，不改变原两个示例包：
+
+```powershell
+node --experimental-strip-types scripts/build-prismatic-opening-package.mjs
+```
+
+输出 `output/opening-packages/prismatic-genesis-1.0.0.dtopening` 和同名 `.opening.zip`。在场景属性中导入并应用，配置有效环境模型后预览，保存后重新发布。封面仅显示核心和环形光效，仓库内容来自场景；缺失或读取失败时应退出开场并保留正常业务场景。Viewer 需重新构建或更新安装版，旧模板未声明该 renderer 时不会携带此开场。
+
+仓库画面读取已就绪、可见且不透明度大于零的环境模型几何快照，保留单位、摆放变换及普通/薄实例。开场独立使用霓虹材质，不改变业务环境的原材质或相机，也不重新下载 GLB。空间卡片使用模型的实际尺寸，不绑定视频里的示例业务数字。为限制双画布资源占用，几何副本最多 64 MiB、8192 个网格实例及 1200 万实例顶点；超限明确退出开场，不截断模型。
+
+新开场的本地验收入口为 `scripts/smoke-prismatic-opening.mjs`、`tests/digitalTwin/prismaticOpeningPublish.integration.mjs` 和 `scripts/smoke-prismatic-opening-viewer.mjs`。发布集成测试前需完成 Viewer/Electron 构建；编辑器验收脚本会生成测试环境 GLB。输出均位于 `output/playwright/prismatic-opening/`，使用程序生成的环境模型及本地接口夹具，不能替代用户实际业务场景与线上验收。

@@ -18,7 +18,7 @@ export type OpeningPackageStage = {
 export type OpeningPackageAsset = { id: string; path: string; type: 'image' | 'font'; size: number; sha256: string };
 export type OpeningPackageManifest = {
   formatVersion: 1; runtimeApiVersion: 1; id: string; version: string; name: string;
-  description?: string; renderer: 'reference-huishan' | 'timeline'; assets: OpeningPackageAsset[];
+  description?: string; renderer: 'reference-huishan' | 'timeline' | 'prismatic-genesis'; assets: OpeningPackageAsset[];
   previewAssetId?: string;
 };
 export type OpeningConfigField = {
@@ -139,6 +139,11 @@ function validateStages(value: unknown, definition: OpeningPackageDefinition): a
       }
     }
   }
+  if (definition.manifest.renderer === 'prismatic-genesis') {
+    const phases = ['core', 'tunnel', 'assembly', 'showcase'];
+    assert(value.length === phases.length && value.every((stage, index) => stage.id === phases[index]), '棱光创生必须保留核心、隧道、汇聚、展示四个分镜的顺序与 ID');
+    assert(value.some(stage => stage.durationSeconds > 0), '棱光创生至少一个分镜时长必须大于零');
+  }
   if (definition.manifest.renderer === 'reference-huishan') {
     assert(value.length === 9, '参考模板必须保留九个分镜');
     value.forEach((stage, index) => assert(stage.durationSeconds >= (index === 2 || index === 5 ? 0 : 0.1), '参考模板非业务分镜时长不能小于 0.1 秒'));
@@ -186,7 +191,7 @@ export function validateOpeningPackageDefinition(value: unknown): OpeningPackage
   assert(typeof m.version === 'string' && /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(m.version), '包版本必须是明确的三段版本号');
   assert(text(m.name, 160) && !!m.name, '包名称无效');
   if (m.description !== undefined) assert(text(m.description), '包说明必须是文字');
-  assert(m.renderer === 'timeline' || m.renderer === 'reference-huishan', '不支持此渲染器');
+  assert(m.renderer === 'timeline' || m.renderer === 'reference-huishan' || m.renderer === 'prismatic-genesis', '不支持此渲染器');
   assert(Array.isArray(m.assets) && m.assets.length <= OPENING_PACKAGE_MAX_ASSETS, '素材清单无效');
   const ids = new Set<string>(), paths = new Set<string>();
   let bytes = 0;

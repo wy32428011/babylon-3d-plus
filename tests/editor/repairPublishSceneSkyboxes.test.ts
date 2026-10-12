@@ -34,6 +34,18 @@ test('无替换时保留文档引用', () => {
   assert.equal(repairPublishSceneSkyboxes(scene, { replacements: [] } as any).scene, scene);
 });
 
+test('主进程返回本地发布副本时解除旧中台天空盒关联，保留渲染参数', () => {
+  const { scene, recovery } = fixture();
+  scene.sceneSettings.skybox.dataPlatformResourceId = '99';
+  scene.entities.sky.components.skybox.dataPlatformResourceId = '99';
+  const result = repairPublishSceneSkyboxes(scene, recovery);
+  assert.equal(Object.hasOwn(result.scene.sceneSettings.skybox, 'dataPlatformResourceId'), false);
+  assert.equal(Object.hasOwn(result.scene.entities.sky.components.skybox, 'dataPlatformResourceId'), false);
+  assert.equal(result.scene.entities.sky.components.skybox.intensity, 0.75);
+  assert.deepEqual(result.scene.entities.sky.components.transform, { x: 3 });
+  assert.equal(scene.entities.sky.components.skybox.dataPlatformResourceId, '99');
+});
+
 test('实体或源URL已变化时拒绝迟到恢复结果', () => {
   for (const change of ['entity', 'source']) {
     const { scene, recovery } = fixture();

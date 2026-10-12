@@ -77,6 +77,7 @@ const CONFLICT_CODES = new Set([
   'DIGITAL_TWIN_VERSION_CONFLICT',
   'DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT',
   'DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT',
+  'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID',
 ]);
 
 export type DigitalTwinPublishProgressHandler = (progress: DigitalTwinPublishProgress) => void;
@@ -398,7 +399,10 @@ export async function publishDigitalTwin(
   let prepared: Awaited<ReturnType<typeof validatePublishScenePreparation>>;
   try { prepared = await validatePublishScenePreparation(validated, selected, signal); }
   catch (error) {
-    if (error instanceof DigitalTwinApiError && CONFLICT_CODES.has(error.code)) return createTerminalResult(validated.requestId, 'conflict', { errorCode: error.code, message: error.message, errorData: error.data });
+    if (error instanceof DigitalTwinApiError && CONFLICT_CODES.has(error.code)) {
+      if (validated.preparationId) scenePreparations.delete(validated.preparationId);
+      return createTerminalResult(validated.requestId, 'conflict', { errorCode: error.code, message: error.message, errorData: error.data });
+    }
     throw error;
   }
   emit(onProgress, validated.requestId, 'saving', '正在核验目标中台的模型与环境资源 ID…', 0);

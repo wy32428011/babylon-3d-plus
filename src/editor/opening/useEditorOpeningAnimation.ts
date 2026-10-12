@@ -7,10 +7,12 @@ import type { BabylonViewport } from '../../runtime/babylon/createEngine';
 import type { OpeningSnapshot } from '../../runtime/opening/GeographicOpeningRuntime';
 import { createSceneOpeningPlayback } from '../../shared/opening/createSceneOpeningPlayback';
 import type { OpeningPlaybackCoordinator } from '../../shared/opening/OpeningPlaybackCoordinator';
+import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
 
 export function useEditorOpeningAnimation(options: {
   viewport: BabylonViewport | null; ready: boolean;
   sceneDocument: SceneDocument; sceneSessionId: string; isRuntimePreview: boolean;
+  getEnvironmentSnapshot?: () => OpeningEnvironmentSnapshot;
 }) {
   const { viewport, ready, sceneDocument, sceneSessionId, isRuntimePreview } = options;
   const settings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
@@ -61,6 +63,7 @@ export function useEditorOpeningAnimation(options: {
       }
       if (!container) throw new Error('开场展示容器尚未就绪。');
       const instance = createSceneOpeningPlayback({ container, settings: { ...config, enabled: true },
+        getEnvironmentSnapshot: current.getEnvironmentSnapshot,
         onActiveChange: value => { if (mounted.current) setActive(value); },
         onProgress: value => { if (mounted.current) setSnapshot(value); },
         onTerminal: () => {

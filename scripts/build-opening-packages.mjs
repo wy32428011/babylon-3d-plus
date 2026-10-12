@@ -26,7 +26,7 @@ ${Array.from({ length: 7 }, (_, i) => `<ellipse cx="1120" cy="440" rx="${100 + i
 <circle cx="1100" cy="460" r="220" fill="none" stroke="#317dba" stroke-opacity=".5"/>`);
 const logo = svg('<path d="M180 100 L600 100 L960 450 L600 800 L180 800 L540 450 Z" fill="#69dfff"/><path d="M730 100 L1110 100 L1460 450 L1110 800 L730 800 L1080 450 Z" fill="#e1f6ff"/>');
 
-async function writePackage(output, definition, assets) {
+export async function writePackage(output, definition, assets) {
   const folder = path.join(output, `${definition.manifest.id}-${definition.manifest.version}`);
   await mkdir(path.join(folder, 'assets'), { recursive: true });
   definition.manifest.assets = [];

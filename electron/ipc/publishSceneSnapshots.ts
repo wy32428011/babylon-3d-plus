@@ -134,7 +134,8 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
     if (!after || typeof after !== 'object' || Array.isArray(after)) throw new Error(`发布准备丢失了实例参数或绑定：${location}`);
     const oldRecord = before as Record<string, unknown>;
     const newRecord = after as Record<string, unknown>;
-    const resourceReference = typeof oldRecord.sourceUrl === 'string' || oldRecord.modelAsset !== undefined || oldRecord.assetId !== undefined;
+    const skyboxReference = location.endsWith('.components.skybox');
+    const resourceReference = skyboxReference || typeof oldRecord.sourceUrl === 'string' || oldRecord.modelAsset !== undefined || oldRecord.assetId !== undefined;
     const oldConfig = oldRecord.parameterConfig as { parameters?: Array<{ key?: string }> } | undefined;
     const newConfig = newRecord.parameterConfig as { parameters?: Array<{ key?: string }> } | undefined;
     const resourceChanged = oldRecord.sourceUrl !== newRecord.sourceUrl || oldRecord.assetRevision !== newRecord.assetRevision;
@@ -152,6 +153,7 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
       }
     }
     for (const [key, value] of Object.entries(oldRecord)) {
+      if (skyboxReference && ['dataPlatformResourceId', 'format'].includes(key)) continue;
       if ((resourceReference && RESOURCE_FIELDS.has(key)) || (key === 'modelArrayInstance' && location.endsWith('.components'))) continue;
       if (reconcileParameters && key === 'parameterValues') continue;
       compare(value, newRecord[key], `${location}.${key}`);

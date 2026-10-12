@@ -407,6 +407,10 @@ export function PlayerApp() {
       if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; modelEntrancePlayback?.start(); return; }
       const playback = createSceneOpeningPlayback({
         container: canvas.parentElement!, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
+        getEnvironmentSnapshot: () => {
+          if (!runtime) throw new Error('场景运行时尚未就绪，无法读取环境模型。');
+          return runtime.getOpeningEnvironmentSnapshot();
+        },
         waitUntilVisible: async signal => {
           const visible = await (openingBridge?.waitForHostVisible(signal) ?? Promise.resolve(true));
           if (!visible && !signal.aborted && !disposed) {

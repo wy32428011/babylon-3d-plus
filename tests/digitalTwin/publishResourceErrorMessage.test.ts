@@ -40,4 +40,9 @@ test('实际DigitalTwinApiError构造器保留code/data/httpStatus，只增强me
   assert.equal(error.data, data);
   assert.equal(error.httpStatus, 400);
   assert.equal(new ErrorClass('OTHER', '原始消息', data, 409).message, '原始消息');
+  for (const code of ['DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT', 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_CONFLICT', 'DIGITAL_TWIN_RESOURCE_SNAPSHOT_INVALID']) {
+    const snapshotError = new ErrorClass(code, '请重新同步', null, 409);
+    assert.equal(snapshotError.message, `${code}: 请重新同步`, 'Electron IPC仅保留message时仍能识别重新准备原因');
+    assert.equal(snapshotError.code, code);
+  }
 });

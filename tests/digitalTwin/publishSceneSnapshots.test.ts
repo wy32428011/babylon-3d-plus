@@ -120,6 +120,23 @@ test('只允许为原点击槽位的缺失设备类型新增真实目标，不�
   delete next.scene.entities.click;
   assert.throws(() => assertPublishSceneInstanceStatePreserved(JSON.stringify(previous), JSON.stringify(next)), /删除/);
 });
+
+test('天空盒发布副本可替换资源身份和实际格式，仍保护显示参数及实体变换', () => {
+  const previous: any = { version: 5, scene: { entityIds: ['sky'], entities: { sky: { id: 'sky', components: {
+    skybox: { sourcePath: 'old.exr', format: 'exr', dataPlatformResourceId: '12', assetRevision: 'old',
+      intensity: 0.7, resolution: 256, rotationY: 1.3 }, transform: { rotation: { y: 1.3 } },
+  } } } } };
+  const next = structuredClone(previous);
+  Object.assign(next.scene.entities.sky.components.skybox, { sourcePath: 'current.hdr', sourceUrl: 'local', format: 'hdr', assetRevision: 'current' });
+  delete next.scene.entities.sky.components.skybox.dataPlatformResourceId;
+  const check = () => assertPublishSceneInstanceStatePreserved(JSON.stringify(previous), JSON.stringify(next));
+  assert.doesNotThrow(check);
+  next.scene.entities.sky.components.skybox.intensity = 99;
+  assert.throws(check, /skybox.intensity/);
+  next.scene.entities.sky.components.skybox.intensity = 0.7;
+  next.scene.entities.sky.components.transform.rotation.y = 9;
+  assert.throws(check, /transform.rotation.y/);
+});
 test('发布准备完整收集场景并使用暂存替换，拒绝遗漏、重复及磁盘变化', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'publish-scenes-'));
   const signal = new AbortController().signal;

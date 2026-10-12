@@ -1,4 +1,4 @@
-/** 一次用户操作包含多个独立上传尝试；仅资源修订冲突可以自动重新对齐。 */
+/** 一次用户操作包含多个独立上传尝试；资源冲突或快照失效时重新准备全部场景。 */
 export async function publishWithResourceRetry<Result extends { status: string; errorCode: string | null }>(options: {
   createRequestId: () => string;
   assertCurrent: () => void;
@@ -24,7 +24,7 @@ export async function publishWithResourceRetry<Result extends { status: string; 
 
 function isResourceConflict(error: unknown): boolean {
   const detail = typeof error === 'string' ? error : error instanceof Error ? error.message : '';
-  return /\bDIGITAL_TWIN_RESOURCE_(?:REVISION|SNAPSHOT)_CONFLICT\b/.test(detail);
+  return /\bDIGITAL_TWIN_RESOURCE_(?:(?:REVISION|SNAPSHOT)_CONFLICT|SNAPSHOT_INVALID)\b/.test(detail);
 }
 
 /** 恢复发生在一次已就绪同步之后，必须先重开首帧门控，再提交新的文档。 */

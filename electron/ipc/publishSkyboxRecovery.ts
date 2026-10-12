@@ -23,7 +23,7 @@ export type PublishSkyboxRecoveryOptions = {
   };
 };
 
-/** 发布前将已授权外部天空盒固定到受管副本；缺失资源只按稳定身份向对应中台恢复。 */
+/** 发布以已授权的当前本地天空盒为准；文件缺失时才按稳定身份向对应中台恢复。 */
 export async function recoverPublishSkyboxReference(options: PublishSkyboxRecoveryOptions): Promise<{
   skybox: Skybox; sourcePath: string; recovered: boolean;
 }> {
@@ -34,9 +34,7 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
   const sharedRoot = path.resolve(options.sharedResourcesRoot);
   const sourcePath = readSourcePath(skybox);
   const explicitId = skybox.dataPlatformResourceId;
-  if (explicitId !== undefined && (typeof explicitId !== 'string' || !/^[1-9]\d{0,63}$/.test(explicitId))) throw new Error('天空盒资源 ID 无效。');
   const pathId = /(?:^|[\\/])Skybox-([1-9]\d{0,63})(?:[\\/]|$)/.exec(sourcePath ?? '')?.[1];
-  if (explicitId && pathId && explicitId !== pathId) throw new Error('天空盒资源 ID 与原路径身份不一致。');
   let resourceId = typeof explicitId === 'string' ? explicitId : pathId;
   const expectedHash = typeof skybox.assetRevision === 'string' && /^[a-f\d]{64}$/i.test(skybox.assetRevision)
     ? skybox.assetRevision.toLowerCase() : null;
@@ -49,14 +47,12 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
     await assertNoSourceLinks(sourcePath);
     if (!options.isAuthorizedLocalFile(await fs.realpath(sourcePath))) throw new Error('原天空盒真实文件尚未授权。');
     const inspection = await validateSkyboxSourceFile(sourcePath);
-    if (skybox.format !== inspection.format) throw new Error('原天空盒格式与场景声明不一致。');
     const hash = await hashFile(sourcePath, signal);
-    if (expectedHash && hash !== expectedHash) throw new Error('原天空盒内容与场景 SHA-256 版本不一致。');
     local = { hash, format: inspection.format, size: inspection.fileSizeBytes };
   } catch (error) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
   }
-  if (local && sourcePath && !resourceId) {
+  if (local && sourcePath) {
     const sourceKey = createHash('sha256').update(baseUrl).digest('hex');
     const packagePath = path.join(sharedRoot, '.babylon-editor', 'publish-skyboxes', sourceKey, local.hash, 'Assets', 'Skyboxes', 'Imported');
     await assertRecoveryPathInsideRoot(sharedRoot, packagePath);
@@ -64,7 +60,7 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
     await assertRecoveryPathInsideRoot(sharedRoot, packagePath);
     const target = path.join(packagePath, `skybox.${local.format}`);
     await assertRecoveryPathInsideRoot(sharedRoot, target);
-    if (path.resolve(sourcePath) === path.resolve(target)) return result(skybox, target, local.hash);
+    if (path.resolve(sourcePath) === path.resolve(target)) return result(skybox, target, local.hash, undefined, local.format);
     const temporary = path.join(packagePath, `.skybox-${randomUUID()}.${local.format}`);
     try {
       await fs.copyFile(sourcePath, temporary, fs.constants.COPYFILE_EXCL);
@@ -75,9 +71,11 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
       catch (error) { if (!(error instanceof Error) || !('code' in error) || error.code !== 'EEXIST') throw error; }
       const targetStat = await fs.lstat(target);
       if (!targetStat.isFile() || targetStat.isSymbolicLink() || await hashFile(target, signal) !== local.hash) throw new Error('受管天空盒缓存内容冲突。');
-      return result(skybox, target, local.hash);
+      return result(skybox, target, local.hash, undefined, local.format);
     } finally { await fs.rm(temporary, { force: true }); }
   }
+  if (explicitId !== undefined && (typeof explicitId !== 'string' || !/^[1-9]\d{0,63}$/.test(explicitId))) throw new Error('天空盒资源 ID 无效。');
+  if (explicitId && pathId && explicitId !== pathId) throw new Error('天空盒资源 ID 与原路径身份不一致。');
   if (!resourceId && !expectedHash) throw new Error('天空盒文件缺失且缺少稳定资源 ID 或 SHA-256，无法确定对应中台资源；请重新选择原天空盒。');
   const records = await (options.dependencies?.queryRecords ?? querySkyboxes)(baseUrl, signal);
   assertUniqueSkyboxRecords(records);
@@ -113,11 +111,13 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
   return result(skybox, resolved.sourcePath, entry.sha256, resourceId);
 }
 
-function result(skybox: Skybox, sourcePath: string, hash: string, resourceId?: string) {
-  const next = { ...skybox, sourcePath, packagePath: path.dirname(sourcePath), sourceUrl: encodeAssetUrl(sourcePath), assetRevision: hash,
-    ...(resourceId ? { dataPlatformResourceId: resourceId } : {}) };
+function result(skybox: Skybox, sourcePath: string, hash: string, resourceId?: string, format?: 'hdr' | 'exr') {
+  const next: Skybox = { ...skybox, sourcePath, packagePath: path.dirname(sourcePath), sourceUrl: encodeAssetUrl(sourcePath), assetRevision: hash,
+    format: format ?? skybox.format };
+  if (resourceId) next.dataPlatformResourceId = resourceId;
+  else delete next.dataPlatformResourceId;
   return { skybox: next, sourcePath,
-    recovered: ['sourcePath', 'packagePath', 'sourceUrl', 'assetRevision', 'dataPlatformResourceId'].some(key => skybox[key] !== (next as Skybox)[key]) };
+    recovered: ['sourcePath', 'packagePath', 'sourceUrl', 'assetRevision', 'dataPlatformResourceId', 'format'].some(key => skybox[key] !== next[key]) };
 }
 function readSourcePath(skybox: Skybox): string | null {
   let source = typeof skybox.sourcePath === 'string' ? skybox.sourcePath : '';
