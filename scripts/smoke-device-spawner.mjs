@@ -43,8 +43,8 @@ function createTemplateEntity() {
     components: {
       transform: {
         position: { x: 3, y: 0, z: -2 },
-        rotation: { x: 0, y: 0, z: 0 },
-        scale: { x: 1, y: 1, z: 1 },
+        rotation: { x: 0, y: 0.7, z: 0 },
+        scale: { x: 1.5, y: 1, z: 1 },
       },
       modelAsset: {
         sourcePath: 'F:/fixtures/virtual-conveyor/virtual-conveyor.glb',
@@ -204,6 +204,11 @@ try {
       && Math.abs(spawnedPosition.z - templatePosition.z) < 1e-6,
     `实例初始位置必须等于模板位置，实际 ${spawnedPosition.toString()}，预期 ${templatePosition.toString()}`,
   );
+  // 实例必须继承模板完整变换（旋转/缩放），否则显示为模型原始姿态
+  assert.equal(spawnedModel.root.rotation.y, 0.7, '实例必须继承模板旋转');
+  assert.equal(spawnedModel.root.scaling.x, 1.5, '实例必须继承模板缩放');
+  // 首帧驱动到位前隐藏，避免先在模板位姿闪现再跳到 MQTT 目标位
+  assert.equal(spawnedModel.root.isEnabled(false), false, '实例在首帧驱动前必须隐藏');
   assert.ok(
     spawnedModel.meshes.every((mesh) => mesh.isPickable),
     '动态实例网格必须可拾取（生成器产物点击链路依赖）',
@@ -217,6 +222,7 @@ try {
   const spawnedKey = spawnedModel.entitySnapshot.id;
   assert.ok(spawnedKey.startsWith('spawned:'), `实例合成实体 id 形如 spawned:{key}，实际 ${spawnedKey}`);
   scene.render();
+  assert.equal(spawnedModel.root.isEnabled(false), true, '首帧驱动到位后实例必须被揭示显示');
   const spawnedBounds = runtime.getEntitiesWorldBounds([spawnedKey]);
   assert.ok(spawnedBounds, '合成实体 id 必须能解析出运行态包围盒（高亮/聚焦依赖）');
   const clickPoint = projectToClient(

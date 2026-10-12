@@ -278,6 +278,7 @@ import {
   createSpawnedDeviceKey,
   parseSpawnedDeviceEntityId,
   type DeviceSpawnerConfig,
+  type SpawnedDeviceKey,
 } from './telemetry/spawner/DeviceSpawnerRuntime';
 import {
   STACKER_CARGO_COLOR,
@@ -904,6 +905,8 @@ export class SceneRuntime {
   private readonly deviceSpawnerMarkers = new Map<string, DeviceSpawnerMarkerRuntimeEntry>();
   /** MQTT 消息驱动生成的动态设备实例，键为 spawnerCode + assetCode。 */
   private readonly spawnedDeviceModels = new Map<string, ModelRuntimeEntry>();
+  /** 已创建但尚未显示的生成实例：等首帧驱动把设备吸附到目标位后再揭示，避免先在模板位置闪现再跳走。 */
+  private readonly spawnedDeviceRevealPending = new Set<SpawnedDeviceKey>();
   private readonly deviceSpawnerRuntime: DeviceSpawnerRuntime;
   /** 场景级默认模型生成器实体 ID，syncDocument 时从文档快照刷新。 */
   private defaultCargoGeneratorId: string | null = null;
@@ -1688,6 +1691,7 @@ export class SceneRuntime {
     this.fetchSyncFailureReported = false;
     // 动态设备实例不依赖基线恢复，无论预览态标志如何都先统一销毁并退订消息。
     this.deviceSpawnerRuntime.disposeAll();
+    this.spawnedDeviceRevealPending.clear();
     this.syncDeviceSpawnerMarkerVisibility();
     const hadPreviewState = this.telemetryPreviewActive
       || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
@@ -5992,6 +5996,7 @@ export class SceneRuntime {
       if (diagnosticsFinished !== null) this.telemetryOuterStages.baselineMs = performance.now() - diagnosticsFinished;
       const deltaSeconds = Math.min(0.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
       this.specializedTelemetryRuntime.applyFrame(deltaSeconds);
+      this.revealDrivenSpawnedDevices();
       this.deviceSpawnerRuntime.applyFrame(Date.now());
       const alarmsStarted = startedAt !== null ? performance.now() : null;
       for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(false);
@@ -7451,7 +7456,11 @@ export class SceneRuntime {
     };
 
     const root = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}`, this.scene);
-    root.position = templateModel.root.getAbsolutePosition().clone();
+    // 继承模板实例的完整变换（位置/旋转/缩放），与常规实体 root 同源。
+    this.applyTransform(root, templateEntity.components.transform);
+    // 先隐藏：异步加载与脚本初始化期间设备仍停在模板位姿，等首帧驱动吸附到 MQTT 目标位后再显示。
+    root.setEnabled(false);
+    this.spawnedDeviceRevealPending.add(key);
     const contentRoot = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}_content`, this.scene);
     contentRoot.parent = root;
     this.applyModelUnitScale(contentRoot, modelAsset.unitScaleToMeters);
@@ -7548,11 +7557,31 @@ export class SceneRuntime {
     }
   }
 
+  /**
+   * 揭示已就绪的生成实例：模型加载 + 脚本初始化完成（= 通过驱动候选门槛）后，
+   * 首帧驱动已在同一帧把它吸附到 MQTT 目标位，此时显示即直接出现在目标位、无模板位闪现。
+   * 无有效快照的设备不会被驱动，按模板位姿显示（本就不产生位移）。
+   */
+  private revealDrivenSpawnedDevices(): void {
+    if (this.spawnedDeviceRevealPending.size === 0) return;
+    for (const key of [...this.spawnedDeviceRevealPending]) {
+      const model = this.spawnedDeviceModels.get(key);
+      if (!model) {
+        this.spawnedDeviceRevealPending.delete(key);
+        continue;
+      }
+      if (!model.assetHandle || !model.stackerTelemetryReady) continue;
+      model.root.setEnabled(true);
+      this.spawnedDeviceRevealPending.delete(key);
+    }
+  }
+
   /** 销毁一台动态设备实例；负载中的异步加载通过 loadToken 失效自行丢弃。 */
   private disposeSpawnedDeviceModel(key: string): void {
     const model = this.spawnedDeviceModels.get(key);
     if (!model) return;
     this.spawnedDeviceModels.delete(key);
+    this.spawnedDeviceRevealPending.delete(key);
     model.loadToken += 1;
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {

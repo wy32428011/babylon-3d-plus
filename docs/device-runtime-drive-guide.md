@@ -379,7 +379,8 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 1. `beginTelemetryPreview`：SceneRuntime `configureDeviceSpawnersFromDocument` 解析各产生器模板实体（deviceType 取模板 telemetryBinding.deviceType 或 dataDrivenConfig.device.devType），`DeviceSpawnerRuntime.configure` 以 `(spawnerCode, deviceType)` 复合键注册并订阅遥测消息；同时 `SpecializedTelemetryRuntime.collectResolvedBindingKeys()` eager 构建静态绑定键集合，消除首帧前窗口。
 2. `isDeviceKnown`（SceneRuntime）：静态侧按 `createTelemetryBindingKey(sourceId, deviceType, assetCode)` 查每帧重建的 `resolvedBindingKeys`（含冲突 key）；动态侧查 `deviceSpawnerRuntime.hasAssetCode(assetCode)`（`spawnedDeviceModels` 在 `spawnDeviceInstance` 同步登记，加载中实例也被覆盖，无 in-flight 窗口）。
-3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为 topic 段编号**，合成 entitySnapshot 供驱动读 parameterValues；root 位置=模板世界位置；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
+3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为 topic 段编号**，合成 entitySnapshot 供驱动读 parameterValues；root 经 `applyTransform` **继承模板实例完整变换（位置/旋转/缩放）**，与常规实体 root 同源；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
+3b. **首帧揭示**（消除闪烁移动）：实例 root 创建时 `setEnabled(false)` 并入 `spawnedDeviceRevealPending`；`applyDeviceTelemetryFrame` 每帧 `specializedTelemetryRuntime.applyFrame` 之后调 `revealDrivenSpawnedDevices`，当实例通过驱动候选门槛（`assetHandle && stackerTelemetryReady`）时揭示——此刻首帧驱动已把设备吸附到 MQTT 目标位（司机均为偏移子节点/首帧吸附，不改 root），直接显示在目标位，不会先在模板位姿渲染若干帧再跳走。无有效快照的设备不会被驱动，按模板位姿显示（本就不产生位移）。销毁/退出预览时从集合清理。
 4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`，常量由 `createSpawnedDeviceEntityId` / `parseSpawnedDeviceEntityId` 维护），**五种现有 driver 零改动**驱动动画；网格 `isPickable=true` 仅为生成器产物点击链路服务，常规实体拾取仍按元数据缺 `editorEntityId` 过滤，动态实例不进编辑选择。
 5. 回收：`applyFrame(nowMs)` 每帧先收集 `now - lastMessageAt > timeoutSeconds` 的实例，**帧尾统一销毁**（禁止边迭代边销毁），同步删 assetCode 反查索引；显式下线立即销毁；`endTelemetryPreview` 调 `disposeAll` 清零（在预览态早退判断之前执行）。
 
@@ -394,6 +395,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **assetCode 静态优先**：topic (deviceType, assetCode) 命中既有设备（静态实体或任一产生器的实例）时不再生成，消息直达该设备；多产生器同名先到先得，旧的"冲突双停"场景自然消解。
 - **重生必须带 s**：下线/超时销毁后实例反查表已清空，重新上线的**首条消息必须带 s** 才会再次生成；不带 s 的未知设备消息只留快照不生成。
 - **快照残留**：telemetry store 无单 key 删除，超时销毁后快照留存但无候选匹配，endTelemetryPreview 统一 clear。
+- **参数随模板继承（含脚本参数）**：实例深拷贝模板 modelAsset，声明式参数（parameterConfig）与脚本参数（parameterValues → metadata.scripts[].values → 脚本实例属性）一并生效。**前提是模型脚本按自己的宿主节点子树查找同名节点**（如 virtual-conveyor 的 `findBeltNode` 先查 `this.node.getChildMeshes`）：同场景多台同名实例（手工复制或产生器克隆）并存时，整场景按名字查找会命中别的实例节点，把本实例参数应用到他人几何、自身保持默认。
 - **sourceId 对齐**：快照 sourceId 取订阅 adapter 的 sourceId，必须与模板 binding.sourceId 一致（配置责任）。
 - 动态实例**不写回 SceneDocument**，退出预览全部消失；模板实例的参数修改在下次预览生效。
 

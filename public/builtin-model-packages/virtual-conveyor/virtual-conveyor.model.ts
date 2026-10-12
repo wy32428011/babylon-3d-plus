@@ -173,7 +173,20 @@ export class ParametricModelRuntimeComponent {
 
 	private readonly snapshotMaterials = new Map<any, any>();
 
+	/**
+	 * 查找本实例的输送板节点：优先在脚本宿主节点自身子树内查找。
+	 * 同场景多台同名实例（手工复制或设备产生器克隆）并存时，整场景按名字查找会命中别的实例节点，
+	 * 导致本实例参数被应用到他人几何、自身保持默认；子树未命中才回退整场景，兼容旧层级结构。
+	 */
 	private findBeltNode(): any {
+		const localNodes = [
+			...(typeof this.node.getChildTransformNodes === "function" ? this.node.getChildTransformNodes(false) : []),
+			...(typeof this.node.getChildMeshes === "function" ? this.node.getChildMeshes(false) : []),
+		];
+		const localBelt = localNodes.find((candidate) => candidate !== this.node && String(candidate.name ?? "") === BELT_NODE_NAME);
+		if (localBelt) {
+			return localBelt;
+		}
 		const nodes = [
 			...(this.node.getScene?.().transformNodes ?? []),
 			...(this.node.getScene?.().meshes ?? []),
