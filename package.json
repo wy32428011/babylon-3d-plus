@@ -63,6 +63,7 @@
     "smoke:viewer:gpu": "node scripts/smoke-viewer-gpu-contract.mjs",
     "pack:win": "node scripts/release-tag-guard.mjs --check-only && npm run build && electron-builder --win dir --x64",
     "dist:win": "node scripts/release-tag-guard.mjs && npm run build && electron-builder --win nsis --x64 && node scripts/write-release-note.mjs",
+    "dist:win:test": "node scripts/dist-test-win.mjs",
     "smoke:packaged:win": "node scripts/smoke-packaged-windows.mjs",
     "smoke:packaged:gpu": "node scripts/smoke-packaged-gpu.mjs",
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",

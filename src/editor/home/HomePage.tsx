@@ -571,6 +571,8 @@ export function HomePage({
         : dataPlatformProjectTotal > dataPlatformProjects.length
           ? `${activeProjectSearch ? '搜索 · ' : ''}${dataPlatformProjects.length} / ${dataPlatformProjectTotal} 项`
           : `${activeProjectSearch ? '搜索 · ' : ''}${dataPlatformProjects.length} 项`;
+  // 试打包（dist:win:test）用 VITE_APP_VERSION 覆盖首页显示版本，不改 package.json。
+  const appVersion = import.meta.env.VITE_APP_VERSION || packageInfo.version;
 
   return (
     <main className="home-page" aria-label="编辑器首页">
@@ -579,7 +581,7 @@ export function HomePage({
           <h1 aria-label={APPLICATION_NAME}>
             <BrandLogo className="home-brand-logo" surface="dark" />
             <span className="home-brand-product">3D EDITOR</span>
-            <span className="home-brand-version" title="编辑器版本">v{packageInfo.version}</span>
+            <span className="home-brand-version" title="编辑器版本">v{appVersion}</span>
           </h1>
           <p>项目启动台</p>
         </div>
