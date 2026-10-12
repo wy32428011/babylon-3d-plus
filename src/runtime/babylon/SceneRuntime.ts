@@ -4110,6 +4110,10 @@ export class SceneRuntime {
     return this.environmentRuntime.getWorldBounds();
   }
 
+  getOpeningEnvironmentSnapshot() {
+    return this.environmentRuntime.getOpeningEnvironmentSnapshot();
+  }
+
   /** 切换环境调整态的静态矩阵冻结与辅助包围框。 */
   setEnvironmentAdjustmentActive(active: boolean): void {
     this.environmentRuntime.setAdjustmentActive(active);

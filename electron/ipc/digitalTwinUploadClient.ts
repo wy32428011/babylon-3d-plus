@@ -111,7 +111,7 @@ export class DigitalTwinApiError extends Error {
   constructor(code: string, message: string, data: unknown, httpStatus: number) {
     // Electron invoke只保留message；自动重试仍需识别资源冲突，不能依赖自定义Error字段。
     super(formatDigitalTwinPublishErrorMessage(code,
-      /^DIGITAL_TWIN_RESOURCE_(?:REVISION|SNAPSHOT)_CONFLICT$/.test(code) ? `${code}: ${message}` : message, data));
+      /^DIGITAL_TWIN_RESOURCE_(?:(?:REVISION|SNAPSHOT)_CONFLICT|SNAPSHOT_INVALID)$/.test(code) ? `${code}: ${message}` : message, data));
     this.name = 'DigitalTwinApiError';
     this.code = code;
     this.data = data;

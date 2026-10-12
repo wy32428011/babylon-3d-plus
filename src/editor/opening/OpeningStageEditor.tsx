@@ -42,6 +42,7 @@ export function OpeningStageEditor({ binding, disabled, onChange }: {
 }) {
   const { config, definition } = binding;
   const generic = definition.manifest.renderer === 'timeline';
+  const prismatic = definition.manifest.renderer === 'prismatic-genesis';
   const updateStage = (id: string, patch: Partial<OpeningPackageStage>) => onChange({ ...config, stages: config.stages.map(stage => {
     if (stage.id !== id) return stage;
     // 删除可选字段使用缺省键，避免 undefined 混入可持久化的 JSON 配置。
@@ -61,12 +62,12 @@ export function OpeningStageEditor({ binding, disabled, onChange }: {
     }}><option value="">不使用素材</option>{definition.manifest.assets.filter(asset => asset.type === 'image').map(asset => <option key={asset.id} value={asset.id}>{asset.id}</option>)}</select></label>;
   }
   return <div className="opening-package-stages">
-    <p className="muted">共 {config.stages.length} 个分镜，总时长 {Number(config.stages.reduce((sum, stage) => sum + stage.durationSeconds, 0).toFixed(3))} 秒。{generic ? '时长为 0 的分镜直接跳过。' : '全球和国内停留允许设置为 0 秒。'}</p>
+    <p className="muted">共 {config.stages.length} 个分镜，总时长 {Number(config.stages.reduce((sum, stage) => sum + stage.durationSeconds, 0).toFixed(3))} 秒。{generic || prismatic ? '时长为 0 的分镜直接跳过。' : '全球和国内停留允许设置为 0 秒。'}</p>
     {config.stages.map((stage, index) => <details key={stage.id}>
       <summary>{index + 1}. {stage.label}（{stage.durationSeconds} 秒）</summary>
       <OpeningField label="分镜名称" value={stage.label} maxLength={160} disabled={disabled} onCommit={label => updateStage(stage.id, { label })} />
-      <OpeningField label="分镜时长（秒）" value={stage.durationSeconds} min={generic || index === 2 || index === 5 ? 0 : .1} max={300} disabled={disabled} onCommit={value => updateStage(stage.id, { durationSeconds: Number(value) })} />
-        {(['title', 'subtitle', 'description'] as const).map((key, at) => {
+      <OpeningField label="分镜时长（秒）" value={stage.durationSeconds} min={generic || prismatic || index === 2 || index === 5 ? 0 : .1} max={300} disabled={disabled} onCommit={value => updateStage(stage.id, { durationSeconds: Number(value) })} />
+        {(prismatic ? ['title'] as const : ['title', 'subtitle', 'description'] as const).map((key, at) => {
           const keyField = `${key}Key` as 'titleKey' | 'subtitleKey' | 'descriptionKey';
           const parameter = stage[keyField];
           return <OpeningField key={key} label={['分镜标题', '分镜副标题', '分镜说明'][at]}
@@ -85,7 +86,7 @@ export function OpeningStageEditor({ binding, disabled, onChange }: {
         ] as const).map(([key, label, fallback, min, max]) => <OpeningField key={key} label={label} value={stage[key] ?? fallback} min={min} max={max} disabled={disabled}
           onCommit={value => updateStage(stage.id, { [key]: Number(value) })} />)}</details>
       </> : null}
-      {(generic || stage.routes !== undefined) ? <details><summary>飞线与点位（{stage.routes?.length ?? 0}）</summary>
+      {(!prismatic && (generic || stage.routes !== undefined)) ? <details><summary>飞线与点位（{stage.routes?.length ?? 0}）</summary>
         <OpeningRouteEditor key={stage.id} routes={stage.routes ?? []} style={stage.routeStyle} origin={stage.origin} disabled={disabled} imageCoordinates={!generic}
           backgroundUrl={openingPackageAssetUrl(binding, stage.backgroundKey ? String(config.values[stage.backgroundKey] ?? '') : stage.backgroundAssetId)}
           onChange={routes => updateStage(stage.id, { routes })} />
@@ -105,6 +106,6 @@ export function OpeningStageEditor({ binding, disabled, onChange }: {
         stages: [...config.stages, { id: `stage-${crypto.randomUUID()}`, label: '新分镜', durationSeconds: 5, title: '新分镜', routes: [] }] })}>添加分镜</button> : null}
       <button type="button" disabled={disabled} onClick={() => onChange({ ...config, stages: structuredClone(definition.timeline.stages) })}>恢复包默认分镜</button>
     </div>
-    {!generic ? <p className="muted">参考包固定为九阶段；分镜时长、飞线和上方品牌参数独立保存。</p> : null}
+    {!generic ? <p className="muted">{prismatic ? '棱光创生固定为四阶段；可调整时长和标题，至少保留一个非零分镜。' : '参考包固定为九阶段；分镜时长、飞线和上方品牌参数独立保存。'}</p> : null}
   </div>;
 }

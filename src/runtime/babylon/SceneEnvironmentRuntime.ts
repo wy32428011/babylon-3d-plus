@@ -2,6 +2,7 @@ import {
   AbstractMesh,
   AssetContainer,
   Color3,
+  InstancedMesh,
   LinesMesh,
   Material,
   MultiMaterial,
@@ -43,8 +44,10 @@ import {
 import {
   getMeshWorldBounds,
   mergeWorldBounds,
+  transformWorldBounds,
   type RuntimeWorldBounds,
 } from './runtimeNodeGeometry';
+import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
 
 export type SceneEnvironmentApplyOptions = {
   requestId: string | null;
@@ -189,6 +192,63 @@ export class SceneEnvironmentRuntime {
 
   /** 环境绑定独立于 Hierarchy 实体；隐藏仍返回根节点，保留特效动画进度。 */
   getBuildingEffectTarget(): TransformNode | null { return this.current?.contentRoot ?? null; }
+
+  /** 抓取已提交环境的实际几何，不重新加载资源，也不改变源材质、显隐或相机。 */
+  getOpeningEnvironmentSnapshot(): OpeningEnvironmentSnapshot {
+    const entry = this.current;
+    if (this.snapshot.phase !== 'ready' || !entry || entry.disposed || !entry.root.isEnabled()) {
+      throw new Error('请先加载并显示场景环境模型，再播放棱镜开场。');
+    }
+    // 独立画布需要重新上传几何；超限明确失败，不截断仓库。
+    const maxGeometryBytes = 64 * 1024 * 1024, maxParts = 8192, maxExpandedVertices = 12_000_000;
+    const parts: OpeningEnvironmentSnapshot['parts'] = [];
+    const geometries = new Map<Mesh, { positions: Float32Array; indices: Uint32Array | null }>();
+    let geometryBytes = 0, expandedVertices = 0;
+    let bounds: RuntimeWorldBounds | null = null;
+    for (const mesh of entry.renderMeshes) {
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0 || mesh.metadata?.digitalTwinEffectProxy) continue;
+      const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh instanceof Mesh ? mesh : null;
+      if (!source || source.isDisposed() || source.getTotalVertices() === 0) continue;
+      let geometry = geometries.get(source);
+      if (!geometry) {
+        const positions = source.getVerticesData(VertexBuffer.PositionKind);
+        if (!positions?.length || positions.length % 3 !== 0 || !positions.every(Number.isFinite)) {
+          throw new Error('环境网格“' + mesh.name + '”缺少有效顶点，无法渲染棱镜开场。');
+        }
+        const indices = source.getIndices();
+        if (indices && (indices.length % 3 !== 0 || !indices.every(index => Number.isInteger(index) && index >= 0 && index < positions.length / 3))) {
+          throw new Error('环境网格“' + mesh.name + '”的三角面索引无效，无法渲染棱镜开场。');
+        }
+        geometryBytes += (positions.length + (indices?.length ?? 0)) * 4;
+        if (geometryBytes > maxGeometryBytes) throw new Error('环境模型几何超过开场的 64 MiB 上限，请使用更轻量的环境模型。');
+        geometry = { positions: Float32Array.from(positions), indices: indices?.length ? Uint32Array.from(indices) : null };
+        geometries.set(source, geometry);
+      }
+      mesh.computeWorldMatrix(true);
+      const meshWorld = mesh.getWorldMatrix();
+      const thinCount = mesh instanceof Mesh ? mesh.thinInstanceCount : 0;
+      const matrixData = mesh instanceof Mesh ? mesh._thinInstanceDataStorage?.matrixData : null;
+      if (thinCount && (!matrixData || matrixData.length < thinCount * 16)) throw new Error('环境薄实例矩阵尚未就绪，无法渲染棱镜开场。');
+      const count = Math.max(1, thinCount);
+      expandedVertices += count * geometry.positions.length / 3;
+      if (parts.length + count > maxParts || expandedVertices > maxExpandedVertices) {
+        throw new Error('环境模型超过开场的 8192 个网格或 1200 万实例顶点上限，请使用更轻量的环境模型。');
+      }
+      const localBounds = source.geometry?.extend ?? source.getBoundingInfo().boundingBox;
+      for (let index = 0; index < count; index++) {
+        const matrix = thinCount ? Matrix.FromArray(matrixData!, index * 16).multiply(meshWorld) : meshWorld;
+        const worldMatrix = Array.from(matrix.asArray());
+        const partBounds = worldMatrix.every(Number.isFinite) ? transformWorldBounds(localBounds, matrix) : null;
+        if (!partBounds) throw new Error('环境网格“' + mesh.name + '”的世界变换无效，无法渲染棱镜开场。');
+        bounds = bounds ? mergeWorldBounds(bounds, partBounds) : partBounds;
+        parts.push({ sourceMeshId: String(source.uniqueId), name: thinCount ? mesh.name + '_' + index : mesh.name, ...geometry, worldMatrix });
+      }
+    }
+    if (!bounds || !parts.length || bounds.maximum.subtract(bounds.minimum).lengthSquared() <= 1e-12) {
+      throw new Error('场景环境模型没有可见的有效几何，无法渲染棱镜开场。');
+    }
+    return { parts, bounds: { minimum: vectorData(bounds.minimum), maximum: vectorData(bounds.maximum) } };
+  }
 
   private withBuildingEffectMutation(mutate: () => void): void {
     if (this.options.withBuildingEffectMutation) this.options.withBuildingEffectMutation(mutate);

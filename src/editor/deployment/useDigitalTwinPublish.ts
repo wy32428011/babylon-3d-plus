@@ -203,7 +203,13 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
           for (const item of snapshot.scenes) {
             assertEntryCurrent();
             const content = item.isEntry ? entryContent : await preparePublishSceneSnapshot(item.sceneContent, assertEntryCurrent,
-              message => pushLog(`发布场景「${item.name}」：${message}`));
+              message => pushLog(`发布场景「${item.name}」：${message}`), async scene => {
+                assertEntryCurrent();
+                const recovery = await window.editorApi!.recoverDigitalTwinModels({ requestId, targetToken,
+                  projectId: options.projectId, sceneContent: serializeScene(scene) });
+                assertEntryCurrent();
+                return repairPublishSceneSkyboxes(scene, recovery).scene;
+              });
             preparedScenes.push({ sceneId: item.sceneId, sceneContent: content });
           }
           assertCurrent();

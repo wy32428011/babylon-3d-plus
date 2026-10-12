@@ -642,6 +642,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const opening = useEditorOpeningAnimation({
     viewport: viewportRef.current, ready: sceneReadyForAutoPatrol,
     sceneDocument, sceneSessionId, isRuntimePreview,
+    getEnvironmentSnapshot: () => {
+      if (!runtimeRef.current) throw new Error('场景运行时尚未就绪，无法读取环境模型。');
+      return runtimeRef.current.getOpeningEnvironmentSnapshot();
+    },
   });
   const modelEntrancePlayback = useRef<SceneModelEntrancePlayback | null>(null);
   useEffect(() => {

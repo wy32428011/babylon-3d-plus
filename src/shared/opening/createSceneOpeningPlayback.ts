@@ -1,11 +1,13 @@
 import { GeographicOpeningRuntime, type OpeningSnapshot } from '../../runtime/opening/GeographicOpeningRuntime';
 import type { SceneOpeningAnimationSettings } from '../../editor/model/sceneOpeningAnimation';
 import { OpeningPlaybackCoordinator, type OpeningTerminal } from './OpeningPlaybackCoordinator';
+import type { OpeningEnvironmentSnapshot } from './OpeningEnvironmentSnapshot';
 
 /** 只管理开场的 DOM 和可见性，不接收任何三维业务控制接口。 */
 export function createSceneOpeningPlayback(options: {
   container: HTMLElement;
   settings: SceneOpeningAnimationSettings;
+  getEnvironmentSnapshot?: () => OpeningEnvironmentSnapshot;
   waitUntilVisible?: (signal: AbortSignal) => Promise<boolean>;
   isHostVisible?: () => boolean;
   subscribeToHostVisibility?: (listener: () => void) => () => void;
@@ -39,7 +41,7 @@ export function createSceneOpeningPlayback(options: {
       return !signal.aborted;
     },
     createRuntime: complete => new GeographicOpeningRuntime({
-      container, settings, onComplete: complete,
+      container, settings, getEnvironmentSnapshot: options.getEnvironmentSnapshot, onComplete: complete,
       onSkip: () => playback.skip(),
       onProgress: options.onProgress,
       onError: error => playback.fail(error),

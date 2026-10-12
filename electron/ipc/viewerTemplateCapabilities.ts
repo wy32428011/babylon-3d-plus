@@ -83,7 +83,7 @@ export function createViewerTemplateCapabilities(
       template: OPENING_TEMPLATE,
       assets: openingAssets.map(asset => ({ id: asset.id, ...integrity(asset) })),
     },
-    openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline'], isolatedPlayback: true },
+    openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline', 'prismatic-genesis'], isolatedPlayback: true },
   });
 }
 

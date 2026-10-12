@@ -3,6 +3,7 @@ import { normalizeSceneOpeningAnimation, type SceneOpeningAnimationSettings } fr
 import type { OpeningSnapshot } from './geographicOpeningMath';
 import { createOpeningVisualPlan, type OpeningVisualPlan } from './createOpeningVisualPlan';
 import type { OpeningControlledVisual } from './TimelineOpeningVisual';
+import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
 
 export type { OpeningSnapshot } from './geographicOpeningMath';
 type OpeningOptions = {
@@ -10,6 +11,7 @@ type OpeningOptions = {
   scene?: Scene;
   container?: HTMLElement;
   settings: SceneOpeningAnimationSettings;
+  getEnvironmentSnapshot?: () => OpeningEnvironmentSnapshot;
   onComplete(): void;
   onSkip?(): void;
   onError?(error: unknown): void;
@@ -46,7 +48,7 @@ export class GeographicOpeningRuntime {
     this.settings = normalizeSceneOpeningAnimation(options.settings);
     this.reducedMotion = this.settings.motionPreference === 'reduced'
       || (this.settings.motionPreference === 'system' && typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
-    this.plan = createOpeningVisualPlan(this.settings, this.reducedMotion);
+    this.plan = createOpeningVisualPlan(this.settings, this.reducedMotion, options.getEnvironmentSnapshot);
     this.snapshot = this.frameAt(0);
   }
 

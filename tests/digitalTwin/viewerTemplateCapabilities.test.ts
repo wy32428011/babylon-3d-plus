@@ -87,6 +87,7 @@ test('插件包仅能发布到明确支持其协议和渲染器的新 Viewer', a
   await f.writeManifest();
   await f.validate(scene());
   await f.validate(scene('reference-huishan'));
+  await f.validate(scene('prismatic-genesis'));
   await assert.rejects(f.validate(scene('external-js')), /插件包.*渲染器|插件包.*协议/);
   await assert.rejects(f.validate(scene('timeline', 2)), /插件包.*协议/);
   const unisolated = structuredClone(f.manifest);

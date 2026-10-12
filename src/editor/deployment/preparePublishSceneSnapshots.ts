@@ -12,7 +12,8 @@ import { waitForPublishCondition } from './publishOrchestration';
 import { preparePublishResources } from './preparePublishResources';
 
 /** SOURCE 的非入口场景只在隔离副本中更新，不切换编辑器 Store，也不覆盖磁盘场景。 */
-export async function preparePublishSceneSnapshot(sceneContent: string, assertCurrent: () => void, pushLog: (message: string) => void): Promise<string> {
+export async function preparePublishSceneSnapshot(sceneContent: string, assertCurrent: () => void, pushLog: (message: string) => void,
+  prepareSkyboxes?: (scene: SceneDocument) => Promise<SceneDocument>): Promise<string> {
   assertCurrent();
   const scene = deserializeScene(sceneContent);
   const resources = await preparePublishResources(sceneContent, assertCurrent);
@@ -36,7 +37,9 @@ export async function preparePublishSceneSnapshot(sceneContent: string, assertCu
   }
   issues.push(...updated.issues.map(issue => issue.message));
   if (issues.length) throw new Error(issues.join('\n'));
-  const readyScene = await renderPublishSceneSnapshot(updated.scene, assertCurrent, pushLog);
+  const preparedScene = prepareSkyboxes ? await prepareSkyboxes(updated.scene) : updated.scene;
+  assertCurrent();
+  const readyScene = await renderPublishSceneSnapshot(preparedScene, assertCurrent, pushLog);
   return serializeScene(readyScene);
 }
 

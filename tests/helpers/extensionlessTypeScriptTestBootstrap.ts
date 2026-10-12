@@ -52,6 +52,7 @@ export async function importIsolatedTypeScriptModules<TModules extends readonly 
           resolveJsonModule: true,
           isolatedModules: true,
           noEmit: false,
+          rewriteRelativeImportExtensions: true,
           outDir,
           rootDir: projectRoot,
           types: ['node'],
