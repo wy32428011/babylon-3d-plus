@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { ARRAY_ASSET_NUMBER_MAX_LENGTH, getArrayAssetNumberRuleError } from '../model/arrayAssetNumbering';
-import { getEntityArrayParameterError, MODEL_ARRAY_COPY_COUNT_MAX } from '../model/modelArray';
+import { COMPOSITION_ARRAY_ENTITY_COUNT_MAX, getEntityArrayParameterError, MODEL_ARRAY_COPY_COUNT_MAX } from '../model/modelArray';
 import type { EntityArrayDirection } from '../store/editorStore';
 
 export type EntityArrayDialogValue = {
@@ -13,6 +13,7 @@ export type EntityArrayDialogValue = {
 type EntityArrayDialogProps = {
   value: EntityArrayDialogValue;
   assetNumberedSourceCount: number;
+  compositionArray?: { createdEntityCount: number };
   validationError?: string | null;
   directionLabel?: string;
   readOnly?: boolean;
@@ -105,7 +106,7 @@ export function EntityArrayDialog(props: EntityArrayDialogProps) {
             value={props.value.spacingMeters}
           />
         </label>
-        <label className="hierarchy-array-dialog-row">
+        {!props.compositionArray && <label className="hierarchy-array-dialog-row">
           <span>资产编号规则</span>
           <input
             aria-describedby="hierarchy-array-number-rule-help"
@@ -117,8 +118,12 @@ export function EntityArrayDialog(props: EntityArrayDialogProps) {
             type="text"
             value={props.value.assetNumberRule}
           />
-        </label>
-        {props.assetNumberedSourceCount === 1 ? (
+        </label>}
+        {props.compositionArray ? (
+          <p className="hierarchy-array-dialog-hint">
+            内部成员自动生成新编号。预计新增实体：{props.compositionArray.createdEntityCount}（最多 {COMPOSITION_ARRAY_ENTITY_COUNT_MAX} 个）。
+          </p>
+        ) : props.assetNumberedSourceCount === 1 ? (
           <p className="hierarchy-array-dialog-hint" id="hierarchy-array-number-rule-help">
             可选；规则只影响新副本资产编号。名称末尾数字递增，无数字时追加序号，不添加“副本”。
           </p>

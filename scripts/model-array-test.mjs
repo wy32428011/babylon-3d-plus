@@ -27,6 +27,7 @@ writeFileSync(
         allowSyntheticDefaultImports: true,
         resolveJsonModule: true,
         isolatedModules: true,
+        rewriteRelativeImportExtensions: true,
         noEmit: false,
         outDir,
         rootDir: projectRoot,
@@ -35,6 +36,7 @@ writeFileSync(
       },
       include: [
         assetTypesPath.replaceAll(String.fromCharCode(92), '/'),
+        normalizedProjectRoot + '/src/vite-env.d.ts',
         normalizedProjectRoot + '/src/editor/model/arrayAssetNumbering.ts',
         normalizedProjectRoot + '/src/editor/model/modelArray.ts',
         normalizedProjectRoot + '/tests/editor/modelArray.test.ts',
@@ -56,7 +58,7 @@ try {
 /** 执行模型阵列测试子命令，并在失败时透传退出码。 */
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.status !== 0) throw new Error(`模型阵列测试子命令失败，退出码 ${result.status ?? 1}。`);
 }
 
 /** 修正临时编译产物中的相对 ESM 导入后缀，避免改动源码导入风格。 */

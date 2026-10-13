@@ -110,6 +110,7 @@ import {
   createModelArrayIdentity,
   ENTITY_NAME_MAX_LENGTH,
   getEntityArrayIdentifierError,
+  getCompositionArrayInfo,
   getEntityArrayParameterError,
   MODEL_ARRAY_COPY_COUNT_MAX,
   MODEL_ARRAY_ITEM_COUNT_MAX,
@@ -1882,8 +1883,9 @@ function prepareEntityClipboardPaste(
   scene: SceneDocument,
   clipboard: EntityClipboard,
   parentId: string | null,
+  arrayOptions?: { existingNames: Set<string>; rootName: string },
 ): PreparedEntityClipboardPaste {
-  const existingNames = new Set(Object.values(scene.entities).map((entity) => entity.name));
+  const existingNames = arrayOptions?.existingNames ?? new Set(Object.values(scene.entities).map((entity) => entity.name));
   const entities: Entity[] = [];
   const rootEntityIds: string[] = [];
   const duplicatedIdBySourceId = new Map<string, string>();
@@ -1914,7 +1916,7 @@ function prepareEntityClipboardPaste(
           ...source,
           id: duplicatedId,
           ...(source.composition ? { composition: { ...source.composition, instanceId: createId('composition') } } : {}),
-          name: createUniqueEntityName(existingNames, source.name),
+          name: source.id === entry.rootId && arrayOptions ? arrayOptions.rootName : createUniqueEntityName(existingNames, source.name),
           isFolder: true,
           parentId: duplicatedParentId,
           childrenIds: source.childrenIds.flatMap((childId) => {
@@ -1934,6 +1936,18 @@ function prepareEntityClipboardPaste(
           existingNames,
           { id: duplicatedId },
         );
+        if (arrayOptions) {
+          const renderSourceId = source.components.modelArrayInstance?.sourceEntityId;
+          if (renderSourceId && !copyableIdSet.has(renderSourceId)) {
+            let renderSource = scene.entities[renderSourceId];
+            while (renderSource?.components.modelArrayInstance) renderSource = scene.entities[renderSource.components.modelArrayInstance.sourceEntityId];
+            duplicated.components.modelAsset = {
+              ...cloneEntityComponents(renderSource).modelAsset!,
+              ...duplicated.components.modelAsset!,
+            };
+            delete duplicated.components.modelArrayInstance;
+          }
+        }
         const binding = duplicated.components.locator?.builtInBinding;
         if (binding) {
           // 宿主同批粘贴则按 ID 映射重建绑定；宿主不在剪贴板内则解除绑定，避免悬空引用。
@@ -1967,6 +1981,26 @@ function prepareEntityClipboardPaste(
     if (effectVisual?.targetEntityId) {
       effectVisual.targetEntityId = duplicatedIdBySourceId.get(effectVisual.targetEntityId) ?? effectVisual.targetEntityId;
     }
+    if (arrayOptions) {
+      // 每份组合独立重建业务对象引用；未随组合复制的目标继续引用场景原对象。
+      const remap = (id: string) => duplicatedIdBySourceId.get(id) ?? id;
+      const marker = entity.components.chartMarker;
+      if (marker?.dataSourceEntityId) marker.dataSourceEntityId = remap(marker.dataSourceEntityId);
+      const spawner = entity.components.deviceSpawner;
+      if (spawner?.templateEntityId) spawner.templateEntityId = remap(spawner.templateEntityId);
+      const telemetry = entity.components.telemetryBinding;
+      if (telemetry?.cargoGeneratorId) telemetry.cargoGeneratorId = remap(telemetry.cargoGeneratorId);
+      for (const field of ['columnBindings', 'incomingLayerBindings', 'outgoingLayerBindings'] as const) {
+        if (telemetry?.[field]) telemetry[field] = Object.fromEntries(
+          Object.entries(telemetry[field]!).map(([key, ids]) => [key, ids.map(remap)]),
+        );
+      }
+      const fetchDrive = entity.components.locator?.fetchDrive;
+      if (fetchDrive?.cargoGeneratorId) fetchDrive.cargoGeneratorId = remap(fetchDrive.cargoGeneratorId);
+      for (const event of entity.components.autoPatrol?.events ?? []) {
+        if (event.targetEntityId) event.targetEntityId = remap(event.targetEntityId);
+      }
+    }
     const events = entity.components.chartMarker?.clickEvents;
     if (!events) continue;
     for (const event of events) {
@@ -1976,12 +2010,13 @@ function prepareEntityClipboardPaste(
     }
   }
 
+  const pastedEntityById = new Map(entities.map(entity => [entity.id, entity]));
   // 内置货格资产编号跟随宿主货架副本的编号（宿主粘贴时会生成新编号）
   for (let index = 0; index < entities.length; index += 1) {
     const entity = entities[index];
     const binding = entity.components.locator?.builtInBinding;
     if (!binding) continue;
-    const host = entities.find((candidate) => candidate.id === binding.hostEntityId);
+    const host = pastedEntityById.get(binding.hostEntityId);
     const assetCode = host?.components.modelAsset?.assetCode;
     if (!assetCode || entity.components.locator!.assetId === assetCode) continue;
     entities[index] = {
@@ -2479,6 +2514,34 @@ function prepareResolvedEntityArray(
   }
 
   const requestedSourceIds = [...new Set(input.sourceIds)];
+  const compositionInfo = getCompositionArrayInfo(state.scene, requestedSourceIds, input.copyCount);
+  if (compositionInfo) {
+    const error = compositionInfo.error ?? getEntityArrayIdentifierError(state.scene, requestedSourceIds, input.copyCount, input.assetNumberRule);
+    if (error) return { ok: false, error };
+    const root = state.scene.entities[requestedSourceIds[0]];
+    const step = input.selectionSpanMeters + input.spacingMeters;
+    if (!Number.isFinite(step * input.copyCount)) return { ok: false, error: '净间距或副本数量过大。' };
+    const snapshot = createEntityClipboardSnapshot(state.scene, requestedSourceIds);
+    const existingNames = new Set(Object.values(state.scene.entities).flatMap(entity => [entity.name, ...(entity.components.modelArray?.items.map(item => item.name) ?? [])]));
+    const rootNames: string[] = [];
+    for (let index = 1; index <= input.copyCount; index++) {
+      const name = createEntityArrayName(root.name, index);
+      if (!name.ok) return name;
+      rootNames.push(name.name);
+      existingNames.add(name.name);
+    }
+    const duplicatedEntities: Entity[] = [];
+    for (let index = 1; index <= input.copyCount; index++) {
+      const prepared = prepareEntityClipboardPaste(state.scene, { id: '', entries: snapshot.entries }, root.parentId, { existingNames, rootName: rootNames[index - 1] });
+      for (const entity of prepared.entities) {
+        const position = entity.components.transform.position;
+        entity.components.transform.position = { x: position.x + direction.x * step * index, y: position.y + direction.y * step * index, z: position.z + direction.z * step * index };
+      }
+      duplicatedEntities.push(...prepared.entities);
+    }
+    return { ok: true, sourceIds: requestedSourceIds, copyCount: input.copyCount, spacingMeters: input.spacingMeters, primarySourceId: root.id, duplicatedEntities };
+  }
+
   const sourceIds = requestedSourceIds.filter((sourceId) => {
     const source = state.scene.entities[sourceId];
     return Boolean(
@@ -2625,17 +2688,7 @@ function prepareResolvedEntityArray(
 /** 用一条命令插入全部阵列实体，并保持原始主对象选中。 */
 function createResolvedEntityArrayCommand(prepared: Extract<PreparedResolvedEntityArray, { ok: true }>) {
   return updateSceneDocumentCommand('模型阵列', (scene) => {
-    let nextScene = scene;
-    const groupedByParent = new Map<string | null, Entity[]>();
-    for (const entity of prepared.duplicatedEntities) {
-      const list = groupedByParent.get(entity.parentId) ?? [];
-      list.push(entity);
-      groupedByParent.set(entity.parentId, list);
-    }
-
-    for (const [parentId, entities] of groupedByParent.entries()) {
-      nextScene = insertDuplicatedEntitiesInScene(nextScene, entities, parentId);
-    }
+    const nextScene = insertClipboardEntitiesInScene(scene, prepared.duplicatedEntities, []);
 
     return {
       ...nextScene,
@@ -4857,7 +4910,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   requestEntityArray: (copyCount, direction, spacingMeters, assetNumberRule) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '阵列对象');
-      const sourceIds = getSelectedRuntimeEntityIds(state);
+      const selectionIds = getActiveHierarchySelectionIds(state);
+      const compositionInfo = getCompositionArrayInfo(state.scene, selectionIds, copyCount);
+      const compositionError = compositionInfo && (compositionInfo.error ?? getEntityArrayParameterError(copyCount, spacingMeters) ?? getEntityArrayIdentifierError(state.scene, selectionIds, copyCount, assetNumberRule));
+      if (compositionError) return { entityArrayRequest: null, logs: prependLog(state.logs, '模型阵列失败：' + compositionError) };
+      const sourceIds = compositionInfo ? selectionIds : getSelectedRuntimeEntityIds(state);
       if (sourceIds.length === 0) return state;
 
       const normalizedAssetNumberRule = assetNumberRule.trim();

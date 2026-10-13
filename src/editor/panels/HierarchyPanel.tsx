@@ -23,7 +23,7 @@ import {
   isEntityEffectivelyVisible,
   toggleHierarchyEntitySelection,
 } from '../model/entityHierarchy';
-import { getEntityArrayIdentifierError } from '../model/modelArray';
+import { getCompositionArrayInfo, getEntityArrayIdentifierError } from '../model/modelArray';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
 import { useEditorStore } from '../store/editorStore';
 
@@ -159,7 +159,11 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     (entity.isFolder || Boolean(entity.parentId))
     && !isEntityEffectivelyLocked(entities, entity)
   ));
-  const arraySourceEntities = activeSelectionEntities.filter(
+  const compositionArrayInfo = getCompositionArrayInfo(scene, activeSelectionIds, arrayDialog?.copyCount ?? 1);
+  const canArraySelection = !props.readOnly && (compositionArrayInfo
+    ? activeSelectionEntities.length === 1 && Boolean(activeSelectionEntities[0]?.composition)
+    : canMutateRuntimeSelection);
+  const arraySourceEntities = compositionArrayInfo ? activeSelectionEntities : activeSelectionEntities.filter(
     (entity) => !entity.isFolder
       && !entity.components.skybox
       && !entity.components.manualRoamSpawn
@@ -169,7 +173,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
     (entity) => Boolean(entity.components.modelAsset || entity.components.locator),
   ).length;
   const arrayValidationError = arrayDialog
-    ? getEntityArrayIdentifierError(
+    ? compositionArrayInfo?.error ?? getEntityArrayIdentifierError(
         scene,
         arraySourceEntities.map((entity) => entity.id),
         arrayDialog.copyCount,
@@ -192,7 +196,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
 
   /** 打开模型阵列弹窗，确认后由 SceneRuntime 解析选区包围盒再执行可撤销阵列命令。 */
   function openArrayDialog(): void {
-    if (props.readOnly) return;
+    if (!canArraySelection) return;
     setArrayDialog({ copyCount: 3, direction: 'x', spacingMeters: 1, assetNumberRule: '' });
     setContextMenu(null);
   }
@@ -715,7 +719,8 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
           </button>
           <button
             className="hierarchy-context-menu-item"
-            disabled={!canMutateRuntimeSelection}
+            disabled={!canArraySelection}
+            title={compositionArrayInfo?.error ?? undefined}
             onClick={openArrayDialog}
             role="menuitem"
             type="button"
@@ -782,6 +787,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
       {arrayDialog ? (
         <EntityArrayDialog
           assetNumberedSourceCount={assetNumberedArraySourceCount}
+          compositionArray={compositionArrayInfo ?? undefined}
           onCancel={() => setArrayDialog(null)}
           onChange={setArrayDialog}
           onConfirm={submitArrayDialog}

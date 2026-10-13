@@ -33,6 +33,8 @@
     "test:telemetry": "node scripts/telemetry-test.mjs",
     "test:virtual-conveyor": "node --test tests/runtime/virtualConveyorPackage.test.mjs",
     "test:model-array": "node scripts/model-array-test.mjs",
+    "test:composition-array": "node scripts/test-composition-array.mjs && node --test scripts/test-composition-array-runtime.mjs tests/editor/entityArrayDialog.test.mjs",
+    "smoke:composition-array": "node scripts/smoke-composition-array.mjs",
     "test:builtin-slot": "node scripts/builtin-slot-test.mjs",
     "smoke:units": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:cad && npm run smoke:model-measurement && npm run smoke:model-array && npm run smoke:model-parameters",
     "smoke:cad": "node scripts/smoke-cad-geometry-fidelity.mjs && node scripts/smoke-cad-block-instances.mjs && node scripts/smoke-cad-extended-geometry.mjs",

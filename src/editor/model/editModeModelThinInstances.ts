@@ -151,6 +151,22 @@ export function createEditModeModelThinInstancePlan(
   const independentIds = new Set([...collectAlarmIndependentEntityIds(scene), ...collectDigitalTwinEffectTargetIds(scene)]);
   const motionExcludedModelArrayEntityIds = new Set([...collectMotionExcludedModelArrayEntityIds(scene), ...independentIds]);
   const groups = new Map<string, Entity[]>();
+  const compositionScopeById = new Map<string, string>();
+  function compositionScope(entity: Entity): string {
+    const path: string[] = [];
+    let current: Entity | undefined = entity;
+    const visited = new Set<string>();
+    let scope = '';
+    while (current && !visited.has(current.id)) {
+      if (current.composition) { scope = current.id; break; }
+      const cached = compositionScopeById.get(current.id);
+      if (cached !== undefined) { scope = cached; break; }
+      visited.add(current.id); path.push(current.id);
+      current = current.parentId ? scene.entities[current.parentId] : undefined;
+    }
+    for (const id of path) compositionScopeById.set(id, scope);
+    return scope;
+  }
 
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
@@ -166,8 +182,10 @@ export function createEditModeModelThinInstancePlan(
       continue;
     }
 
-    const groupKey = getCachedModelAssetGroupKey(modelAsset);
-    if (!groupKey) continue;
+    const assetGroupKey = getCachedModelAssetGroupKey(modelAsset);
+    if (!assetGroupKey) continue;
+    // 组合副本必须能独立删除和升级库版本；自动合批只在同一组合内建立实体引用。
+    const groupKey = JSON.stringify([compositionScope(entity), assetGroupKey]);
 
     const group = groups.get(groupKey) ?? [];
     group.push(entity);

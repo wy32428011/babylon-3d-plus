@@ -4,16 +4,18 @@ import type { SceneDocument } from './SceneDocument';
 import { createArrayAssetNumber, type ArrayAssetNumberResult } from './arrayAssetNumbering';
 
 export const MODEL_ARRAY_COPY_COUNT_MAX = 1000;
+export const COMPOSITION_ARRAY_ENTITY_COUNT_MAX = 10_000;
 /** 单个源模型可关联的矩阵阵列实体上限；同时作为旧版隐藏阵列项迁移保护。 */
 export const MODEL_ARRAY_ITEM_COUNT_MAX = 100_000;
 export const MODEL_ARRAY_MIN_SPAN_METERS = 1e-6;
 export const ENTITY_NAME_MAX_LENGTH = 80;
 
-export type ShiftEntityArrayKind = 'model' | 'mesh' | 'locator' | 'cad-reference' | 'poi';
+export type ShiftEntityArrayKind = 'model' | 'mesh' | 'locator' | 'cad-reference' | 'poi' | 'composition';
 export type ShiftEntityArrayIdentityBehavior = 'asset-number' | 'name-only';
 
-/** 返回实体可参与 Shift+Gizmo 阵列的运行时类型；文件夹、灯光和模型生成器始终排除。 */
+/** 返回实体可参与 Shift+Gizmo 阵列的运行时类型；组合根可参与；普通文件夹、灯光和模型生成器排除。 */
 export function getShiftEntityArrayKind(entity: Entity | null | undefined): ShiftEntityArrayKind | null {
+  if (entity?.isFolder && entity.composition) return 'composition';
   if (!entity || entity.isFolder || entity.components.modelGenerator || entity.components.light) return null;
   if (entity.components.modelAsset) return 'model';
   if (entity.components.meshRenderer) return 'mesh';
@@ -161,6 +163,65 @@ export function createModelArrayIdentity(
 }
 
 
+/** 返回组合阵列完整范围；锁定、失效结构、混选和数量超限均原子拒绝。 */
+export function getCompositionArrayInfo(scene: SceneDocument, sourceIds: string[], copyCount: number): { entityIds: string[]; createdEntityCount: number; error: string | null } | null {
+  const ids = [...new Set(sourceIds)];
+  if (!ids.some(id => scene.entities[id]?.composition)) return null;
+  const entityIds: string[] = [];
+  const result = (error: string | null) => ({ entityIds, createdEntityCount: entityIds.length * copyCount, error });
+  const root = scene.entities[ids[0]];
+  if (ids.length !== 1 || !root?.isFolder || !root.composition) return result('组合阵列仅支持单个组合根节点，不能混选。');
+  const included = new Set<string>();
+  const stack = [root.id];
+  while (stack.length) {
+    const id = stack.pop()!;
+    const entity = scene.entities[id];
+    if (!entity || included.has(id)) return result('组合成员结构已失效。');
+    included.add(id); entityIds.push(id);
+    for (const childId of entity.childrenIds) {
+      if (!entity.isFolder || scene.entities[childId]?.parentId !== id) return result('组合成员结构已失效。');
+      stack.push(childId);
+    }
+  }
+  for (const entity of Object.values(scene.entities)) {
+    const hostId = entity.components.locator?.builtInBinding?.hostEntityId;
+    if (hostId && included.has(hostId) && !included.has(entity.id)) { included.add(entity.id); entityIds.push(entity.id); }
+    if (entity.parentId && included.has(entity.parentId) && !included.has(entity.id)) return result('组合成员结构已失效。');
+  }
+  for (const id of entityIds) {
+    // 旧隐藏项需先经反序列化展开，避免低估数量或漏算几何跨度。
+    if (scene.entities[id].components.modelArray?.items.length) {
+      return result('组合内存在旧版隐藏阵列，请保存并重新打开场景后再阵列。');
+    }
+    const ancestors = new Set<string>();
+    let current: Entity | undefined = scene.entities[id];
+    while (current) {
+      if (ancestors.has(current.id)) return result('组合祖先结构已失效。');
+      ancestors.add(current.id);
+      if (current.locked) return result('组合根、祖先或成员已锁定，不能阵列。');
+      if (!current.parentId) break;
+      const parent: Entity | undefined = scene.entities[current.parentId];
+      if (!parent?.isFolder || !parent.childrenIds.includes(current.id)) return result('组合成员或祖先结构已失效。');
+      current = parent;
+    }
+    const hostId = scene.entities[id].components.locator?.builtInBinding?.hostEntityId;
+    if (hostId && !scene.entities[hostId]?.components.modelAsset) return result('内置货格宿主已失效。');
+    const renderIds = new Set<string>();
+    let render: Entity | undefined = scene.entities[id];
+    while (render?.components.modelArrayInstance) {
+      if (renderIds.has(render.id)) return result('组合模型阵列源结构已失效。');
+      renderIds.add(render.id);
+      render = scene.entities[render.components.modelArrayInstance.sourceEntityId];
+      if (!render?.components.modelAsset) return result('组合模型阵列源已失效。');
+    }
+  }
+  const parameterError = getEntityArrayParameterError(copyCount, 0);
+  if (parameterError) return result(parameterError);
+  if (entityIds.length * copyCount > COMPOSITION_ARRAY_ENTITY_COUNT_MAX) return result('单次新增实体不能超过 10000 个。');
+  if (!entityIds.some(id => !scene.entities[id].isFolder)) return result('组合没有可阵列的成员。');
+  return result(null);
+}
+
 type ArrayAssetNumberTarget = {
   value: string;
 };
@@ -182,6 +243,19 @@ export function getEntityArrayIdentifierError(
   copyCount: number,
   assetNumberRule: string,
 ): string | null {
+  const compositionInfo = getCompositionArrayInfo(scene, sourceIds, copyCount);
+  if (compositionInfo) {
+    if (compositionInfo.error) return compositionInfo.error;
+    if (assetNumberRule.trim()) return '组合内部成员自动生成新编号，不支持自定义资产编号规则。';
+    const names = new Set(Object.values(scene.entities).flatMap(entity => [entity.name, ...(entity.components.modelArray?.items.map(item => item.name) ?? [])]));
+    for (let index = 1; index <= copyCount; index++) {
+      const name = createEntityArrayName(scene.entities[sourceIds[0]].name, index);
+      if (!name.ok) return name.error;
+      if (names.has(name.name)) return '对象名称“' + name.name + '”已存在，请修改源对象名称或冲突对象。';
+      names.add(name.name);
+    }
+    return null;
+  }
   const normalizedRule = assetNumberRule.trim();
   const normalizedCopyCount = Math.min(
     MODEL_ARRAY_COPY_COUNT_MAX,

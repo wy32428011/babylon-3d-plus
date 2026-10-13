@@ -300,3 +300,11 @@ test('无资产编号实体禁用自定义编号规则但允许默认空间阵�
     /仅支持一个带资产编号的源对象/,
   );
 });
+
+test('组合根支持 Shift 阵列并只显示名称配置，普通文件夹继续排除', () => {
+  const root = { ...createBaseEntity('composition'), isFolder: true };
+  const composition: Entity = { ...root, composition: { schemaVersion: 1, instanceId: 'instance', libraryId: 'library', revision: 'revision' } };
+  assert.equal(getShiftEntityArrayKind(composition), 'composition');
+  assert.equal(getShiftEntityArrayIdentityBehavior(composition), 'name-only');
+  assert.equal(getShiftEntityArrayKind(root), null);
+});

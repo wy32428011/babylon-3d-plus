@@ -84,7 +84,7 @@ import {
 import type { Vector3Data } from '../../editor/model/math';
 import { createGroupSpatialInfo, type GroupSpatialInfoResult } from '../../editor/model/groupSpatialInfo';
 import { deriveColumnSplitFromBinding } from '../../editor/model/builtInSlotBinding';
-import { MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
+import { getCompositionArrayInfo, MODEL_ARRAY_COPY_COUNT_MAX, MODEL_ARRAY_MIN_SPAN_METERS } from '../../editor/model/modelArray';
 import {
   createModelAssetCode,
   createSceneSkyboxSettingsFromEntity,
@@ -992,6 +992,11 @@ export class SceneRuntime {
   private maxSelectionSyncDurationMs = 0;
   private lastSelectionChangedEntityCount = 0;
   private entityArrayPreview: EntityArrayPreviewEntry | null = null;
+  private compositionArrayPreview: {
+    sourceEntityId: string;
+    entityIds: string[];
+    members: Map<string, { source: EntityArrayPreviewSource; batch: EntityArrayThinInstanceBatch }>;
+  } | null = null;
   private groupTranslationPreview: EntityGroupTranslationPreview | null = null;
   private pendingGroupTranslationDelta: Vector3Data | null = null;
   private groupRotationPreview: EntityGroupRotationPreview | null = null;
@@ -2616,6 +2621,38 @@ export class SceneRuntime {
     direction.normalize();
     const normalizedDirection = { x: direction.x, y: direction.y, z: direction.z };
 
+    if (this.shadowDocument?.entities[entityId]?.composition) {
+      const members = this.resolveCompositionArraySources(entityId, 1);
+      if (!members) return null;
+      const points: Vector3[] = [];
+      for (const [memberId, source] of members) {
+        const instance = this.modelArrayInstanceEntities.get(memberId);
+        const model = instance ? this.resolveModelArrayRenderModel(instance) : null;
+        if (instance && model) {
+          const instancePoints = this.getModelArrayInstanceWorldPoints(instance, model);
+          if (!instancePoints) return null;
+          for (const point of instancePoints) points.push(point);
+          continue;
+        }
+        for (const mesh of source.geometryMeshes) {
+          if (mesh.isDisposed() || mesh.getTotalVertices() === 0) continue;
+          mesh.computeWorldMatrix(true);
+          const matrices = mesh instanceof Mesh && mesh.thinInstanceCount > 0
+            ? readCurrentThinInstanceMatrices(mesh)?.map(matrix => matrix.multiply(mesh.getWorldMatrix()))
+            : [mesh.getWorldMatrix()];
+          if (!matrices) return null;
+          for (const matrix of matrices) {
+            for (const corner of (mesh.rawBoundingInfo ?? mesh.getBoundingInfo()).boundingBox.vectors) {
+              points.push(Vector3.TransformCoordinates(corner, matrix));
+            }
+          }
+        }
+      }
+      const spanMeters = this.measureWorldPointsAlongAxes(points, [direction])?.[0];
+      return spanMeters !== undefined && Number.isFinite(spanMeters) && spanMeters > MODEL_ARRAY_MIN_SPAN_METERS
+        ? { direction: normalizedDirection, spanMeters } : null;
+    }
+
     const instanceEntity = this.modelArrayInstanceEntities.get(entityId);
     const sourceModel = instanceEntity ? this.resolveModelArrayRenderModel(instanceEntity) : null;
     if (instanceEntity && sourceModel) {
@@ -2649,6 +2686,10 @@ export class SceneRuntime {
     copyCount: number,
     spacingMeters: number,
   ): boolean {
+    if (this.shadowDocument?.entities[entityId]?.composition) {
+      return this.updateCompositionArrayPreview(entityId, worldDirection, copyCount, spacingMeters);
+    }
+    if (this.compositionArrayPreview) this.clearEntityArrayPreview();
     const source = this.resolveEntityArrayPreviewSource(entityId);
     const geometry = this.getEntityArrayGeometry(entityId, worldDirection);
     if (!source || !geometry) {
@@ -2784,6 +2825,10 @@ export class SceneRuntime {
 
   /** 清除当前全部临时阵列批次或克隆，不释放源实体的材质、纹理或几何资源。 */
   clearEntityArrayPreview(): void {
+    if (this.compositionArrayPreview) {
+      for (const { batch } of this.compositionArrayPreview.members.values()) batch.dispose();
+      this.compositionArrayPreview = null;
+    }
     if (!this.entityArrayPreview) return;
 
     for (const clone of this.entityArrayPreview.clones) {
@@ -2792,6 +2837,84 @@ export class SceneRuntime {
     this.entityArrayPreview.matrixPreview?.dispose();
     this.entityArrayPreview.poiBoundsMaterial?.dispose(false, false);
     this.entityArrayPreview = null;
+  }
+
+  /** 文件夹仅承载层级；组合成员的几何和预览按各自世界变换收集，禁止部分就绪提交。 */
+  private resolveCompositionArraySources(entityId: string, copyCount: number): Map<string, EntityArrayPreviewSource> | null {
+    if (!this.shadowDocument) return null;
+    const info = getCompositionArrayInfo(this.shadowDocument, [entityId], copyCount);
+    if (!info || info.error) return null;
+    const members = new Map<string, EntityArrayPreviewSource>();
+    for (const memberId of info.entityIds) {
+      const entity = this.shadowDocument.entities[memberId];
+      if (entity.isFolder) continue;
+      let ancestor: Entity | undefined = entity;
+      while (ancestor && ancestor.visible !== false) {
+        ancestor = ancestor.parentId ? this.shadowDocument.entities[ancestor.parentId] : undefined;
+      }
+      if (ancestor?.visible === false) continue;
+      const source = this.resolveEntityArrayPreviewSource(memberId);
+      if (!source || !source.geometryReady || source.root.isDisposed() || source.previewMeshes.length === 0) return null;
+      members.set(memberId, source);
+    }
+    return members.size > 0 ? members : null;
+  }
+
+  /** 逐成员隔离矩阵批次，既保留独立世界位姿，也支持无独立 Mesh 的模型阵列成员。 */
+  private updateCompositionArrayPreview(entityId: string, direction: Vector3Data, copyCount: number, spacingMeters: number): boolean {
+    if (copyCount === 0) { this.clearEntityArrayPreview(); return true; }
+    const sources = this.resolveCompositionArraySources(entityId, copyCount);
+    const geometry = this.getEntityArrayGeometry(entityId, direction);
+    if (!sources || !geometry || !Number.isFinite(spacingMeters) || spacingMeters < 0) {
+      this.clearEntityArrayPreview();
+      return false;
+    }
+    const memberIds = [...sources.keys()];
+    if (this.entityArrayPreview || (this.compositionArrayPreview && (
+      this.compositionArrayPreview.sourceEntityId !== entityId
+      || memberIds.join('|') !== this.compositionArrayPreview.entityIds.join('|')
+      || memberIds.some(id => {
+        const previous = this.compositionArrayPreview!.members.get(id)?.source;
+        const current = sources.get(id)!;
+        return previous?.root !== current.root
+          || previous.previewMeshes.length !== current.previewMeshes.length
+          || previous.previewMeshes.some((mesh, i) => mesh !== current.previewMeshes[i]);
+      })
+    ))) this.clearEntityArrayPreview();
+    this.compositionArrayPreview ??= { sourceEntityId: entityId, entityIds: memberIds, members: new Map() };
+    const preview = this.compositionArrayPreview;
+    const step = geometry.spanMeters + spacingMeters;
+    for (const [memberId, source] of sources) {
+      let entry = preview.members.get(memberId);
+      if (!entry) {
+        const batch = EntityArrayThinInstanceBatch.create(memberId, source.previewMeshes);
+        if (!batch) { this.clearEntityArrayPreview(); return false; }
+        entry = { source, batch };
+        preview.members.set(memberId, entry);
+      }
+      let updated: boolean;
+      if (source.modelArraySourceRoot && source.modelArrayBaseTransform) {
+        const transform = source.modelArrayBaseTransform;
+        const instances = Array.from({ length: copyCount }, (_, i) => ({
+          entityId: `__compositionArrayPreview_${memberId}_${i}`,
+          pickable: false,
+          transform: {
+            ...transform,
+            position: {
+              x: transform.position.x + geometry.direction.x * step * (i + 1),
+              y: transform.position.y + geometry.direction.y * step * (i + 1),
+              z: transform.position.z + geometry.direction.z * step * (i + 1),
+            },
+          },
+        }));
+        source.modelArraySourceRoot.computeWorldMatrix(true);
+        updated = entry.batch.updateEntityTransforms(source.modelArraySourceRoot.getWorldMatrix().clone(), instances);
+      } else {
+        updated = entry.batch.update(copyCount, geometry.direction, step);
+      }
+      if (!updated) { this.clearEntityArrayPreview(); return false; }
+    }
+    return true;
   }
 
   /** 汇总多个实体的世界包围盒，供场景聚焦和模型阵列读取中心、尺寸与几何就绪状态。 */
@@ -3540,6 +3663,12 @@ export class SceneRuntime {
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
     this.shadowDocument = document;
+    if (this.compositionArrayPreview) {
+      const preview = this.compositionArrayPreview;
+      const info = getCompositionArrayInfo(document, [preview.sourceEntityId], 1);
+      const validMemberIds = new Set(info?.entityIds);
+      if (!info || info.error || preview.entityIds.some(id => !validMemberIds.has(id))) this.clearEntityArrayPreview();
+    }
     const hasSurfaceArrows = document.entityIds.some(id => {
       const components = document.entities[id]?.components;
       if (!components?.modelAsset || components.telemetryBinding?.surfaceArrows?.enabled === false) return false;
@@ -6873,7 +7002,9 @@ export class SceneRuntime {
 
   /** 当前源实体被删除、重建或锁定时立即释放其临时阵列预览。 */
   private clearEntityArrayPreviewIfSource(entityId: string): void {
-    if (this.entityArrayPreview?.sourceEntityId === entityId) this.clearEntityArrayPreview();
+    if (this.entityArrayPreview?.sourceEntityId === entityId
+      || this.compositionArrayPreview?.sourceEntityId === entityId
+      || this.compositionArrayPreview?.members.has(entityId)) this.clearEntityArrayPreview();
   }
 
   /** 清理临时阵列克隆的交互状态，并恢复共享矩阵实例的公开缓冲容器。 */

@@ -90,6 +90,7 @@ export type TransformGizmoTargetOptions = {
   uniformScaleOnly?: boolean;
   supportedTools?: readonly TransformTool[];
   entityArrayEnabled?: boolean;
+  entityArraySourceId?: string;
   subTargetId?: string;
   rotationAxes?: readonly TransformGizmoAxis[];
 };
@@ -187,6 +188,7 @@ export class TransformGizmoController {
   private readonly dragObserverBindings: DragObserverBinding[] = [];
   private attachedTarget: GizmoTarget | null = null;
   private attachedEntityId: string | null = null;
+  private attachedEntityArraySourceId: string | null = null;
   private attachedSubTargetId: string | null = null;
   private attachedGroupId: string | null = null;
   private attachedEnvironment = false;
@@ -321,6 +323,7 @@ export class TransformGizmoController {
     this.cancelActiveDrag();
     this.attachedTarget = target;
     this.attachedEntityId = nextEntityId;
+    this.attachedEntityArraySourceId = nextEntityId;
     this.attachedSubTargetId = nextSubTargetId;
     this.attachedGroupId = null;
     this.attachedEnvironment = false;
@@ -338,9 +341,10 @@ export class TransformGizmoController {
   attachToGroupTarget(
     target: TransformNode | null,
     folderId: string | null,
-    options: Pick<TransformGizmoTargetOptions, 'rotationAxes'> = {},
+    options: Pick<TransformGizmoTargetOptions, 'rotationAxes' | 'entityArraySourceId'> = {},
   ): void {
     const nextGroupId = target ? folderId : null;
+    const nextArraySourceId = target ? options.entityArraySourceId ?? null : null;
     const nextRotationAxes = new Set<TransformGizmoAxis>(
       target ? options.rotationAxes ?? ALL_TRANSFORM_AXES : ALL_TRANSFORM_AXES,
     );
@@ -348,18 +352,20 @@ export class TransformGizmoController {
       this.attachedTarget === target
       && this.attachedGroupId === nextGroupId
       && this.attachedEntityId === null
+      && this.attachedEntityArraySourceId === nextArraySourceId
       && areRotationAxisSetsEqual(this.attachedRotationAxes, nextRotationAxes)
     ) return;
 
     this.cancelActiveDrag();
     this.attachedTarget = target;
     this.attachedEntityId = null;
+    this.attachedEntityArraySourceId = nextArraySourceId;
     this.attachedSubTargetId = null;
     this.attachedGroupId = nextGroupId;
     this.attachedEnvironment = false;
     this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(['translate', 'rotate']);
-    this.attachedEntityArrayEnabled = false;
+    this.attachedEntityArrayEnabled = Boolean(nextArraySourceId);
     this.attachedRotationAxes = nextRotationAxes;
     this.currentTool = this.currentTool === 'rotate' ? 'rotate' : 'translate';
     this.setTool(this.currentTool);
@@ -386,6 +392,7 @@ export class TransformGizmoController {
     this.attachedSubTargetId = null;
     this.attachedGroupId = null;
     this.attachedEnvironment = Boolean(target);
+    this.attachedEntityArraySourceId = null;
     this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(ALL_TRANSFORM_TOOLS);
     this.attachedEntityArrayEnabled = false;
@@ -569,6 +576,7 @@ export class TransformGizmoController {
     this.utilityLayer.dispose();
     this.attachedTarget = null;
     this.attachedEntityId = null;
+    this.attachedEntityArraySourceId = null;
     this.attachedSubTargetId = null;
     this.attachedGroupId = null;
     this.attachedEnvironment = false;
@@ -609,7 +617,7 @@ export class TransformGizmoController {
       const shiftKey = event.pointerInfo?.event.shiftKey === true;
       if (
         this.attachedEnvironment
-        || this.attachedGroupId
+        || (this.attachedGroupId && !this.attachedEntityArraySourceId)
         || !this.attachedEntityArrayEnabled
         || !shiftKey
         || this.currentTool !== 'translate'
@@ -656,7 +664,8 @@ export class TransformGizmoController {
 
   /** 初始化 Shift 阵列会话，并在第一帧移动前把 Gizmo 改绑到代理节点。 */
   private beginEntityArrayDrag(axis: TransformGizmoAxis, event: DragStartEndEvent): void {
-    if (!this.attachedTarget || !this.attachedEntityId) return;
+    const sourceEntityId = this.attachedEntityArraySourceId ?? this.attachedEntityId;
+    if (!this.attachedTarget || !sourceEntityId) return;
 
     const positiveDirection = this.getWorldAxisDirection(this.attachedTarget, axis);
     if (!positiveDirection) {
@@ -665,7 +674,7 @@ export class TransformGizmoController {
     }
 
     const context: EntityArrayDragContext = {
-      entityId: this.attachedEntityId,
+      entityId: sourceEntityId,
       axis,
       space: this.transformSpace,
       positiveDirection: vector3Data(positiveDirection),
