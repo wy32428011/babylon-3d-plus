@@ -121,11 +121,15 @@ import {
 import { clearCompositionCache, getCompositionLibraryEntry } from './composition/compositionCargoCache';
 import {
   CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET,
+  CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
   consumeCadReferenceParseResult,
   parseCadReferenceDxf,
   type CadReferenceParseResult,
 } from '../../editor/cad/cadReference';
-import { createCadReferenceDxfWorkerTask } from '../../editor/cad/cadReferenceWorkerClient';
+import { createCadReferenceDxfWorkerTask, shouldParseCadReferenceDxfInWorker } from '../../editor/cad/cadReferenceWorkerClient';
+import { publishCadReferenceLoadStatus, forgetCadReferenceLoadStatus, registerCadReferenceLoadCancellation } from '../../editor/cad/cadReferenceLoadStatus';
+import { CAD_REFERENCE_MAX_BATCH_POINTS, CAD_REFERENCE_MAX_BATCH_POLYLINES } from '../../editor/cad/cadReferenceGeometryPolicy';
+import { mergeCadReferenceRenderLayers } from '../../editor/cad/cadReferenceRenderLayers';
 import { decodeCadDxfBytes } from '../../editor/cad/cadTextEncoding';
 import {
   ExternalModelScriptRuntime,
@@ -635,6 +639,8 @@ type CadReferenceRuntimeEntry = {
   opacity: number;
   geometryReady: boolean;
   cancelLoad: (() => void) | null;
+  abortController: AbortController;
+  unregisterCancellation: () => void;
 };
 
 /** 输送线编辑器轨迹可视化：虚线 + 方向箭头，仅编辑态、非拾取。 */
@@ -3429,12 +3435,12 @@ export class SceneRuntime {
     return createPointWorldBounds(modelGenerator.markerRoot.getAbsolutePosition());
   }
 
-  /** CAD 参考层优先按所有线稿 Mesh 合并包围盒，加载中则回退到根节点位置。 */
+  /** CAD 取景包含所有 INSERT 实例，不能使用只描述原型尺寸的模型包围盒。 */
   private getCadReferenceWorldBounds(cadReference: CadReferenceRuntimeEntry): RuntimeWorldBounds | null {
     let mergedBounds: RuntimeWorldBounds | null = null;
 
     for (const lineMesh of cadReference.lineMeshes) {
-      const bounds = getMeshWorldBounds(lineMesh);
+      const bounds = getThinInstanceMeshWorldBounds(lineMesh) ?? getMeshWorldBounds(lineMesh);
       if (!bounds) continue;
       mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;
     }
@@ -4951,103 +4957,76 @@ export class SceneRuntime {
 
   /** 同步 CAD/DXF 网格参考层，线稿不可拾取，只作为建模布局底图。 */
   private syncCadReferenceEntity(entity: Entity): void {
-    const cadReference = entity.components.cadReference;
-    if (!cadReference) return;
-
+    const reference = entity.components.cadReference;
+    if (!reference) return;
     const existing = this.cadReferences.get(entity.id);
-    if (
-      existing &&
-      (existing.sourceUrl !== cadReference.sourceUrl || existing.unitScaleToMeters !== cadReference.unitScaleToMeters)
-    ) {
+    if (existing && (existing.sourceUrl !== reference.sourceUrl || existing.unitScaleToMeters !== reference.unitScaleToMeters)) {
       this.disposeCadReference(entity.id, existing);
     }
-
     const current = this.cadReferences.get(entity.id);
     if (current) {
       this.applyTransform(current.root, entity.components.transform);
-      this.applyCadReferenceStyle(current, cadReference);
+      this.applyCadReferenceStyle(current, reference);
       this.applyCadReferenceInteractivity(current, entity.id);
       return;
     }
-
-    const root = new TransformNode(`${entity.id}_cadReferenceRoot`, this.scene);
+    const root = new TransformNode(entity.id + '_cadReferenceRoot', this.scene);
     this.applyTransform(root, entity.components.transform);
-
-    const loadToken = ++this.modelLoadSequence;
     const pending: CadReferenceRuntimeEntry = {
-      sourceUrl: cadReference.sourceUrl,
-      unitScaleToMeters: cadReference.unitScaleToMeters,
-      root,
-      lineMeshes: [],
-      highlighted: false,
-      loadToken,
-      lineColor: cadReference.lineColor,
-      opacity: cadReference.opacity,
-      geometryReady: false,
-      cancelLoad: null,
+      sourceUrl: reference.sourceUrl, unitScaleToMeters: reference.unitScaleToMeters,
+      root, lineMeshes: [], highlighted: false, loadToken: ++this.modelLoadSequence,
+      lineColor: reference.lineColor, opacity: reference.opacity, geometryReady: false,
+      cancelLoad: null, abortController: new AbortController(), unregisterCancellation: () => undefined,
     };
     this.cadReferences.set(entity.id, pending);
+    pending.unregisterCancellation = registerCadReferenceLoadCancellation(entity.id, () => {
+      if (!this.isActiveCadReferenceLoad(entity.id, pending)) return;
+      this.stopCadReferenceLoad(pending);
+      publishCadReferenceLoadStatus({ entityId: entity.id, sourceUrl: reference.sourceUrl, state: 'canceled', percent: 0, detail: 'CAD 加载已取消。' });
+    });
     this.applyCadReferenceInteractivity(pending, entity.id);
+    publishCadReferenceLoadStatus({ entityId: entity.id, sourceUrl: reference.sourceUrl, state: 'loading', percent: 0, detail: '正在加载 CAD 参考图...' });
+    void this.loadCadReferenceGeometry(entity.id, pending, reference).catch(error => {
+      if (!this.isActiveCadReferenceLoad(entity.id, pending) || pending.abortController.signal.aborted) return;
+      const detail = 'CAD 参考图加载失败：' + (error instanceof Error ? error.message : String(error));
+      this.pushLog(detail);
+      this.stopCadReferenceLoad(pending);
+      publishCadReferenceLoadStatus({ entityId: entity.id, sourceUrl: reference.sourceUrl, state: 'error', percent: 100, detail });
+    });
+  }
 
-    const cachedGeometry = consumeCadReferenceParseResult(cadReference.sourceUrl, cadReference.unitScaleToMeters);
-    if (cachedGeometry) {
-      void Promise.resolve().then(async () => {
-        const activeEntry = this.cadReferences.get(entity.id);
-        if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.sourceUrl !== cadReference.sourceUrl) {
-          return;
+  /** 新导入复用缓存；重开同时检查元数据和响应长度，旧场景未知大小走安全后台路径。 */
+  private async loadCadReferenceGeometry(entityId: string, pending: CadReferenceRuntimeEntry, reference: CadReferenceComponent): Promise<void> {
+    const signal = pending.abortController.signal;
+    let geometry = consumeCadReferenceParseResult(reference.sourceUrl, reference.unitScaleToMeters);
+    if (!geometry) {
+      const useWorker = shouldParseCadReferenceDxfInWorker(reference.sourceFileSizeBytes, { importMode: reference.importMode, preferSafeUnknownSize: true })
+        || reference.polylineCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPolylines * 0.5
+        || reference.pointCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPoints * 0.5;
+      const parseInWorker = async (): Promise<CadReferenceParseResult> => {
+        const task = createCadReferenceDxfWorkerTask(resolveRuntimeAssetUrl(reference.sourceUrl), progress => {
+          if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
+          publishCadReferenceLoadStatus({ entityId, sourceUrl: reference.sourceUrl, state: 'loading', ...progress });
+        }, reference.unitScaleToMeters, { signal });
+        pending.cancelLoad = task.cancel;
+        return task.promise;
+      };
+      if (useWorker) geometry = await parseInWorker();
+      else {
+        const response = await fetch(resolveRuntimeAssetUrl(reference.sourceUrl), { signal });
+        if (!response.ok) throw new Error('读取 CAD 文件失败：HTTP ' + response.status);
+        const headerSize = Number(response.headers.get('content-length') ?? 0);
+        if (!Number.isFinite(headerSize) || headerSize <= 0 || headerSize >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES) {
+          await response.body?.cancel();
+          geometry = await parseInWorker();
+        } else {
+          geometry = parseCadReferenceDxf(decodeCadDxfBytes(new Uint8Array(await response.arrayBuffer())), { unitScaleToMeters: reference.unitScaleToMeters });
         }
-
-        try {
-          await this.applyCadReferenceGeometry(entity.id, activeEntry, cachedGeometry);
-        } catch (error) {
-          console.warn('CAD 参考图加载失败', error);
-          if (this.cadReferences.get(entity.id)?.loadToken === loadToken) {
-            this.disposeCadReference(entity.id, activeEntry);
-          }
-        }
-      });
-      return;
+      }
     }
-
-    const shouldUseLargeDxfWorker = cadReference.importMode === 'large-preview' || (
-      cadReference.polylineCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPolylines * 0.5
-      || cadReference.pointCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPoints * 0.5
-    );
-    let geometryPromise: Promise<CadReferenceParseResult>;
-    if (shouldUseLargeDxfWorker) {
-      const workerTask = createCadReferenceDxfWorkerTask(resolveRuntimeAssetUrl(cadReference.sourceUrl), undefined, cadReference.unitScaleToMeters);
-      pending.cancelLoad = workerTask.cancel;
-      geometryPromise = workerTask.promise;
-    } else {
-      const abortController = new AbortController();
-      pending.cancelLoad = () => abortController.abort();
-      geometryPromise = fetch(resolveRuntimeAssetUrl(cadReference.sourceUrl), { signal: abortController.signal })
-        .then(async (response) => {
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const content = decodeCadDxfBytes(new Uint8Array(await response.arrayBuffer()));
-          return parseCadReferenceDxf(content, { unitScaleToMeters: cadReference.unitScaleToMeters });
-        });
-    }
-
-    void geometryPromise
-      .then(async (geometry) => {
-        const activeEntry = this.cadReferences.get(entity.id);
-        if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.sourceUrl !== cadReference.sourceUrl) {
-          return;
-        }
-
-        activeEntry.cancelLoad = null;
-        await this.applyCadReferenceGeometry(entity.id, activeEntry, geometry);
-      })
-      .catch((error) => {
-        const activeEntry = this.cadReferences.get(entity.id);
-        if (!activeEntry || activeEntry.loadToken !== loadToken) return;
-        activeEntry.cancelLoad = null;
-        console.warn('CAD 参考图加载失败。', error);
-        if (activeEntry.loadToken === loadToken) {
-          this.disposeCadReference(entity.id, activeEntry);
-        }
-      });
+    if (!this.isActiveCadReferenceLoad(entityId, pending) || signal.aborted) return;
+    pending.cancelLoad = null;
+    await this.applyCadReferenceGeometry(entityId, pending, geometry);
   }
 
   /** 记录独立矩阵实例实体；其几何由 sourceEntityId 对应源模型的批次统一提交。 */
@@ -6845,12 +6824,17 @@ export class SceneRuntime {
     }
 
     if (light.lightKind === 'point') {
-      return new PointLight(entityId, Vector3.Zero(), this.scene);
+      const point = new PointLight(entityId, Vector3.Zero(), this.scene);
+      // 编辑强度与照射范围使用统一衰减，避免 PBR 将低数值强度按物理单位衰减到不可见。
+      point.falloffType = Light.FALLOFF_STANDARD;
+      return point;
     }
 
     if (light.lightKind === 'spot') {
-      return new SpotLight(entityId, Vector3.Zero(), Vector3.Down(),
+      const spot = new SpotLight(entityId, Vector3.Zero(), Vector3.Down(),
         light.angle ?? DEFAULT_SPOT_ANGLE, light.exponent ?? DEFAULT_SPOT_EXPONENT, this.scene);
+      spot.falloffType = Light.FALLOFF_STANDARD;
+      return spot;
     }
     if (light.lightKind === 'rectArea') {
       ensureLocalAreaLightTextures(this.scene);
@@ -7082,16 +7066,24 @@ export class SceneRuntime {
     this.locators.delete(entityId);
   }
 
+  /** 停止后台和构建任务，保留终止记录，避免其它实体编辑自动重试大图。 */
+  private stopCadReferenceLoad(cadReference: CadReferenceRuntimeEntry): void {
+    cadReference.unregisterCancellation();
+    cadReference.abortController.abort();
+    cadReference.cancelLoad?.();
+    cadReference.cancelLoad = null;
+    for (const lineMesh of cadReference.lineMeshes) lineMesh.dispose();
+    cadReference.lineMeshes.length = 0;
+    cadReference.geometryReady = false;
+  }
+
   /** 释放 CAD 参考图的所有线稿 Mesh 与根节点。 */
   private disposeCadReference(entityId: string, cadReference: CadReferenceRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
-    cadReference.cancelLoad?.();
-    cadReference.cancelLoad = null;
-    for (const lineMesh of cadReference.lineMeshes) {
-      lineMesh.dispose();
-    }
+    this.stopCadReferenceLoad(cadReference);
     cadReference.root.dispose();
     this.cadReferences.delete(entityId);
+    forgetCadReferenceLoadStatus(entityId);
   }
 
   // ===== 输送线轨迹可视化 =====
@@ -8007,10 +7999,23 @@ export class SceneRuntime {
     cadReference: CadReferenceRuntimeEntry,
     geometry: CadReferenceParseResult,
   ): Promise<void> {
-    const maxBatchPointCount = 60_000;
-    const maxBatchPolylineCount = 4_000;
+    const maxBatchPointCount = CAD_REFERENCE_MAX_BATCH_POINTS;
+    const maxBatchPolylineCount = CAD_REFERENCE_MAX_BATCH_POLYLINES;
+    const renderLayers = mergeCadReferenceRenderLayers(geometry.layers);
+    let completedBatches = 0;
 
-    for (const layer of geometry.layers) {
+    for (const layer of renderLayers) {
+      if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
+      if (layer.isChunk) {
+        this.createCadReferenceLineBatch(entityId, cadReference, layer.name, completedBatches,
+          layer.positions, layer.polylinePointCounts, layer.instanceMatrices);
+        completedBatches += 1;
+        publishCadReferenceLoadStatus({ entityId, sourceUrl: cadReference.sourceUrl, state: 'rendering',
+          percent: 90 + completedBatches / renderLayers.length * 8,
+          detail: '正在创建 CAD 线稿 ' + completedBatches + '/' + renderLayers.length + ' 批...' });
+        await this.waitForCadReferenceRenderFrame(cadReference.abortController.signal);
+        continue;
+      }
       let polylineIndex = 0;
       let pointOffset = 0;
       let batchIndex = 0;
@@ -8028,12 +8033,12 @@ export class SceneRuntime {
               cadReference,
               layer.name,
               batchIndex,
-              layer.positions.slice(chunkPointOffset * 3, (chunkPointOffset + chunkPointCount) * 3),
+              layer.positions.subarray(chunkPointOffset * 3, (chunkPointOffset + chunkPointCount) * 3),
               new Uint32Array([chunkPointCount]),
               layer.instanceMatrices,
             );
             batchIndex += 1;
-            await this.waitForCadReferenceRenderFrame();
+            await this.waitForCadReferenceRenderFrame(cadReference.abortController.signal);
 
             if (chunkPointCount === remainingPointCount) break;
             chunkPointOffset += chunkPointCount - 1;
@@ -8072,20 +8077,25 @@ export class SceneRuntime {
           cadReference,
           layer.name,
           batchIndex,
-          layer.positions.slice(batchPointOffset * 3, (batchPointOffset + batchPointCount) * 3),
-          layer.polylinePointCounts.slice(batchPolylineIndex, batchPolylineIndex + batchPolylineCount),
+          layer.positions.subarray(batchPointOffset * 3, (batchPointOffset + batchPointCount) * 3),
+          layer.polylinePointCounts.subarray(batchPolylineIndex, batchPolylineIndex + batchPolylineCount),
           layer.instanceMatrices,
         );
         batchIndex += 1;
-        await this.waitForCadReferenceRenderFrame();
+        await this.waitForCadReferenceRenderFrame(cadReference.abortController.signal);
       }
     }
 
     if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
-    cadReference.geometryReady = cadReference.lineMeshes.length > 0;
+    if (cadReference.lineMeshes.length === 0) throw new Error('DXF 中没有可显示的线稿图元。');
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
     this.refreshGroupTransformPreviewTargets();
+    publishCadReferenceLoadStatus({ entityId, sourceUrl: cadReference.sourceUrl, state: 'rendering', percent: 99, detail: '正在等待 CAD 首帧显示...' });
+    await waitForSceneRenderReady(this.scene, cadReference.abortController.signal);
+    if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
+    cadReference.geometryReady = true;
+    publishCadReferenceLoadStatus({ entityId, sourceUrl: cadReference.sourceUrl, state: 'ready', percent: 100, detail: 'CAD 参考图已显示。' });
   }
 
   /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
@@ -8103,7 +8113,7 @@ export class SceneRuntime {
     positions: Float32Array,
     polylinePointCounts: Uint32Array,
     instanceMatrices?: Float32Array,
-  ): void {
+  ): LinesMesh {
     let segmentCount = 0;
     for (const pointCount of polylinePointCounts) {
       segmentCount += Math.max(0, pointCount - 1);
@@ -8142,16 +8152,31 @@ export class SceneRuntime {
     lineMesh.isPickable = false;
     lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layerName };
     cadReference.lineMeshes.push(lineMesh);
+    return lineMesh;
   }
 
   /** 在 CAD 批次之间让出一帧，使编辑器输入、进度和重绘保持响应。 */
-  private waitForCadReferenceRenderFrame(): Promise<void> {
-    return new Promise((resolve) => {
-      if (typeof requestAnimationFrame === 'function') {
-        requestAnimationFrame(() => resolve());
-        return;
-      }
-      setTimeout(resolve, 0);
+  private waitForCadReferenceRenderFrame(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let frame = 0;
+      let timeout: ReturnType<typeof setTimeout>;
+      let settled = false;
+      const finish = (canceled = false): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', abort);
+        clearTimeout(timeout);
+        if (frame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+        if (canceled) { const error = new Error('CAD 构建已取消。'); error.name = 'AbortError'; reject(error); }
+        else resolve();
+      };
+      const abort = (): void => finish(true);
+      signal.addEventListener('abort', abort, { once: true });
+      // 后台标签页可能暂停 RAF；取消及构建调度都不能无限等待。
+      timeout = setTimeout(() => finish(), 100);
+      if (signal.aborted) abort();
+      else if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(() => finish());
+      else { clearTimeout(timeout); timeout = setTimeout(() => finish(), 0); }
     });
   }
 

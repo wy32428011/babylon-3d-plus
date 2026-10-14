@@ -51,6 +51,9 @@ export type CadReferenceGeometryLayer = {
   polylinePointCounts: Uint32Array;
   instanceMatrices?: Float32Array;
   instanceCount?: number;
+  /** 流式路径已经完成绘制分块；同 geometryKey 的显示组共享几何。 */
+  isChunk?: boolean;
+  geometryKey?: string;
   entityCount: number;
   polylineCount: number;
   pointCount: number;
@@ -67,6 +70,8 @@ export type CadReferenceParseResult = {
   pointCount: number;
   layers: CadReferenceGeometryLayer[];
   budgetLimited: boolean;
+  /** 按 CPU/GPU 缓冲区与批次开销估算，不等于进程总内存。 */
+  estimatedMemoryBytes?: number;
 };
 
 export type CadReferenceGeometryBudget = {

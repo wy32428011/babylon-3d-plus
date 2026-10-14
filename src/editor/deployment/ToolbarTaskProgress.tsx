@@ -5,6 +5,8 @@ export type ToolbarTaskProgressProps = {
   percent: number;
   detail: string;
   tone?: ToolbarTaskProgressTone;
+  onCancel?: () => void;
+  onDismiss?: () => void;
 };
 
 /** 在 Toolbar 中显示可访问的紧凑任务进度，供 CAD 导入和部署导出共同使用。 */
@@ -22,6 +24,8 @@ export function ToolbarTaskProgress(props: ToolbarTaskProgressProps) {
       <div className="toolbar-task-progress-header">
         <strong title={props.label}>{props.label}</strong>
         <span>{percent}%</span>
+        {props.onCancel ? <button type="button" onClick={props.onCancel}>取消</button> : null}
+        {props.onDismiss ? <button type="button" aria-label="关闭任务进度" onClick={props.onDismiss}>关闭</button> : null}
       </div>
       <div
         aria-label={`${props.label}进度`}

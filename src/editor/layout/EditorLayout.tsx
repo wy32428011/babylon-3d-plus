@@ -92,6 +92,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const toggleCameraStandardView = useEditorStore((state) => state.toggleCameraStandardView);
   const setCameraProjection = useEditorStore((state) => state.setCameraProjection);
   const importCadReference = useEditorStore((state) => state.importCadReference);
+  const cancelCadImport = useEditorStore((state) => state.cancelCadImport);
+  const dismissCadImportProgress = useEditorStore((state) => state.dismissCadImportProgress);
   const saveScene = useEditorStore((state) => state.saveScene);
   const loadScene = useEditorStore((state) => state.loadScene);
   const updateMqttConfig = useEditorStore((state) => state.updateMqttConfig);
@@ -378,6 +380,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         deploymentExportProgress={deploymentExport.state.progress}
         deploymentExportBusy={deploymentExport.isBusy}
         onImportCadReference={() => void importCadReference()}
+        onCancelCadImport={cancelCadImport}
+        onDismissCadImportProgress={dismissCadImportProgress}
         mqttConfig={mqttConfig}
         mqttConfigDialogOpen={isMqttConfigDialogOpen}
         onOpenMqttConfig={() => setMqttConfigDialogOpen(true)}

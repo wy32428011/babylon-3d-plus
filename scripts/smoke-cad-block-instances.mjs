@@ -27,7 +27,7 @@ try {
   server = await createServer({
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: { port: 0 }, watch: null },
     optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });

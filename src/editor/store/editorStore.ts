@@ -234,11 +234,16 @@ import {
   CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
   createCadReferenceComponentMetadata,
   rememberCadReferenceParseResult,
+  consumeCadReferenceParseResult,
   sanitizeCadReferenceDisplayPatch,
 } from '../cad/cadReference';
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { decodeCadDxfBytes } from '../cad/cadTextEncoding';
 import { parseCadReferenceDxfForImport } from '../cad/cadReferenceWorkerClient';
+import { cancelCadReferenceLoad, waitForCadReferenceReady, selectCadReferenceRuntimeProgress, type CadReferenceLoadStatus } from '../cad/cadReferenceLoadStatus';
+
+let activeCadImport: { id: string; controller: AbortController } | null = null;
+const cadRuntimeLoads = new Map<string, CadReferenceLoadStatus>();
 
 type EditorLog = {
   id: string;
@@ -252,6 +257,8 @@ export type CadImportProgress = {
   label: string;
   detail: string;
   fileName: string | null;
+  tone?: 'active' | 'success' | 'error' | 'canceled';
+  entityId?: string;
 };
 
 type EntityClipboardEntry = {
@@ -658,6 +665,9 @@ type EditorState = {
   commitRecoveredLocalSceneResources: (sceneSessionId: string, before: SceneDocument, after: SceneDocument) => boolean;
   refreshModelInstancesFromAssets: (assets: AssetEntry[], options?: { preserveResolvedSnapshots?: boolean }) => number;
   importCadReference: () => Promise<void>;
+  cancelCadImport: () => void;
+  dismissCadImportProgress: () => void;
+  reportCadReferenceRuntimeLoad: (status: CadReferenceLoadStatus) => void;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
   selectEntity: (entityId: string | null) => void;
   selectHierarchyEntities: (entityIds: string[], primaryEntityId: string | null) => void;
@@ -848,10 +858,12 @@ function createCadImportProgress(
   label: string,
   detail: string,
   fileName: string | null,
+  tone: NonNullable<CadImportProgress['tone']> = 'active',
 ): CadImportProgress {
   return {
     id,
-    active: true,
+    active: tone === 'active',
+    tone,
     percent: Math.min(100, Math.max(0, Math.round(percent))),
     label,
     detail,
@@ -4541,112 +4553,134 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     return refreshedCount;
   },
+  reportCadReferenceRuntimeLoad: (status) => {
+    const state = get();
+    for (const [entityId, current] of cadRuntimeLoads) {
+      if (state.scene.entities[entityId]?.components.cadReference?.sourceUrl !== current.sourceUrl) cadRuntimeLoads.delete(entityId);
+    }
+    if (activeCadImport || state.scene.entities[status.entityId]?.components.cadReference?.sourceUrl !== status.sourceUrl) return;
+    cadRuntimeLoads.set(status.entityId, status);
+    const currentId = state.cadImportProgress?.entityId;
+    const selection = selectCadReferenceRuntimeProgress([...cadRuntimeLoads.values()], currentId);
+    if (!selection) return;
+    const display = selection.status;
+    const entity = state.scene.entities[display.entityId];
+    if (!entity) return;
+    const active = selection.activeCount > 0;
+    const tone = active ? 'active' : display.state === 'ready' ? 'success' : display.state === 'error' ? 'error' : 'canceled';
+    const label = active ? '加载 CAD 参考图（' + selection.activeCount + ' 个）' : display.state === 'ready' ? 'CAD 加载完成' : display.state === 'error' ? 'CAD 加载失败' : 'CAD 加载已取消';
+    set({ cadImportProgress: { ...createCadImportProgress(display.entityId, display.percent, label, display.detail, entity.name, tone), entityId: display.entityId } });
+  },
+  cancelCadImport: () => {
+    if (activeCadImport) {
+      activeCadImport.controller.abort();
+      const progress = get().cadImportProgress;
+      if (progress?.entityId) cancelCadReferenceLoad(progress.entityId);
+    } else {
+      for (const status of [...cadRuntimeLoads.values()]) {
+        if (status.state === 'loading' || status.state === 'rendering') cancelCadReferenceLoad(status.entityId);
+      }
+    }
+  },
+  dismissCadImportProgress: () => {
+    if (!get().cadImportProgress?.active) { cadRuntimeLoads.clear(); set({ cadImportProgress: null }); }
+  },
   importCadReference: async () => {
     if (get().runtimeMode === 'preview') {
-      set((state) => guardRuntimePreviewMutation(state, '导入 CAD'));
+      set(state => guardRuntimePreviewMutation(state, '导入 CAD'));
       return;
     }
-
     if (get().cadImportProgress?.active) {
-      set((state) => ({ logs: prependLog(state.logs, 'CAD 正在导入，请等待当前任务完成。') }));
+      set(state => ({ logs: prependLog(state.logs, 'CAD 正在导入，请等待当前任务完成。') }));
       return;
     }
-
     if (!window.editorApi?.importCadFile) {
-      set((state) => ({ logs: prependLog(state.logs, '导入 CAD 需要 Electron 桌面环境。') }));
+      set(state => ({ logs: prependLog(state.logs, '导入 CAD 需要 Electron 桌面环境。') }));
       return;
     }
-
-    const importProgressId = crypto.randomUUID();
-
-    try {
-      set({
-        cadImportProgress: createCadImportProgress(importProgressId, 8, '选择 CAD 文件', '等待选择 .dxf 文件...', null),
-      });
-
-      const result = await window.editorApi.importCadFile();
-      if (result.canceled || !result.filePath || !result.sourceUrl) {
-        set((state) => ({
-          cadImportProgress: null,
-          logs: prependLog(state.logs, '已取消导入 CAD。'),
-        }));
-        return;
+    const id = crypto.randomUUID();
+    const sessionId = get().sceneSessionId;
+    const controller = new AbortController();
+    activeCadImport = { id, controller };
+    let importedEntity: Entity | null = null;
+    let importCommand: ReturnType<typeof createEntityCommand> | null = null;
+    let cachedSource: { url: string; scale: number } | null = null;
+    const unsubscribe = useEditorStore.subscribe(state => {
+      if (state.sceneSessionId !== sessionId) controller.abort();
+    });
+    const assertCurrent = (): void => {
+      if (controller.signal.aborted || get().sceneSessionId !== sessionId) {
+        const error = new Error('CAD 导入已取消。'); error.name = 'AbortError'; throw error;
       }
-
+    };
+    try {
+      set({ cadImportProgress: createCadImportProgress(id, 0, '选择 CAD 文件', '等待选择 .dxf 文件...', null) });
+      const result = await window.editorApi.importCadFile();
+      assertCurrent();
+      if (result.canceled || !result.filePath || !result.sourceUrl) {
+        controller.abort();
+        const error = new Error('CAD 导入已取消。'); error.name = 'AbortError'; throw error;
+      }
       const sourceUrl = result.sourceUrl;
       const displayName = result.filePath.split(/[\\/]/).pop()?.replace(/\.dxf$/i, '') || 'CAD参考图';
-      set({
-        cadImportProgress: createCadImportProgress(importProgressId, 14, '准备读取 CAD', `正在打开 ${displayName}...`, displayName),
-      });
-
+      set({ cadImportProgress: createCadImportProgress(id, 5, '准备读取 CAD', '正在打开 ' + displayName + '...', displayName) });
       const parseResult = await parseCadReferenceDxfForImport({
-        sourceUrl,
-        fileSizeBytes: result.fileSizeBytes,
-        readSmallFileText: async (onProgress) => {
-          const response = await fetch(sourceUrl);
-          if (!response.ok) {
-            throw new Error(`读取 CAD 文件失败：HTTP ${response.status}`);
-          }
+        sourceUrl, fileSizeBytes: result.fileSizeBytes, signal: controller.signal,
+        readSmallFileText: async onProgress => {
+          const response = await fetch(sourceUrl, { signal: controller.signal });
+          if (!response.ok) throw new Error('读取 CAD 文件失败：HTTP ' + response.status);
           return readCadResponseText(response, result.fileSizeBytes, onProgress);
         },
         onProgress: ({ percent, detail }) => {
-          set({
-            cadImportProgress: createCadImportProgress(importProgressId, percent, '解析 CAD 图元', detail, displayName),
-          });
+          if (controller.signal.aborted || get().sceneSessionId !== sessionId) return;
+          set({ cadImportProgress: createCadImportProgress(id, Math.min(89, percent * 0.9), '解析 CAD 图元', detail, displayName) });
         },
       });
+      assertCurrent();
       rememberCadReferenceParseResult(sourceUrl, parseResult);
-      set({
-        cadImportProgress: createCadImportProgress(importProgressId, 92, '创建参考层', '正在写入场景并同步到网格层...', displayName),
-      });
-
-      const entity = createCadReferenceEntity(
-        result.filePath,
-        sourceUrl,
-        displayName,
-        createCadReferenceComponentMetadata(parseResult, {
-          sourceFileSizeBytes: result.fileSizeBytes,
-          importMode: result.fileSizeBytes >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES ? 'large-preview' : 'exact',
-        }),
-      );
+      cachedSource = { url: sourceUrl, scale: parseResult.unitScaleToMeters };
+      const entity = createCadReferenceEntity(result.filePath, sourceUrl, displayName,
+        createCadReferenceComponentMetadata(parseResult, { sourceFileSizeBytes: result.fileSizeBytes,
+          importMode: result.fileSizeBytes >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES ? 'large-preview' : 'exact' }));
+      importedEntity = entity;
       const command = createEntityCommand(entity);
-
-      set((state) => {
+      importCommand = command;
+      set(state => {
         const commandResult = executeCommand(state.scene, state.history, command);
         const hierarchySelectionIds = [entity.id];
-        return {
-          ...commandResult,
-          cadImportProgress: createCadImportProgress(importProgressId, 100, '导入完成', 'CAD 参考图已创建。', displayName),
-          hierarchySelectionIds,
+        return { ...commandResult, hierarchySelectionIds,
           ...resolveSelectionTransformMode(state, commandResult.scene, hierarchySelectionIds),
-          logs: prependLog(
-            state.logs,
-            parseResult.budgetLimited
-              ? `导入CAD参考图：${displayName}，${formatCadReferenceUnitSummary(parseResult)}，已按大文件预算截取 ${parseResult.polylineCount} 条折线，${parseResult.pointCount} 个点`
-              : `导入CAD参考图：${displayName}，${formatCadReferenceUnitSummary(parseResult)}，${parseResult.polylineCount} 条折线，${parseResult.pointCount} 个点`
-          ),
+          cadImportProgress: { ...createCadImportProgress(id, 90, '构建 CAD 线稿', '正在分批创建参考层...', displayName), entityId: entity.id } };
+      });
+      await waitForCadReferenceReady(entity.id, { signal: controller.signal, onProgress: status => {
+        if (controller.signal.aborted || get().sceneSessionId !== sessionId) return;
+        set({ cadImportProgress: { ...createCadImportProgress(id, Math.max(90, status.percent), '构建 CAD 线稿', status.detail, displayName), entityId: entity.id } });
+      } });
+      assertCurrent();
+      set(state => ({
+        cadImportProgress: { ...createCadImportProgress(id, 100, '导入完成', 'CAD 参考图已显示。', displayName, 'success'), entityId: entity.id },
+        logs: prependLog(state.logs, '导入CAD参考图：' + displayName + '，' + formatCadReferenceUnitSummary(parseResult)
+          + '，' + parseResult.polylineCount + ' 条折线，' + parseResult.pointCount + ' 个点'),
+      }));
+    } catch (error) {
+      if (cachedSource) consumeCadReferenceParseResult(cachedSource.url, cachedSource.scale);
+      if (importedEntity) cancelCadReferenceLoad(importedEntity.id);
+      if (get().sceneSessionId !== sessionId) return;
+      const canceled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
+      const message = canceled ? 'CAD 导入已取消。' : error instanceof Error ? error.message : String(error);
+      const entity = importedEntity, command = importCommand;
+      set(state => {
+        const scene = entity && command && state.scene.entities[entity.id] ? command.undo(state.scene) : state.scene;
+        const hierarchySelectionIds = state.hierarchySelectionIds.filter(entityId => entityId !== entity?.id && Boolean(scene.entities[entityId]));
+        return { scene, hierarchySelectionIds,
+          history: command ? { undoStack: state.history.undoStack.filter(item => item !== command), redoStack: state.history.redoStack.filter(item => item !== command) } : state.history,
+          cadImportProgress: createCadImportProgress(id, state.cadImportProgress?.percent ?? 0, canceled ? '导入已取消' : '导入失败', message, state.cadImportProgress?.fileName ?? null, canceled ? 'canceled' : 'error'),
+          logs: prependLog(state.logs, (canceled ? '取消导入 CAD：' : '导入 CAD 失败：') + message),
         };
       });
-      setTimeout(() => {
-        set((state) => (
-          state.cadImportProgress?.id === importProgressId
-            ? { cadImportProgress: null }
-            : state
-        ));
-      }, 900);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      set((state) => ({
-        cadImportProgress: createCadImportProgress(importProgressId, 100, '导入失败', message, state.cadImportProgress?.fileName ?? null),
-        logs: prependLog(state.logs, `导入 CAD 失败：${message}`),
-      }));
-      setTimeout(() => {
-        set((state) => (
-          state.cadImportProgress?.id === importProgressId
-            ? { cadImportProgress: null }
-            : state
-        ));
-      }, 1600);
+    } finally {
+      unsubscribe();
+      if (activeCadImport?.id === id) activeCadImport = null;
     }
   },
   loadSceneAsset: async (asset) => {

@@ -134,6 +134,7 @@ export class EnvironmentShadowMaterialPlugin extends MaterialPluginBase {
       ...LOCAL_SHADOW_SLOTS.flatMap(i => [
         `lightMatrixEnvLocal${i}`, `environmentLocalShadowActive${i}`, `environmentLocalShadowInfo${i}`,
         `environmentLocalShadowDepth${i}`, `environmentLocalShadowPosition${i}`, `environmentLocalShadowDirection${i}`,
+        `environmentLocalShadowInnerCone${i}`,
       ]),
     ] };
   }
@@ -183,6 +184,7 @@ export class EnvironmentShadowMaterialPlugin extends MaterialPluginBase {
         const length = direction.length() || 1;
         effect.setFloat4(`environmentLocalShadowDirection${i}`, direction.x / length, direction.y / length,
           direction.z / length, Math.cos(light.angle / 2));
+        effect.setFloat(`environmentLocalShadowInnerCone${i}`, Math.cos(light.angle * 0.45));
       }
       const size = map.getSize().width;
       effect.setFloat4(`environmentLocalShadowInfo${i}`, generator.darkness, size, generator.blurScale / size, generator.frustumEdgeFalloff);
@@ -283,6 +285,7 @@ uniform vec4 environmentLocalShadowInfo${i};
 uniform vec2 environmentLocalShadowDepth${i};
 uniform vec4 environmentLocalShadowPosition${i};
 uniform vec4 environmentLocalShadowDirection${i};
+uniform float environmentLocalShadowInnerCone${i};
 #ifdef ENVIRONMENT_LOCAL_SHADOW_CUBE${i}
 uniform samplerCube shadowTextureEnvLocal${i};
 #else
@@ -293,30 +296,38 @@ uniform highp sampler2DShadow shadowTextureEnvLocal${i};
 uniform sampler2D shadowTextureEnvLocal${i};
 #endif
 #endif
-float environmentLocalShadowFactor${i}(vec3 position) {
-  if (environmentLocalShadowActive${i} < 0.5) return 1.0;
+// x 为阴影明暗，y 为有效覆盖；范围外不能解除已经存在的主阴影。
+vec2 environmentLocalShadowSample${i}(vec3 position) {
+  if (environmentLocalShadowActive${i} < 0.5) return vec2(1.0, 0.0);
   vec3 offset = position - environmentLocalShadowPosition${i}.xyz;
   float distanceToLight = length(offset);
-  if (distanceToLight < environmentLocalShadowDepth${i}.x || distanceToLight > environmentLocalShadowPosition${i}.w) return 1.0;
+  float range = environmentLocalShadowPosition${i}.w;
+  if (distanceToLight < environmentLocalShadowDepth${i}.x || distanceToLight >= range) return vec2(1.0, 0.0);
+  float coverage = 1.0 - smoothstep(range * 0.9, range, distanceToLight);
 #ifdef ENVIRONMENT_LOCAL_SHADOW_CUBE${i}
-  return computeShadowWithPoissonSamplingCube(position, environmentLocalShadowPosition${i}.xyz, shadowTextureEnvLocal${i},
+  float shade = computeShadowWithPoissonSamplingCube(position, environmentLocalShadowPosition${i}.xyz, shadowTextureEnvLocal${i},
     environmentLocalShadowInfo${i}.z, environmentLocalShadowInfo${i}.x, environmentLocalShadowDepth${i});
 #else
-  if (dot(offset / distanceToLight, environmentLocalShadowDirection${i}.xyz) < environmentLocalShadowDirection${i}.w) return 1.0;
+  float coneCos = dot(offset / distanceToLight, environmentLocalShadowDirection${i}.xyz);
+  float outerCone = environmentLocalShadowDirection${i}.w;
+  if (coneCos <= outerCone) return vec2(1.0, 0.0);
+  coverage *= smoothstep(outerCone, environmentLocalShadowInnerCone${i}, coneCos);
   vec4 projected = lightMatrixEnvLocal${i} * vec4(position, 1.0);
-  if (projected.w <= 0.0) return 1.0;
+  if (projected.w <= 0.0 || any(greaterThan(abs(projected.xy / projected.w), vec2(1.0)))) return vec2(1.0, 0.0);
 #ifdef USE_REVERSE_DEPTHBUFFER
   float depth = (-projected.z + environmentLocalShadowDepth${i}.x) / environmentLocalShadowDepth${i}.y;
 #else
   float depth = (projected.z + environmentLocalShadowDepth${i}.x) / environmentLocalShadowDepth${i}.y;
 #endif
+  if (depth < 0.0 || depth > 1.0) return vec2(1.0, 0.0);
 #ifdef ENVIRONMENT_LOCAL_SHADOW_PCF${i}
-  return computeShadowWithPCF1(projected, depth, shadowTextureEnvLocal${i}, environmentLocalShadowInfo${i}.x, environmentLocalShadowInfo${i}.w);
+  float shade = computeShadowWithPCF1(projected, depth, shadowTextureEnvLocal${i}, environmentLocalShadowInfo${i}.x, environmentLocalShadowInfo${i}.w);
 #else
-  return computeShadowWithPoissonSampling(projected, depth, shadowTextureEnvLocal${i},
+  float shade = computeShadowWithPoissonSampling(projected, depth, shadowTextureEnvLocal${i},
     environmentLocalShadowInfo${i}.z, environmentLocalShadowInfo${i}.x, environmentLocalShadowInfo${i}.w);
 #endif
 #endif
+  return vec2(shade, coverage);
 }
 #endif`).join('\n')}
 #if ${SHADOW_ENABLED}
@@ -325,10 +336,15 @@ float environmentShadowFactor(vec3 position) {
 #ifdef ENVIRONMENT_SHADOW
   shade = environmentPrimaryShadowFactor(position);
 #endif
+  float localCoverage = 0.0;
+  float localDarkness = 0.0;
 ${LOCAL_SHADOW_SLOTS.map(i => `#ifdef ENVIRONMENT_LOCAL_SHADOW${i}
-  shade = min(shade, environmentLocalShadowFactor${i}(position));
+  vec2 localSample${i} = environmentLocalShadowSample${i}(position);
+  localCoverage = max(localCoverage, localSample${i}.y);
+  localDarkness = max(localDarkness, (1.0 - localSample${i}.x) * localSample${i}.y);
 #endif`).join('\n')}
-  return shade;
+  // 局部灯覆盖内部以局部阴影形成明暗，边缘回到主阴影；多灯取最暗层而不累乘。
+  return clamp(mix(shade, 1.0, localCoverage) - localDarkness, 0.0, 1.0);
 }
 #endif`,
       CUSTOM_FRAGMENT_BEFORE_FOG: `

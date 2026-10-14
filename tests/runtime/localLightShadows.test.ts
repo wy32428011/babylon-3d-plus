@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FreeCamera, MeshBuilder, NullEngine, PointLight, Scene, SpotLight, Vector3 } from '@babylonjs/core';
+import {
+  DirectionalLight, FreeCamera, Material, MeshBuilder, MultiMaterial, NullEngine, PBRMaterial,
+  PointLight, Scene, SpotLight, StandardMaterial, Vector3,
+} from '@babylonjs/core';
 import { SceneShadowRuntime } from '../../src/runtime/babylon/SceneShadowRuntime.ts';
 
 const settings = {
@@ -8,6 +11,127 @@ const settings = {
   darkness: 0.32, catcherEnabled: true, sunAzimuthDegrees: 56, sunElevationDegrees: 63,
   sunIntensity: 1.05, distanceMeters: 0, bias: 0.002, normalBias: 0.03, fillIntensity: 0.2, iblIntensityMax: 0.45,
 };
+
+async function renderReady(scene: Scene): Promise<void> {
+  scene.render();
+  await scene.whenReadyAsync();
+  scene.render();
+}
+
+for (const MaterialClass of [PBRMaterial, StandardMaterial]) {
+  for (const kind of ['point', 'spot'] as const) {
+    test(`${MaterialClass.name} 冻结接收面首次渲染后新增 ${kind} 必须编译实际阴影定义`, async () => {
+      const engine = new NullEngine(), scene = new Scene(engine);
+      const camera = new FreeCamera('camera', new Vector3(0, 8, -12), scene);
+      camera.setTarget(Vector3.Zero());
+      const runtime = new SceneShadowRuntime(scene);
+      const floor = MeshBuilder.CreateGround('floor', { width: 20, height: 20 }, scene);
+      floor.metadata = { editorEnvironmentMesh: true };
+      const material = new MaterialClass('floor', scene);
+      floor.material = material;
+      runtime.applySettings(settings);
+      material.freeze();
+      const hasShadow = (light: PointLight | SpotLight) => {
+        const index = floor.lightSources.indexOf(light);
+        return index >= 0 && new RegExp('^#define SHADOW' + index + '$', 'm').test(floor.subMeshes[0].effect?.defines ?? '');
+      };
+      try {
+        await renderReady(scene);
+        assert.equal(floor.receiveShadows, true);
+        const light = kind === 'point'
+          ? new PointLight('local', new Vector3(0, 4, 0), scene)
+          : new SpotLight('local', new Vector3(0, 4, 0), Vector3.Down(), Math.PI / 3, 2, scene);
+        light.range = 20;
+        runtime.syncLight('local', light);
+        await renderReady(scene);
+        assert.ok(hasShadow(light), '已冻结材质必须加入新局部灯的 SHADOW 定义');
+        const first = light.getShadowGenerator();
+        runtime.applySettings({ ...settings, quality: 'quality' });
+        await renderReady(scene);
+        assert.notEqual(light.getShadowGenerator(), first);
+        assert.ok(hasShadow(light));
+        for (const toggle of ['hidden', 'zero'] as const) {
+          if (toggle === 'hidden') light.setEnabled(false); else light.intensity = 0;
+          runtime.syncLight('local', light);
+          await renderReady(scene);
+          assert.equal(hasShadow(light), false, '停用局部灯必须移除阴影采样');
+          light.setEnabled(true); light.intensity = 1;
+          runtime.syncLight('local', light);
+          await renderReady(scene);
+          assert.ok(hasShadow(light), '恢复局部灯必须重新编译阴影采样');
+        }
+        const second = new PointLight('second', new Vector3(3, 4, 0), scene);
+        runtime.syncLight('second', second);
+        await renderReady(scene);
+        runtime.removeLight('local');
+        await renderReady(scene);
+        assert.equal(hasShadow(light), false, '还有其他局部灯时删除也必须刷新');
+        assert.ok(hasShadow(second));
+        light.dispose();
+        const replacement = kind === 'point'
+          ? new SpotLight('replacement', new Vector3(0, 4, 0), Vector3.Down(), Math.PI / 3, 2, scene)
+          : new PointLight('replacement', new Vector3(0, 4, 0), scene);
+        runtime.syncLight('second', replacement);
+        second.dispose();
+        await renderReady(scene);
+        assert.ok(hasShadow(replacement));
+        const index = floor.lightSources.indexOf(replacement);
+        const lightDefine = replacement instanceof PointLight ? 'POINTLIGHT' : 'SPOTLIGHT';
+        assert.match(floor.subMeshes[0].effect!.defines, new RegExp('^#define ' + lightDefine + index + '$', 'm'));
+        runtime.applySettings({ ...settings, mode: 'baked' });
+        await renderReady(scene);
+        assert.equal(hasShadow(replacement), false);
+        runtime.applySettings(settings);
+        await renderReady(scene);
+        assert.ok(hasShadow(replacement), '静态/实时模式切换后恢复实际阴影 shader');
+        assert.equal(material.isFrozen, true, '灯光变化不得丢失原冻结状态');
+      } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
+    });
+  }
+}
+
+test('灯光拓扑变更按共享及 MultiMaterial 子材质去重，普通变换不重编译', async () => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new FreeCamera('camera', new Vector3(0, 8, -12), scene);
+  camera.setTarget(Vector3.Zero());
+  const runtime = new SceneShadowRuntime(scene);
+  const shared = new StandardMaterial('shared', scene), other = new PBRMaterial('other', scene);
+  const unfrozen = new StandardMaterial('unfrozen', scene);
+  const multi = new MultiMaterial('multi', scene);
+  multi.subMaterials = [shared, other, shared];
+  for (const material of [shared, multi, unfrozen]) {
+    const floor = MeshBuilder.CreateGround(material.name, { width: 2, height: 2 }, scene);
+    floor.metadata = { editorEnvironmentMesh: true }; floor.material = material;
+  }
+  runtime.applySettings(settings);
+  shared.freeze(); other.freeze(); multi.freeze();
+  try {
+    await renderReady(scene);
+    const calls = new Map<Material, number>();
+    for (const material of [shared, other, multi, unfrozen]) {
+      const original = material.markAsDirty.bind(material);
+      material.markAsDirty = (flag) => {
+        if (flag === Material.LightDirtyFlag) calls.set(material, (calls.get(material) ?? 0) + 1);
+        original(flag);
+      };
+    }
+    const point = new PointLight('point', new Vector3(0, 4, 0), scene);
+    runtime.syncLight('point', point);
+    for (const material of [shared, other, multi]) {
+      assert.equal(calls.get(material), 1, '每个共享或子材质只刷新一次灯光定义');
+      assert.equal(material.isFrozen, true);
+    }
+    assert.equal(unfrozen.isFrozen, false, '普通受光材质不得被意外冻结');
+    calls.clear();
+    point.position.x = 2; point.intensity = 2;
+    runtime.syncLight('point', point);
+    runtime.applySettings({ ...settings, bias: 0, normalBias: 0, distanceMeters: 120 });
+    assert.equal(calls.size, 0, '位置、正强度与偏移变化无需刷新 shader');
+    const theme = new DirectionalLight('theme', Vector3.Down(), scene);
+    runtime.setThemeLight(theme);
+    for (const material of [shared, other, multi]) assert.equal(calls.get(material), 1, '主题主方向光更替需要刷新冻结材质');
+  } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
+});
 
 for (const kind of ['point', 'spot'] as const) {
   test(`${kind} 局部阴影跟随质量、变换、显隐和场景开关释放及恢复`, () => {

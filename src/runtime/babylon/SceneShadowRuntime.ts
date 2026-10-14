@@ -169,6 +169,7 @@ export class SceneShadowRuntime {
   private readonly entityDirectionals = new Map<string, DirectionalLight>();
   private readonly localLights = new Map<string, PointLight | SpotLight>();
   private readonly localGenerators = new Map<string, ShadowGenerator>();
+  private receiverLightBindings = new Map<Light, ShadowGenerator | null>();
   private readonly knownMeshes = new Set<AbstractMesh>();
   private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
@@ -204,6 +205,7 @@ export class SceneShadowRuntime {
     if (this.themeLight === light) return;
     this.themeLight = light;
     this.refreshPrimary();
+    this.refreshReceiverLightDefines();
   }
 
   /** 主方向光沿用缓存/级联策略；点光和聚光灯在实时模式单独产生局部阴影。 */
@@ -221,6 +223,7 @@ export class SceneShadowRuntime {
 
     this.refreshPrimary();
     if (this.syncLocalGenerators()) this.syncSceneMeshes(true);
+    this.refreshReceiverLightDefines();
     this.invalidateCachedShadow();
   }
 
@@ -235,6 +238,7 @@ export class SceneShadowRuntime {
       this.disposePrimaryGenerator();
       this.disposeLocalGenerators();
       this.disposeAutoSun();
+      this.refreshReceiverLightDefines();
       this.restoreFillLightPolicy();
       for (const [mesh, observer] of this.meshTransformObservers) mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
       this.meshTransformObservers.clear();
@@ -261,6 +265,7 @@ export class SceneShadowRuntime {
     this.updateShadowDistance();
     this.updateAutoSunPose();
     this.syncSceneMeshes(true);
+    this.refreshReceiverLightDefines();
     this.invalidateCachedShadow();
     this.applyFillLightPolicy();
   }
@@ -275,7 +280,8 @@ export class SceneShadowRuntime {
     this.localGenerators.delete(entityId);
     this.syncEnvironmentLocalShadows();
     this.refreshPrimary();
-    if (hadLocalGenerator && this.localGenerators.size === 0) this.syncSceneMeshes(true);
+    if (hadLocalGenerator) this.syncSceneMeshes(true);
+    this.refreshReceiverLightDefines();
   }
 
   dispose(): void {
@@ -287,6 +293,7 @@ export class SceneShadowRuntime {
     this.disposePrimaryGenerator();
     this.disposeLocalGenerators();
     this.disposeAutoSun();
+    this.refreshReceiverLightDefines();
     this.restoreFillLightPolicy();
     this.catcher.material?.dispose();
     this.catcher.dispose();
@@ -366,6 +373,40 @@ export class SceneShadowRuntime {
       } else {
         generator.removeShadowCaster(mesh, false);
       }
+    }
+  }
+
+  /** 冻结材质会跳过灯光定义检查；只在灯光拓扑或生成器变更时重新开放一次编译。 */
+  private refreshReceiverLightDefines(): void {
+    const bindings = new Map<Light, ShadowGenerator | null>();
+    if (!this.disposed && this.settings.enabled && this.settings.mode === 'realtime') {
+      if (this.primaryLight) bindings.set(this.primaryLight, this.primaryGenerator);
+      for (const light of this.entityDirectionals.values()) {
+        if (!light.isDisposed() && light.isEnabled() && light.intensity > 0) {
+          bindings.set(light, light === this.primaryLight ? this.primaryGenerator : null);
+        }
+      }
+      for (const [id, light] of this.localLights) {
+        if (!light.isDisposed() && light.isEnabled() && light.intensity > 0) {
+          bindings.set(light, this.localGenerators.get(id) ?? null);
+        }
+      }
+    }
+    if (bindings.size === this.receiverLightBindings.size
+      && [...bindings].every(([light, generator]) => this.receiverLightBindings.has(light)
+        && this.receiverLightBindings.get(light) === generator)) return;
+    this.receiverLightBindings = bindings;
+
+    const materials = new Set<Material>();
+    for (const mesh of this.scene.meshes) {
+      if (!mesh.receiveShadows || mesh.isDisposed()) continue;
+      for (const material of collectMeshMaterials(mesh)) materials.add(material);
+    }
+    for (const material of materials) {
+      const wasFrozen = material.isFrozen;
+      if (wasFrozen) material.unfreeze();
+      material.markAsDirty(Material.LightDirtyFlag);
+      if (wasFrozen) material.freeze();
     }
   }
 

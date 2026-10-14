@@ -183,7 +183,7 @@ const server = await createServer({
   configFile: false,
   cacheDir: 'node_modules/.vite-environment-shadows',
   optimizeDeps: { noDiscovery: true, include: ['@babylonjs/core'] },
-  server: { host: '127.0.0.1', port: 0, hmr: false },
+  server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
   plugins: [{
     name: 'environment-shadows-fixture',
     resolveId(id) { if (id === '/__environment_shadows__.js') return '\0environment-shadows'; },
