@@ -1,3 +1,4 @@
+import { subscribeCadReferenceLoadStatus } from '../cad/cadReferenceLoadStatus';
 import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
 import { OpeningAnimationOverlay } from '../../shared/ui/OpeningAnimationOverlay';
 import { useEditorOpeningAnimation } from '../opening/useEditorOpeningAnimation';
@@ -124,11 +125,13 @@ import type { Vector3Data } from '../model/math';
 import { createGroupPositionDelta } from '../model/groupSpatialInfo';
 import {
   resolveHierarchyGroupTransformSelection,
+  isEntityEffectivelyLocked,
   toggleHierarchyEntitySelection,
   type HierarchyGroupTransformReadySelection,
 } from '../model/entityHierarchy';
 import {
   getEntityArrayIdentifierError,
+  getCompositionArrayInfo,
   getEntityArrayParameterError,
   getShiftEntityArrayIdentityBehavior,
   isShiftEntityArraySupported,
@@ -279,8 +282,7 @@ function getEntityArrayDialogError(
   }
 
   const source = scene.entities[dialog.sourceEntityId];
-  const parent = source?.parentId ? scene.entities[source.parentId] : null;
-  if (!isShiftEntityArraySupported(source) || source?.locked || parent?.locked) {
+  if (!isShiftEntityArraySupported(source) || !source || isEntityEffectivelyLocked(scene.entities, source)) {
     return '源对象已失效、被锁定或不再支持 Shift 阵列。';
   }
 
@@ -300,6 +302,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
+  useEffect(() => subscribeCadReferenceLoadStatus(status => {
+    useEditorStore.getState().reportCadReferenceRuntimeLoad(status);
+  }), []);
   const gizmoRef = useRef<TransformGizmoController | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
@@ -748,6 +753,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       );
       gizmo.attachToGroupTarget(target, groupSelection.groupId, {
         rotationAxes: containsManualRoamSpawn ? ['y'] : undefined,
+        entityArraySourceId: groupSelection.selectionIds.length === 1
+          && state.scene.entities[groupSelection.selectionIds[0]]?.composition
+          ? groupSelection.selectionIds[0] : undefined,
       });
       return;
     }
@@ -865,7 +873,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!entityArrayDialog) return;
 
     const source = sceneDocument.entities[entityArrayDialog.sourceEntityId];
-    const parent = source?.parentId ? sceneDocument.entities[source.parentId] : null;
     const activeSelectionIds = hierarchySelectionIds.length > 0
       ? hierarchySelectionIds.filter((entityId) => Boolean(sceneDocument.entities[entityId]))
       : selectedEntityId
@@ -873,8 +880,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         : [];
     const sourceInvalid = sceneDocument !== entityArrayDialog.sourceSceneDocument
       || !isShiftEntityArraySupported(source)
-      || source?.locked
-      || parent?.locked
+      || !source
+      || isEntityEffectivelyLocked(sceneDocument.entities, source)
+      || Boolean(getCompositionArrayInfo(sceneDocument, [entityArrayDialog.sourceEntityId], 1)?.error)
       || selectedEntityId !== entityArrayDialog.sourceEntityId
       || activeSelectionIds.length !== 1
       || activeSelectionIds[0] !== entityArrayDialog.sourceEntityId;
@@ -1542,7 +1550,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           const currentScene = sceneDocumentRef.current;
           const currentState = useEditorStore.getState();
           const source = currentScene?.entities[context.entityId];
-          const parent = source?.parentId && currentScene ? currentScene.entities[source.parentId] : null;
           const activeSelectionIds = currentState.hierarchySelectionIds.length > 0
             ? currentState.hierarchySelectionIds.filter((entityId) => Boolean(currentScene?.entities[entityId]))
             : currentState.scene.selectedEntityId
@@ -1561,8 +1568,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
             pushLog('模型阵列已阻止：Shift 拖拽仅支持单个选中的场景对象。');
             return null;
           }
-          if (!isShiftEntityArraySupported(source) || source?.locked || parent?.locked) {
-            pushLog('模型阵列已阻止：请选择一个未锁定且支持阵列的场景对象。');
+          const compositionInfo = currentScene ? getCompositionArrayInfo(currentScene, [context.entityId], 1) : null;
+          if (!isShiftEntityArraySupported(source) || !source || !currentScene
+            || isEntityEffectivelyLocked(currentScene.entities, source) || compositionInfo?.error) {
+            pushLog(`模型阵列已阻止：${compositionInfo?.error ?? '请选择一个未锁定且支持阵列的场景对象。'}`);
             return null;
           }
 
@@ -2867,9 +2876,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       return;
     }
 
-    const bounds = runtime.getEntitiesWorldBounds(entityArrayRequest.sourceIds);
     const axis = getEntityArrayAxis(entityArrayRequest.direction);
-    const selectionSpanMeters = bounds?.geometryReady ? bounds.sizeMeters[axis] : null;
+    const source = sceneDocumentRef.current?.entities[entityArrayRequest.sourceIds[0]];
+    const bounds = source?.composition ? null : runtime.getEntitiesWorldBounds(entityArrayRequest.sourceIds);
+    const worldDirection = { x: axis === 'x' ? 1 : 0, y: axis === 'y' ? 1 : 0, z: axis === 'z' ? 1 : 0 };
+    const selectionSpanMeters = source?.composition
+      ? runtime.getEntityArrayGeometry(source.id, worldDirection)?.spanMeters ?? null
+      : bounds?.geometryReady ? bounds.sizeMeters[axis] : null;
     resolveEntityArrayRequest(entityArrayRequest.id, selectionSpanMeters);
   }, [entityArrayRequest, resolveEntityArrayRequest]);
 
@@ -2887,16 +2900,22 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const containsSkybox = sceneFocusRequest.entityIds.some((entityId) => (
         Boolean(currentScene?.entities[entityId]?.components.skybox)
       ));
+      const containsCad = sceneFocusRequest.entityIds.some(entityId => Boolean(currentScene?.entities[entityId]?.components.cadReference));
+      // CAD 参考层按完整实例范围取景，不能套用普通模型 3m 聚焦上限。
       viewport.setViewDistance(
         containsSkybox
           ? SKYBOX_FOCUS_VIEW_DISTANCE_METERS
-          : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
+          : containsCad
+            ? Math.min(SCENE_VIEW_DISTANCE_MAX, Math.max(currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX, Math.ceil(bounds.radiusMeters * 4)))
+            : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
       );
       viewport.focusOnBounds(
         bounds,
         containsSkybox
           ? { animate: false, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-          : sceneFocusRequest.transition,
+          : containsCad
+            ? { ...sceneFocusRequest.transition, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
+            : sceneFocusRequest.transition,
       );
       sceneFocusPerformanceRef.current = {
         ...bounds,
@@ -2944,6 +2963,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     : null;
   const entityArrayIdentityBehavior = getShiftEntityArrayIdentityBehavior(entityArraySource);
   const entityArrayAssetNumberedSourceCount = entityArrayIdentityBehavior === 'asset-number' ? 1 : 0;
+  const compositionArrayInfo = entityArrayDialog
+    ? getCompositionArrayInfo(sceneDocument, [entityArrayDialog.sourceEntityId], entityArrayDialog.value.copyCount)
+    : null;
 
   /** 修改弹框参数时同步刷新临时 Babylon 阵列，不写入场景或命令历史。 */
   function handleEntityArrayDialogChange(value: EntityArrayDialogValue): void {
@@ -2955,7 +2977,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     const runtime = runtimeRef.current;
     if (!runtime) return;
-    if (getEntityArrayParameterError(value.copyCount, value.spacingMeters)) {
+    if (getEntityArrayDialogError(sceneDocumentRef.current ?? sceneDocument, nextDialog)) {
       runtime.clearEntityArrayPreview();
       return;
     }
@@ -3226,6 +3248,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       {entityArrayDialog ? (
         <EntityArrayDialog
           assetNumberedSourceCount={entityArrayAssetNumberedSourceCount}
+          compositionArray={compositionArrayInfo ?? undefined}
           directionLabel={entityArrayDialog.directionLabel}
           onCancel={closeEntityArrayDialog}
           onChange={handleEntityArrayDialogChange}

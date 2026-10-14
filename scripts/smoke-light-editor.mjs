@@ -3,6 +3,7 @@ import {
   Camera,
   FreeCamera,
   Matrix,
+  Light,
   NullEngine,
   PointLight,
   SpotLight,
@@ -59,7 +60,8 @@ try {
     appType: 'custom',
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    cacheDir: 'node_modules/.vite-light-editor-smoke',
+    server: { middlewareMode: true, hmr: false, watch: null },
     optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
   });
@@ -100,6 +102,8 @@ try {
   scene.activeCamera = camera;
 
   const point = createLightEntity('point', { x: 1, y: 2, z: 3 });
+  point.components.light.intensity = 3;
+  point.components.light.range = 120;
   const directional = createLightEntity('directional', { x: -2, y: 5, z: 4 });
   directional.components.transform.rotation = { x: 0.2, y: 0.3, z: -0.1 };
   const hemispheric = createLightEntity('hemispheric');
@@ -126,6 +130,9 @@ try {
   const pointLight = scene.lights.find((light) => light.name === point.id);
   const directionalLight = scene.lights.find((light) => light.name === directional.id);
   assert.ok(pointLight instanceof PointLight);
+  assert.equal(pointLight.falloffType, Light.FALLOFF_STANDARD, '编辑点光在 PBR 与 Standard 上必须使用相同的范围衰减');
+  assert.equal(pointLight.intensity, 3);
+  assert.equal(pointLight.range, 120);
   assert.ok(directionalLight instanceof DirectionalLight);
 
   const nearVisualRoot = pointTarget.getChildren().find((child) => child.name.endsWith('_lightMarkerVisualRoot'));
@@ -277,6 +284,8 @@ try {
   const area = createLightEntity('rectArea', { x: -2, y: 5, z: 1 });
   spot.components.light.angle = Math.PI / 4;
   spot.components.light.exponent = 3;
+  spot.components.light.intensity = 2.5;
+  spot.components.light.range = 60;
   area.components.light.width = 3;
   area.components.light.height = 1.5;
   document = createDocument(createEmptySceneDocument, [point, directional, hemispheric, spot, area], spot.id);
@@ -288,6 +297,9 @@ try {
   assert.ok(areaLight instanceof RectAreaLight, '矩形面光必须创建原生 RectAreaLight');
   assert.equal(spotLight.angle, Math.PI / 4);
   assert.equal(spotLight.exponent, 3);
+  assert.equal(spotLight.falloffType, Light.FALLOFF_STANDARD, '编辑聚光灯必须沿用编辑强度与范围语义');
+  assert.equal(spotLight.intensity, 2.5);
+  assert.equal(spotLight.range, 60);
   assert.equal(areaLight.width, 3);
   assert.equal(areaLight.height, 1.5);
   assert.ok(pointLight.getShadowGenerator(), '实时模式点光源必须投影');
@@ -324,6 +336,17 @@ try {
     '发布 Viewer 场景中不得保留编辑器灯光标记 Mesh',
   );
 
+  // 类型替换会销毁原灯，重新创建的局部灯也必须保持相同光照契约。
+  for (const lightKind of ['spot', 'point']) {
+    const replacement = { ...point, components: { ...point.components,
+      light: { ...point.components.light, lightKind } } };
+    runtime.sync(createDocument(createEmptySceneDocument, [replacement], replacement.id));
+    const actual = scene.getLightByName(point.id);
+    assert.ok(lightKind === 'point' ? actual instanceof PointLight : actual instanceof SpotLight);
+    assert.equal(actual.falloffType, Light.FALLOFF_STANDARD, '类型替换不能恢复物理衰减');
+    assert.equal(actual.intensity, 3, '类型替换保留用户强度');
+    assert.equal(actual.range, 120, '类型替换保留照射范围');
+  }
   console.log('Light editor smoke passed.');
 } finally {
   delete globalThis.window;

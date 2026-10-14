@@ -64,10 +64,20 @@ export default defineConfig({
   base: './',
   cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
   plugins: [react(), editorLocalAssetDevServerPlugin()],
+  optimizeDeps: {
+    // 历史验收与打包目录中也有 HTML，只从实际编辑器入口扫描依赖。
+    entries: ['index.html'],
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    watch: {
+      // 生成目录无需热更新，避免为历史缓存和安装包建立大量文件监听。
+      ignored: ['output', 'release', 'dist-electron', 'dist-viewer-template'].map(
+        (directory) => `${path.resolve(workspaceRoot, directory).replaceAll('\\', '/')}/**`,
+      ),
+    },
     fs: {
       allow: [workspaceRoot, modelLibraryRoot],
     },

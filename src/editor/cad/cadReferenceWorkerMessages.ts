@@ -3,7 +3,9 @@ import type { CadReferenceGeometryBudget, CadReferenceParseResult } from './cadR
 export type CadReferenceDxfWorkerRequest = {
   id: string;
   sourceUrl: string;
-  geometryBudget: CadReferenceGeometryBudget;
+  /** 仅保留旧消息类型兼容，新流式路径使用几何字节预算。 */
+  geometryBudget?: CadReferenceGeometryBudget;
+  maxGeometryBytes?: number;
   unitScaleToMeters?: number;
 };
 

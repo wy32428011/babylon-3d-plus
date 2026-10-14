@@ -5,9 +5,10 @@ import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
-const root=path.resolve('output/playwright/editable-composition/viewer'),output=path.dirname(root);
+const root=path.resolve(process.env.COMPOSITION_PUBLISH_FIXTURE_ROOT ?? 'output/playwright/editable-composition','viewer'),output=path.dirname(root);
 const expected=JSON.parse(await fs.readFile(path.join(root,'project/scene.json'),'utf8')).scene;
-const ids=Object.values(expected.entities).filter(e=>e.components.meshRenderer).map(e=>e.id);
+const ids=Object.values(expected.entities).filter(e=>e.components.meshRenderer || e.components.modelAsset).map(e=>e.id);
+assert.ok(ids.length>0,'发布场景必须包含组合成员');
 const mime={'.html':'text/html','.js':'text/javascript','.json':'application/json','.css':'text/css','.wasm':'application/wasm','.png':'image/png'};
 const server=createServer(async(req,res)=>{
   try{
@@ -32,15 +33,15 @@ try{
   },ids,{timeout:120000});
   await page.getByRole('progressbar').waitFor({state:'hidden',timeout:120000});
   const rendered=await page.evaluate(ids=>{
-    const meshes=window.compositionEngineStore.Instances.flatMap(e=>e.scenes.flatMap(s=>s.meshes));
-    return ids.map(id=>{const m=meshes.find(m=>m.metadata?.editorEntityId===id&&m.getTotalVertices()>0);return {id,position:{x:m.position.x,y:m.position.y,z:m.position.z},vertices:m.getTotalVertices()};});
+    const scenes=window.compositionEngineStore.Instances.flatMap(e=>e.scenes),meshes=scenes.flatMap(s=>s.meshes);
+    return ids.map(id=>{const m=meshes.find(m=>m.metadata?.editorEntityId===id&&m.getTotalVertices()>0),node=scenes.flatMap(s=>s.transformNodes).find(n=>n.name===id+'_modelRoot')??m;return {id,position:{x:node.position.x,y:node.position.y,z:node.position.z},vertices:m.getTotalVertices()};});
   },ids);
   for(const mesh of rendered)assert.deepEqual(mesh.position,expected.entities[mesh.id].components.transform.position);
-  assert.equal(rendered.length,4);assert.deepEqual(errors,[]);
+  assert.equal(rendered.length,ids.length);assert.deepEqual(errors,[]);
   const png=await page.locator('canvas').first().screenshot();
   const visibleBluePixels=await page.evaluate(async data=>{const image=new Image();image.src='data:image/png;base64,'+data;await image.decode();const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);const pixels=ctx.getImageData(0,0,image.width,image.height).data;let count=0;for(let i=0;i<pixels.length;i+=4)if(pixels[i]>30&&pixels[i+2]>70&&pixels[i+2]>pixels[i]*1.2&&pixels[i+2]>pixels[i+1]*1.03)count++;return count;},png.toString('base64'));
   assert.ok(visibleBluePixels>100,'发布场景必须绘制可见组合模型像素');
   await page.screenshot({path:path.join(output,'viewer.png')});
   await fs.writeFile(path.join(output,'viewer-result.json'),JSON.stringify({status:'PASS',rendered,visibleBluePixels,firstFrameVisible:true,errors,platformConfig:'local-fixture'},null,2));
-  console.log('PASS: 实际 DIST Viewer 绘制两组四个成员，位置一致且无页面脚本错误');
+  console.log(`PASS: 实际 DIST Viewer 绘制 ${Object.values(expected.entities).filter(e=>e.composition).length} 组 ${rendered.length} 个成员，位置一致且无页面脚本错误`);
 }finally{await browser?.close();await new Promise(resolve=>server.close(resolve));}

@@ -5,13 +5,31 @@ import {
   type CadReferenceGeometryBudget,
   type CadReferenceParseOptions,
   type CadReferenceParseResult,
+  type DxfEntityRecord,
 } from './cadReference';
 
+export { parseCadReferenceDxfStream } from './cadReferenceStreamingDxf';
+
 /** DXF group-pair 记录，code 表示组码，value 保留原始字符串值。 */
-type DxfGroupPair = {
+export type DxfGroupPair = {
   code: number;
   value: string;
 };
+
+type DxfPairReader = {
+  next(): DxfGroupPair | null;
+  unread(group: DxfGroupPair): void;
+};
+
+/** 流式扫描只保留当前实体的受限组码，复用既有字段解析和 POLYLINE/HATCH 语义。 */
+export function parseScannedDxfEntity(type: string, groups: readonly DxfGroupPair[]): DxfEntityRecord | null {
+  let offset = 0;
+  const reader: DxfPairReader = {
+    next: () => groups[offset++] ?? null,
+    unread: () => { offset -= 1; },
+  };
+  return readEntityAfterType(reader, type) as unknown as DxfEntityRecord | null;
+}
 
 /** 轻量扫描出的 DXF 实体记录，只保留 CAD 参考层需要的字段。 */
 type ScannedDxfEntity = Record<string, unknown> & {
@@ -206,7 +224,7 @@ function skipCurrentSection(reader: DxfGroupReader): void {
 }
 
 /** 按实体类型分派轻量读取逻辑。 */
-function readEntityAfterType(reader: DxfGroupReader, type: string): ScannedDxfEntity | null {
+function readEntityAfterType(reader: DxfPairReader, type: string): ScannedDxfEntity | null {
   if (type === 'POLYLINE') return readPolylineEntity(reader);
   if (type === 'HATCH') return readHatchEntity(reader);
   if (!isSupportedScannedEntityType(type)) {
@@ -218,7 +236,7 @@ function readEntityAfterType(reader: DxfGroupReader, type: string): ScannedDxfEn
 }
 
 /** 读取 LINE、ARC、CIRCLE、LWPOLYLINE 与 INSERT 的基础字段。 */
-function readBasicEntity(reader: DxfGroupReader, type: string): ScannedDxfEntity {
+function readBasicEntity(reader: DxfPairReader, type: string): ScannedDxfEntity {
   const entity: ScannedDxfEntity = { type };
   let currentVertex: ScannedDxfVertex | null = null;
 
@@ -234,7 +252,7 @@ function readBasicEntity(reader: DxfGroupReader, type: string): ScannedDxfEntity
 }
 
 /** 读取旧式 POLYLINE 的 VERTEX 列表，直到 SEQEND 结束。 */
-function readPolylineEntity(reader: DxfGroupReader): ScannedDxfEntity {
+function readPolylineEntity(reader: DxfPairReader): ScannedDxfEntity {
   const entity: ScannedDxfEntity = { type: 'POLYLINE', vertices: [] };
 
   for (let group = reader.next(); group; group = reader.next()) {
@@ -255,7 +273,7 @@ function readPolylineEntity(reader: DxfGroupReader): ScannedDxfEntity {
 }
 
 /** 读取旧式 POLYLINE 的单个 VERTEX。 */
-function readPolylineVertex(reader: DxfGroupReader): ScannedDxfVertex | null {
+function readPolylineVertex(reader: DxfPairReader): ScannedDxfVertex | null {
   const vertex: ScannedDxfVertex = { x: Number.NaN, y: Number.NaN, bulge: 0 };
 
   for (let group = reader.next(); group; group = reader.next()) {
@@ -271,7 +289,7 @@ function readPolylineVertex(reader: DxfGroupReader): ScannedDxfVertex | null {
   return Number.isFinite(vertex.x) && Number.isFinite(vertex.y) ? vertex : null;
 }
 
-function readHatchEntity(reader: DxfGroupReader): ScannedDxfEntity {
+function readHatchEntity(reader: DxfPairReader): ScannedDxfEntity {
   const entity: ScannedDxfEntity = { type: 'HATCH', boundary: { loops: [] } };
   const loops = (entity.boundary as { loops: Array<{ entities: Array<Record<string, unknown>> }> }).loops;
   let activePolyline: { type: 'POLYLINE'; points: ScannedDxfVertex[]; closed?: boolean } | null = null;
@@ -314,7 +332,7 @@ function readHatchEntity(reader: DxfGroupReader): ScannedDxfEntity {
 }
 
 /** 跳过不参与显示的实体记录。 */
-function skipUnsupportedEntity(reader: DxfGroupReader): void {
+function skipUnsupportedEntity(reader: DxfPairReader): void {
   for (let group = reader.next(); group; group = reader.next()) {
     if (group.code === 0) {
       reader.unread(group);

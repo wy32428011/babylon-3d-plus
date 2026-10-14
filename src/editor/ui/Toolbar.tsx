@@ -166,6 +166,8 @@ type ToolbarProps = {
   deploymentExportProgress: DeploymentExportViewProgress | null;
   deploymentExportBusy: boolean;
   onImportCadReference: () => void;
+  onCancelCadImport?: () => void;
+  onDismissCadImportProgress?: () => void;
   mqttConfig: MqttConfig;
   mqttConfigDialogOpen: boolean;
   onOpenMqttConfig: () => void;
@@ -753,10 +755,13 @@ export function Toolbar(props: ToolbarProps) {
           detail={props.cadImportProgress.detail}
           label={props.cadImportProgress.label}
           percent={props.cadImportProgress.percent}
+          tone={props.cadImportProgress.tone}
+          onCancel={props.cadImportProgress.active ? props.onCancelCadImport : undefined}
+          onDismiss={props.cadImportProgress.active ? undefined : props.onDismissCadImportProgress}
         />
       ) : null}
-      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
-      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
+      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy || Boolean(props.cadImportProgress?.active)} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
+      <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy || Boolean(props.cadImportProgress?.active)} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
       <ToolbarIconButton
         disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy || props.digitalTwinPublishBusy}
         icon={TOOLBAR_ICONS.publish}

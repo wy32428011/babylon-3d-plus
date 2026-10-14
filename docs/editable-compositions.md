@@ -9,6 +9,13 @@
 3. 从组合卡片拖回场景。单击成员默认选中整体；双击或点击 Inspector 的“编辑组合内部”调整成员，点击场景标题栏“完成编辑”或按 Esc 退出。
 4. **将调整后的组合拖到已有卡片上，直接替换该卡片对应的组合。** 卡片 ID、名称及中台资源 ID 保持，内容生成新版本。
 5. 整体支持移动、旋转和等比缩放；子模型可保留自己的非等比缩放。加入或移出成员沿用层级树操作，解除组合保留成员，删除组合会删除全部成员。
+6. 选中一个组合，右键选择“模型阵列”，设置新增副本数量、X/Y/Z 正负方向及净间距（米）；也可按住 Shift 拖动移动坐标轴，松开后在弹框中调整并确认。间距按整个组合的实际几何跨度计算，数量不包含原组合。
+
+组合阵列复制当前场景中的成员布局和参数，各副本保留组合来源版本并独立编辑。内部成员自动生成新资产编号，货格编号跟随副本宿主；内部对象引用重建到同一副本，MQTT 配置及组外业务引用沿用普通复制行为。只保存场景即可保留全部副本，一次撤销或重做覆盖整次阵列。
+
+组合阵列仅支持单个组合根，内部编辑时选中的成员沿用普通模型阵列。根、祖先或成员锁定、结构失效、几何未就绪时会阻止提交。每次可新增 1–1000 份组合，展开后新增实体最多 10,000 个（包含组合根、文件夹、成员及绑定货格）；弹框显示预计数量，超过上限时不生成部分副本。取消或切换选区会清除临时预览。
+
+旧版隐藏阵列在重新打开场景时会自动展开为独立成员；若当前内存中仍保留旧隐藏项，请先保存并重新打开，再对整个组合执行阵列。
 
 只保存场景不会修改库模板。更新卡片不会改动其他已经摆放的实例，也不会改变已发布 Viewer。Inspector 的“使用库中版本”会先显示增删成员预览，确认后仅更新该实例，保留整体位姿与兼容成员身份；内部布局和参数采用库版本，支持撤销。整体搬动不改变模板中的相对摆放。
 
@@ -33,6 +40,8 @@
 ## 验证
 
 - `npm run typecheck`
+- `npm run test:model-array` 与 `npm run test:composition-array`
+- `npm run smoke:composition-array` 验证真实右键阵列、Shift 拖轴、保存重开及 WebGL 画面；使用该夹具发布时设置 `COMPOSITION_PUBLISH_FIXTURE_ROOT=output/playwright/composition-array`
 - `node --experimental-strip-types --test tests/editor/composition.test.ts tests/editor/compositionPackage.test.ts`
 - `node --test tests/editor/compositionRemote.test.mjs`
 - `node scripts/smoke-editable-composition.mjs`
