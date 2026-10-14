@@ -7463,7 +7463,9 @@ export class SceneRuntime {
     // 继承模板实例的完整变换（位置/旋转/缩放），与常规实体 root 同源。
     this.applyTransform(root, templateEntity.components.transform);
     // 先隐藏：异步加载与脚本初始化期间设备仍停在模板位姿，等首帧驱动吸附到 MQTT 目标位后再显示。
-    root.setEnabled(false);
+    // 隐藏走网格级 isVisible 而非禁用 root：模型脚本 onStart 会捕获 isEnabled()（含祖先）作参数基线，
+    // root 禁用会让脚本把 enabled=false 记为基线并在每帧 onUpdate 还原，导致整车永隐（见 revealDrivenSpawnedDevices）。
+    // root 启用期间 contentRoot 下无内容，本就无可渲染网格；网格挂载后由 setSpawnedDeviceMeshesVisible 隐藏。
     this.spawnedDeviceRevealPending.add(key);
     const contentRoot = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}_content`, this.scene);
     contentRoot.parent = root;
@@ -7527,11 +7529,16 @@ export class SceneRuntime {
         }
 
         this.refreshSpawnedDeviceModelMeshes(model, spawner);
+        this.setSpawnedDeviceMeshesVisible(model, false);
         this.normalizeModelContentOrigin(model);
         this.applyModelAssetParameters(modelAsset, model);
         this.syncModelAssetExternalScripts(modelAsset, model, (current) => {
           if (this.spawnedDeviceModels.get(key) !== current) return;
           this.refreshSpawnedDeviceModelMeshes(current, spawner);
+          // 脚本 start 可能新建网格，待揭示期间统一保持隐藏。
+          if (this.spawnedDeviceRevealPending.has(key)) {
+            this.setSpawnedDeviceMeshesVisible(current, false);
+          }
         });
       })
       .catch((error: unknown) => {
@@ -7575,8 +7582,15 @@ export class SceneRuntime {
         continue;
       }
       if (!model.assetHandle || !model.stackerTelemetryReady) continue;
-      model.root.setEnabled(true);
+      this.setSpawnedDeviceMeshesVisible(model, true);
       this.spawnedDeviceRevealPending.delete(key);
+    }
+  }
+
+  /** 生成实例隐藏期的网格级显隐开关；不动 root.enabled，避免脚本把禁用状态捕获为参数基线。 */
+  private setSpawnedDeviceMeshesVisible(model: ModelRuntimeEntry, visible: boolean): void {
+    for (const mesh of model.meshes) {
+      mesh.isVisible = visible;
     }
   }
 
