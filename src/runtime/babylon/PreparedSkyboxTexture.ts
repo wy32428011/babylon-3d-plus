@@ -34,9 +34,9 @@ export class PreparedSkyboxTexture extends EnvCubeTexture {
       null, null, this.gammaSpace, this._generateHarmonics) as this;
   }
 
-  getClassName(): string { return this.sourceFormat === 'exr' ? 'EXRCubeTexture' : 'HDRCubeTexture'; }
+  override getClassName(): string { return this.sourceFormat === 'exr' ? 'EXRCubeTexture' : 'HDRCubeTexture'; }
 
-  serialize() {
+  override serialize() {
     const value = super.serialize();
     if (value) value.customType = `BABYLON.${this.getClassName()}`;
     return value;

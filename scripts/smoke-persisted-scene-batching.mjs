@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'vite';
+import ts from 'typescript';
 
 const REAL_SCENE_PATH = process.env.ZENDING_SCENE_SOURCE
   ?? 'E:\\公司文件\\数字孪生\\场景\\珀莱雅一楼场景.scene.json';
 
-function assertSerializationWiring() {
+async function assertSerializationWiring() {
   const storeSource = readFileSync('src/editor/store/editorStore.ts', 'utf8');
   const publishSource = readFileSync('src/editor/deployment/useDigitalTwinPublish.ts', 'utf8');
   const exportSource = readFileSync('src/editor/deployment/useDeploymentExport.ts', 'utf8');
@@ -13,14 +14,57 @@ function assertSerializationWiring() {
 
   assert.match(storeSource, /const content = serializeScene\(sceneSnapshot\);[\s\S]*?saveScene\(\{[\s\S]*?content,/,
     '普通保存必须通过 serializeScene 生成持久化合批快照');
-  assert.match(publishSource, /const sceneContent = serializeScene\(useEditorStore\.getState\(\)\.scene\);[\s\S]*?publishDigitalTwin\(\{[\s\S]*?sceneContent,/,
-    '数据中台发布必须通过 serializeScene 生成持久化合批快照');
+  const parse = (source) => ts.createSourceFile('wiring.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const publishAst = parse(publishSource);
+  const serviceAst = parse(publishServiceSource);
+  const one = (root, predicate) => {
+    const found = [];
+    const visit = node => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
+    visit(root);
+    assert.equal(found.length, 1, '发布接线必须存在唯一匹配表达式');
+    return found[0];
+  };
+  const call = (root, name) => one(root, node => ts.isCallExpression(node)
+    && (ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : node.expression.getText()) === name);
+  const property = (object, name) => one(object, node => ts.isPropertyAssignment(node) && node.name.getText() === name).initializer;
+  const text = node => node.getText().replace(/\s/g, '');
+  const entry = one(publishAst, node => ts.isVariableDeclaration(node) && node.name.getText() === 'entryContent');
+  assert.equal(text(entry.initializer), 'serializeScene(useEditorStore.getState().scene)');
+  const selection = one(publishAst, node => ts.isConditionalExpression(node) && text(node.condition) === 'item.isEntry');
+  assert.equal(text(selection.whenTrue), 'entryContent');
+  assert.ok(ts.isAwaitExpression(selection.whenFalse));
+  const prepareCall = selection.whenFalse.expression;
+  assert.equal(prepareCall.expression.getText(), 'preparePublishSceneSnapshot');
+  assert.equal(text(prepareCall.arguments[0]), 'item.sceneContent');
+  const selectContent = new (Object.getPrototypeOf(async function () {}).constructor)(
+    'item', 'entryContent', 'preparePublishSceneSnapshot', 'assertEntryCurrent', 'pushLog',
+    ts.transpileModule(`return ${selection.getText()};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText);
+  const preparedInputs = [];
+  const prepareOther = async content => { preparedInputs.push(content); return `normalized:${content}`; };
+  for (const item of [{ isEntry: true, sceneContent: 'stale-entry' }, { isEntry: false, sceneContent: 'other-scene' }]) {
+    assert.equal(await selectContent(item, 'normalized:entry', prepareOther, () => {}, () => {}),
+      item.isEntry ? 'normalized:entry' : 'normalized:other-scene');
+  }
+  assert.deepEqual(preparedInputs, ['other-scene'], '入口复用当前快照，其他场景独立准备');
+  const payload = call(publishAst, 'publishDigitalTwin').arguments[0];
+  assert.equal(text(property(payload, 'sceneContent')), 'content');
+  assert.ok(payload.properties.some(node => ts.isShorthandPropertyAssignment(node) && node.name.text === 'preparedScenes'));
+  const push = one(publishAst, node => ts.isCallExpression(node) && text(node.expression) === 'preparedScenes.push');
+  assert.equal(text(property(push.arguments[0], 'sceneContent')), 'content');
+  assert.equal(text(property(push.arguments[0], 'sceneId')), 'item.sceneId');
+  assert.ok(entry.parent.parent.parent.statements.some(node => ts.isReturnStatement(node) && node.expression?.getText() === 'entryContent'));
+  const otherSource = readFileSync('src/editor/deployment/preparePublishSceneSnapshots.ts', 'utf8');
+  assert.match(otherSource, /return serializeScene\(readyScene\);/, '其他场景同样必须经过标准序列化');
   assert.match(exportSource, /const sceneContent = serializeScene\(sceneSnapshot\);[\s\S]*?exportWebProject\(\{[\s\S]*?sceneContent,/,
     '独立部署导出必须通过 serializeScene 生成持久化合批快照');
-  assert.match(publishServiceSource, /saveCurrentScene\([^;]*validated\.sceneContent\);/,
-    '发布主进程保存当前场景时必须使用 renderer 提交的同一份 sceneContent');
-  assert.match(publishServiceSource, /buildDigitalTwinDistPackage\(\{[\s\S]*?sceneContent: validated\.sceneContent,/,
-    'Viewer DIST 必须复用同一份已合批 sceneContent');
+  assert.equal(text(call(serviceAst, 'saveCurrentScene').arguments[2]), 'validated.sceneContent');
+  const overlay = one(serviceAst, node => ts.isCallExpression(node) && text(node.expression) === 'prepared.overlays.set');
+  assert.deepEqual(overlay.arguments.map(text), ['savedScene.filePath', 'validated.sceneContent']);
+  const sourcePayload = call(serviceAst, 'buildDigitalTwinSourcePackage').arguments[0];
+  assert.equal(text(property(sourcePayload, 'entrySceneFilePath')), 'savedScene.filePath');
+  assert.equal(text(property(sourcePayload, 'preparedSceneContents')), 'prepared?.overlays');
+  assert.equal(text(property(call(serviceAst, 'buildDigitalTwinDistPackage').arguments[0], 'sceneContent')),
+    'createPublicViewerSceneContent(sourcePackage.entrySceneContent)', 'DIST 必须使用 SOURCE 入口快照的公共投影');
 }
 
 function createModelAsset(assetCode, options = {}) {
@@ -154,7 +198,7 @@ function snapshotRequiredPersistedState(document) {
 }
 
 async function run() {
-  assertSerializationWiring();
+  await assertSerializationWiring();
   let editorStore;
   let editorStoreSnapshot;
   const server = await createServer({
@@ -163,7 +207,7 @@ async function run() {
     envFile: false,
     logLevel: 'error',
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false, port: 0, ws: false },
+    server: { middlewareMode: true, hmr: false, port: 0, ws: false, watch: null },
     preview: { port: 0 },
     optimizeDeps: { noDiscovery: true },
     // editorStore 会间接加载 CAD 模块，沿用现有 Store smoke 的 ESM 转换配置。

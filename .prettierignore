@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-electron
+dist-viewer-template
+release
+output
+artifacts
+test-artifacts
+public
+Assets
+Platforms
+Projects
+SharedResources
+package-lock.json
+*.tsbuildinfo
+.tmp-*

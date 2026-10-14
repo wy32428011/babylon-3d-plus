@@ -1,1 +1,0 @@
-import{t as e}from"./gaussianSplattingVertexDeclaration-41qUyjEL.js";export{e as gaussianSplattingVertexDeclarationWGSL};

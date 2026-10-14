@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 import { createViewerTemplateCapabilities, VIEWER_TEMPLATE_CAPABILITIES_PATH } from './electron/ipc/viewerTemplateCapabilities';
+import { buildAnalysisPlugins } from './scripts/build-analysis-plugin';
 
 const workspaceRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,9 +40,9 @@ function viewerCapabilitiesPlugin(): Plugin {
 export default defineConfig({
   root: path.join(workspaceRoot, 'src', 'player'),
   base: './',
-  cacheDir: path.join(workspaceRoot, 'node_modules', '.vite-viewer'),
+  cacheDir: process.env.VITE_CACHE_DIR || path.join(workspaceRoot, 'node_modules', '.vite-viewer'),
   publicDir: path.join(workspaceRoot, 'public'),
-  plugins: [react(), viewerCapabilitiesPlugin()],
+  plugins: [react(), viewerCapabilitiesPlugin(), ...buildAnalysisPlugins('viewer')],
   build: {
     outDir: path.join(workspaceRoot, 'dist-viewer-template'),
     emptyOutDir: true,

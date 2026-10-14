@@ -6,7 +6,7 @@ const viteServer = await createServer({
   appType: 'custom',
   configFile: false,
   root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, hmr: false, watch: null, ws: false },
   optimizeDeps: { noDiscovery: true },
 });
 const { parseDigitalTwinAllowedParentOrigins, parsePlayerRuntimeConfig } = await viteServer.ssrLoadModule(

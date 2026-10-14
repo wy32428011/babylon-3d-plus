@@ -1,15 +1,44 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import test from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createRequire } from 'node:module';
-import { prepareSourceSceneEnvironment } from '../../electron/ipc/digitalTwinSourceEnvironmentRelink.ts';
-import { buildDigitalTwinSourcePackage } from '../../electron/ipc/digitalTwinSourcePackage.ts';
-import { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract, getSceneShadowBakeErrorContract } from '../../electron/shared/sceneShadowBakeContract.ts';
-import { relocateDataPlatformScene } from '../../electron/ipc/dataPlatformSceneRelocation.ts';
+import { createRequire, registerHooks } from 'node:module';
+
+// NodeNext 源码保留编译后的 .js 引用；仅在本测试加载真实模块期间映射尚未生成的 TS 文件。
+// 已存在的 JS 文件保持原样，避免改写生产导入或依赖上一次 build 的产物。
+async function loadSourcePackageModules() {
+  const sourceRoot = new URL('../../electron/', import.meta.url);
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier.startsWith('.') && specifier.endsWith('.js')
+        && context.parentURL?.startsWith(sourceRoot.href)) {
+        const target = new URL(specifier, context.parentURL);
+        const source = new URL(target.href.slice(0, -3) + '.ts');
+        if (source.href.startsWith(sourceRoot.href) && !existsSync(target) && existsSync(source)) {
+          return nextResolve(source.href, context);
+        }
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+  try {
+    return await Promise.all([
+      import('../../electron/ipc/digitalTwinSourceEnvironmentRelink.ts'),
+      import('../../electron/ipc/digitalTwinSourcePackage.ts'),
+      import('../../electron/shared/sceneShadowBakeContract.ts'),
+      import('../../electron/ipc/dataPlatformSceneRelocation.ts'),
+    ]);
+  } finally {
+    hooks.deregister();
+  }
+}
+
+const [{ prepareSourceSceneEnvironment }, { buildDigitalTwinSourcePackage },
+  { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract, getSceneShadowBakeErrorContract },
+  { relocateDataPlatformScene }] = await loadSourcePackageModules();
 
 const require = createRequire(import.meta.url);
 const NO_SKYBOX_CACHE = { getSharedProjectSkyboxRoot: () => null };

@@ -1,1 +1,0 @@
-import{t as e}from"./picking.vertex-Nc-iqxv6.js";export{e as pickingVertexShaderWGSL};

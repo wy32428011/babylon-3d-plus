@@ -1,1 +1,0 @@
-import{t as e}from"./background.vertex-C-iWIBTw.js";export{e as backgroundVertexShaderWGSL};

@@ -1,1 +1,0 @@
-import{t as e}from"./lightProxy.fragment-BGXIUNiN.js";export{e as lightProxyPixelShader};

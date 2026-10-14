@@ -1,1 +1,0 @@
-import{t as e}from"./sprites.vertex-S-gtPB8k.js";export{e as spritesVertexShader};

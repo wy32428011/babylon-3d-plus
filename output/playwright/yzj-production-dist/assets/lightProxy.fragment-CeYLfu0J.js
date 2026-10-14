@@ -1,1 +1,0 @@
-import{t as e}from"./lightProxy.fragment-DyDshaAT.js";export{e as lightProxyPixelShaderWGSL};

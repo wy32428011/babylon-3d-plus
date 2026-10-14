@@ -10,7 +10,7 @@ import {
 import '@babylonjs/loaders/glTF/index.js';
 import { createServer } from 'vite';
 
-const FIXTURE_GLB_PATH = path.join(process.cwd(), 'output', 'playwright', 'shelf-assets', 'Shelf.glb');
+const FIXTURE_GLB_PATH = path.join(process.cwd(), 'tests', 'fixtures', 'model-packages', 'shelf-assets', 'Shelf.glb');
 const STATIC_ENTITY_COUNT = 100;
 const EDIT_THIN_INSTANCE_ENTITY_COUNT = STATIC_ENTITY_COUNT - 1;
 const EDIT_BATCH_ENTITY_COUNT = STATIC_ENTITY_COUNT;
@@ -70,16 +70,17 @@ function createStaticArrayInstance(index, modelAsset, sourceEntityId) {
   };
 }
 
-/** 使用稳定 entities/entityIds 引用创建最小 SceneRuntime 文档，便于验证选择专用增量路径。 */
-function createDocument(entities, entityIds, selectedEntityId = null) {
-  return {
-    id: 'scene_capacity_smoke',
-    name: 'Scene Capacity Smoke',
-    entityIds,
-    entities,
-    selectedEntityId,
-    mqttConfig: {},
-    sceneSettings: {},
+/** 使用真实场景默认值，并保留 entities/entityIds 引用以验证选择专用增量路径。 */
+function createDocumentFactory(createEmptySceneDocument) {
+  return (entities, entityIds, selectedEntityId = null) => {
+    const document = createEmptySceneDocument('Scene Capacity Smoke');
+    return {
+      ...document,
+      id: 'scene_capacity_smoke',
+      entityIds,
+      entities,
+      selectedEntityId,
+    };
   };
 }
 
@@ -148,6 +149,7 @@ function assertSameReferences(actual, expected, message) {
 /** 验证外置参数脚本批次源修改资产编号时只更新设备上下文，不重建编辑态 Geometry 批次。 */
 async function verifyParametricSourceAssetCodeBatchReuse({
   SceneRuntime,
+  createDocument,
   createEditModeModelThinInstancePlan,
   glbBytes,
 }) {
@@ -294,7 +296,7 @@ function collectEntityMeshes(scene, entityId) {
 }
 
 /** 验证多个已有阵列源只在编辑态统一到一个源，原始场景引用保持不变。 */
-function verifyReferencedSourceCoalescing(createEditModeModelThinInstancePlan, modelAsset) {
+function verifyReferencedSourceCoalescing(createEditModeModelThinInstancePlan, modelAsset, createDocument) {
   const primarySource = createStaticEntity(1_000, modelAsset);
   const secondarySource = createStaticEntity(1_001, modelAsset);
   const primaryInstance = createStaticArrayInstance(1_002, modelAsset, primarySource.id);
@@ -412,7 +414,7 @@ async function run() {
     configFile: false,
     logLevel: 'error',
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, watch: null, ws: false },
     optimizeDeps: { noDiscovery: true },
     resolve: {
       alias: {
@@ -432,13 +434,17 @@ async function run() {
       { SceneRuntime },
       { createEditModeModelThinInstancePlan, patchEditModeModelThinInstancePlanForModelParameters, resolveEditModeModelThinInstanceReason },
       { normalizeModelDataDrivenConfig },
+      { createEmptySceneDocument },
     ] = await Promise.all([
       server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts'),
       server.ssrLoadModule('/src/editor/model/editModeModelThinInstances.ts'),
       server.ssrLoadModule('/src/editor/model/telemetryBinding.ts'),
+      server.ssrLoadModule('/src/editor/model/SceneDocument.ts'),
     ]);
+    const createDocument = createDocumentFactory(createEmptySceneDocument);
     const parametricSourceAssetCode = await verifyParametricSourceAssetCodeBatchReuse({
       SceneRuntime,
+      createDocument,
       createEditModeModelThinInstancePlan,
       glbBytes,
     });
@@ -449,12 +455,8 @@ async function run() {
         name: FIXTURE_GLB_PATH,
       });
       const originalDispose = container.dispose.bind(container);
-      let disposed = false;
       container.dispose = () => {
-        if (!disposed) {
-          disposed = true;
-          sourceDisposeCount += 1;
-        }
+        sourceDisposeCount += 1;
         originalDispose();
       };
       return container;
@@ -566,6 +568,7 @@ async function run() {
     const referencedSourceCoalescing = verifyReferencedSourceCoalescing(
       createEditModeModelThinInstancePlan,
       modelAsset,
+      createDocument,
     );
 
     const movedEntityId = entityIds.at(-1);
@@ -791,8 +794,26 @@ async function run() {
     assert.ok(firstMeshes.every((mesh) => mesh.isDisposed()), '删除单个静态实体必须释放其全部实例 Mesh');
     assert.equal(sourceDisposeCount, 0, '仍有共享实例时不得释放源 AssetContainer');
 
+    const remainingMeshes = remainingIds.flatMap((entityId) => collectEntityMeshes(scene, entityId));
     runtime.sync(createDocument({}, []));
-    assert.equal(sourceDisposeCount, 1, '删除最后一个共享实例时必须只释放一次源 AssetContainer');
+    assert.ok(remainingMeshes.every((mesh) => mesh.isDisposed()), '清空文档必须释放剩余全部实例 Mesh');
+    // 空闲模板按缓存预算保留；最终释放契约在 SceneRuntime.dispose 时兑现。
+    const idleCache = runtime.getPerformanceMetrics().loading.modelCache;
+    assert.equal(idleCache.entries, 1, '清空实体后只保留一个共享模板');
+    assert.equal(idleCache.idleEntries, 1, '共享模板必须归还全部活动引用');
+    assert.equal(sourceDisposeCount, 0, '预算内空闲模板必须保留供同源模型复用');
+    const loadCountBeforeReuse = loadCount;
+    runtime.sync(rawDocument);
+    await waitForAllEntityMeshes(scene, entityIds);
+    assert.equal(loadCount, loadCountBeforeReuse, '重新加入同源实体不得重复加载 AssetContainer');
+    assert.equal(runtime.getPerformanceMetrics().loading.modelCache.idleEntries, 0, '重新加入实体必须重新持有模板引用');
+    const reusedMeshes = entityIds.flatMap((entityId) => collectEntityMeshes(scene, entityId));
+    runtime.dispose();
+    assert.ok(reusedMeshes.every((mesh) => mesh.isDisposed()), '销毁运行时必须释放重新创建的全部实例 Mesh');
+    assert.equal(sourceDisposeCount, 1, '销毁运行时必须只释放一次源 AssetContainer');
+    runtime.dispose();
+    assert.equal(sourceDisposeCount, 1, '重复销毁运行时不得重复释放源 AssetContainer');
+    runtime = undefined;
 
     console.log(JSON.stringify({
       ok: true,

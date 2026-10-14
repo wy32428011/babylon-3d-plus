@@ -1,1 +1,0 @@
-import{t as e}from"./boundingBoxRenderer.fragment-DoDiyFZE.js";export{e as boundingBoxRendererPixelShaderWGSL};

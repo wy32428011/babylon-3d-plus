@@ -3,9 +3,10 @@ import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { build } from 'vite';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,16 +34,17 @@ function createMinimalGlbBuffer() {
 }
 
 test('编辑器读取并保留 string 类型模型脚本参数', async (t) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
+  const output = await fs.mkdtemp(path.resolve('node_modules/.string-parameter-'));
+  t.after(async () => {
+    if (path.dirname(output) !== path.resolve('node_modules') || !path.basename(output).startsWith('.string-parameter-')) throw Error('invalid fixture output');
+    await fs.rm(output, { recursive: true, force: true });
   });
-  t.after(async () => server.close());
-
-  const modelParameters = await server.ssrLoadModule('/src/editor/model/modelParameters.ts');
-  const scanner = await server.ssrLoadModule('/electron/ipc/modelPackageScanner.ts');
+  // Vite 8 的开发 SSR runner 在此依赖链挂起；沿用参数恢复测试的实际 SSR 构建入口。
+  await build({ configFile: false, publicDir: false, logLevel: 'silent', build: { ssr: true, outDir: output,
+    rollupOptions: { input: { parameters: 'src/editor/model/modelParameters.ts', scanner: 'electron/ipc/modelPackageScanner.ts' },
+      output: { entryFileNames: '[name].mjs' } } } });
+  const [modelParameters, scanner] = await Promise.all(['parameters', 'scanner']
+    .map(name => import(pathToFileURL(path.join(output, name + '.mjs')))));
 
   await t.test('显式 modelParameters schema 接受空字符串默认值并保留原始内容', () => {
     const config = modelParameters.normalizeModelParameterConfig({

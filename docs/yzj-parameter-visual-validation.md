@@ -1,5 +1,7 @@
 # YZJ 一体式顶升移载参数化、方向箭头与视觉验证
 
+> 2026-10-14 夹具位置更新：当前资源位于 [tests/fixtures/model-packages/yzj-assets](../tests/fixtures/model-packages/yzj-assets/)，验证页位于 [tests/fixtures/model-packages](../tests/fixtures/model-packages/)。下文保留历史路径；新运行使用 `/tests/fixtures/model-packages/<原HTML名>`，生产验证构建输出仍为 `output/playwright/yzj-production-dist`。
+
 ## 目标与边界
 
 2026-07-21 按用户参考图片重设 YZJ 一体式顶升移载的主参数，同时保留既有 MQTT、方向箭头和旧场景兼容：

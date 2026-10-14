@@ -2,20 +2,10 @@ import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { defineConfig, type Plugin } from 'vite';
+import { buildAnalysisPlugins } from './scripts/build-analysis-plugin';
+import { isAllowedDevAssetPath, resolveDevAssetRoots } from './scripts/dev-asset-paths';
 
 const workspaceRoot = process.cwd();
-const modelLibraryRoot = path.resolve(process.env.STACKER_MODEL_LIBRARY_ROOT ?? 'F:/3d-models');
-const devAssetRoots = [workspaceRoot, modelLibraryRoot];
-
-/** 判断请求文件是否位于允许的开发期本地资产根目录内。 */
-function isAllowedDevAssetPath(filePath: string): boolean {
-  const resolvedFilePath = path.resolve(filePath);
-
-  return devAssetRoots.some((root) => {
-    const relativePath = path.relative(root, resolvedFilePath);
-    return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-  });
-}
 
 /** 根据扩展名返回最小 MIME，保证 GLB、脚本和贴图都按原文返回给运行时。 */
 function getDevAssetContentType(filePath: string): string {
@@ -30,7 +20,7 @@ function getDevAssetContentType(filePath: string): string {
 }
 
 /** 开发期只读地暴露 editor-asset 本地文件，避免 Vite 转译模型包脚本。 */
-function editorLocalAssetDevServerPlugin(): Plugin {
+function editorLocalAssetDevServerPlugin(devAssetRoots: string[]): Plugin {
   return {
     name: 'editor-local-asset-dev-server',
     apply: 'serve',
@@ -47,7 +37,7 @@ function editorLocalAssetDevServerPlugin(): Plugin {
           return;
         }
 
-        if (!isAllowedDevAssetPath(filePath) || !existsSync(filePath) || !statSync(filePath).isFile()) {
+        if (!isAllowedDevAssetPath(filePath, devAssetRoots) || !existsSync(filePath) || !statSync(filePath).isFile()) {
           response.statusCode = 404;
           response.end('Asset not found.');
           return;
@@ -60,26 +50,29 @@ function editorLocalAssetDevServerPlugin(): Plugin {
   };
 }
 
-export default defineConfig({
-  base: './',
-  cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
-  plugins: [react(), editorLocalAssetDevServerPlugin()],
-  optimizeDeps: {
-    // 历史验收与打包目录中也有 HTML，只从实际编辑器入口扫描依赖。
-    entries: ['index.html'],
-  },
-  server: {
-    host: '127.0.0.1',
-    port: 5173,
-    strictPort: true,
-    watch: {
-      // 生成目录无需热更新，避免为历史缓存和安装包建立大量文件监听。
-      ignored: ['output', 'release', 'dist-electron', 'dist-viewer-template'].map(
-        (directory) => `${path.resolve(workspaceRoot, directory).replaceAll('\\', '/')}/**`,
-      ),
+export default defineConfig(({ mode }) => {
+  const devAssetRoots = resolveDevAssetRoots(workspaceRoot, mode);
+  return {
+    base: './',
+    cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
+    plugins: [react(), editorLocalAssetDevServerPlugin(devAssetRoots), ...buildAnalysisPlugins('editor')],
+    optimizeDeps: {
+      // 历史验收与打包目录中也有 HTML，只从实际编辑器入口扫描依赖。
+      entries: ['index.html'],
     },
-    fs: {
-      allow: [workspaceRoot, modelLibraryRoot],
+    server: {
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true,
+      watch: {
+        // 生成目录无需热更新，避免为历史缓存和安装包建立大量文件监听。
+        ignored: ['output', 'release', 'dist-electron', 'dist-viewer-template'].map(
+          (directory) => `${path.resolve(workspaceRoot, directory).replaceAll('\\', '/')}/**`,
+        ),
+      },
+      fs: {
+        allow: devAssetRoots,
+      },
     },
-  },
+  };
 });

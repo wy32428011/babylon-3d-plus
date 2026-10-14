@@ -1,1 +1,0 @@
-import{t as e}from"./default.vertex-DRU6rqOq.js";export{e as defaultVertexShaderWGSL};

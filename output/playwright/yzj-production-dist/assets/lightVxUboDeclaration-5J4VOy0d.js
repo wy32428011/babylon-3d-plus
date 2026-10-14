@@ -1,1 +1,0 @@
-import{t as e}from"./lightVxUboDeclaration-DpF0MCXt.js";export{e as lightVxUboDeclarationWGSL};

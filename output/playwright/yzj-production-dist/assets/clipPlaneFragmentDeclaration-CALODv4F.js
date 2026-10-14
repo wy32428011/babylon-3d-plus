@@ -1,1 +1,0 @@
-import{t as e}from"./clipPlaneFragmentDeclaration-DYuu9Qqk.js";export{e as clipPlaneFragmentDeclarationWGSL};

@@ -1,1 +1,0 @@
-import{t as e}from"./meshUVSpaceRenderer.vertex-BOm-ZqZV.js";export{e as meshUVSpaceRendererVertexShaderWGSL};

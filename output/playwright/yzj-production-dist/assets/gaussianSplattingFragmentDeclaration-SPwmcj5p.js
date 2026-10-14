@@ -1,1 +1,0 @@
-import{t as e}from"./gaussianSplattingFragmentDeclaration-C-FAEfrX.js";export{e as gaussianSplattingFragmentDeclarationWGSL};

@@ -17,11 +17,19 @@
     "refresh:model-assets": "node scripts/refresh-model-asset-index.mjs",
     "optimize:environment-glb": "node scripts/optimize-environment-glb.mjs",
     "wait:renderer": "node scripts/wait-for-vite-renderer.mjs",
-    "build": "tsc -b && vite build && npm run build:viewer && npm run build:electron",
+    "build": "node scripts/build-typescript.mjs && vite build && npm run build:viewer",
     "build:viewer": "vite build --config vite.viewer.config.ts",
-    "build:electron": "tsc -p tsconfig.node.json",
+    "build:electron": "node scripts/build-typescript.mjs --electron",
     "build:yzj:visual": "node scripts/build-yzj-direction-arrow-visual.mjs",
-    "typecheck": "tsc -b",
+    "typecheck": "node scripts/build-typescript.mjs",
+    "test:typescript-build": "node --test tests/buildTypeScript.test.mjs",
+    "lint": "eslint src electron vite.config.ts vite.viewer.config.ts",
+    "lint:fix": "eslint src electron vite.config.ts vite.viewer.config.ts --fix",
+    "format": "prettier --write package.json eslint.config.js .prettierrc.json .github/workflows/ci.yml",
+    "format:check": "prettier --check package.json eslint.config.js .prettierrc.json .github/workflows/ci.yml",
+    "test:ci": "npm test",
+    "analyze": "node scripts/build-analysis.mjs",
+    "test:build-analysis": "node --experimental-strip-types --test tests/buildAnalysis.test.ts",
     "test:encoding": "node --test tests/encoding/utf8Integrity.test.mjs && node --experimental-strip-types --test tests/encoding/utf8Transport.test.ts tests/encoding/cadTextEncoding.test.ts",
     "test:scene-theme": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/sceneTheme.test.ts tests/editor/lightSettings.test.ts tests/editor/lightEditor.test.ts tests/editor/sceneTheme.integration.test.mjs tests/runtime/sceneThemeRuntime.test.mjs tests/runtime/sceneEnvironmentEffects.test.mjs tests/runtime/themeEnvironmentLighting.test.mjs",
     "smoke:scene-theme": "node scripts/smoke-scene-theme.mjs",
@@ -91,10 +99,19 @@
     "test:scene-loading": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
     "smoke:scene-loading": "npm run build && node scripts/smoke-packaged-remote-scene.mjs --source",
     "test:local-scene-recovery": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/localSceneResourceRecovery.test.ts tests/dataPlatform/localSceneRecoveryService.test.ts tests/dataPlatform/localSceneRemoteRecovery.test.ts tests/dataPlatform/editorAssetFileError.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/localSceneEnvironmentChoice.test.ts tests/runtime/sceneResourceRetry.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/editor/sceneModelLibrarySync.test.ts",
-    "test:builtin-slot-rows": "node --experimental-strip-types --test tests/editor/builtInSlotRowReconcile.test.ts"
+    "test:builtin-slot-rows": "node --experimental-strip-types --test tests/editor/builtInSlotRowReconcile.test.ts",
+    "test:dev-asset-paths": "node --experimental-strip-types --test tests/devAssetPaths.test.ts",
+    "test": "node scripts/test-groups.mjs core",
+    "test:integration": "node scripts/test-groups.mjs integration",
+    "test:smoke": "node scripts/test-groups.mjs smoke",
+    "test:groups": "node --test tests/testGroups.test.mjs",
+    "test:expression": "node --experimental-strip-types --test tests/runtime/modelParameterExpression.test.ts",
+    "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-include=src/runtime/babylon/modelParameterExpression.ts --test tests/runtime/modelParameterExpression.test.ts",
+    "test:entries": "node scripts/test-groups.mjs --check",
+    "typecheck:quality": "tsc -p tsconfig.quality.json"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^22.15.0 || >=24.0.0"
   },
   "dependencies": {
     "@babylonjs/core": "^9.12.0",
@@ -110,6 +127,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/archiver": "^8.0.0",
     "@types/node": "^25.9.3",
     "@types/react": "^19.2.17",
@@ -119,8 +137,14 @@
     "cross-env": "^10.1.0",
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
     "playwright": "^1.61.1",
+    "prettier": "^3.9.10",
+    "rollup-plugin-visualizer": "^7.1.1",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.2",
     "vite": "^8.0.16",
     "wait-on": "^9.0.10"
   },
@@ -153,7 +177,9 @@
       {
         "from": "public/builtin-skyboxes",
         "to": "builtin-skyboxes",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "dist-viewer-template",

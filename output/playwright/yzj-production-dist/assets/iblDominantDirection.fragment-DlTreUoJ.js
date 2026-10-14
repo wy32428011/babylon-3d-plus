@@ -1,1 +1,0 @@
-import{t as e}from"./iblDominantDirection.fragment-CkzDy-Pt.js";export{e as iblDominantDirectionPixelShader};

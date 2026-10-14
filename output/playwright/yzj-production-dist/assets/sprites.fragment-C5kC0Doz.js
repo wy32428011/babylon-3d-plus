@@ -1,1 +1,0 @@
-import{t as e}from"./sprites.fragment-CmZMeHte.js";export{e as spritesPixelShaderWGSL};

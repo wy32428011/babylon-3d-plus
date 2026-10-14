@@ -5,10 +5,10 @@ import { build } from 'vite';
 const workspaceRoot = process.cwd();
 const outputRoot = path.resolve(workspaceRoot, 'output/playwright/yzj-production-dist');
 const visualEntries = [
-  path.resolve(workspaceRoot, 'output/playwright/image-library-texture-drop-check.html'),
-  path.resolve(workspaceRoot, 'output/playwright/yzj-direction-arrow-check.html'),
-  path.resolve(workspaceRoot, 'output/playwright/yzj-conveyor-runtime-check.html'),
-  path.resolve(workspaceRoot, 'output/playwright/yzj-reference-parameters-check.html'),
+  path.resolve(workspaceRoot, 'tests/fixtures/model-packages/image-library-texture-drop-check.html'),
+  path.resolve(workspaceRoot, 'tests/fixtures/model-packages/yzj-direction-arrow-check.html'),
+  path.resolve(workspaceRoot, 'tests/fixtures/model-packages/yzj-conveyor-runtime-check.html'),
+  path.resolve(workspaceRoot, 'tests/fixtures/model-packages/yzj-reference-parameters-check.html'),
 ];
 
 /** 递归查找目录中的文件，供生产产物检查 hash PNG。 */
@@ -38,9 +38,9 @@ async function buildYzjDirectionArrowVisuals() {
     },
   });
 
-  const fixtureTarget = path.join(outputRoot, 'output/playwright/yzj-assets');
+  const fixtureTarget = path.join(outputRoot, 'tests/fixtures/model-packages/yzj-assets');
   await mkdir(path.dirname(fixtureTarget), { recursive: true });
-  await cp(path.resolve(workspaceRoot, 'output/playwright/yzj-assets'), fixtureTarget, { recursive: true, force: true });
+  await cp(path.resolve(workspaceRoot, 'tests/fixtures/model-packages/yzj-assets'), fixtureTarget, { recursive: true, force: true });
 
   const outputFiles = await listFilesRecursively(outputRoot);
   const hashedDirectionArrowPngs = outputFiles.filter((filePath) => /direction-arrow-glow-[A-Za-z0-9_-]+[.]png$/i.test(path.basename(filePath)));

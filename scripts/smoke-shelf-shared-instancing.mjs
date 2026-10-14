@@ -16,7 +16,7 @@ import {
 import '@babylonjs/loaders/glTF/index.js';
 import { createServer } from 'vite';
 
-const FIXTURE_ROOT = path.join(process.cwd(), 'output', 'playwright', 'shelf-assets');
+const FIXTURE_ROOT = path.join(process.cwd(), 'tests', 'fixtures', 'model-packages', 'shelf-assets');
 const GLB_PATH = path.join(FIXTURE_ROOT, 'Shelf.glb');
 const SCRIPT_PATH = path.join(FIXTURE_ROOT, 'shelf.model.ts');
 const META_PATH = path.join(FIXTURE_ROOT, 'meta.json');

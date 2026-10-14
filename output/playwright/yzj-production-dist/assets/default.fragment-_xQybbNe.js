@@ -1,1 +1,0 @@
-import{t as e}from"./default.fragment-Bpac2rlY.js";export{e as defaultPixelShader};

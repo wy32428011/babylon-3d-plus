@@ -6,7 +6,7 @@ import type { ClickEventBindingEffect } from '../../src/editor/model/components.
 
 const server = await createServer({
   configFile: false,
-  server: { middlewareMode: true, hmr: false },
+  server: { middlewareMode: true, hmr: false, watch: null, ws: false },
   optimizeDeps: { noDiscovery: true },
 });
 after(() => server.close());

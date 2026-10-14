@@ -8,21 +8,21 @@ import { validateSkyboxSourceDimensions } from './skyboxDecodedValidation.ts';
 
 /** Worker 不支持的格式沿用 Babylon 解码，转换和反射克隆仍采用平滑采样。 */
 export class BilinearHDRCubeTexture extends HDRCubeTexture {
-  protected async _getCubeMapTextureDataAsync(buffer: ArrayBuffer, size: number) {
+  protected override async _getCubeMapTextureDataAsync(buffer: ArrayBuffer, size: number) {
     const bytes = new Uint8Array(buffer);
     const header = RGBE_ReadHeader(bytes);
     validateSkyboxSourceDimensions(header.width, header.height);
     return convertSkyboxPanoramaToCubemap(RGBE_ReadPixels(bytes, header), header.width, header.height, size, true);
   }
 
-  protected _instantiateClone(): this {
+  protected override _instantiateClone(): this {
     return new BilinearHDRCubeTexture(this.url, this.getScene() || this._getEngine()!, this._size,
       this._noMipmap, this._generateHarmonics, this.gammaSpace) as this;
   }
 }
 
 export class BilinearEXRCubeTexture extends EXRCubeTexture {
-  protected async _getCubeMapTextureDataAsync(buffer: ArrayBuffer, size: number) {
+  protected override async _getCubeMapTextureDataAsync(buffer: ArrayBuffer, size: number) {
     const header = GetExrHeader(new DataView(buffer), { value: 0 });
     validateSkyboxSourceDimensions(header.dataWindow.xMax - header.dataWindow.xMin + 1,
       header.dataWindow.yMax - header.dataWindow.yMin + 1);
@@ -31,7 +31,7 @@ export class BilinearEXRCubeTexture extends EXRCubeTexture {
     return convertSkyboxPanoramaToCubemap(decoded.data, decoded.width, decoded.height, size, false);
   }
 
-  protected _instantiateClone(): this {
+  protected override _instantiateClone(): this {
     return new BilinearEXRCubeTexture(this.url, this.getScene() || this._getEngine()!, this._size,
       this._noMipmap, this._generateHarmonics, this.gammaSpace) as this;
   }
