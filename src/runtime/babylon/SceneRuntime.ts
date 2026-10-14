@@ -913,6 +913,8 @@ export class SceneRuntime {
   private readonly spawnedDeviceModels = new Map<string, ModelRuntimeEntry>();
   /** 已创建但尚未显示的生成实例：等首帧驱动把设备吸附到目标位后再揭示，避免先在模板位置闪现再跳走。 */
   private readonly spawnedDeviceRevealPending = new Set<SpawnedDeviceKey>();
+  /** 隐藏期被置 layerMask=0 的网格原值（mesh.uniqueId → 原 layerMask），揭示/销毁时恢复。 */
+  private readonly spawnedDeviceHiddenLayerMasks = new Map<number, number>();
   private readonly deviceSpawnerRuntime: DeviceSpawnerRuntime;
   /** 场景级默认模型生成器实体 ID，syncDocument 时从文档快照刷新。 */
   private defaultCargoGeneratorId: string | null = null;
@@ -1703,6 +1705,7 @@ export class SceneRuntime {
     // 动态设备实例不依赖基线恢复，无论预览态标志如何都先统一销毁并退订消息。
     this.deviceSpawnerRuntime.disposeAll();
     this.spawnedDeviceRevealPending.clear();
+    this.spawnedDeviceHiddenLayerMasks.clear();
     this.syncDeviceSpawnerMarkerVisibility();
     const hadPreviewState = this.telemetryPreviewActive
       || [...this.models.values()].some((model) => model.telemetryPreviewBaseline)
@@ -7586,9 +7589,9 @@ export class SceneRuntime {
     // 继承模板实例的完整变换（位置/旋转/缩放），与常规实体 root 同源。
     this.applyTransform(root, templateEntity.components.transform);
     // 先隐藏：异步加载与脚本初始化期间设备仍停在模板位姿，等首帧驱动吸附到 MQTT 目标位后再显示。
-    // 隐藏走网格级 isVisible 而非禁用 root：模型脚本 onStart 会捕获 isEnabled()（含祖先）作参数基线，
-    // root 禁用会让脚本把 enabled=false 记为基线并在每帧 onUpdate 还原，导致整车永隐（见 revealDrivenSpawnedDevices）。
-    // root 启用期间 contentRoot 下无内容，本就无可渲染网格；网格挂载后由 setSpawnedDeviceMeshesVisible 隐藏。
+    // 隐藏走 layerMask=0（见 setSpawnedDeviceMeshesVisible），禁用 root 或 isVisible=false 都会被脚本
+    // 捕获/过滤（isEnabled 基线快照、isBoundsMesh 过滤），导致参数化（主体颜色/尺寸拉伸）丢失或整车永隐。
+    // root 启用期间 contentRoot 下无内容，本就无可渲染网格；网格挂载后再隐藏。
     this.spawnedDeviceRevealPending.add(key);
     const contentRoot = new TransformNode(`spawnedDevice_${spawner.spawnerCode}_${assetCode}_content`, this.scene);
     contentRoot.parent = root;
@@ -7710,10 +7713,21 @@ export class SceneRuntime {
     }
   }
 
-  /** 生成实例隐藏期的网格级显隐开关；不动 root.enabled，避免脚本把禁用状态捕获为参数基线。 */
+  /** 生成实例隐藏期的网格级显隐：走 layerMask=0 渲染剔除，不动 enabled/isVisible/visibility——脚本会捕获 enabled 基线、过滤 isVisible=false 的网格，这两条路都会让参数化丢失。 */
   private setSpawnedDeviceMeshesVisible(model: ModelRuntimeEntry, visible: boolean): void {
     for (const mesh of model.meshes) {
-      mesh.isVisible = visible;
+      if (visible) {
+        const original = this.spawnedDeviceHiddenLayerMasks.get(mesh.uniqueId);
+        if (original !== undefined) {
+          mesh.layerMask = original;
+          this.spawnedDeviceHiddenLayerMasks.delete(mesh.uniqueId);
+        }
+      } else {
+        if (!this.spawnedDeviceHiddenLayerMasks.has(mesh.uniqueId)) {
+          this.spawnedDeviceHiddenLayerMasks.set(mesh.uniqueId, mesh.layerMask);
+        }
+        mesh.layerMask = 0;
+      }
     }
   }
 
@@ -7723,6 +7737,9 @@ export class SceneRuntime {
     if (!model) return;
     this.spawnedDeviceModels.delete(key);
     this.spawnedDeviceRevealPending.delete(key);
+    for (const mesh of model.meshes) {
+      this.spawnedDeviceHiddenLayerMasks.delete(mesh.uniqueId);
+    }
     model.loadToken += 1;
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {

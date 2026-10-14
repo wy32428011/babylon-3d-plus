@@ -208,11 +208,12 @@ try {
   assert.equal(spawnedModel.root.rotation.y, 0.7, '实例必须继承模板旋转');
   assert.equal(spawnedModel.root.scaling.x, 1.5, '实例必须继承模板缩放');
   // 首帧驱动到位前隐藏，避免先在模板位姿闪现再跳到 MQTT 目标位；
-  // 隐藏走网格级 isVisible：root 必须保持启用，否则脚本 onStart 会把 enabled=false 捕获为参数基线并每帧还原，整车永隐
+  // 隐藏走 layerMask=0 渲染剔除：root 保持启用且网格 isVisible 不动，
+  // 否则脚本会把 enabled=false 捕获为基线、或把 isVisible=false 的网格过滤出参数化（主体颜色/尺寸拉伸丢失）
   assert.equal(spawnedModel.root.isEnabled(false), true, '实例隐藏期间 root 必须保持启用（脚本基线依赖）');
   assert.ok(
-    spawnedModel.meshes.every((mesh) => !mesh.isVisible),
-    '实例在首帧驱动前必须隐藏（网格 isVisible=false）',
+    spawnedModel.meshes.every((mesh) => mesh.isVisible && mesh.layerMask === 0),
+    '实例在首帧驱动前必须隐藏（layerMask=0，isVisible 保持 true）',
   );
   assert.ok(
     spawnedModel.meshes.every((mesh) => mesh.isPickable),
@@ -228,8 +229,8 @@ try {
   assert.ok(spawnedKey.startsWith('spawned:'), `实例合成实体 id 形如 spawned:{key}，实际 ${spawnedKey}`);
   scene.render();
   assert.ok(
-    spawnedModel.meshes.every((mesh) => mesh.isVisible),
-    '首帧驱动到位后实例必须被揭示显示（网格 isVisible=true）',
+    spawnedModel.meshes.every((mesh) => mesh.layerMask !== 0),
+    '首帧驱动到位后实例必须被揭示显示（layerMask 恢复原值）',
   );
   const spawnedBounds = runtime.getEntitiesWorldBounds([spawnedKey]);
   assert.ok(spawnedBounds, '合成实体 id 必须能解析出运行态包围盒（高亮/聚焦依赖）');
