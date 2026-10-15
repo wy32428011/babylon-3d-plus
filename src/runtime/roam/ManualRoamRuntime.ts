@@ -17,12 +17,15 @@ import {
   TransformNode,
   Vector3,
 } from '@babylonjs/core';
-import { resolveDefaultManualRoamAvatarUrl } from '../assets/manualRoamAvatarAsset';
+import { resolveDefaultManualRoamAvatarUrl, resolveManualRoamMotionUrls } from '../assets/manualRoamAvatarAsset';
+import { ManualRoamAvatarAnimator } from './ManualRoamAvatarAnimator';
+import { getManualRoamRigProfile, MANUAL_ROAM_RIG_PROFILE_V2 } from './manualRoamAvatarRig';
+import { ManualRoamFootIK } from './ManualRoamFootIK';
+import { createManualRoamTurnState, stepManualRoamTurnState } from './manualRoamTurnState';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
-  resolveRoamHorizontalSpeed,
   resolveRoamKinematicStep,
   sanitizeManualRoamConfig,
   sanitizeManualRoamSpawnPose,
@@ -57,7 +60,7 @@ import {
   type ProceduralGaitState,
 } from './proceduralAvatarAnimation';
 
-export type ManualRoamAvatarAnimationMode = 'loading' | 'embedded' | 'procedural' | 'static' | 'error';
+export type ManualRoamAvatarAnimationMode = 'loading' | 'shared-skeleton' | 'embedded' | 'procedural' | 'static' | 'error';
 
 export type ManualRoamSnapshot = {
   enabled: boolean;
@@ -173,7 +176,8 @@ export class ManualRoamRuntime {
   private readonly collisionProxyPool: ManualRoamCollisionProxyPool | null;
   private readonly localTriangleCollider: ManualRoamLocalTriangleCollider;
   private collisionWorldDirty = false;
-  private readonly beforeRenderObserver: Nullable<Observer<Scene>>;
+  private readonly beforeAnimationsObserver: Nullable<Observer<Scene>>;
+  private readonly afterAnimationsObserver: Nullable<Observer<Scene>>;
   private readonly meshAddedObserver: Nullable<Observer<AbstractMesh>>;
   private snapshot = createInitialManualRoamSnapshot();
   private kinematicState: RoamKinematicState;
@@ -190,11 +194,18 @@ export class ManualRoamRuntime {
   private lastPinchDistance: number | null = null;
   private jumpQueued = false;
   private previousGamepadJumpPressed = false;
+  private readonly frameStartPosition = Vector3.Zero();
+  private readonly frameVelocity = Vector3.Zero();
+  private frameJumped = false;
+  private motionResetThisFrame = false;
   private currentAnimation: AnimationGroup | null = null;
   private pausedAvatarAnimation: AnimationGroup | null = null;
   private animationGroups: AnimationGroup[] = [];
   private proceduralGaitState: ProceduralGaitState = createInitialProceduralGaitState();
   private proceduralAnimator: ProceduralAvatarMorphAnimator | null = null;
+  private skeletalAnimator: ManualRoamAvatarAnimator | null = null;
+  private footIK: ManualRoamFootIK | null = null;
+  private turnState = createManualRoamTurnState(0);
   private visualBasePosition = Vector3.Zero();
   private avatarContainer: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
   private avatarUrl: string | null = null;
@@ -269,7 +280,9 @@ export class ManualRoamRuntime {
       this.observeCollisionMesh(mesh);
       this.disableFallbackGroundWhenSceneFloorIsReady();
     });
-    this.beforeRenderObserver = scene.onBeforeRenderObservable.add(() => this.update());
+    // 先提交本帧动画，再由引擎混合，最后执行IK；避免骨骼修正被late binding覆盖。
+    this.beforeAnimationsObserver = scene.onBeforeAnimationsObservable.add(() => this.update());
+    this.afterAnimationsObserver = scene.onAfterAnimationsObservable.add(() => this.updateFootIK());
     this.kinematicState = createInitialRoamKinematicState({ x: 0, y: 0, z: 0 });
     this.bindInputEvents();
     if (this.options.preloadAvatar !== false) this.setAvatarUrl(this.options.avatarUrl);
@@ -307,6 +320,10 @@ export class ManualRoamRuntime {
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
       if (this.pausedAvatarAnimation === this.currentAnimation) this.pausedAvatarAnimation?.restart();
       this.pausedAvatarAnimation = null;
+      this.skeletalAnimator?.sampleIdle();
+      this.skeletalAnimator?.resume();
+      this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
+      this.footIK?.reset();
       this.options.onActivated?.();
       this.publish({ enabled: true, statusMessage: this.resolveStatusMessage(true) });
       this.updateCamera(1);
@@ -318,6 +335,8 @@ export class ManualRoamRuntime {
     this.exitPointerLock();
     this.collider.setEnabled(false);
     this.facingRoot.setEnabled(false);
+    this.skeletalAnimator?.pause();
+    this.footIK?.reset();
     // 只暂停本控制器正在播放的片段；重进恢复同一实例，不重置进度或重启已结束的跳跃。
     if (this.currentAnimation?.isPlaying) {
       this.currentAnimation.pause();
@@ -420,6 +439,11 @@ export class ManualRoamRuntime {
   }
 
   reset(): void {
+    this.skeletalAnimator?.sampleIdle();
+    this.frameVelocity.setAll(0);
+    this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
+    this.avatarVisualRoot.rotation.y = 0;
+    this.footIK?.reset();
     if (!this.spawnInitialized) this.ensureSpawnInitialized();
     this.clearInputs();
     this.proceduralGaitState = createInitialProceduralGaitState();
@@ -442,10 +466,14 @@ export class ManualRoamRuntime {
     this.clearInputs();
     this.exitPointerLock();
     this.unbindInputEvents();
-    this.options.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
+    this.options.scene.onBeforeAnimationsObservable.remove(this.beforeAnimationsObserver);
+    this.options.scene.onAfterAnimationsObservable.remove(this.afterAnimationsObserver);
     this.options.scene.onNewMeshAddedObservable.remove(this.meshAddedObserver);
     if (this.collisionMeshDefaults.size > 0) this.deactivateCollisionWorld();
     this.stopCurrentAnimation();
+    this.skeletalAnimator?.dispose();
+    this.skeletalAnimator = null;
+    this.footIK?.dispose(); this.footIK = null;
     this.proceduralAnimator?.dispose();
     this.proceduralAnimator = null;
     this.avatarContainer?.dispose();
@@ -592,6 +620,10 @@ export class ManualRoamRuntime {
     if (this.avatarUrl === avatarUrl) return;
     this.avatarUrl = avatarUrl;
     this.stopCurrentAnimation();
+    this.skeletalAnimator?.dispose();
+    this.skeletalAnimator = null;
+    this.footIK?.dispose(); this.footIK = null;
+    this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
     this.animationGroups = [];
     this.proceduralAnimator?.dispose();
     this.proceduralAnimator = null;
@@ -599,6 +631,7 @@ export class ManualRoamRuntime {
     this.avatarContainer = null;
     this.avatarMeshes.clear();
     this.avatarVisualRoot.position.setAll(0);
+    this.avatarVisualRoot.setEnabled(false);
     this.avatarVisualRoot.rotation.setAll(0);
     this.avatarVisualRoot.scaling.setAll(1);
     this.visualBasePosition.setAll(0);
@@ -629,27 +662,57 @@ export class ManualRoamRuntime {
       // 先标记人物网格再加入场景，避免 onNewMeshAdded 将人物误判为静态碰撞体。
       container.addAllToScene();
       for (const node of container.rootNodes) node.parent = this.avatarVisualRoot;
+      this.avatarContainer = container;
+      let skeletalError: string | null = null;
+      let shared = false;
+      try {
+        const rigProfile = getManualRoamRigProfile(container);
+        if (rigProfile) {
+          shared = true;
+          const animator = await ManualRoamAvatarAnimator.create(this.options.scene, container, {...resolveManualRoamMotionUrls(undefined, undefined, rigProfile === MANUAL_ROAM_RIG_PROFILE_V2 ? 'v2' : 'v1'),enableStrideWarp:rigProfile===MANUAL_ROAM_RIG_PROFILE_V2});
+          if (this.disposed || generation !== this.avatarLoadGeneration) {
+            animator.dispose();
+            container.dispose();
+            return;
+          }
+          this.skeletalAnimator = animator;
+          if(rigProfile===MANUAL_ROAM_RIG_PROFILE_V2) this.footIK = new ManualRoamFootIK(container,{
+            probeGround:(x,z,y,length)=>{const hit=this.pickGround(x,z,y,length);return hit?{height:hit.y,normal:hit.normal}:null;},
+            maxCorrection:Math.min(.28,this.snapshot.config.stepHeight+.06),maxSlopeDegrees:45,
+          });
+        }
+      } catch (error) {
+        // 绑定失败仍保留可显示人物，不能冒充共享动作成功或任取内嵌动作。
+        this.skeletalAnimator?.dispose(); this.skeletalAnimator = null;
+        this.footIK?.dispose(); this.footIK = null;
+        shared = true;
+        skeletalError = `共享骨骼动作不可用：${getErrorMessage(error)}`;
+      }
+      if (this.disposed || generation !== this.avatarLoadGeneration) { container.dispose(); return; }
       this.normalizeAvatar(container.meshes);
-      this.animationGroups = [...container.animationGroups];
-      this.proceduralAnimator = isDefaultAvatar && this.animationGroups.length === 0
+      this.skeletalAnimator?.sampleIdle();
+      if (!this.snapshot.enabled) this.skeletalAnimator?.pause();
+      this.animationGroups = shared ? [] : [...container.animationGroups];
+      this.proceduralAnimator = !shared && isDefaultAvatar && this.animationGroups.length === 0
         ? ProceduralAvatarMorphAnimator.create(this.options.scene, container.meshes)
         : null;
       this.avatarContainer = container;
-      const avatarAnimationMode: ManualRoamAvatarAnimationMode = this.animationGroups.length > 0
+      const avatarAnimationMode: ManualRoamAvatarAnimationMode = skeletalError ? 'error' : this.skeletalAnimator ? 'shared-skeleton' : this.animationGroups.length > 0
         ? 'embedded'
         : this.proceduralAnimator ? 'procedural' : 'static';
       this.applyAvatarVisibility(this.snapshot.enabled, this.snapshot.viewMode);
+      this.avatarVisualRoot.setEnabled(true);
       this.publish({
         avatarAnimationMode,
-        statusMessage: avatarAnimationMode === 'procedural'
+        statusMessage: skeletalError ?? (avatarAnimationMode === 'procedural'
           ? '当前人物模型无骨骼动画，已启用程序化步态。'
-          : avatarAnimationMode === 'static' ? '人物模型无内置动画，保留原始姿态。' : null,
+          : avatarAnimationMode === 'static' ? '人物模型无内置动画，保留原始姿态。' : null),
       });
       this.options.onLog?.(
-        avatarAnimationMode === 'embedded'
+        skeletalError ?? (avatarAnimationMode === 'shared-skeleton' ? '人物模型加载完成，已绑定共享骨骼动作。' : avatarAnimationMode === 'embedded'
           ? `人物模型加载完成，检测到 ${this.animationGroups.length} 个动画片段。`
           : avatarAnimationMode === 'static' ? '人物模型加载完成，保留原始姿态。'
-            : `人物模型加载完成；未检测到蒙皮动画，已为 ${this.proceduralAnimator?.meshCount ?? 0} 个网格启用程序化四肢步态。`,
+            : `人物模型加载完成；未检测到蒙皮动画，已为 ${this.proceduralAnimator?.meshCount ?? 0} 个网格启用程序化四肢步态。`),
       );
     } catch (error) {
       if (container) {
@@ -696,6 +759,9 @@ export class ManualRoamRuntime {
 
     const frameSeconds = Math.min(MAX_FRAME_SECONDS, Math.max(0, this.options.engine.getDeltaTime() / 1000));
     const input = this.collectInputFrame(frameSeconds);
+    this.frameStartPosition.copyFrom(this.collider.position);
+    this.frameJumped = false;
+    this.motionResetThisFrame = false;
     let remaining = frameSeconds;
     let firstStep = true;
     while (remaining > 1e-6) {
@@ -707,9 +773,17 @@ export class ManualRoamRuntime {
       remaining -= delta;
       firstStep = false;
     }
+    // 碰撞与台阶修正之后采样；复位不属于人物运动，不能放大步频。
+    if (frameSeconds > 1e-6 && !this.motionResetThisFrame) {
+      this.collider.position.subtractToRef(this.frameStartPosition, this.frameVelocity);
+      this.frameVelocity.scaleInPlace(1 / frameSeconds);
+    } else {
+      this.frameVelocity.setAll(0);
+    }
     this.updateCamera(frameSeconds);
     this.updateAvatarAnimation(input, frameSeconds);
-    const moving = Math.hypot(input.forward, input.right, input.vertical) > 0.05;
+    const moving = Math.hypot(this.frameVelocity.x, this.frameVelocity.z,
+      this.snapshot.locomotionMode === 'fly' ? this.frameVelocity.y : 0) > 0.03;
     this.publish({
       grounded: this.kinematicState.grounded,
       moving,
@@ -785,6 +859,7 @@ export class ManualRoamRuntime {
     this.kinematicState.yaw = step.yaw;
     this.kinematicState.pitch = step.pitch;
     this.kinematicState.verticalVelocity = step.verticalVelocity;
+    this.frameJumped ||= step.jumped;
 
     const displacement = new Vector3(step.displacement.x, step.displacement.y, step.displacement.z);
     if (this.snapshot.locomotionMode === 'ground' && this.kinematicState.grounded) {
@@ -827,17 +902,23 @@ export class ManualRoamRuntime {
     const hit = this.pickGround(
       this.collider.position.x,
       this.collider.position.z,
-      this.collider.position.y + 0.08,
-      config.groundProbeDistance + 0.08,
+      this.collider.position.y + config.stepHeight + 0.08,
+      config.stepHeight + config.groundProbeDistance + 0.08,
     );
     if (!hit || hit.y > this.collider.position.y + config.stepHeight) {
       this.kinematicState.grounded = false;
       return;
     }
     const distance = this.collider.position.y - hit.y;
-    if (!force && (distance < -0.02 || distance > config.groundProbeDistance)) {
+    if (!force && (distance < -config.stepHeight || distance > config.groundProbeDistance)) {
       this.kinematicState.grounded = false;
       return;
+    }
+    if(distance < -0.015) {
+      const ceiling=this.options.scene.pickWithRay(new Ray(
+        new Vector3(this.collider.position.x,this.collider.position.y+config.capsuleHeight-0.01,this.collider.position.z),
+        Vector3.Up(),-distance+0.03),mesh=>this.isCollisionCandidate(mesh,true),false);
+      if(ceiling?.hit){this.kinematicState.grounded=false;return;}
     }
     this.collider.position.y = hit.y;
     this.kinematicState.verticalVelocity = 0;
@@ -924,11 +1005,35 @@ export class ManualRoamRuntime {
 
   /** 用实际水平速度驱动程序化步态或内置走/跑片段，使步频与位移同步。 */
   private updateAvatarAnimation(input: Readonly<RoamInputFrame>, deltaSeconds: number): void {
+    if (this.skeletalAnimator) {
+      const horizontalSpeed=Math.hypot(this.frameVelocity.x,this.frameVelocity.z);
+      const orientToMovement=!!this.footIK&&this.snapshot.locomotionMode==='ground';
+      const movementYaw=horizontalSpeed>.03?Math.atan2(this.frameVelocity.x,this.frameVelocity.z):undefined;
+      const turnMotion = this.skeletalAnimator.getTurnMotion();
+      if(Object.keys(turnMotion.turnDurations).length) {
+        this.turnState=stepManualRoamTurnState(this.turnState,{deltaSeconds,controlYaw:this.kinematicState.yaw,
+          horizontalSpeed,grounded:this.kinematicState.grounded,orientToMovement,movementYaw,
+          fly:this.snapshot.locomotionMode==='fly',...turnMotion});
+        this.avatarVisualRoot.rotation.y=this.turnState.visualYaw-this.kinematicState.yaw;
+      } else this.turnState=createManualRoamTurnState(this.kinematicState.yaw);
+      this.skeletalAnimator.update({
+        deltaSeconds, velocityX: this.frameVelocity.x, velocityZ: this.frameVelocity.z,
+        // 巡检人物以真实行进方向前走，视觉根平滑跟随；控制yaw仍独立负责键位和相机。
+        yaw: orientToMovement&&movementYaw!==undefined?movementYaw:this.turnState.animationYaw,
+        verticalVelocity: this.snapshot.locomotionMode === 'fly' ? this.frameVelocity.y : this.kinematicState.verticalVelocity,
+        grounded: this.kinematicState.grounded, jumped: this.frameJumped,
+        fly: this.snapshot.locomotionMode === 'fly', sprint: input.sprint,
+        walkSpeed: this.snapshot.config.walkSpeed, worldScale: this.avatarVisualRoot.scaling.y,
+        turn:this.turnState.turnClip?{clip:this.turnState.turnClip,progress:this.turnState.turnProgress,weight:this.turnState.turnWeight}:undefined,
+      });
+      return;
+    }
     if (this.snapshot.avatarAnimationMode === 'static') return;
-    const horizontalAmount = Math.hypot(input.forward, input.right);
-    const horizontalSpeed = resolveRoamHorizontalSpeed(input, this.snapshot.config);
+    const horizontalSpeed = Math.hypot(this.frameVelocity.x, this.frameVelocity.z);
+    const referenceSpeed = input.sprint ? this.snapshot.config.runSpeed : this.snapshot.config.walkSpeed;
+    const horizontalAmount = Math.min(1, horizontalSpeed / referenceSpeed);
     const airborne = this.snapshot.locomotionMode === 'ground' && !this.kinematicState.grounded;
-    const animationName = airborne ? 'jump' : horizontalAmount > 0.05 ? input.sprint ? 'run' : 'walk' : 'idle';
+    const animationName = airborne ? 'jump' : horizontalSpeed > 0.03 ? input.sprint ? 'run' : 'walk' : 'idle';
     if (this.animationGroups.length > 0) {
       this.playEmbeddedAnimation(animationName, horizontalSpeed);
       return;
@@ -947,6 +1052,15 @@ export class ManualRoamRuntime {
     this.avatarVisualRoot.position.copyFrom(this.visualBasePosition);
     this.avatarVisualRoot.position.y += bodyMotion.verticalOffsetMeters;
     this.avatarVisualRoot.rotation.z = bodyMotion.rollRadians;
+  }
+
+  private updateFootIK(): void {
+    if(!this.snapshot.enabled||this.disposed||!this.footIK||!this.skeletalAnimator)return;
+    this.footIK.update({dt:this.options.engine.getDeltaTime()/1000,grounded:this.kinematicState.grounded,
+      fly:this.snapshot.locomotionMode==='fly',teleported:this.motionResetThisFrame||Boolean(this.resetTransition),
+      footContacts:this.skeletalAnimator.getFootContacts(),speed:Math.hypot(this.frameVelocity.x,this.frameVelocity.z),
+      strideScale:this.skeletalAnimator.getStrideScale(),
+      turning:Math.hypot(this.frameVelocity.x,this.frameVelocity.z)>.03&&Math.abs(this.turnState.deltaYaw)>.08});
   }
 
   /** 按当前水平速度缩放内置走/跑片段，避免滑步或原地碎步。 */
@@ -996,6 +1110,9 @@ export class ManualRoamRuntime {
   }
 
   private finishResetImmediately(): void {
+    this.motionResetThisFrame = true;
+    this.skeletalAnimator?.sampleIdle();
+    this.footIK?.reset();
     this.resetTransition = null;
     this.collider.position.copyFrom(this.spawnPosition);
     this.kinematicState = createInitialRoamKinematicState(
@@ -1003,6 +1120,8 @@ export class ManualRoamRuntime {
       { yaw: this.spawnYaw, pitch: this.spawnPitch },
     );
     this.snapCharacterToGround(true);
+    this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
+    this.avatarVisualRoot.rotation.y=0;
   }
 
   private ensureSpawnInitialized(): void {

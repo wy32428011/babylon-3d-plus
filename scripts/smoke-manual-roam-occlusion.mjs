@@ -61,6 +61,13 @@ window.checkOcclusion = async (mode, selected) => {
   await loaded;
   await new Promise(resolve => setTimeout(resolve, 0));
   SceneLoader.LoadAssetContainerAsync = originalLoader;
+  if (mode === 'default') {
+    const deadline = performance.now() + 30000;
+    while (!runtime.getWorldBoundsMeshes(spawn.id).some(mesh => mesh.skeleton)) {
+      if (performance.now() > deadline) throw new Error('默认骨骼人物及共享待机姿态未完成装配');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
   await scene.whenReadyAsync();
   const root = runtime.getTransformTarget(spawn.id);
   const capture = async () => {
@@ -98,7 +105,8 @@ await mkdir(outputDir, { recursive: true });
 const server = await createServer({
   configFile: false,
   cacheDir: path.join(outputDir, 'vite-cache'),
-  server: { host: '127.0.0.1', port: 0, hmr: false },
+  optimizeDeps: { entries: [], noDiscovery: true, include: ['@babylonjs/core', '@babylonjs/loaders'] },
+  server: { host: '127.0.0.1', port: 0, hmr: false, watch: null },
   plugins: [{
     name: 'manual-roam-occlusion-fixture',
     resolveId(id) { if (id === '/__manual_roam_occlusion__.js') return moduleId; },
@@ -118,7 +126,7 @@ let page;
 const errors = [];
 try {
   await server.listen();
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
   page = await browser.newPage({ viewport: { width: 512, height: 512 } });
   page.on('pageerror', error => errors.push(error.message));
   console.log('Loading manual-roam WebGL fixture');

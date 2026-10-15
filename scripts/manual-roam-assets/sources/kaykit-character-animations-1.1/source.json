@@ -1,0 +1,55 @@
+{
+  "author": "Kay Lousberg",
+  "pack": "KayKit Character Animations",
+  "version": "1.1",
+  "license": "CC0-1.0",
+  "source": "https://kaylousberg.itch.io/kaykit-character-animations",
+  "download": "https://kaylousberg.itch.io/kaykit-character-animations/file/15799903",
+  "tier": "Free 1.1",
+  "archiveSha256": "65882f31f905ad2e953819648a59287cdeab8f623908d5ef701971d3758be20f",
+  "licenseSha256": "373b159044d1a886ed15f57ca5a7673ba14e2623c460283452705f2056912ed9",
+  "retrievedDate": "2026-10-15",
+  "files": [
+    {
+      "name": "Rig_Medium_MovementAdvanced.glb",
+      "sha256": "8b2317cf81e3f24149e4b791c27e1932bebd46cd378ed962e7d27d642fad8c56",
+      "bytes": 719628,
+      "archivePath": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_MovementAdvanced.glb"
+    },
+    {
+      "name": "Rig_Medium_MovementBasic.glb",
+      "sha256": "11422afd50abf7e8c92ea107e2e0bc94abd38023d6d15f55ad580347efbfa29e",
+      "bytes": 689624,
+      "archivePath": "KayKit_Character_Animations_1.1/Animations/gltf/Rig_Medium/Rig_Medium_MovementBasic.glb"
+    }
+  ],
+  "nativeClips": {
+    "Running_Strafe_Left": {
+      "file": "Rig_Medium_MovementAdvanced.glb",
+      "duration": 0.8,
+      "fps": 30
+    },
+    "Running_Strafe_Right": {
+      "file": "Rig_Medium_MovementAdvanced.glb",
+      "duration": 0.8,
+      "fps": 30
+    },
+    "Walking_Backwards": {
+      "file": "Rig_Medium_MovementAdvanced.glb",
+      "duration": 1.0666666666666667,
+      "fps": 30
+    }
+  },
+  "missingNativeClips": [
+    "Walking_Strafe_Left",
+    "Walking_Strafe_Right",
+    "Running_Backwards"
+  ],
+  "notes": [
+    "Original official glb bytes preserved. Not downloaded from third-party mirrors.",
+    "Free release contains running strafes and walking backwards only; does not supply all walk/run directional variants.",
+    "Skeleton is stylized Rig_Medium with 23 joints and nonidentity local rest rotations. Must retarget by world rest delta and chain mapping, not name replacement.",
+    "Raw running strafes show strong lateral foot travel and torso remains forward-biased, not a forward run with whole root rotated 90 degrees. Foot travel also has forward/back component; validate target foot contact and axis before use.",
+    "Both files include skinned mannequin meshes for offline source inspection; do not ship these source visible meshes as runtime motion geometry."
+  ]
+}

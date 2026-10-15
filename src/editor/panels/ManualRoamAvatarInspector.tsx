@@ -72,7 +72,8 @@ export function ManualRoamAvatarInspector(props: {
       <button type="button" disabled={!window.editorApi} onClick={() => void upload()}>
         {busy ? '正在上传…' : '上传人物模型（GLB）'}
       </button>
-      <p className="muted">使用内嵌纹理的单文件 GLB，自动适配人物身高。自带动画可用于行走；无动画模型保留原始姿态。</p>
+      <p className="muted">使用内嵌纹理的单文件 GLB，自动适配人物身高。默认人物和通过兼容检查的标准蒙皮人物共用内置动作；旧人物继续使用模型内嵌动画或静态姿态。</p>
+      <p className="muted">共享动作支持 mixamo-humanoid-v1/v2 骨架与蒙皮规范。漫游面板显示实际动作状态；绑定失败会保留人物并显示具体原因。</p>
       {error ? <p role="alert">{error}</p> : null}
     </fieldset>
   );

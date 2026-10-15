@@ -3,7 +3,7 @@ import test, { after } from 'node:test';
 import { createServer } from 'vite';
 import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Vector3 } from '@babylonjs/core';
 
-const server = await createServer({ appType: 'custom', configFile: false, server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true } });
+const server = await createServer({ appType: 'custom', configFile: false, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
 const { ManualRoamRuntime } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamRuntime.ts');
 const { EditorManualRoamSpawnRuntime } = await server.ssrLoadModule('/src/runtime/babylon/EditorManualRoamSpawnRuntime.ts');
 const { createManualRoamSpawnEntity } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
@@ -170,6 +170,59 @@ test('退出漫游暂停真实人物动画求值，重进恢复且反复启停�
     }
     runtime.dispose();
     assert.equal(scene.animationGroups.includes(group), false);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('碰撞阻止位移时保持待机，恢复移动后按实际位移驱动步频', async (t) => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: new EventTarget(), configurable: true });
+  const avatar = createAvatar(scene, 'collision-avatar');
+  const groups = ['Idle', 'Walk'].map(name => {
+    const group = new AnimationGroup(name, scene);
+    const animation = new Animation(name, 'rotation.y', 30, Animation.ANIMATIONTYPE_FLOAT);
+    animation.setKeys([{ frame: 0, value: 0 }, { frame: 30, value: 0.1 }]);
+    group.addTargetedAnimation(animation, avatar.mesh);
+    avatar.container.animationGroups.push(group);
+    return group;
+  });
+  avatar.container.removeAllFromScene();
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(engine, 'getDeltaTime', () => 1000 / 60);
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(),
+    avatarUrl: 'https://assets.test/collision.glb', setOrbitControlsEnabled: () => {},
+    resolveSpawnPose: () => ({ position: { x: 0, y: 0, z: 0 }, yaw: 0 }) });
+  try {
+    await flush();
+    runtime.setEnabled(true);
+    const collider = scene.getMeshByName('__manual_roam_character_collider__');
+    assert.ok(collider);
+    let displacementScale = 0;
+    t.mock.method(collider, 'moveWithCollisions', (displacement: Vector3) => {
+      collider.position.addInPlace(displacement.scale(displacementScale));
+      return collider;
+    });
+    runtime.setVirtualMovement(0, 1);
+    scene.render();
+    assert.equal(runtime.getSnapshot().moving, false, '输入不能替代碰撞后的实际移动');
+    assert.equal(groups[0].isPlaying, true);
+    assert.equal(Boolean(groups[1].isPlaying), false);
+    displacementScale = 0.5;
+    scene.render();
+    assert.equal(runtime.getSnapshot().moving, true);
+    assert.equal(groups[1].isPlaying, true);
+    assert.ok(Math.abs(groups[1].speedRatio - 0.5) < 0.01, '步频应反映碰撞减速后的位移');
+    displacementScale = 0;
+    scene.render();
+    assert.equal(groups[0].isPlaying, true, '再次受阻时应回待机');
   } finally {
     runtime.dispose(); scene.dispose(); engine.dispose();
     if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');

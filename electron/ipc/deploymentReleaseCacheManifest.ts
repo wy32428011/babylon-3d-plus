@@ -10,6 +10,16 @@ import {
 
 export const RELEASE_CACHE_MANIFEST_PATH = 'release-cache-manifest.json';
 
+const BUILTIN_ROAM_ASSETS = new Set([
+  'manual-roam/EQ_People.glb',
+  'manual-roam/EQ_People_rigged_v1.glb',
+  'manual-roam/locomotion-v1.glb',
+  'manual-roam/locomotion-v1.manifest.json',
+  'manual-roam/EQ_People_rigged_v2.glb',
+  'manual-roam/locomotion-v2.glb',
+  'manual-roam/locomotion-v2.manifest.json',
+]);
+
 export type DeploymentReleaseCacheFile = {
   path: string;
   size: number;
@@ -91,9 +101,9 @@ export async function createDeploymentReleaseCacheManifest(
       size: file.size,
       sha256,
       contentType: CONTENT_TYPES[path.posix.extname(relativePath).toLowerCase()] ?? 'application/octet-stream',
-      // 内置人物也由模型加载器读取，HTTP 部署时需进入 IndexedDB，不能依赖 Service Worker。
+      // 人物、共享动作及其清单由运行时读取，HTTP 部署时需进入 IndexedDB，不能依赖 Service Worker。
       storage: relativePath === 'project/scene.json' || relativePath === 'project/asset-manifest.json'
-        || relativePath.startsWith('project/assets/') || relativePath === 'manual-roam/EQ_People.glb' ? 'asset' : 'response',
+        || relativePath.startsWith('project/assets/') || BUILTIN_ROAM_ASSETS.has(relativePath) ? 'asset' : 'response',
     });
   }
   throwIfDeploymentExportAborted(signal);

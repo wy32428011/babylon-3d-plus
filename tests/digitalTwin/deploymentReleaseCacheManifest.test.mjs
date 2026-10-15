@@ -81,6 +81,13 @@ test('排除根级实时配置、说明、清单与 worker，保留同名嵌套�
 test('内置漫游人物模型进入原始资源缓存，其他 Viewer 文件保持响应缓存', async () => {
   await withFiles({
     'manual-roam/EQ_People.glb': Buffer.from([1, 2, 3, 4]),
+    'manual-roam/EQ_People_rigged_v1.glb': Buffer.from([7, 8]),
+    'manual-roam/locomotion-v1.glb': Buffer.from([9, 10]),
+    'manual-roam/locomotion-v1.manifest.json': '{"version":1}',
+    'manual-roam/EQ_People_rigged_v2.glb': Buffer.from([11, 12]),
+    'manual-roam/locomotion-v2.glb': Buffer.from([13, 14]),
+    'manual-roam/locomotion-v2.manifest.json': '{"version":2}',
+    'manual-roam/locomotion-v1.glb.bak': 'not an asset',
     'manual-roam/help.js': 'export const help = true;',
     'manual-roam-copy/EQ_People.glb': Buffer.from([5, 6]),
   }, async (root) => {
@@ -88,8 +95,23 @@ test('内置漫游人物模型进入原始资源缓存，其他 Viewer 文件保
     const entries = Object.fromEntries(manifest.files.map((entry) => [entry.path, entry]));
     assert.equal(entries['manual-roam/EQ_People.glb'].storage, 'asset');
     assert.equal(entries['manual-roam/EQ_People.glb'].contentType, 'model/gltf-binary');
+    for (const name of ['EQ_People_rigged_v1.glb', 'locomotion-v1.glb', 'locomotion-v1.manifest.json', 'EQ_People_rigged_v2.glb', 'locomotion-v2.glb', 'locomotion-v2.manifest.json']) {
+      assert.equal(entries[`manual-roam/${name}`].storage, 'asset');
+    }
+    assert.equal(entries['manual-roam/locomotion-v1.manifest.json'].contentType, 'application/json; charset=utf-8');
+    assert.equal(entries['manual-roam/locomotion-v1.glb.bak'].storage, 'response');
     assert.equal(entries['manual-roam/help.js'].storage, 'response');
     assert.equal(entries['manual-roam-copy/EQ_People.glb'].storage, 'response');
+  });
+});
+
+test('共享动作文件变更后清单使用实际新字节的摘要', async () => {
+  await withFiles({ 'manual-roam/locomotion-v1.glb': 'old' }, async (root) => {
+    const old = await createDeploymentReleaseCacheManifest(root, REVISION, new AbortController().signal);
+    await writeFile(path.join(root, 'manual-roam/locomotion-v1.glb'), 'new');
+    const next = await createDeploymentReleaseCacheManifest(root, REVISION, new AbortController().signal);
+    assert.notEqual(next.files[0].sha256, old.files[0].sha256);
+    assert.equal(next.files[0].sha256, createHash('sha256').update('new').digest('hex'));
   });
 });
 
