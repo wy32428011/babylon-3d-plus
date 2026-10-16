@@ -255,6 +255,7 @@ import {
 } from './EntityGroupRotationPreview';
 import {
   createConveyorTelemetryState,
+  createHcliftTelemetryState,
   createLiftTelemetryState,
   createRgvTelemetryState,
   createShuttleTelemetryState,
@@ -268,6 +269,7 @@ import {
   readConveyorCargoSurfaceOffset,
   readConveyorCargoTravelConfig,
   resetConveyorTelemetryState,
+  resetHcliftTelemetryState,
   resetLiftTelemetryState,
   resetRgvTelemetryState,
   resetShuttleTelemetryState,
@@ -307,6 +309,7 @@ import type {
   ConveyorModelTelemetryState,
   GeneratedCargoKind,
   GeneratedCargoRuntimeEntry,
+  HcliftModelTelemetryState,
   LiftModelTelemetryState,
   RgvModelTelemetryState,
   ShuttleModelTelemetryState,
@@ -448,6 +451,7 @@ export type ModelRuntimeEntry = {
   rgvTelemetry: RgvModelTelemetryState;
   shuttleTelemetry: ShuttleModelTelemetryState;
   liftTelemetry: LiftModelTelemetryState;
+  hcliftTelemetry: HcliftModelTelemetryState;
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
   /**
@@ -1760,6 +1764,7 @@ export class SceneRuntime {
       resetRgvTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
+      resetHcliftTelemetryState(model);
     }
     for (const owner of this.generatedOutputOwners.values()) {
       if (owner.output?.kind !== 'model') continue;
@@ -1773,6 +1778,7 @@ export class SceneRuntime {
       resetRgvTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
+      resetHcliftTelemetryState(model);
     }
     // 合批阵列代表模型同样接受遥测驱动（collectModels 合并视图），退出时必须一并清理
     for (const variant of this.modelArrayParameterVariants.values()) {
@@ -1781,6 +1787,7 @@ export class SceneRuntime {
       resetRgvTelemetryState(variant.model);
       resetShuttleTelemetryState(variant.model);
       resetLiftTelemetryState(variant.model);
+      resetHcliftTelemetryState(variant.model);
     }
     for (const proxy of this.modelArrayTelemetryProxies.values()) {
       resetConveyorTelemetryState(proxy);
@@ -5131,6 +5138,7 @@ export class SceneRuntime {
         resetRgvTelemetryState(current);
         resetShuttleTelemetryState(current);
         resetLiftTelemetryState(current);
+        resetHcliftTelemetryState(current);
       }
       current.assetCode = modelAsset.assetCode;
       current.telemetryBinding = entity.components.telemetryBinding ?? null;
@@ -5196,6 +5204,7 @@ export class SceneRuntime {
       rgvTelemetry: createRgvTelemetryState(root),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
+      hcliftTelemetry: createHcliftTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -5704,6 +5713,7 @@ export class SceneRuntime {
       rgvTelemetry: createRgvTelemetryState(modelRoot),
       shuttleTelemetry: createShuttleTelemetryState(modelRoot),
       liftTelemetry: createLiftTelemetryState(modelRoot),
+      hcliftTelemetry: createHcliftTelemetryState(modelRoot),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -7701,6 +7711,7 @@ export class SceneRuntime {
       rgvTelemetry: createRgvTelemetryState(root),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
+      hcliftTelemetry: createHcliftTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -8746,6 +8757,7 @@ export class SceneRuntime {
       rgvTelemetry: createRgvTelemetryState(root),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
+      hcliftTelemetry: createHcliftTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
       telemetryProxySource: host,
@@ -9161,6 +9173,7 @@ export class SceneRuntime {
       rgvTelemetry: createRgvTelemetryState(root),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
+      hcliftTelemetry: createHcliftTelemetryState(root),
       stackerTelemetryReady: false,
       telemetryPreviewBaseline: null,
     };
@@ -9714,6 +9727,7 @@ export class SceneRuntime {
       resetRgvTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
+      resetHcliftTelemetryState(model);
       model.stackerTelemetryReady = true;
       settle(model);
       return;
@@ -9760,6 +9774,7 @@ export class SceneRuntime {
           resetRgvTelemetryState(current);
           resetShuttleTelemetryState(current);
           resetLiftTelemetryState(current);
+          resetHcliftTelemetryState(current);
           current.externalScriptStarting = false;
           current.measurementReady = true;
           current.stackerTelemetryReady = true;
@@ -9775,6 +9790,7 @@ export class SceneRuntime {
           resetRgvTelemetryState(current);
           resetShuttleTelemetryState(current);
           resetLiftTelemetryState(current);
+          resetHcliftTelemetryState(current);
           current.stackerTelemetryReady = true;
           const message = error instanceof Error ? error.message : String(error);
           current.readinessError = message;
@@ -9795,6 +9811,7 @@ export class SceneRuntime {
     resetRgvTelemetryState(model);
     resetShuttleTelemetryState(model);
     resetLiftTelemetryState(model);
+    resetHcliftTelemetryState(model);
     model.measurementReady = true;
     model.stackerTelemetryReady = true;
     settle(model);

@@ -69,6 +69,8 @@ function decodeShuttleDepthRow(toDepth: number): number | null {
 
 /** 走行到位判定余量（米）：Status=1/2 伸叉前要求车体已对准目标格。 */
 const SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS = 0.02;
+/** hclift 台面高度发布的保鲜阈值：超过视为失联滞留值，小车回退按层闪现。 */
+const HCLIFT_PLATFORM_SURFACE_STALE_MS = 2000;
 
 /**
  * 多穿小车遥测驱动：Status 单字段状态机（0 待机 / 1 装货 / 2 卸货 / 3 移动中）。
@@ -206,6 +208,12 @@ export class ShuttleTelemetryDriver {
 
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, locator.startColumn, y);
     if (!supportPosition) return { cell: null, key: null, mismatch: true };
+    // x=-2（换层中）且存在同巷道/同站台绑定的小车提升机：支撑位跟随提升机载货台实时台面高度（整车被托举升降）；
+    // x=-1（驶入站台等待）或无匹配提升机时维持按层闪现
+    if (x === -2) {
+      const platformSupportY = this.resolveHcliftPlatformSupportY(locator);
+      if (platformSupportY !== null) supportPosition.y = platformSupportY;
+    }
     const cell: ShuttleTargetCell = {
       locator,
       supportPosition,
@@ -215,6 +223,25 @@ export class ShuttleTelemetryDriver {
       isLayerChangePlatform: true,
     };
     return { cell, key: JSON.stringify(['platform', y]), mismatch: false };
+  }
+
+  /**
+   * 匹配本站台对应的小车提升机（hclift）载货台实时台面世界 Y：巷道号相等优先，其次提升机 assetCode 命中站台
+   * deviceAssetCode；失联（停止驱动超过阈值）的滞留值丢弃。无匹配返回 null（维持按层闪现）。
+   */
+  private resolveHcliftPlatformSupportY(locator: LocatorRuntimeEntry): number | null {
+    const nowMs = Date.now();
+    let byAssetCode: number | null = null;
+    for (const surface of this.state.hcliftPlatformSurfaces.values()) {
+      if (nowMs - surface.updatedAtMs > HCLIFT_PLATFORM_SURFACE_STALE_MS) continue;
+      if (surface.aisleCode && locator.aisleCode && surface.aisleCode === locator.aisleCode) {
+        return surface.supportY;
+      }
+      if (byAssetCode === null && locator.deviceAssetCode && surface.assetCode === locator.deviceAssetCode) {
+        byAssetCode = surface.supportY;
+      }
+    }
+    return byAssetCode;
   }
 
   /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位超出货格列层范围。 */

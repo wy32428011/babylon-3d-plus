@@ -7,6 +7,7 @@ import {
   type ConveyorModelTelemetryState,
   CONVEYOR_DEFAULT_TRANSLATE_SPEED_METERS_PER_SECOND,
   createLiftStationState,
+  type HcliftModelTelemetryState,
   type LiftModelTelemetryState,
   type RgvModelTelemetryState,
   type ShuttleModelTelemetryState,
@@ -99,6 +100,43 @@ export function isLiftModelAsset(modelAsset: ModelAssetComponent): boolean {
   ]).toLowerCase();
 
   return signature.includes('lift') || signature.includes('提升机');
+}
+
+/** 判断当前模型是否具备小车提升机（hclift）驱动能力：仅按脚本声明 devType=hclift 识别（同 shuttle 策略，不维护 capable 标志）。 */
+export function isHcliftRuntimeModel(model: ModelRuntimeEntry): boolean {
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'hclift') return true;
+  }
+  return false;
+}
+
+/** 创建小车提升机遥测运行态，所有偏移只保存在内存中。 */
+export function createHcliftTelemetryState(root: TransformNode): HcliftModelTelemetryState {
+  return {
+    rootBasePosition: root.position.clone(),
+    liftOffset: 0,
+    liftTargetOffset: null,
+    liftConstraint: null,
+    targetLevel: null,
+    hasInitialLevel: false,
+    workState: null,
+    nodeBaselines: new Map(),
+  };
+}
+
+/** 模型完成归一化和外置脚本初始化后，重新建立小车提升机遥测基线。 */
+export function resetHcliftTelemetryState(model: ModelRuntimeEntry): void {
+  model.hcliftTelemetry.rootBasePosition = model.root.position.clone();
+  model.hcliftTelemetry.liftOffset = 0;
+  model.hcliftTelemetry.liftTargetOffset = null;
+  model.hcliftTelemetry.liftConstraint = null;
+  model.hcliftTelemetry.targetLevel = null;
+  model.hcliftTelemetry.hasInitialLevel = false;
+  model.hcliftTelemetry.workState = null;
+  model.hcliftTelemetry.nodeBaselines.clear();
 }
 
 /** 判断当前模型是否具备提升机驱动能力：仅按脚本声明 devType=lift 识别（同 shuttle 策略，中文签名不进运行时判定，防误接管）。 */

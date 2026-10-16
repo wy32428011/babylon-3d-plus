@@ -407,6 +407,19 @@ function normalizeDeviceCompatibleFields(deviceType: string, fields: DeviceTelem
   normalizeStackerCompatibleFields(deviceType, fields);
   normalizeConveyorCompatibleFields(deviceType, fields);
   normalizeLiftCompatibleFields(deviceType, fields);
+  normalizeHcliftCompatibleFields(deviceType, fields);
+}
+
+/** 小车提升机层号/状态字段归一为整数：EPV 点位可能以浮点/字符串数值上报。 */
+function normalizeHcliftCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
+  if (deviceType !== 'hclift') return;
+
+  for (const key of ['lift_current_level', 'task_target_level', 'work_state'] as const) {
+    const value = readNumberField(fields, key);
+    if (value !== null && Number.isFinite(value)) {
+      fields[key] = Math.trunc(value);
+    }
+  }
 }
 
 /** 提升机目标层字段归一为整数：EPV 点位可能以浮点/字符串数值上报。 */

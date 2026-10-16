@@ -474,6 +474,19 @@ function LiftLayerBindingsEditor(props: {
       {binding.deviceType === 'rgv' ? (
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
       ) : null}
+      {binding.deviceType === 'hclift' ? (
+        <>
+          <label className="inspector-row">
+            <span>巷道编号</span>
+            <input
+              disabled={props.disabled}
+              value={binding.aisleCode ?? ''}
+              onChange={(event) => commit({ aisleCode: event.target.value || undefined })}
+            />
+          </label>
+          <p className="muted">绑定巷道编号：MQTT 目标层靠它匹配同巷道多穿库的换层站台货格定高；留空时仅靠站台 deviceAssetCode 命中本机 assetCode。</p>
+        </>
+      ) : null}
       {binding.deviceType === 'lift' ? (
         <>
           <LiftLayerBindingsEditor

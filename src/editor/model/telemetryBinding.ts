@@ -33,7 +33,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'lift'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'lift', 'hclift'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
@@ -55,6 +55,8 @@ export type TelemetryBindingComponent = {
   incomingLayerBindings?: Record<string, string[]>;
   /** 提升机专用：送料层号(十进制正整数字符串) → 送料 conveyor 实体 ID 列表；reference_upper_step=2 时按 level_upper 选层；仅 deviceType === 'lift' 时有意义。 */
   outgoingLayerBindings?: Record<string, string[]>;
+  /** 小车提升机专用：绑定巷道编号——MQTT 目标层靠它匹配同巷道多穿库的换层站台；空串不参与巷道匹配；仅 deviceType === 'hclift' 时有意义。 */
+  aisleCode?: string;
   /** 输送线专用：模型局部正向校准，同时供货物行走、编辑轨迹和表面箭头使用。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
@@ -234,6 +236,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const deviceType = normalizeTelemetryDeviceType(value.deviceType);
   if (!deviceType) return null;
   const assetCode = normalizeOptionalString(value.assetCode);
+  const aisleCode = normalizeOptionalString(value.aisleCode);
   const cargoGeneratorId = normalizeOptionalString(value.cargoGeneratorId);
   const columnBindings = normalizeColumnBindings(value.columnBindings);
   const incomingLayerBindings = normalizeColumnBindings(value.incomingLayerBindings);
@@ -247,6 +250,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     sourceId: normalizeString(value.sourceId, 'default'),
     deviceType,
     ...(assetCode ? { assetCode } : {}),
+    ...(aisleCode ? { aisleCode } : {}),
     expectedIntervalMs,
     staleAfterMs: Math.max(createTelemetryStaleAfterMs(expectedIntervalMs), staleAfterMs),
     ...(cargoGeneratorId ? { cargoGeneratorId } : {}),

@@ -479,6 +479,28 @@ export function createLiftStationState(): LiftStationState {
 export type LiftCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
 /**
+ * 小车提升机（hclift）遥测运行态：多穿库的真实换层设备，竖版 RGV——按巷道对应多穿库换层站台货格，
+ * 载货台（dataDriven.cargo.nodes 上表面中心）对齐站台货格下表面中心。只托举多穿小车，无货物交接状态机。
+ * lift_current_level 仅首个有效值吸附定位；task_target_level 驱动升降动画（不作 finish 门控）；work_state=10 急停冻结。
+ */
+export type HcliftModelTelemetryState = {
+  rootBasePosition: Vector3;
+  /** 载货台当前 Y 偏移（米，世界轴投影；基线 0 = 脚本导入姿态）。 */
+  liftOffset: number;
+  /** task_target_level 换算出的 Y 偏移目标；null 表示无有效目标。 */
+  liftTargetOffset: number | null;
+  /** 升降物理行程约束（整机静态框架 × 提升部件基线投影）。 */
+  liftConstraint: StackerLiftConstraint | null;
+  /** 当前目标层号（task_target_level）；null 表示尚未收到有效目标层。 */
+  targetLevel: number | null;
+  /** 首个有效 lift_current_level 已吸附定位（吸附前不响应 task_target_level 动画）。 */
+  hasInitialLevel: boolean;
+  /** work_state 原始值（0 待机/1 取小车中/2 取完/3 卸小车中/5 卸完/6 移动中/7 移动完/10 急停/11 未知）；仅 10 参与驱动。 */
+  workState: number | null;
+  nodeBaselines: Map<TransformNode, Vector3>;
+};
+
+/**
  * 多穿小车遥测运行态：堆垛机的水平裁剪版——仅 Z 轴走行（Y 层变换直接闪现）、
  * 两段货叉沿 X 比例联动（一段=二段偏移的一半，二段几何中心锚定货箱）。
  * Status 单字段驱动：0 待机 / 1 装货 / 2 卸货 / 3 移动中。
@@ -554,6 +576,8 @@ export type SpecializedTelemetrySharedState = {
   rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
   shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
   liftCargoMeshes: Map<string, LiftCargoRuntimeEntry>;
+  /** hclift 载货台上表面实时世界 Y（key=entityId）：每帧发布供多穿小车 x=-2 换层跟随（巷道号匹配优先，其次 assetCode 命中站台 deviceAssetCode）；updatedAtMs 供跟随方丢弃失联设备的滞留值。 */
+  hcliftPlatformSurfaces: Map<string, { assetCode: string; aisleCode: string; supportY: number; updatedAtMs: number }>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -570,6 +594,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     rgvCargoMeshes: new Map(),
     shuttleCargoMeshes: new Map(),
     liftCargoMeshes: new Map(),
+    hcliftPlatformSurfaces: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),

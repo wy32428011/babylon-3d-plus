@@ -21,6 +21,13 @@ function readNumber(field, configuration, key) {
   return typeof configuredValue === 'number' && Number.isFinite(configuredValue) ? configuredValue : undefined;
 }
 
+function readString(field, configuration, key) {
+  const directValue = field[key];
+  const configuredValue = configuration[key];
+  if (typeof directValue === 'string' && directValue.trim()) return directValue.trim();
+  return typeof configuredValue === 'string' && configuredValue.trim() ? configuredValue.trim() : undefined;
+}
+
 function normalizeOptions(value, defaultValue) {
   if (!Array.isArray(value) || value.length === 0) return null;
 
@@ -60,6 +67,7 @@ function createParameterDefinition(field) {
   const base = { key, label };
 
   if (type === 'number' && typeof defaultValue === 'number' && Number.isFinite(defaultValue)) {
+    const unit = readString(field, configuration, 'unit');
     return {
       ...base,
       type: 'number',
@@ -67,6 +75,7 @@ function createParameterDefinition(field) {
       min: readNumber(field, configuration, 'min'),
       max: readNumber(field, configuration, 'max'),
       step: readNumber(field, configuration, 'step'),
+      ...(unit ? { unit } : {}),
     };
   }
 

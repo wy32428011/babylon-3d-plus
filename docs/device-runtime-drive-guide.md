@@ -19,8 +19,8 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 ### 设备类型识别
 
 - 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:23)、`isStackerModelAsset`(:41)、`isRgvModelAsset`(:54)、`isShuttleModelAsset`、`isLiftModelAsset`，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
-- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→shuttle→rgv→lift。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`。
-- shuttle 的 `isShuttleRuntimeModel` 仅按脚本 `dataDriven.device.devType==='shuttle'` 判定（该模型必有脚本，不加 ModelRuntimeEntry.capable 标志位）。
+- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→hclift→shuttle→rgv→lift。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`；**hclift 必须排在 shuttle 前**：提升机同帧先发布载货台高度，小车当帧跟随。
+- shuttle 的 `isShuttleRuntimeModel` 仅按脚本 `dataDriven.device.devType==='shuttle'` 判定（该模型必有脚本，不加 ModelRuntimeEntry.capable 标志位）。hclift 同此策略（`devType==='hclift'`）。
 - lift 双保险：`isLiftRuntimeModel` 仅按脚本 `devType==='lift'` 判定（同 shuttle 策略），`ModelRuntimeEntry.liftCapable`（资产签名）仅用于编辑态解锁绑定 UI；「提升机」中文签名不进运行时判定，防止误接管。
 - **shelf 无专用 driver**：是参数化脚本宿主模型 + Locator 组件（`builtInSlotBinding`），由 SceneRuntime 直接驱动渲染。
 
@@ -60,7 +60,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 点击事件高亮与固定轨道
 
-- 点击事件绑定有两种挂载，共用同一 `ClickEventBindingComponent`（序列化零新增字段）：**POI 标记**（`deviceSlots` 按 `modelAsset.sourceUrl` 全场匹配设备类型）与**生成器自带**（`deviceSlots` 恒空，作用域是本生成器的产物，见第 9 章）。
+- 点击事件绑定有两种挂载，共用同一 `ClickEventBindingComponent`（序列化零新增字段）：**POI 标记**（`deviceSlots` 按 `modelAsset.sourceUrl` 全场匹配设备类型）与**生成器自带**（`deviceSlots` 恒空，作用域是本生成器的产物，见第 10 章）。
 - 点击事件绑定的「高亮选中」效果支持「忽略固定轨道」参数（`ClickEventBindingEvent.highlight.excludeFixedTrack`）：命中 stacker/RGV 时轨道子树网格不参与描边，只描设备本体。
 - 轨道识别与遥测驱动同一套语义（`fixedTrackHighlightNodes.ts`）：`dataDriven.fixedNodes` 声明优先，缺失按 capable 标志回退（stacker 固定名 / RGV A37~A46 正则）。modelArrayBatch 薄实例批次路径无法按实体剔除网格，该参数不生效。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
@@ -365,7 +365,46 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ---
 
-## 7. 设备产生器 deviceSpawner
+## 7. 小车提升机 hclift
+
+多穿库的**真实换层设备**：竖版 RGV——提升部件沿模型 Y 轴升降，按**巷道**与多穿库的换层站台货格对应（同巷道多穿货架的 `layerChangePlatform` Locator）。只托举多穿小车换层，**不交接货箱**（无货物状态机，比 lift 少整套 stations/handoff）。
+
+### 参数化配置
+| 配置 | 位置 | 语义 |
+|---|---|---|
+| 遥测绑定 `aisleCode` | 数据驱动 Inspector（telemetryBinding，同 RGV 列绑定模式） | 绑定巷道编号：MQTT 寻址数据源——`task_target_level` 靠它找到同巷道多穿库的换层站台；空串时不参与巷道匹配，仅靠站台 `deviceAssetCode` 命中 |
+| Inspector `liftSpeed` 参数 | modelAsset.parameterValues | 载货台升降速度，优先级最高（同 lift 链路） |
+| `dataDriven.device.devType = 'hclift'` | 模型包脚本 | 专用驱动识别（shuttle 策略：仅 devType 判定，不维护 capable 标志） |
+| `dataDriven.motion.lift.nodes` | 模型包脚本 | 提升部件全集（小车提升机：Box026~Box043、Box049~Box059、Cylinder014~Cylinder035） |
+| `dataDriven.motion.lift.speed` | 模型包脚本 | 速度缺省值，最终回退 `LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND` |
+| `dataDriven.cargo.nodes` | 模型包脚本 | 载货台节点（Box050/Box051）：**层对齐口径 = 载货台上表面中心对站台货格下表面中心** |
+
+行程不配 limits：整机静态框架 × 提升部件基线投影交集（同 lift `getLiftConstraint`）。
+
+### MQTT 消费
+- `lift_current_level`：当前实际层。**仅首个有效值用于初始定位**——直接吸附到该层（无动画），之后的运动全由 `task_target_level` 驱动。
+- `task_target_level`：换层任务目标层（正整数）。目标层变化即重解算目标偏移并开始插值移动；**不以任何 finish 完结信号为门控**（协议侧 2/5/7 均可能缺失）。
+- `work_state`：0 待机 / 1 取小车中 / 2 取完 / 3 卸小车中 / 5 卸完 / 6 移动中 / 7 移动完 / 10 急停 / 11 未知。**仅 10 参与驱动**（并入 faulted 冻结：不动，状态恢复后继续向目标层移动）；其余值仅作运行态上报，不影响动画。
+
+层号 → 高度：`findLayerChangePlatformLocator(assetCode, aisleCode)`（deviceAssetCode 命中优先，其次巷道匹配）→ 站台格（列固定 startColumn、层号=目标层）`resolveLocatorCellSupportWorldPosition` 取**货格下表面中心世界 Y**；目标偏移 = 该 Y − 载货台上表面基线世界 Y。站台未匹配或层越界：一次性告警且不移动。
+
+**不消费 fetch**。
+
+### 动画
+载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`，写回提升部件节点基线（同 lift `applyLiftNodeMotionOffsets`）。断流继续朝最后已知目标确定性插值（`applyWhenStale`，同 stacker/shuttle），保证平台高度发布不断更。
+
+### shuttle 跟随（托举换层）
+hclift 每帧向共享状态发布载货台上表面世界 Y（`hcliftPlatformSurfaces`，key=entityId，含 assetCode/aisleCode）。shuttle 目标为换层站台格且 **x=-2（换层中）** 时，`resolveLayerChangePlatformCell` 将格支撑位 Y 替换为匹配提升机（巷道号相等优先，否则 assetCode 命中站台 deviceAssetCode）的实时台面 Y——车体底面贴台面随升降（`resolveShuttleYFlashOffset` 站台分支原逻辑自动生效），X/Z 仍锁定站台格中心并受轨道尽头钳制。x=-1（驶入站台等待）或无匹配提升机时维持原按层闪现。司机注册顺序 hclift 在 shuttle 之前，保证同帧先发布后跟随。
+
+### 状态机（HcliftModelTelemetryState, types.ts）
+`liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetLevel` / `hasInitialLevel`（首帧吸附锁）/ `workState` / `liftConstraint` / `nodeBaselines`。无到位锁与交接态（不交接货物）。
+
+### 扩展点
+新 MQTT 字段 → `applyToModel` 内 read；多台提升机同巷道 → 站台 `deviceAssetCode` 精确绑定各自的提升机 assetCode。
+
+---
+
+## 8. 设备产生器 deviceSpawner
 
 适用 AGV、多穿库 shuttle 等**实例个数编辑期不确定**的设备：运行预览时由 MQTT 消息动态克隆模板实例生成设备，消息驱动动画，超时/下线销毁。与 `modelGenerator`（货箱模板库，UI 名"模型生成器"）是不同概念，勿混淆。
 
@@ -413,7 +452,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ---
 
-## 8. 模型生成器组合货物模板（kind:'composition'）
+## 9. 模型生成器组合货物模板（kind:'composition'）
 
 模型生成器除 `kind:'model'`（单 GLB）/`kind:'mesh'`（内置几何体）外，支持拖入组合资源库条目作为货物模板。
 
@@ -435,7 +474,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ---
 
-## 9. 生成器产物点击事件绑定
+## 10. 生成器产物点击事件绑定
 
 模型生成器与设备产生器的 Inspector 各带一个「点击事件绑定」栏目（`ClickEventBindingInspector` 的 `variant="generator"`），配置的是**本生成器产物**的点击行为，而不是全场设备类型。
 
@@ -507,7 +546,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 5. SceneRuntime 加 reset 调用（:4906-4910 等同步/脚本路径）与遍历清单（:1682-1716）。
 6. TelemetryBindingInspector 加绑定编辑 UI。
 7. 同步更新本文档新增章节。
-8. 若设备实例个数编辑期不确定（AGV/穿梭车集群等），不要走静态实体——用 deviceSpawner 产生器（见第 7 章），消息 `s` 字段路由。
+8. 若设备实例个数编辑期不确定（AGV/穿梭车集群等），不要走静态实体——用 deviceSpawner 产生器（见第 8 章），消息 `s` 字段路由。
 
 ### 新增数据源类型
 实现 `TelemetryAdapterConfig`（deviceTelemetry.ts:11）经 `MqttSubscriptionConfig.adapter` 接入，或直接向 deviceTelemetryStore 写同构快照并用 sourceId 路由。

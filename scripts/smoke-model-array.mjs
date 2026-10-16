@@ -160,7 +160,14 @@ try {
   const { EntityArrayThinInstanceBatch } = await server.ssrLoadModule(
     '/src/runtime/babylon/EntityArrayThinInstanceBatch.ts',
   );
-  const { createConveyorTelemetryState, createRgvTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+  const {
+    createConveyorTelemetryState,
+    createHcliftTelemetryState,
+    createLiftTelemetryState,
+    createRgvTelemetryState,
+    createShuttleTelemetryState,
+    createStackerTelemetryState,
+  } = await server.ssrLoadModule(
     '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
   );
   const { TransformGizmoController } = await server.ssrLoadModule(
@@ -749,6 +756,9 @@ try {
   sourceModelEntry.stackerTelemetry = createStackerTelemetryState(root);
   sourceModelEntry.conveyorTelemetry = createConveyorTelemetryState();
   sourceModelEntry.rgvTelemetry = createRgvTelemetryState(root);
+  sourceModelEntry.shuttleTelemetry = createShuttleTelemetryState(root);
+  sourceModelEntry.liftTelemetry = createLiftTelemetryState(root);
+  sourceModelEntry.hcliftTelemetry = createHcliftTelemetryState(root);
   sourceModelEntry.externalScriptRuntime = {
     updateAssetCode: () => undefined,
     updateParameterValues: () => undefined,
@@ -1283,6 +1293,8 @@ try {
     opacity: 1,
     geometryReady: false,
     cancelLoad: null,
+    abortController: new AbortController(),
+    unregisterCancellation: () => undefined,
   };
   runtime.cadReferences.set(cadEntityId, cadRuntimeEntry);
   const cadLocalX = cadRoot.getDirection(Vector3.Right()).normalize();

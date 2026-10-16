@@ -15,12 +15,13 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { isConveyorRuntimeModel, isHcliftRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
 import { RgvTelemetryDriver } from './rgvDriver';
 import { ShuttleTelemetryDriver } from './shuttleDriver';
 import { LiftTelemetryDriver } from './liftDriver';
+import { HcliftTelemetryDriver } from './hcliftDriver';
 import { createTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../telemetryPerformanceStages';
 import {
   type ConveyorCargoRuntimeEntry,
@@ -69,6 +70,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly rgvDriver: RgvTelemetryDriver;
   private readonly shuttleDriver: ShuttleTelemetryDriver;
   private readonly liftDriver: LiftTelemetryDriver;
+  private readonly hcliftDriver: HcliftTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
   private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
@@ -95,6 +97,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.rgvDriver = new RgvTelemetryDriver(this);
     this.shuttleDriver = new ShuttleTelemetryDriver(this);
     this.liftDriver = new LiftTelemetryDriver(this);
+    this.hcliftDriver = new HcliftTelemetryDriver(this);
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -108,6 +111,14 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         isCapable: isConveyorRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.conveyorDriver.applyToModel(model, snapshot, deltaSeconds),
         applyWhenStale: (model) => (model.conveyorTelemetry?.selfDriveDirection ?? 0) !== 0,
+      },
+      // hclift 必须注册在 shuttle 之前：提升机同帧先发布载货台高度，多穿小车 x=-2 换层当帧跟随
+      {
+        deviceType: 'hclift',
+        isCapable: isHcliftRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.hcliftDriver.applyToModel(model, snapshot, deltaSeconds),
+        // 断流时继续朝最后已知目标层做确定性插值并维持台面高度发布（同 stacker/shuttle）
+        applyWhenStale: () => true,
       },
       // shuttle 必须注册在 rgv 之前：多穿小车脚本元数据含「穿梭车」字样会误中 isRgvModelAsset
       {
