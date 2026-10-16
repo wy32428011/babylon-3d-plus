@@ -136,6 +136,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         return;
       }
 
+      // 人物预览有独立的漫游输入；模态窗口内不能操作底层场景或抢走 Esc。
+      if (document.querySelector('dialog.manual-roam-avatar-preview[open]')) return;
       const key = event.key.toLowerCase();
       // F11 走场景全屏，而不是浏览器默认的整页全屏。
       if (key === 'f11') {

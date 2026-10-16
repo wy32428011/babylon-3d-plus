@@ -245,7 +245,7 @@ async function assertReadableSourceRevision(asset: JsonObject, entry: PublishRes
 export async function resolvePublishModelIdentityReplacements(sceneContent: string, context: PublishModelIdentityContext,
   signal: AbortSignal, onProgress: (message: string) => void = () => {}): Promise<DigitalTwinModelRecoveryResult> {
   signal.throwIfAborted();
-  if (typeof sceneContent !== 'string' || Buffer.byteLength(sceneContent, 'utf8') > 64 * 1024 * 1024) throw new Error('发布身份恢复场景内容无效或超过 64 MiB。');
+  if (typeof sceneContent !== 'string' || !sceneContent) throw new Error('发布身份恢复场景内容不能为空。');
   const parsed: unknown = JSON.parse(sceneContent);
   if (!object(parsed) || typeof parsed.version !== 'number' || ![1, 2, 3, 4, 5].includes(parsed.version) || !object(parsed.scene)) throw new Error('发布身份恢复场景格式无效。');
   const baseUrl = normalizeDataPlatformSourceUrl(context.baseUrl);

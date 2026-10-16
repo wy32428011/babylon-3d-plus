@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { controlCondition, evaluateSourceExpression } from '../helpers/playerContractTestHelpers.ts';
 
 import {
   bindStatusOverlayPointerChordToggle,
@@ -143,10 +144,17 @@ test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥'
     playerSource,
     /startManualRoam: \(\) => \{[\s\S]*?resolvePlayerFloatingControlToggle\([\s\S]*?'manual-roam'[\s\S]*?if \(nextControl === null\) \{[\s\S]*?manualRoamRuntime\.setEnabled\(false\);[\s\S]*?updateOpenedDigitalTwinFloatingControl\(null\);[\s\S]*?return;[\s\S]*?autoPatrolPlayback\?\.stop\(\);[\s\S]*?manualRoamRuntime\.setEnabled\(true\);[\s\S]*?updateOpenedDigitalTwinFloatingControl\('manual-roam'\);/,
   );
-  assert.match(
-    playerSource,
-    /phase === 'ready' && manualRoamControlsVisible && config\?\.viewer\.allowCameraControl && hasManualRoamSpawn/,
-  );
+  const scope = { phase: 'ready', openingActive: false, manualRoamControlsVisible: true,
+    config: { viewer: { allowCameraControl: true } }, hasManualRoamSpawn: true };
+  const visible = (patch = {}) => Boolean(evaluateSourceExpression(playerSource,
+    controlCondition('ManualRoamControls'), { ...scope, ...patch }));
+  assert.equal(visible(), true);
+  assert.equal(visible({ openingActive: true }), false, '开场期间不显示漫游控制');
+  assert.equal(visible({ phase: 'loading' }), false);
+  assert.equal(visible({ phase: 'blocked' }), false);
+  assert.equal(visible({ manualRoamControlsVisible: false }), false);
+  assert.equal(visible({ config: { viewer: { allowCameraControl: false } } }), false);
+  assert.equal(visible({ hasManualRoamSpawn: false }), false);
   assert.match(
     playerSource,
     /const manualRoamControlsVisible = shouldShowPlayerFloatingControl\([\s\S]*?'manual-roam',[\s\S]*?\);/,

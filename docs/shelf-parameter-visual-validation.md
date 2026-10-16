@@ -1,5 +1,7 @@
 # Shelf 参数语义与视觉校验
 
+> 2026-10-14 夹具位置更新：当前 Shelf 资源位于 [tests/fixtures/model-packages/shelf-assets](../tests/fixtures/model-packages/shelf-assets/)。下文保留历史验证路径；新运行及脚本、元数据一致性检查使用当前夹具目录。
+
 ## 目标
 
 Shelf 参数脚本以 `Shelf.glb` 的真实节点结构为基准，保持 GLB 文件不变，只通过 `shelf.model.ts` 调整节点变换和运行态克隆。本轮调整解决两个问题：

@@ -93,7 +93,7 @@ try {
   server = await createServer({
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, watch: null, ws: false },
     optimizeDeps: { noDiscovery: true },
     resolve: {
       alias: {

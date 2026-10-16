@@ -196,7 +196,7 @@ async function main() {
   const server = await createServer({
     appType: 'custom',
     logLevel: 'error',
-    server: { middlewareMode: true },
+    server: { middlewareMode: true, watch: null, ws: false },
   });
 
   try {

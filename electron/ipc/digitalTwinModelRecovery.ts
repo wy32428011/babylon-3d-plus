@@ -71,8 +71,8 @@ export async function recoverPublishSceneModels(
 
 async function inspectPublishSceneModels(sceneContent: string, signal: AbortSignal, scope?: PublishModelResourceScope) {
   signal.throwIfAborted();
-  if (typeof sceneContent !== 'string' || Buffer.byteLength(sceneContent, 'utf8') > 64 * 1024 * 1024) {
-    throw new Error('发布前模型恢复的场景内容无效或超过 64 MiB。');
+  if (typeof sceneContent !== 'string' || !sceneContent) {
+    throw new Error('发布前模型恢复的场景内容不能为空。');
   }
   const parsed = JSON.parse(sceneContent) as { version?: number; scene?: unknown };
   if (![1, 2, 3, 4, 5].includes(parsed.version ?? 0) || !parsed.scene) throw new Error('发布前模型恢复的场景格式无效。');

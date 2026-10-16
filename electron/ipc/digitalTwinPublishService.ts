@@ -67,7 +67,6 @@ import {
   resolveDataPlatformParentOrigin,
 } from '../shared/digitalTwinRuntimeConfig.js';
 
-const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const CONFIRMATION_CODES = new Set([
   'DIGITAL_TWIN_OVERWRITE_CONFIRM_REQUIRED',
@@ -815,7 +814,6 @@ async function saveCurrentScene(
   sceneContent: string,
   expected?: { diskHash: string | null },
 ): Promise<{ filePath: string; entryScenePath: string }> {
-  if (Buffer.byteLength(sceneContent, 'utf8') > MAX_SCENE_CONTENT_BYTES) throw new Error('当前场景超过 64 MiB 发布上限。');
   let parsed: unknown;
   try {
     parsed = JSON.parse(sceneContent) as unknown;

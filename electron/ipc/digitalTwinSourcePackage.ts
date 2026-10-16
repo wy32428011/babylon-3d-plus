@@ -43,7 +43,6 @@ const {
 const { builtinSkyboxPackageForPath, validateBuiltinSkyboxPackage, BUILTIN_SKYBOX_FILE_NAME, BUILTIN_SKYBOX_FILE_SIZE, BUILTIN_SKYBOX_SHA256 } = require(`./builtinSkyboxAssets${runtimeExtension}`) as typeof import('./builtinSkyboxAssets.js');
 
 const MAX_SCENE_FILES = 1_000;
-const MAX_SCENE_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_FILES = 200_000;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024 * 1024;
 const PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
@@ -383,9 +382,8 @@ async function readSceneSnapshots(
     throwIfAborted(signal);
     const stat = await fs.lstat(sourcePath);
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`场景文件不是安全普通文件：${sourcePath}`);
-    if (stat.size <= 0 || stat.size > MAX_SCENE_BYTES) throw new Error(`场景文件大小无效：${sourcePath}`);
+    if (stat.size <= 0) throw new Error(`场景文件内容不能为空：${sourcePath}`);
     const content = preparedSceneContents?.get(path.resolve(sourcePath)) ?? await readUtf8File(sourcePath, '数字孪生 SOURCE 场景文件');
-    if (Buffer.byteLength(content) > MAX_SCENE_BYTES) throw new Error(`准备后的场景文件大小无效：${sourcePath}`);
     let parsed: unknown;
     try {
       parsed = JSON.parse(content) as unknown;
@@ -593,9 +591,7 @@ async function prepareSourceSceneCadFiles(
   isAuthorizedCadFile?: (filePath: string) => boolean,
 ): Promise<ReadonlyMap<string, ResourceBundle>> {
   const references: PlainObject[] = [];
-  let visited = 0;
   const visit = (value: unknown): void => {
-    if (++visited > 1_000_000) throw new Error('场景结构过大，无法完成 CAD 资源扫描。');
     if (Array.isArray(value)) { for (const child of value) visit(child); return; }
     if (!isPlainObject(value)) return;
     for (const [key, child] of Object.entries(value)) {
@@ -683,10 +679,7 @@ function collectResourceBundles(
   const effectMetadata = new WeakSet(sceneValues.flatMap(collectEffectModelReferences));
   const openingMetadata = new WeakSet<object>(sceneValues.map(rawSceneOpening).filter((value): value is NonNullable<typeof value> => value !== null));
 
-  let visited = 0;
   const visit = (value: unknown, fieldName: string | null = null): void => {
-    visited += 1;
-    if (visited > 1_000_000) throw new Error('场景结构过大，无法完成源工程资源扫描。');
     if (typeof value === 'string') {
       const platformBundle = cadBundleMap.get(value) ?? platformImageBundleMap.get(value);
       if (platformBundle) {

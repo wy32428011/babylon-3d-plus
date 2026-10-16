@@ -350,8 +350,8 @@ export async function prepareLocalSceneResources(
   const issues: NonNullable<LocalSceneResourceSyncResult['issues']> = [];
   let environment = request.environment === undefined ? undefined : normalizeEnvironmentResourceReference(request.environment);
   if (latest) {
-    if (typeof request.sceneContent !== 'string' || Buffer.byteLength(request.sceneContent, 'utf8') > 64 * 1024 * 1024) {
-      throw new Error('场景模型更新内容无效或超过 64 MiB。');
+    if (typeof request.sceneContent !== 'string' || !request.sceneContent) {
+      throw new Error('场景模型更新内容不能为空。');
     }
     const parsed = JSON.parse(request.sceneContent) as { version?: number; scene?: { sceneSettings?: { environment?: { dataPlatformSourceKey?: string } } } };
     if (![1, 2, 3, 4, 5].includes(parsed.version ?? 0) || !parsed.scene) throw new Error('场景模型更新格式无效。');

@@ -52,11 +52,8 @@ export function collectDigitalTwinResourceIds(sceneContents: readonly string[]):
   const modelIds = new Set<string>();
   const envModelIds = new Set<string>();
   const comboModelIds = new Set<string>();
-  let visited = 0;
 
   const visit = (value: unknown, fieldName: string | null = null, owner?: Record<string, unknown>): void => {
-    visited += 1;
-    if (visited > 1_000_000) throw new Error('场景结构过大，无法完成资源引用扫描。');
     if (typeof value === 'string') {
       if (!fieldName || !RESOURCE_REFERENCE_KEYS.has(fieldName)) return;
       const key = parseDataPlatformResourceKey(value);

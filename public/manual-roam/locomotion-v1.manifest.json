@@ -1,0 +1,241 @@
+{
+  "version": 1,
+  "profile": "mixamo-humanoid-v1",
+  "clips": {
+    "Idle": {
+      "name": "Idle",
+      "loop": true,
+      "referenceSpeed": 0,
+      "duration": 2.5,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "idle",
+        "derivation": "rest-pose-retarget-in-place"
+      }
+    },
+    "WalkForward": {
+      "name": "WalkForward",
+      "loop": true,
+      "referenceSpeed": 1.6,
+      "duration": 0.9666666666666667,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "walk",
+        "derivation": "rest-pose-retarget-in-place"
+      }
+    },
+    "WalkBackward": {
+      "name": "WalkBackward",
+      "loop": true,
+      "referenceSpeed": 1.6,
+      "duration": 0.9666666666666667,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "walk",
+        "derivation": "reverse-time"
+      }
+    },
+    "WalkLeft": {
+      "name": "WalkLeft",
+      "loop": true,
+      "referenceSpeed": 1.6,
+      "duration": 0.9666666666666667,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "walk",
+        "derivation": "lower-limb-axis-remap-upper-body-forward"
+      }
+    },
+    "WalkRight": {
+      "name": "WalkRight",
+      "loop": true,
+      "referenceSpeed": 1.6,
+      "duration": 0.9666666666666667,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "walk",
+        "derivation": "lower-limb-axis-remap-upper-body-forward"
+      }
+    },
+    "RunForward": {
+      "name": "RunForward",
+      "loop": true,
+      "referenceSpeed": 3.2,
+      "duration": 0.7,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "run",
+        "derivation": "rest-pose-retarget-in-place"
+      }
+    },
+    "RunBackward": {
+      "name": "RunBackward",
+      "loop": true,
+      "referenceSpeed": 3.2,
+      "duration": 0.7,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "run",
+        "derivation": "reverse-time"
+      }
+    },
+    "RunLeft": {
+      "name": "RunLeft",
+      "loop": true,
+      "referenceSpeed": 3.2,
+      "duration": 0.7,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "run",
+        "derivation": "lower-limb-axis-remap-upper-body-forward"
+      }
+    },
+    "RunRight": {
+      "name": "RunRight",
+      "loop": true,
+      "referenceSpeed": 3.2,
+      "duration": 0.7,
+      "fps": 30,
+      "source": {
+        "kind": "BabylonJS-Assets",
+        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+        "license": "CC-BY-4.0",
+        "attribution": "BabylonJS Assets contributors",
+        "clip": "run",
+        "derivation": "lower-limb-axis-remap-upper-body-forward"
+      }
+    },
+    "JumpStart": {
+      "name": "JumpStart",
+      "loop": false,
+      "referenceSpeed": 0,
+      "duration": 0.3,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    },
+    "JumpUp": {
+      "name": "JumpUp",
+      "loop": false,
+      "referenceSpeed": 0,
+      "duration": 0.45,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    },
+    "Fall": {
+      "name": "Fall",
+      "loop": true,
+      "referenceSpeed": 0,
+      "duration": 0.8,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    },
+    "Land": {
+      "name": "Land",
+      "loop": false,
+      "referenceSpeed": 0,
+      "duration": 0.3,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    },
+    "FlyIdle": {
+      "name": "FlyIdle",
+      "loop": true,
+      "referenceSpeed": 0,
+      "duration": 2,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    },
+    "FlyMove": {
+      "name": "FlyMove",
+      "loop": true,
+      "referenceSpeed": 0,
+      "duration": 1.2,
+      "fps": 30,
+      "source": {
+        "kind": "original-authored-keyframes",
+        "author": "project manual-roam asset pipeline",
+        "description": "Explicit offline skeletal keyframes; not a downloaded Mixamo clip"
+      }
+    }
+  },
+  "files": {
+    "avatar": {
+      "path": "manual-roam/EQ_People_rigged_v1.glb",
+      "sha256": "33db3092b3d87687b320e4514a7ec4c6369a8153f13075938354a75052ee3e53"
+    },
+    "animation": {
+      "path": "manual-roam/locomotion-v1.glb",
+      "sha256": "35bf6908243fd447d21c6fc97955a92bad6fe1ca82b1c1831f331e8296da751a"
+    }
+  },
+  "sources": [
+    {
+      "kind": "BabylonJS-Assets",
+      "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
+      "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
+      "license": "CC-BY-4.0",
+      "attribution": "BabylonJS Assets contributors"
+    }
+  ]
+}

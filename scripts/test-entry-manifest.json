@@ -1,0 +1,425 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "name": "test:typescript-build",
+      "command": "node --test tests/buildTypeScript.test.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:build-analysis",
+      "command": "node --experimental-strip-types --test tests/buildAnalysis.test.ts",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:encoding",
+      "command": "node --test tests/encoding/utf8Integrity.test.mjs && node --experimental-strip-types --test tests/encoding/utf8Transport.test.ts tests/encoding/cadTextEncoding.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:scene-theme",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/sceneTheme.test.ts tests/editor/lightSettings.test.ts tests/editor/lightEditor.test.ts tests/editor/sceneTheme.integration.test.mjs tests/runtime/sceneThemeRuntime.test.mjs tests/runtime/sceneEnvironmentEffects.test.mjs tests/runtime/themeEnvironmentLighting.test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:scene-theme",
+      "command": "node scripts/smoke-scene-theme.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:light-editor",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/lightEditor.test.ts tests/editor/lightSettings.test.ts tests/editor/lightSettings.integration.test.mjs tests/editor/lightLibrary.test.mjs tests/runtime/localLightShadows.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:auto-patrol",
+      "command": "node --experimental-strip-types --test tests/editor/autoPatrol.test.ts tests/editor/autoPatrolPlayback.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:manual-roam",
+      "command": "node --experimental-strip-types --test tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:manual-roam:integration",
+      "command": "npm run build:electron && electron tests/roam/manualRoamAvatar.integration.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:telemetry",
+      "command": "node scripts/telemetry-test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:virtual-conveyor",
+      "command": "node --test tests/runtime/virtualConveyorPackage.test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:model-array",
+      "command": "node scripts/model-array-test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:composition-array",
+      "command": "node scripts/test-composition-array.mjs && node --test scripts/test-composition-array-runtime.mjs tests/editor/entityArrayDialog.test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:composition-array",
+      "command": "node scripts/smoke-composition-array.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:builtin-slot",
+      "command": "node scripts/builtin-slot-test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:units",
+      "command": "node scripts/smoke-meter-unit-contract.mjs && npm run smoke:cad && npm run smoke:model-measurement && npm run smoke:model-array && npm run smoke:model-parameters",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:cad",
+      "command": "node scripts/smoke-cad-geometry-fidelity.mjs && node scripts/smoke-cad-block-instances.mjs && node scripts/smoke-cad-extended-geometry.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-measurement",
+      "command": "node scripts/smoke-model-measurement.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-array",
+      "command": "node scripts/smoke-model-array.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-array-packages",
+      "command": "node scripts/smoke-parametric-model-array-packages.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-array-visual",
+      "command": "node scripts/smoke-parametric-model-array-visual.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:hierarchy-clipboard",
+      "command": "node scripts/smoke-hierarchy-clipboard.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:model-parameters",
+      "command": "node --test tests/editor/modelStringParameters.test.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-parameters",
+      "command": "npm run test:model-parameters && node scripts/smoke-model-parameter-meters.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:model-picking",
+      "command": "node scripts/smoke-model-picking.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:selection-highlight",
+      "command": "node scripts/smoke-selection-highlight.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:grid",
+      "command": "node scripts/smoke-editor-ground-grid.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:light-editor",
+      "command": "node scripts/smoke-light-editor.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:lighting-types",
+      "command": "node scripts/smoke-lighting-types.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:environment-light",
+      "command": "node scripts/smoke-environment-light-isolation.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:environment-shadows",
+      "command": "node scripts/smoke-environment-shadows.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:static-shadows",
+      "command": "node scripts/smoke-static-shadow-settings.mjs && node scripts/smoke-static-shadows.mjs && node scripts/smoke-multilevel-static-shadows.mjs && node scripts/smoke-shadow-quality.mjs && node scripts/smoke-static-shadow-ui.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:auto-patrol",
+      "command": "node scripts/smoke-auto-patrol.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:auto-patrol-capture",
+      "command": "node scripts/smoke-auto-patrol-capture.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:camera-view",
+      "command": "node scripts/smoke-camera-view.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:shelf-instancing",
+      "command": "node scripts/smoke-shelf-shared-instancing.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:persisted-scene-batching",
+      "command": "node scripts/smoke-persisted-scene-batching.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:device-spawner",
+      "command": "node scripts/smoke-device-spawner.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:generated-cargo-click",
+      "command": "node scripts/smoke-generated-cargo-click.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:scene-capacity",
+      "command": "node scripts/smoke-static-model-instancing-policy.mjs && node scripts/smoke-asset-load-scheduler.mjs && node scripts/smoke-scene-capacity.mjs && npm run smoke:persisted-scene-batching && npm run smoke:editor-performance",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:gpu",
+      "command": "npm run build && node scripts/smoke-gpu-acceleration.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:viewer:gpu",
+      "command": "node scripts/smoke-viewer-gpu-contract.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "dist:win:test",
+      "command": "node scripts/dist-test-win.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:packaged:win",
+      "command": "node scripts/smoke-packaged-windows.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:packaged:gpu",
+      "command": "node scripts/smoke-packaged-gpu.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:installer:gpu",
+      "command": "npm run dist:win && npm run smoke:packaged:gpu",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "test:data-platform-relink",
+      "command": "node --experimental-strip-types --test tests/dataPlatform/*.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:source-resource-plan",
+      "command": "npm run build:electron && node --test tests/digitalTwin/sourceResourcePlan.test.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:data-platform-skybox",
+      "command": "node --experimental-strip-types --test tests/dataPlatform/preloadProgressGate.test.ts tests/dataPlatform/skyboxContract.test.ts tests/dataPlatform/skyboxLifecycle.test.ts tests/dataPlatform/skyboxIndex.test.ts tests/dataPlatform/skyboxRelink.test.ts tests/digitalTwin/dataPlatformSkyboxSync.test.ts tests/digitalTwin/projectLibraryTabs.test.ts tests/digitalTwin/skyboxSyncController.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:data-platform-skybox:built",
+      "command": "node scripts/smoke-data-platform-skybox.mjs",
+      "category": "external",
+      "reason": "需要数据平台或外部资源条件，确认目标环境后单独执行。"
+    },
+    {
+      "name": "smoke:data-platform-skybox",
+      "command": "npm run build && npm run smoke:data-platform-skybox:built",
+      "category": "external",
+      "reason": "需要数据平台或外部资源条件，确认目标环境后单独执行。"
+    },
+    {
+      "name": "smoke:data-platform",
+      "command": "npm run build && npm run test:data-platform-relink && node scripts/smoke-data-platform-project.mjs && npm run smoke:data-platform-skybox:built",
+      "category": "external",
+      "reason": "需要数据平台或外部资源条件，确认目标环境后单独执行。"
+    },
+    {
+      "name": "test:digital-twin",
+      "command": "npm run test:digital-twin:unit && npm run test:digital-twin:integration",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:unified-model-sync",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/unifiedModelAssetUpdate.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/digitalTwin/publishOrchestration.test.ts tests/digitalTwin/preparePublishResources.test.ts tests/digitalTwin/publishSceneSnapshots.test.ts tests/digitalTwin/publishPreloadBridge.test.mjs tests/digitalTwin/publishParameterWarnings.test.ts tests/runtime/modelParameterBindingExecution.test.ts tests/editor/modelParameterRestoration.test.mjs tests/editor/publishModelRecovery.test.ts tests/digitalTwin/publishModelPackageRecovery.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:scene-model-update",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelVersionSync.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/editor/modelAssetUpdateMerge.test.ts tests/editor/sceneLatestModelUpdate.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelSyncOverlay.test.mjs tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/editor/restoreFailedSceneResources.test.ts tests/editor/scenePreparationProgress.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:scene-model-update",
+      "command": "npm run build:viewer && npm run build:electron && node scripts/run-scene-model-update-integration.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:publish-model-recovery",
+      "command": "node --test tests/digitalTwin/publishPreloadBridge.test.mjs && npm run build:electron && node scripts/run-publish-model-recovery-integration.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:click-events:integration",
+      "command": "npm run build:electron && electron tests/digitalTwin/clickEventBindingPublish.integration.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "smoke:editor-performance",
+      "command": "node scripts/smoke-editor-large-scene-performance.mjs && node scripts/smoke-hierarchy-virtualization.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:reimport-performance",
+      "command": "npm run build && node scripts/smoke-real-scene-reimport-performance.mjs",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:folder-group-move",
+      "command": "node scripts/smoke-folder-group-move.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:folder-group-runtime",
+      "command": "node scripts/smoke-folder-group-runtime.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "smoke:transform-gizmo",
+      "command": "node scripts/smoke-transform-gizmo.mjs",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:digital-twin:unit",
+      "command": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:digital-twin:integration",
+      "command": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs",
+      "category": "build-required",
+      "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
+    },
+    {
+      "name": "test:scene-loading",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "smoke:scene-loading",
+      "command": "npm run build && node scripts/smoke-packaged-remote-scene.mjs --source",
+      "category": "manual",
+      "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
+    },
+    {
+      "name": "test:local-scene-recovery",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/localSceneResourceRecovery.test.ts tests/dataPlatform/localSceneRecoveryService.test.ts tests/dataPlatform/localSceneRemoteRecovery.test.ts tests/dataPlatform/editorAssetFileError.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/localSceneEnvironmentChoice.test.ts tests/runtime/sceneResourceRetry.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/editor/sceneModelLibrarySync.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:builtin-slot-rows",
+      "command": "node --experimental-strip-types --test tests/editor/builtInSlotRowReconcile.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:dev-asset-paths",
+      "command": "node --experimental-strip-types --test tests/devAssetPaths.test.ts",
+      "category": "legacy",
+      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    }
+  ]
+}

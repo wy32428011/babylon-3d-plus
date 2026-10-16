@@ -1,1 +1,0 @@
-import{t as e}from"./sprites.vertex-BqlKEfIW.js";export{e as spritesVertexShaderWGSL};

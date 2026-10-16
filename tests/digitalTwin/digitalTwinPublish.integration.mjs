@@ -329,7 +329,10 @@ class DigitalTwinMockServer {
   async close() {
     this.releaseDelayedCancelChunk();
     if (!this.server) return;
-    await new Promise((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
+    const closed = new Promise((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()));
+    // Electron 网络层可能保留预连接；用例结束后关闭本测试服务器的全部连接。
+    this.server.closeAllConnections();
+    await closed;
     this.server = null;
   }
 
@@ -2006,9 +2009,74 @@ async function run() {
         assert.equal(mock.requests.some(item => item.path.endsWith('/skyboxes/query')), false, '本地文件有效时不因旧中台资源匹配阻断');
       }
     } finally { await rendererModules.close(); }
+
+    // 同时跨过旧的字节和节点阈值，覆盖当前入口及非入口场景的完整发布链路。
+    {
+      await resetBinding(); mock.setRemoteStatus(createRemoteStatus()); mock.resetRequests();
+      const { recoverPublishSceneResources } = await import('../../dist-electron/ipc/digitalTwinPublishResourceRecovery.js');
+      const { prepareLocalSceneResources } = await import('../../dist-electron/ipc/dataPlatformProjectService.js');
+      const largeScene = JSON.parse(sceneContent).scene;
+      largeScene.name = '大场景发布回归';
+      delete largeScene.entities['cad-reference'].components.cadReference;
+      largeScene.largeSceneFixture = {
+        values: Array.from({ length: 1_000_001 }, () => 0),
+        payload: '场'.repeat(22 * 1024 * 1024),
+        tail: 'large-scene-scan-complete',
+      };
+      const largeContent = JSON.stringify({ version: 5, scene: largeScene });
+      const inputBytes = Buffer.byteLength(largeContent);
+      assert.ok(inputBytes > 64 * 1024 * 1024);
+      const payloadHash = sha256(largeScene.largeSceneFixture.payload);
+      const originalHash = sha256(largeContent);
+      await writeFile(scenePath, largeContent);
+      await writeFile(secondaryPath, largeContent);
+      const resources = await prepareLocalSceneResources(mock.baseUrl, workspaceRoot, {
+        requestId: 'large-scene-sync', mode: 'scene-latest', sceneContent: largeContent,
+      });
+      assert.deepEqual(resources.issues ?? [], []);
+      const recovery = await recoverPublishSceneResources(largeContent, {
+        baseUrl: mock.baseUrl, projectRoot, sharedResourcesRoot, legacyWorkspaceRoot: workspaceRoot,
+      }, new AbortController().signal, () => {});
+      assert.deepEqual(recovery.replacements, []);
+      const context = await publishModule.getDigitalTwinPublishContext();
+      const preparation = await publishModule.prepareDigitalTwinPublishSceneSnapshots({
+        requestId: 'large-scene-prepare', targetToken: context.targetToken,
+        projectId: PROJECT_ID, sceneContent: largeContent,
+      }, new AbortController().signal);
+      assert.equal(preparation.scenes.length, 2);
+      const result = await publishModule.publishDigitalTwin(createPublishRequest('large-scene-publish', largeContent, {
+        targetToken: context.targetToken, preparationId: preparation.preparationId,
+        preparedScenes: preparation.scenes.map(({ sceneId, sceneContent }) => ({ sceneId, sceneContent })),
+      }), new AbortController().signal, () => {});
+      assert.equal(result.status, 'completed');
+      for (const type of ['SOURCE', 'DIST']) {
+        const entries = await readZipEntries(mock.getUploadedPackage('large-scene-publish', type));
+        const scenes = [...entries].filter(([name]) => type === 'SOURCE'
+          ? name.endsWith('.scene.json') : name === 'project/scene.json');
+        assert.equal(scenes.length, type === 'SOURCE' ? 2 : 1);
+        for (const [name, bytes] of scenes) {
+          assert.ok(bytes.length > 64 * 1024 * 1024, `${type} ${name} 仍大于旧上限`);
+          const fixture = JSON.parse(bytes.toString('utf8')).scene.largeSceneFixture;
+          assert.equal(fixture.values.length, 1_000_001);
+          assert.ok(fixture.values.every(value => value === 0));
+          assert.equal(sha256(fixture.payload), payloadHash, `${type} ${name} 场景内容不能截断`);
+          assert.equal(fixture.tail, 'large-scene-scan-complete');
+        }
+      }
+      assert.equal(sha256(await readFile(secondaryPath)), originalHash, '发布不能写回非入口大场景');
+      largeScene.largeSceneFixture.tail = 'C:/private/secret.scene.json';
+      await assert.rejects(deploymentSceneModule.prepareDeploymentExport(
+        JSON.stringify({ version: 5, scene: largeScene }), '大场景路径校验', [], new AbortController().signal, () => {},
+      ), /仍包含本机路径.*largeSceneFixture.tail/, '超过旧节点阈值后仍必须完整审计本机路径');
+      console.log(JSON.stringify({ largeScenePublish: 'PASS', inputBytes, sceneValueCount: 1_000_001 }));
+    }
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'large-scenes-over-64mib-and-million-values-source-dist-complete',
+        'large-non-entry-scene-prepared-and-original-preserved',
+        'large-scene-resource-sync-and-recovery',
+        'large-scene-tail-local-path-rejected',
         'prepared-source-multiple-scenes-and-original-files-preserved',
         'prepared-source-dist-entry-snapshot-consistent',
         'snapshot-404-fallback-revision-conflict-and-new-attempt',

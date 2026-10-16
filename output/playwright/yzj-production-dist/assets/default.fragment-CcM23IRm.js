@@ -1,1 +1,0 @@
-import{t as e}from"./default.fragment-DBN4rl-T.js";export{e as defaultPixelShaderWGSL};

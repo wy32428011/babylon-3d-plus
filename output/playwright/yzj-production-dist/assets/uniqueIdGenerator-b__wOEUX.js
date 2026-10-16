@@ -1,1 +1,0 @@
-var e=class{static get UniqueId(){let e=this._UniqueIdCounter;return this._UniqueIdCounter++,e}};e._UniqueIdCounter=1;export{e as t};

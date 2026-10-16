@@ -1,23 +1,25 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ArcRotateCamera, NullEngine, Scene, Vector3 } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { build } from 'vite';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../../src/runtime/babylon/cameraControlStandard.ts';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-  ssr: { noExternal: ['@babylonjs/core'] },
-});
-const { ArcRotateCameraViewController } = await viteServer.ssrLoadModule(
-  '/src/runtime/babylon/ArcRotateCameraViewController.ts',
-) as typeof import('../../src/runtime/babylon/ArcRotateCameraViewController.ts');
-after(async () => {
-  await viteServer.close();
-});
+const output = await mkdtemp(path.resolve('node_modules/.camera-transition-'));
+const cleanup = async () => {
+  if (path.dirname(output) !== path.resolve('node_modules') || !path.basename(output).startsWith('.camera-transition-')) throw Error('invalid fixture output');
+  await rm(output, { recursive: true, force: true });
+};
+after(cleanup);
+// 避免开发 SSR runner 遍历 Babylon barrel 的挂起，保持真实控制器及原 noExternal 语义。
+await build({ configFile: false, publicDir: false, logLevel: 'silent', ssr: { noExternal: ['@babylonjs/core'] },
+  build: { ssr: true, outDir: output, rollupOptions: { input: {
+    controller: 'src/runtime/babylon/ArcRotateCameraViewController.ts', engine: 'src/runtime/babylon/createEngine.ts',
+  }, output: { entryFileNames: '[name].mjs' } } } }).catch(async error => { await cleanup(); throw error; });
+const { ArcRotateCameraViewController } = await import(pathToFileURL(path.join(output, 'controller.mjs')).href)
+  .catch(async error => { await cleanup(); throw error; }) as typeof import('../../src/runtime/babylon/ArcRotateCameraViewController.ts');
 
 function fixture() {
   const engine = new NullEngine({ renderWidth: 800, renderHeight: 600 });
@@ -157,9 +159,7 @@ test('人工输入可显式取消 transition 并收到 manual-input 原因', () 
 });
 
 test('聚焦以最新模型中心为 Target，链条机改大后相机位于斜上方 45° 且距离不超过 3m', async () => {
-  const { focusArcRotateCameraOnBounds } = await viteServer.ssrLoadModule(
-    '/src/runtime/babylon/createEngine.ts',
-  ) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const { focusArcRotateCameraOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
   const {
     defaultBetaRadians,
     minCameraHeightMeters,
@@ -245,9 +245,7 @@ test('聚焦以最新模型中心为 Target，链条机改大后相机位于斜�
 });
 
 test('标准视角锁定后聚焦会切回轨道模式并使用斜上方 45° 位置', async () => {
-  const { focusArcRotateCameraViewOnBounds } = await viteServer.ssrLoadModule(
-    '/src/runtime/babylon/createEngine.ts',
-  ) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const { focusArcRotateCameraViewOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
   const f = fixture();
   try {
     f.scene.activeCamera = f.camera;
@@ -273,9 +271,7 @@ test('标准视角锁定后聚焦会切回轨道模式并使用斜上方 45° �
 });
 
 test('环境同步聚焦保留标准视角锁和当前观察方向', async () => {
-  const { focusArcRotateCameraViewOnBounds } = await viteServer.ssrLoadModule(
-    '/src/runtime/babylon/createEngine.ts',
-  ) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const { focusArcRotateCameraViewOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
   const f = fixture();
   try {
     f.scene.activeCamera = f.camera;
@@ -302,9 +298,7 @@ test('环境同步聚焦保留标准视角锁和当前观察方向', async () =>
 });
 
 test('发布态同步聚焦立即从模型斜上方 45° 直视模型，距离不超过 3m', async () => {
-  const { focusArcRotateCameraViewOnBounds } = await viteServer.ssrLoadModule(
-    '/src/runtime/babylon/createEngine.ts',
-  ) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const { focusArcRotateCameraViewOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
   const f = fixture();
   const bounds = {
     center: { x: 8, y: 2.632455, z: -5 },

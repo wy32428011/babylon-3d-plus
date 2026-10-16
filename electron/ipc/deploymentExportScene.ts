@@ -41,7 +41,6 @@ import {
 } from './deploymentSkyboxCache.js';
 
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
-const MAX_SCENE_CONTENT_BYTES = 64 * 1024 * 1024;
 const MAX_GLTF_JSON_BYTES = 64 * 1024 * 1024;
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const SCRIPT_EXTENSION = '.ts';
@@ -332,9 +331,6 @@ function createManifestAssetPath(destinationRelativePath: string): string {
 /** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3/4/5。 */
 function parseSceneFile(content: string): PlainObject {
   if (typeof content !== 'string' || content.length === 0) throw new Error('导出场景内容不能为空。');
-  if (Buffer.byteLength(content, 'utf8') > MAX_SCENE_CONTENT_BYTES) {
-    throw new Error(`导出场景内容超过 ${MAX_SCENE_CONTENT_BYTES / 1024 / 1024} MiB 安全上限。`);
-  }
 
   let parsed: unknown;
   try {
@@ -1381,10 +1377,7 @@ function isSafeBrowserMqttAddress(address: string): boolean {
 }
 
 /** 递归确认 scene.json 中不存在 Windows、UNC、file:// 或绝对 editor-asset 本机路径。 */
-function assertNoLocalMachinePaths(value: unknown, location = '$', seen = { count: 0 }): void {
-  seen.count += 1;
-  if (seen.count > 1_000_000) throw new Error('场景结构过大，无法完成本机路径审计。');
-
+function assertNoLocalMachinePaths(value: unknown, location = '$'): void {
   if (typeof value === 'string') {
     if (/^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value) || /^file:\/\//i.test(value)) {
       throw new Error(`部署场景仍包含本机路径：${location}`);
@@ -1400,11 +1393,11 @@ function assertNoLocalMachinePaths(value: unknown, location = '$', seen = { coun
   }
 
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoLocalMachinePaths(item, `${location}[${index}]`, seen));
+    value.forEach((item, index) => assertNoLocalMachinePaths(item, `${location}[${index}]`));
     return;
   }
   if (isPlainObject(value)) {
-    for (const [key, child] of Object.entries(value)) assertNoLocalMachinePaths(child, `${location}.${key}`, seen);
+    for (const [key, child] of Object.entries(value)) assertNoLocalMachinePaths(child, `${location}.${key}`);
   }
 }
 

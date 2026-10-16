@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": [
+    "src/runtime/babylon/modelParameterExpression.ts",
+    "src/vite-env.d.ts"
+  ],
+  "references": []
+}

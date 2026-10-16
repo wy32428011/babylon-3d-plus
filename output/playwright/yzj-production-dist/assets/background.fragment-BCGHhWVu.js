@@ -1,1 +1,0 @@
-import{t as e}from"./background.fragment-Bu68F5VJ.js";export{e as backgroundPixelShaderWGSL};

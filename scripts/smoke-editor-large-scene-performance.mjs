@@ -14,6 +14,7 @@ import {
   VertexData,
 } from '@babylonjs/core';
 import { createServer } from 'vite';
+import ts from 'typescript';
 
 const LARGE_PLAN_COUNTS = [10_000, 50_000];
 const BATCH_ENTITY_COUNT = 10_000;
@@ -1171,9 +1172,50 @@ async function verifySceneViewWiring() {
   assert.match(layoutSource, /onSetPerformanceHudVisible=\{setPerformanceHudVisible\}/, 'EditorLayout 必须接收 Toolbar 显隐操作');
   assert.match(layoutSource, /<SceneViewPanel performanceHudVisible=\{performanceHudVisible\} \/>/, 'Scene View 必须使用 Toolbar 控制的显隐状态');
   assert.match(toolbarSource, /aria-label="性能监控"/, 'Toolbar 必须提供性能监控显隐入口');
-  assert.match(toolbarSource, /checked=\{props\.performanceHudVisible\}/, 'Toolbar 必须反映性能监控当前显隐状态');
-  assert.match(toolbarSource, /props\.onSetPerformanceHudVisible\(event\.target\.checked\)/, 'Toolbar 必须切换性能监控显隐状态');
-  assert.match(panelSource, /performanceSnapshot && props\.performanceHudVisible/, 'Scene View 必须按 Toolbar 状态显示或隐藏 HUD');
+  // 执行真实 JSX 与派生状态，覆盖性能运行临时强制显示及停止后恢复用户设置。
+  const toolbarAst = ts.createSourceFile(TOOLBAR_PATH, toolbarSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const panelAst = ts.createSourceFile(SCENE_VIEW_PANEL_PATH, panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const selectOne = (root, predicate) => {
+    const found = [];
+    const visit = node => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
+    visit(root); assert.equal(found.length, 1, '必须精确定位一个 HUD 入口'); return found[0];
+  };
+  const input = selectOne(toolbarAst, node => ts.isJsxSelfClosingElement(node)
+    && node.tagName.getText(toolbarAst) === 'input'
+    && node.attributes.properties.some(attr => ts.isJsxAttribute(attr)
+      && attr.name.getText(toolbarAst) === 'aria-label' && attr.initializer?.text === '性能监控'));
+  const attribute = name => {
+    const attr = input.attributes.properties.find(item => ts.isJsxAttribute(item) && item.name.getText(toolbarAst) === name);
+    assert.ok(attr && ts.isJsxExpression(attr.initializer) && attr.initializer.expression, name);
+    return attr.initializer.expression;
+  };
+  const variable = (ast, name) => selectOne(ast, node => ts.isVariableDeclaration(node) && node.name.getText(ast) === name).initializer;
+  const evaluate = (node, scope) => {
+    const js = ts.transpileModule('return (' + node.getText() + ');', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    return new Function(...Object.keys(scope), js)(...Object.values(scope));
+  };
+  for (const initialVisible of [false, true]) {
+    const props = { performanceHudVisible: initialVisible, runtimePerformanceEnabled: false, runtimeMode: 'edit',
+      onSetPerformanceHudVisible: value => { props.performanceHudVisible = value; } };
+    for (const [mode, performance] of [['edit', false], ['preview', false], ['preview', true], ['edit', false]]) {
+      props.runtimeMode = mode; props.runtimePerformanceEnabled = performance;
+      const isPreview = evaluate(variable(toolbarAst, 'isPreview'), { props });
+      const forced = mode === 'preview' && performance;
+      assert.equal(evaluate(attribute('checked'), { props, isPreview }), props.performanceHudVisible || forced);
+      assert.equal(evaluate(attribute('disabled'), { props, isPreview }), forced);
+      const isRuntimePreview = evaluate(variable(panelAst, 'isRuntimePreview'), { runtimeMode: mode });
+      const isPerformanceRun = evaluate(variable(panelAst, 'isPerformanceRun'), { isRuntimePreview, runtimePerformanceEnabled: performance });
+      for (const performanceSnapshot of [null, { fps: 60 }]) {
+        assert.equal(evaluate(variable(panelAst, 'showPerformanceHud'), { performanceSnapshot, props, isPerformanceRun }),
+          Boolean(performanceSnapshot && (props.performanceHudVisible || forced)));
+      }
+      assert.equal(props.performanceHudVisible, initialVisible, '性能模式不能覆盖原手动显隐设置');
+    }
+    const change = evaluate(attribute('onChange'), { props });
+    change({ target: { checked: !initialVisible } });
+    assert.equal(props.performanceHudVisible, !initialVisible, '普通模式操作必须写回用户选择');
+    assert.equal(evaluate(attribute('checked'), { props, isPreview: false }), !initialVisible);
+  }
   assert.doesNotMatch(panelSource, /隐藏性能监控|显示性能监控/, '显隐入口不得继续留在 Scene View HUD 内');
   assert.match(monitorSource, /const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;/, 'React 性能 HUD 最多每秒更新一次');
   assert.match(monitorSource, /const MAX_HISTORY_SAMPLES = 60;/, '性能报告必须保持最近一分钟有界历史');
@@ -1244,7 +1286,7 @@ try {
     appType: 'custom',
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, watch: null, ws: false },
     optimizeDeps: { noDiscovery: true },
   });
   const [planModule, batchModule, performanceModule] = await Promise.all([

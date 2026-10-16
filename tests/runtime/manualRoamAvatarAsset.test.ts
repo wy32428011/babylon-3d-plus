@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
-  DEFAULT_MANUAL_ROAM_AVATAR_ASSET,
+  LEGACY_MANUAL_ROAM_AVATAR_ASSET as DEFAULT_MANUAL_ROAM_AVATAR_ASSET,
+  DEFAULT_MANUAL_ROAM_AVATAR_ASSET as RIGGED_AVATAR_ASSET,
+  resolveManualRoamMotionUrls,
   resolveDefaultManualRoamAvatarUrl,
 } from '../../src/runtime/assets/manualRoamAvatarAsset.ts';
 import {
@@ -63,17 +65,28 @@ const BUNDLED_AVATAR_LIMB_SEGMENTS: Record<ProceduralLimbName, LocalLimbSegment>
 
 const BUNDLED_AVATAR_GAIT_POSE = resolveBundledAvatarGaitPose();
 
+test('新版默认人物与独立动作资源使用同一相对部署目录', async () => {
+  assert.deepEqual(resolveManualRoamMotionUrls('https://example.test/viewer/index.html', './'), {
+    sourceUrl: 'https://example.test/viewer/manual-roam/locomotion-v2.glb',
+    manifestUrl: 'https://example.test/viewer/manual-roam/locomotion-v2.manifest.json',
+  });
+  const file = await readFile(new URL('../../public/manual-roam/EQ_People_rigged_v2.glb', import.meta.url));
+  assert.equal(createHash('sha256').update(file).digest('hex'), RIGGED_AVATAR_ASSET.sha256);
+  assert.equal(RIGGED_AVATAR_ASSET.hasSkinnedMesh, true);
+  assert.equal(RIGGED_AVATAR_ASSET.hasEmbeddedAnimations, false);
+});
+
 test('resolves the bundled avatar from a relative deployment base', () => {
   assert.equal(
     resolveDefaultManualRoamAvatarUrl('https://example.test/viewer/index.html', './'),
-    'https://example.test/viewer/manual-roam/EQ_People.glb',
+    'https://example.test/viewer/manual-roam/EQ_People_rigged_v2.glb',
   );
 });
 
 test('resolves the bundled avatar from an absolute application base', () => {
   assert.equal(
     resolveDefaultManualRoamAvatarUrl('https://example.test/index.html', '/digital-twin/'),
-    'https://example.test/digital-twin/manual-roam/EQ_People.glb',
+    'https://example.test/digital-twin/manual-roam/EQ_People_rigged_v2.glb',
   );
 });
 

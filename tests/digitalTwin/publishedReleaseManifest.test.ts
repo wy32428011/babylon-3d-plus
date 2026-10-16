@@ -15,7 +15,10 @@ test('完整清单绑定本次发布，兼容编码路径并保留两类存储�
 
 test('内置漫游人物接受新 asset 归属并兼容旧发布 response 归属', () => {
   for (const storage of ['asset', 'response']) {
-    for (const path of ['manual-roam/EQ_People.glb', 'manual-roam/%45Q_People.glb']) {
+    for (const path of ['manual-roam/EQ_People.glb', 'manual-roam/%45Q_People.glb',
+      'manual-roam/EQ_People_rigged_v1.glb', 'manual-roam/%45Q_People_rigged_v1.glb',
+      'manual-roam/locomotion-v1.glb', 'manual-roam/locomotion-v1.manifest.json',
+      'manual-roam/EQ_People_rigged_v2.glb', 'manual-roam/locomotion-v2.glb', 'manual-roam/locomotion-v2.manifest.json']) {
       const result = parsePublishedReleaseManifest(manifest([{ ...file, path, storage }]), base, 'release-4');
       assert.equal(result.files[0].storage, storage);
       assert.equal(result.files[0].url, base + path);
@@ -26,8 +29,20 @@ test('内置漫游人物接受新 asset 归属并兼容旧发布 response 归属
 test('漫游人物例外不允许相似路径、目录脚本或越界地址伪装为 asset', () => {
   for (const path of ['manual-roam/help.js', 'manual-roam-copy/EQ_People.glb',
     'manual-roam/other.glb', 'manual-roam/EQ_People.glb/extra',
+    'manual-roam/locomotion-v1.glb.bak', 'manual-roam-copy/locomotion-v1.glb',
+    'manual-roam/%256cocomotion-v1.glb',
     'manual-roam/../EQ_People.glb', 'manual-roam/%2e%2e/EQ_People.glb', 'manual-roam%2fEQ_People.glb']) {
     assert.throws(() => parsePublishedReleaseManifest(manifest([{ ...file, path }]), base, 'release-4'), undefined, path);
+  }
+});
+
+test('内置资源拒绝编码等价的重复项及无效摘要', () => {
+  const path = 'manual-roam/locomotion-v1.glb';
+  assert.throws(() => parsePublishedReleaseManifest({ ...manifest([
+    { ...file, path }, { ...file, path: 'manual-roam/%6cocomotion-v1.glb' },
+  ]), totalBytes: 24 }, base, 'release-4'), /重复/);
+  for (const sha256 of ['', 'abc', 'z'.repeat(64)]) {
+    assert.throws(() => parsePublishedReleaseManifest(manifest([{ ...file, path, sha256 }]), base, 'release-4'), /校验/);
   }
 });
 

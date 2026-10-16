@@ -13,7 +13,9 @@ import {
 } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { TransformComponent } from '../../editor/model/components';
-import { resolveDefaultManualRoamAvatarUrl } from '../assets/manualRoamAvatarAsset';
+import { resolveDefaultManualRoamAvatarUrl, resolveManualRoamMotionUrls } from '../assets/manualRoamAvatarAsset';
+import { ManualRoamAvatarAnimator } from '../roam/ManualRoamAvatarAnimator';
+import { getManualRoamRigProfile, MANUAL_ROAM_RIG_PROFILE_V2 } from '../roam/manualRoamAvatarRig';
 import { createDefaultManualRoamConfig } from '../roam/manualRoamCore';
 
 const DEFAULT_AVATAR_HEIGHT_METERS = createDefaultManualRoamConfig().capsuleHeight;
@@ -30,6 +32,7 @@ type SpawnEntry = {
   placeholderMaterial: StandardMaterial;
   avatarMeshes: AbstractMesh[];
   avatarContainer: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null;
+  avatarAnimator: ManualRoamAvatarAnimator | null;
   loadGeneration: number;
   selected: boolean;
   visible: boolean;
@@ -147,6 +150,7 @@ export class EditorManualRoamSpawnRuntime {
     const entry = this.entries.get(entityId);
     if (!entry) return;
     entry.loadGeneration += 1;
+    entry.avatarAnimator?.dispose();
     entry.avatarContainer?.dispose();
     for (const mesh of [...entry.placeholderMeshes, ...entry.guideMeshes]) mesh.dispose(false, false);
     entry.guideMaterial.dispose(false, false);
@@ -217,6 +221,7 @@ export class EditorManualRoamSpawnRuntime {
       placeholderMaterial,
       avatarMeshes: [],
       avatarContainer: null,
+      avatarAnimator: null,
       loadGeneration: 0,
       selected: false,
       visible: true,
@@ -255,7 +260,27 @@ export class EditorManualRoamSpawnRuntime {
       }
       container.addAllToScene();
       for (const node of container.rootNodes) node.parent = entry.visualRoot;
+      entry.avatarContainer = container;
+      entry.visualRoot.setEnabled(false);
+      try {
+        const rigProfile = getManualRoamRigProfile(container);
+        const automatic = !rigProfile && container.skeletons.length > 0 && container.meshes.some(mesh => mesh.skeleton && mesh.getTotalVertices() > 0);
+        if (rigProfile || automatic) {
+          const animator = await ManualRoamAvatarAnimator.create(this.scene, container, resolveManualRoamMotionUrls(undefined, undefined, automatic || rigProfile === MANUAL_ROAM_RIG_PROFILE_V2 ? 'v2' : 'v1'));
+          if (this.entries.get(entry.entity.id) !== entry || entry.loadGeneration !== generation || !this.editorEnabled) {
+            animator.dispose(); container.dispose(); return;
+          }
+          entry.avatarAnimator = animator;
+          entry.visualRoot.rotation.y = animator.getRigBinding().facingYaw;
+        }
+      } catch (error) {
+        if (this.entries.get(entry.entity.id) !== entry || entry.loadGeneration !== generation) { container.dispose(); return; }
+        this.pushLog(`人物共享骨骼动作不可用，保留静态模型：${getErrorMessage(error)}`);
+      }
       normalizeAvatar(entry.visualRoot, container.meshes);
+      entry.avatarAnimator?.sampleIdle();
+      entry.avatarAnimator?.pause();
+      entry.visualRoot.setEnabled(true);
       entry.avatarContainer = container;
       entry.avatarMeshes = [...container.meshes];
       for (const mesh of entry.placeholderMeshes) mesh.setEnabled(false);
@@ -320,10 +345,13 @@ function normalizeAvatar(visualRoot: TransformNode, meshes: readonly AbstractMes
   const height = bounds.maximum.y - bounds.minimum.y;
   const scale = height > 1e-5 ? DEFAULT_AVATAR_HEIGHT_METERS / height : 1;
   visualRoot.scaling.setAll(scale);
+  const offsetX = -(bounds.minimum.x + bounds.maximum.x) / 2 * scale;
+  const offsetZ = -(bounds.minimum.z + bounds.maximum.z) / 2 * scale;
+  const yaw = visualRoot.rotation.y;
   visualRoot.position.set(
-    -(bounds.minimum.x + bounds.maximum.x) / 2 * scale,
+    offsetX * Math.cos(yaw) + offsetZ * Math.sin(yaw),
     -bounds.minimum.y * scale,
-    -(bounds.minimum.z + bounds.maximum.z) / 2 * scale,
+    offsetZ * Math.cos(yaw) - offsetX * Math.sin(yaw),
   );
   visualRoot.computeWorldMatrix(true);
 }

@@ -6,7 +6,7 @@ import { createServer } from 'vite';
 test('发布轻量采样保留几何指标、跳过材质明细，并完整释放采样器与观察器', async (context) => {
   const server = await createServer({
     appType: 'custom', configFile: false, root: process.cwd(),
-    server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true },
+    server: { middlewareMode: true, hmr: false, watch: null, ws: false }, optimizeDeps: { noDiscovery: true },
   });
   const engine = new NullEngine();
   const scene = new Scene(engine);

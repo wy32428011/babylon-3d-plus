@@ -1,1 +1,0 @@
-import{t as e}from"./openpbr.fragment-UBEs40fe.js";export{e as openpbrPixelShaderWGSL};

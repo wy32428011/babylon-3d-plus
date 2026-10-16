@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ProjectModelAssetEntry } from '../assets/AssetDatabase';
 import type { ManualRoamSpawnComponent } from '../model/components';
 import { useEditorStore } from '../store/editorStore';
+
+const ManualRoamAvatarPreviewDialog = lazy(() => import('./ManualRoamAvatarPreviewDialog').then(module => ({ default: module.ManualRoamAvatarPreviewDialog })));
+type AvatarReference = NonNullable<ManualRoamSpawnComponent['avatar']>;
 
 export function ManualRoamAvatarInspector(props: {
   entityId: string;
@@ -11,9 +14,12 @@ export function ManualRoamAvatarInspector(props: {
   const [assets, setAssets] = useState<ProjectModelAssetEntry[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ avatar: AvatarReference | null; pending: boolean; sessionId: string } | null>(null);
   const mounted = useRef(true);
   const avatar = props.component.avatar;
   const setAvatar = useEditorStore((state) => state.setManualRoamAvatar);
+  const runtimeMode = useEditorStore((state) => state.runtimeMode);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
 
   useEffect(() => {
     mounted.current = true;
@@ -37,10 +43,10 @@ export function ManualRoamAvatarInspector(props: {
       if (result.canceled || !result.importedAsset) return;
       const asset = result.importedAsset;
       setAssets((previous) => [...previous.filter((item) => item.path !== asset.path), asset]);
-      setAvatar(props.entityId, {
+      setPreview({ avatar: {
         name: asset.displayName || asset.name, sourcePath: asset.path,
         sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision,
-      });
+      }, pending: true, sessionId });
     } catch (reason) {
       if (mounted.current) setError(`上传人物失败：${reason instanceof Error ? reason.message : String(reason)}`);
     } finally {
@@ -50,7 +56,8 @@ export function ManualRoamAvatarInspector(props: {
 
   const candidates = assets.filter((asset) => asset.libraryKind === 'model' && /\.glb$/i.test(asset.path));
   return (
-    <fieldset className="transform-fieldset" disabled={props.disabled || busy}>
+    <>
+    <fieldset className="transform-fieldset" disabled={props.disabled || busy || runtimeMode !== 'edit'}>
       <legend>漫游人物模型</legend>
       <label className="inspector-row">
         <span>人物</span>
@@ -72,8 +79,19 @@ export function ManualRoamAvatarInspector(props: {
       <button type="button" disabled={!window.editorApi} onClick={() => void upload()}>
         {busy ? '正在上传…' : '上传人物模型（GLB）'}
       </button>
-      <p className="muted">使用内嵌纹理的单文件 GLB，自动适配人物身高。自带动画可用于行走；无动画模型保留原始姿态。</p>
+      <button type="button" disabled={runtimeMode !== 'edit'} onClick={() => setPreview({ avatar: avatar ?? null, pending: false, sessionId: sceneSessionId })}>预览人物动作</button>
+      <p className="muted">上传内嵌纹理的单文件 GLB。有完整人形骨骼和蒙皮的模型会自动适配漫游动作，无需修改骨骼名称或添加专用数据。</p>
+      <p className="muted">上传后可预览并应用人物。不能适配时会说明原因，保留模型自带动画或静态姿态；无骨骼模型不会自动绑骨。</p>
       {error ? <p role="alert">{error}</p> : null}
     </fieldset>
+    {preview && preview.sessionId === sceneSessionId && runtimeMode === 'edit' ? <Suspense fallback={<p role="status">正在打开人物预览…</p>}>
+      <ManualRoamAvatarPreviewDialog name={preview.avatar?.name ?? '默认人物'} sourceUrl={preview.avatar?.sourceUrl}
+        onClose={() => setPreview(null)} onApply={preview.pending ? () => {
+          if (props.disabled || useEditorStore.getState().sceneSessionId !== preview.sessionId) return;
+          setAvatar(props.entityId, preview.avatar);
+          setPreview(null);
+        } : undefined} />
+    </Suspense> : null}
+    </>
   );
 }

@@ -11,15 +11,20 @@ const { values } = parseArgs({ options: {
   scene: { type: 'string' }, workspace: { type: 'string' }, output: { type: 'string' },
   url: { type: 'string' },
   'app-root': { type: 'string' }, replay: { type: 'string' }, 'no-timing': { type: 'boolean', default: false },
+  'project-root': { type: 'string' },
+  'warm-opens': { type: 'string', default: '0' },
   fullscreen: { type: 'boolean', default: false },
   seconds: { type: 'string', default: '60' }, repeats: { type: 'string', default: '3' },
   'soak-cycles': { type: 'string', default: '0' },
   modes: { type: 'string', default: 'edit,static,input-only,motion,roam-still,roam-walk' },
   profile: { type: 'boolean', default: false }, timeout: { type: 'string', default: '600000' },
+  'react-probe': { type: 'boolean', default: false },
 } });
 assert.ok(values.scene && values.workspace && values.output,
   '用法：node scripts/smoke-extreme-scene-performance.mjs --scene <scene.json> --workspace <资源工作区> --output <报告目录>');
 const seconds = Number(values.seconds), repeats = Number(values.repeats), timeout = Number(values.timeout);
+const warmOpens = Number(values['warm-opens']);
+assert.ok(Number.isInteger(warmOpens) && warmOpens >= 0 && warmOpens <= 20);
 assert.ok(Number.isInteger(seconds) && seconds >= 5 && seconds <= 1800);
 assert.ok(Number.isInteger(repeats) && repeats >= 1 && repeats <= 10);
 assert.ok(Number.isFinite(timeout) && timeout >= 1000 && timeout <= 3_600_000);
@@ -57,9 +62,12 @@ const report = { passed: false, sourceSha256: sourceHash, scope: recording ? 're
   telemetryTimingEnabled: !values['no-timing'],
   sceneEntityCount: sceneDocument.entityIds.length, deviceCount: devices.length, seconds, repeats,
   profileEnabled: values.profile, modes, runs: [], errors: [] };
+report.reactProbeEnabled = values['react-probe'];
 report.lifecycleSoak = soakCycles > 0;
 report.fullscreen4k = values.fullscreen;
 let app, page, broker;
+const harnessStarted = performance.now();
+let applicationStarted;
 try {
   report.buildFiles = await Promise.all(['dist/index.html', 'dist-electron/main.js'].map(async file => ({
     file, sha256: digest(await readFile(path.join(appRoot, file))),
@@ -74,9 +82,25 @@ try {
   await writeFile(path.join(userData, 'data-platform-config.json'), JSON.stringify({ version: 2, baseUrl: values.url ?? '', workspaceRoot: workspace }));
   await writeFile(path.join(userData, 'recent-workspaces.json'), JSON.stringify({ version: 1, projects: [],
     scenes: [{ filePath: fixture, lastOpenedAt: new Date().toISOString() }] }));
+  applicationStarted = performance.now();
   app = await _electron.launch({ args: [appRoot, `--user-data-dir=${userData}`], cwd: appRoot,
     env: { ...process.env, OPEN_DEVTOOLS: 'false', VITE_DEV_SERVER_URL: '' }, timeout: 120000 });
   page = await app.firstWindow();
+  if (values['react-probe']) {
+    await page.addInitScript(() => {
+      if (window.__REACT_DEVTOOLS_GLOBAL_HOOK__) return;
+      const probe = { commits: 0, renderers: new Map() };
+      window.__performanceReactProbe = probe;
+      window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+        supportsFiber: true, renderers: probe.renderers,
+        inject(renderer) { const id = probe.renderers.size + 1; probe.renderers.set(id, renderer); return id; },
+        onCommitFiberRoot() { probe.commits += 1; }, onCommitFiberUnmount() {},
+      };
+    });
+    // 诊断专用 reload 使生产 React 在初始化时连接计数 hook，不纳入冷启动对比。
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window.__performanceReactProbe?.renderers.size > 0);
+  }
   await app.evaluate(({ BrowserWindow }, fullscreen) => {
     const window = BrowserWindow.getAllWindows()[0];
     if (fullscreen) window.setFullScreen(true);
@@ -91,12 +115,64 @@ try {
   page.on('pageerror', error => report.errors.push(redact(error.message)));
   page.on('dialog', dialog => dialog.accept()); // 仅本脚本创建的场景副本，无用户编辑。
   await page.bringToFront();
+  if (values['project-root']) {
+    // SOURCE 工程副本沿用正常项目选择 IPC 建立资源授权，不把 Viewer 文件当成已打开工程。
+    const projectRoot = path.resolve(values['project-root']);
+    await app.evaluate(({ dialog }, root) => {
+      globalThis.__performanceOriginalDirectoryDialog = dialog.showOpenDialog;
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] });
+    }, projectRoot);
+    try {
+      const selected = await page.evaluate(() => window.editorApi.selectProjectDirectory());
+      assert.equal(selected.canceled, false);
+      assert.equal(path.resolve(selected.projectRoot), projectRoot);
+    } finally {
+      await app.evaluate(({ dialog }) => {
+        dialog.showOpenDialog = globalThis.__performanceOriginalDirectoryDialog;
+        delete globalThis.__performanceOriginalDirectoryDialog;
+      });
+    }
+  }
   if (values.fullscreen) await page.waitForFunction(() => Math.round(innerWidth * devicePixelRatio) === 3840
     && Math.round(innerHeight * devicePixelRatio) === 2160, null, { timeout: 15000 });
+  const firstOpenStarted = performance.now();
   await page.locator('.home-recent-card').filter({ hasText: path.basename(fixture) })
     .getByRole('button', { name: '打开', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('canvas.scene-canvas')
-    && !document.querySelector('[data-scene-preparation-phase]'), null, { timeout });
+    && (!document.querySelector('[data-scene-preparation-phase]')
+      || document.querySelector('[data-scene-preparation-phase]')?.textContent?.includes('场景资源加载失败')),
+  null, { timeout });
+  assert.equal(await page.locator('[data-scene-preparation-phase]').count(), 0,
+    '资源准备失败，不能将不完整场景计为性能样本：'
+      + (await page.locator('[data-scene-preparation-phase]').allTextContents()).join('\n'));
+  report.loading = {
+    diagnosticOnly: values['react-probe'],
+    cold: { harnessToReadyMs: performance.now() - harnessStarted,
+      applicationToReadyMs: performance.now() - applicationStarted,
+      openToReadyMs: performance.now() - firstOpenStarted },
+    warm: [],
+    definition: 'cold=fresh Electron and userData; warm=renderer reload in same Electron/userData; OS file cache not cleared',
+  };
+  console.log(JSON.stringify({ phase: 'cold-ready', ...report.loading.cold }));
+  for (let index = 0; index < warmOpens; index += 1) {
+    const started = performance.now();
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const recent = page.locator('.home-recent-card').filter({ hasText: path.basename(fixture) })
+      .getByRole('button', { name: '打开', exact: true });
+    await recent.waitFor({ state: 'visible', timeout: 120000 });
+    const openStarted = performance.now();
+    await recent.click();
+    await page.waitForFunction(() => document.querySelector('canvas.scene-canvas')
+      && (!document.querySelector('[data-scene-preparation-phase]')
+        || document.querySelector('[data-scene-preparation-phase]')?.textContent?.includes('场景资源加载失败')),
+    null, { timeout });
+    assert.equal(await page.locator('[data-scene-preparation-phase]').count(), 0,
+      '暖加载资源准备失败，不得计为通过样本');
+    const sample = { index: index + 1, reloadToReadyMs: performance.now() - started,
+      openToReadyMs: performance.now() - openStarted };
+    report.loading.warm.push(sample);
+    console.log(JSON.stringify({ phase: 'warm-ready', ...sample }));
+  }
   if (values.fullscreen) {
     await page.getByRole('button', { name: '全屏显示场景 (F11)', exact: true }).click();
     await page.locator('[data-scene-fullscreen="true"]').waitFor();
@@ -249,6 +325,7 @@ function installCapture() {
   const stack = first ? [first.stateNode?.current ?? first] : [];
   const seen = new Set();
   let runtime, roam, monitor;
+  let reactCommitsAtStart = null;
   const visit = value => {
     if (!value || typeof value !== 'object') return;
     const current = value.current ?? value;
@@ -271,6 +348,18 @@ function installCapture() {
   const originalApply = specialized.applyFrame;
   let actionsDisabled = false, recording = false, previous = null, nextSample = 0, samples = [], intervals = [];
   let violation = null, conditions = null;
+  let longTasks = [], longTaskOverflow = false, captureStarted = 0;
+  const collectLongTasks = entries => {
+    if (!recording) return;
+    for (const entry of entries) {
+      if (entry.startTime < captureStarted) continue;
+      if (longTasks.length < 10000) longTasks.push({ startTime: entry.startTime, duration: entry.duration });
+      else longTaskOverflow = true;
+    }
+  };
+  const longTaskObserver = globalThis.PerformanceObserver?.supportedEntryTypes?.includes('longtask')
+    ? new PerformanceObserver(list => collectLongTasks(list.getEntries())) : null;
+  longTaskObserver?.observe({ type: 'longtask' });
   specialized.applyFrame = function (...args) { if (!actionsDisabled) return originalApply.apply(this, args); };
   const snapshot = () => {
     const metrics = runtime.getPerformanceMetrics();
@@ -281,6 +370,7 @@ function installCapture() {
       activeMeshEvaluationMs: counter(monitor?.sceneInstrumentation.activeMeshesEvaluationTimeCounter),
       gpuFrameMs: gpuNs > 0 ? gpuNs / 1e6 : null,
       jsHeapBytes: performance.memory?.usedJSHeapSize ?? null,
+      drawCalls: engine._drawCalls?.current ?? null,
       width: engine.getRenderWidth(), height: engine.getRenderHeight(), dpr: window.devicePixelRatio,
       camera: { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, mode: camera.mode,
         target: { x: camera.target.x, y: camera.target.y, z: camera.target.z } },
@@ -324,19 +414,26 @@ function installCapture() {
     getViolation: () => violation,
     start(timing = true, movingCamera = false) {
       previous = null; samples = []; intervals = []; nextSample = 0; violation = null;
+      reactCommitsAtStart = window.__performanceReactProbe?.commits ?? null;
+      longTasks = []; longTaskOverflow = false; captureStarted = performance.now();
+      longTaskObserver?.takeRecords();
       conditions = { width: engine.getRenderWidth(), height: engine.getRenderHeight(), movingCamera,
         alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() };
       recording = true; runtime.setTelemetryPerformanceTimingEnabled(timing);
     },
     stop() {
+      collectLongTasks(longTaskObserver?.takeRecords() ?? []);
       recording = false; runtime.setTelemetryPerformanceTimingEnabled(false);
       const sorted = [...intervals].sort((a, b) => a - b), duration = intervals.reduce((a, b) => a + b, 0);
-      return { intervalCount: intervals.length, measuredDurationMs: duration,
+      return { reactCommits: reactCommitsAtStart === null ? null : window.__performanceReactProbe.commits - reactCommitsAtStart,
+        intervalCount: intervals.length, measuredDurationMs: duration,
         effectiveFps: duration ? intervals.length * 1000 / duration : null,
         p50Ms: sorted[Math.ceil(sorted.length * 0.5) - 1] ?? null,
         p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? null,
         p99Ms: sorted[Math.ceil(sorted.length * 0.99) - 1] ?? null,
         over50MsCount: intervals.filter(ms => ms > 50).length, intervalsMs: intervals,
+        longTasks: longTaskObserver ? { entries: longTasks, count: longTasks.length,
+          totalDurationMs: longTasks.reduce((sum, entry) => sum + entry.duration, 0), overflow: longTaskOverflow } : null,
         samples, last: snapshot(), cargo: ['stacker', 'conveyor', 'rgv'].flatMap(kind => (
           [...specialized.state[`${kind}CargoMeshes`].entries()].map(([key, cargo]) => ({
             kind, key, task: cargo.task, assetCode: cargo.assetCode, generatorEntityId: cargo.generatorEntityId,
@@ -345,7 +442,7 @@ function installCapture() {
           }))
         )) };
     },
-    dispose() { recording = false; scene.onAfterRenderObservable.remove(observer); specialized.applyFrame = originalApply;
+    dispose() { recording = false; longTaskObserver?.disconnect(); scene.onAfterRenderObservable.remove(observer); specialized.applyFrame = originalApply;
       runtime.setTelemetryPerformanceTimingEnabled(false); delete window.__extremeCapture; },
   };
 }

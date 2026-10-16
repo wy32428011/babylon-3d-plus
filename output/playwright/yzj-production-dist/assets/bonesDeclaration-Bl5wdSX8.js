@@ -1,1 +1,0 @@
-import{t as e}from"./bonesDeclaration-oDxSsnww.js";export{e as bonesDeclaration};

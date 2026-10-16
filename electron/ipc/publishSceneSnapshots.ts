@@ -4,7 +4,6 @@ import path from 'node:path';
 import { getHeapStatistics } from 'node:v8';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
 
-const MAX_SCENE_BYTES = 64 * 1024 * 1024;
 function assertSnapshotMemoryAvailable(additionalBytes: number): void {
   // 不限制工程总大小，仅在进程已无法容纳当前场景的解析/序列化副本时报告可恢复错误。
   if (additionalBytes * 6 > getHeapStatistics().total_available_size) throw new Error('当前进程可用内存不足以准备此场景，请释放内存后重试。');
@@ -166,7 +165,7 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
   }
 }
 function parseScene(content: string): { scene: { name?: string } } {
-  if (typeof content !== 'string' || !content || Buffer.byteLength(content) > MAX_SCENE_BYTES) throw new Error('发布准备场景大小无效或超过 64 MiB。');
+  if (typeof content !== 'string' || !content) throw new Error('发布准备场景内容不能为空。');
   const parsed = JSON.parse(content);
   if (![1, 2, 3, 4, 5].includes(parsed?.version) || !parsed.scene || typeof parsed.scene !== 'object' || Array.isArray(parsed.scene)) throw new Error('发布准备场景格式无效。');
   if (parsed.scene.entities !== undefined && (!parsed.scene.entities || typeof parsed.scene.entities !== 'object' || Array.isArray(parsed.scene.entities))) throw new Error('发布准备场景实体集合无效。');
@@ -195,7 +194,7 @@ async function listScenes(projectRoot: string, signal: AbortSignal): Promise<str
 }
 async function readScene(file: string): Promise<string> {
   const stat = await fs.lstat(file);
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SCENE_BYTES) throw new Error('SOURCE 场景文件不安全或超过大小限制。');
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('SOURCE 场景文件不安全。');
   const content = new TextDecoder('utf-8', { fatal: true }).decode(await fs.readFile(file));
   parseScene(content);
   return content;

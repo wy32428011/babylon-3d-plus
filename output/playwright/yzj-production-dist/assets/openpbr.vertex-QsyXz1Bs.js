@@ -1,1 +1,0 @@
-import{t as e}from"./openpbr.vertex-2ecjsEts.js";export{e as openpbrVertexShader};

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 
 import type { ProjectSkyboxAssetEntry } from '../../src/editor/assets/AssetDatabase.ts';
 
@@ -70,7 +72,7 @@ test('模型库空状态只由普通模型资产决定', () => {
   );
 });
 
-test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库仅保留七个指定入口', () => {
+test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库包含设备产生器等八个指定入口', () => {
   const source = readFileSync(PROJECT_LIBRARY_PATH, 'utf8');
   const poiLibrary = readProjectLibraryDefinition(source, 'poi');
   const effectLibrary = readProjectLibraryDefinition(source, 'effect');
@@ -81,7 +83,7 @@ test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库仅保留七个�
   assert.ok(poiIndex < effectIndex && effectIndex < themeIndex, '特效库应位于 POI 库与主题库之间');
   assert.deepEqual(
     [...poiLibrary.matchAll(/id: '(poi-[^']+)'/g)].map((match) => match[1]),
-    ['poi-auto-patrol', 'poi-model-generator', 'poi-click-event-binding', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
+    ['poi-auto-patrol', 'poi-model-generator', 'poi-device-spawner', 'poi-click-event-binding', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
   );
   assert.ok(!poiLibrary.includes('createPoiEffectLibraryItems()'));
   assert.ok(effectLibrary.includes("label: '特效库'"));
@@ -304,7 +306,44 @@ test('天空盒同步订阅委托 controller 清理迟到事件，列表成功�
   assert.ok(source.includes('controller.dispose();'));
   assert.ok(source.includes('if (!await waitForInitialProjectAssetsLoad(reloadSceneSessionId)) {'));
   assert.ok(source.includes('const result = await loadProjectAssets();'));
-  assert.ok(source.includes('applyAssets: (assets, sceneId) => relinkCurrentSkyboxFromAssets(assets, sceneId)'));
+  const ast = ts.createSourceFile(PROJECT_PANEL_PATH, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const matches: ts.Expression[] = [];
+  const contexts: ts.Expression[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(ast) === 'applyAssets') matches.push(node.initializer);
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === 'controller.setContext') contexts.push(node.arguments[0]);
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(matches.length, 1, '天空盒同步应只有一个资源应用入口');
+  assert.equal(contexts.length, 1, '天空盒控制器应绑定当前场景上下文');
+  const evaluate = (expression: ts.Expression, context: Record<string, unknown>) => runInNewContext(
+    ts.transpileModule('globalThis.result = (' + expression.getText(ast) + ');', {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText + ';result', context,
+  );
+  const assets: ProjectSkyboxAssetEntry[] = [];
+  const calls: unknown[][] = [];
+  const preservePackagedSkyboxRef = { current: true };
+  const applyAssets = evaluate(matches[0], {
+    preservePackagedSkyboxRef,
+    relinkCurrentSkyboxFromAssets: (...args: unknown[]) => { calls.push(args); return 'applied'; },
+  });
+  assert.equal(applyAssets(assets, 'scene-a'), 'applied');
+  preservePackagedSkyboxRef.current = false;
+  assert.equal(applyAssets(assets, 'scene-b'), 'applied');
+  assert.deepEqual(calls, [[assets, 'scene-a', true], [assets, 'scene-b', false]]);
+  for (const [readOnly, preparing, transaction, expectedReadOnly] of [[false, false, null, false], [true, false, null, true], [false, true, null, true], [false, false, {}, true]] as const) {
+    const context = evaluate(contexts[0], {
+      props: { readOnly }, localResourcePreparingRef: { current: preparing },
+      useEditorStore: { getState: () => ({ latestSceneResourceTransaction: transaction }) },
+      sceneDocument: { id: 'scene-current' }, sceneSessionId: 'session-current', skyboxSyncContextKey: 'workspace-current',
+    });
+    assert.deepEqual({ ...context }, {
+      readOnly: expectedReadOnly, sceneId: 'scene-current',
+      contextKey: 'session-current', syncContextKey: 'workspace-current',
+    });
+  }
   assert.ok(source.includes('updateSkyboxConfig(refreshedSkybox)'));
   assert.match(controllerSource, /await options\.reloadAssets\(\)/);
   assert.match(controllerSource, /result !== 'applied' && result !== 'unchanged'/);

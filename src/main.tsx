@@ -13,7 +13,7 @@ type EditorErrorBoundaryState = {
 
 /** 捕获 React 渲染链路中的异常，避免 Electron 窗口只剩空白内容区。 */
 class EditorErrorBoundary extends React.Component<EditorErrorBoundaryProps, EditorErrorBoundaryState> {
-  state: EditorErrorBoundaryState = {
+  override state: EditorErrorBoundaryState = {
     error: null,
   };
 
@@ -23,12 +23,12 @@ class EditorErrorBoundary extends React.Component<EditorErrorBoundaryProps, Edit
   }
 
   /** 输出组件栈，配合 Electron 主进程日志定位白屏根因。 */
-  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
+  override componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     console.error('编辑器渲染失败。', error, errorInfo.componentStack);
   }
 
   /** 渲染正常编辑器界面或可读错误页。 */
-  render(): ReactNode {
+  override render(): ReactNode {
     if (this.state.error) {
       return (
         <main className="app-error-screen" role="alert">

@@ -44,8 +44,10 @@ async function createFixture(version, model, skybox) {
   const skyboxUrl = 'editor-asset://local/project%2Fassets%2Fsky.hdr';
   const transform = { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } };
   scene.scene = {
-    id: 'smoke-release-cache', name: `缓存发布 ${version}`, entityIds: ['model', 'skybox'], selectedEntityId: null,
+    id: 'smoke-release-cache', name: `缓存发布 ${version}`, entityIds: ['model', 'skybox', 'roam'], selectedEntityId: null,
     entities: {
+      roam: { id: 'roam', name: '手动漫游初始位置', visible: true, locked: false, parentId: null, childrenIds: [],
+        components: { transform: { ...transform, position: { x: 0, y: 0, z: -3 } }, manualRoamSpawn: {} } },
       model: { id: 'model', name: '缓存验收模型', visible: true, locked: false, parentId: null, childrenIds: [], components: {
         transform, modelAsset: { sourcePath: modelUrl, sourceUrl: modelUrl, assetRevision: 'fixture', lengthUnit: 'meter', unitScaleToMeters: 1 },
       } },
@@ -87,7 +89,10 @@ async function createFixture(version, model, skybox) {
   await writeFile(path.join(root, 'release-cache-manifest.json'), JSON.stringify(manifest));
   assert.ok(manifest.files.some((file) => file.path.endsWith('.wasm')), '真实 Viewer 模板必须包含 WASM');
   assert.ok(manifest.files.some((file) => file.path.endsWith('.css')), '真实 Viewer 模板必须包含 CSS');
-  assert.ok(manifest.files.some((file) => file.path === 'manual-roam/EQ_People.glb'), '实际模板必须包含懒加载 avatar');
+  for (const name of ['EQ_People.glb', 'EQ_People_rigged_v1.glb', 'locomotion-v1.glb', 'locomotion-v1.manifest.json', 'EQ_People_rigged_v2.glb', 'locomotion-v2.glb', 'locomotion-v2.manifest.json']) {
+    assert.ok(manifest.files.some((file) => file.path === `manual-roam/${name}` && file.storage === 'asset'),
+      `实际模板必须包含漫游原始资源 ${name}`);
+  }
   releases.set(version, { root, manifest, config });
 }
 
@@ -314,7 +319,10 @@ async function checkCacheFailureModes() {
   let frame = await record('indexeddb-unavailable', page, '1', before, { fault: 'IndexedDB.open throws' }, 'partial');
   const rawEntries = releases.get('1').manifest.files.filter((file) => file.storage === 'asset');
   // 缓存完全不可用时只按需加载，未启用的漫游人物与备用模型不应因此强制下载。
-  for (const entry of rawEntries.filter(file => !['project/assets/models/lazy-model.glb', 'manual-roam/EQ_People.glb'].includes(file.path))) {
+  for (const entry of rawEntries.filter(file => !['project/assets/models/lazy-model.glb',
+    'manual-roam/EQ_People.glb', 'manual-roam/EQ_People_rigged_v1.glb',
+    'manual-roam/locomotion-v1.glb', 'manual-roam/locomotion-v1.manifest.json',
+    'manual-roam/EQ_People_rigged_v2.glb', 'manual-roam/locomotion-v2.glb', 'manual-roam/locomotion-v2.manifest.json'].includes(file.path))) {
     const resource = releasePrefix('1') + decodeURIComponent(entry.path);
     assert.ok((counts.get(resource) ?? 0) > (before.get(resource) ?? 0), `IDB 故障应联网加载 ${entry.path}`);
   }
@@ -446,6 +454,36 @@ try {
   assertNoStaticDownloads(before, '1', '同版本刷新');
   assert.ok(counts.get('/api/runtime-config') > (before.get('/api/runtime-config') ?? 0), '运行配置每次刷新仍从网络读取');
   assert.ok(counts.get(releasePrefix('1') + 'runtime-config.json') > (before.get(releasePrefix('1') + 'runtime-config.json') ?? 0), '发布配置每次刷新仍读取');
+
+  // 在真实发布 Viewer 中断网重进漫游，验证人物、动作和清单均走原始资源缓存。
+  await page.evaluate(() => {
+    window.roamBridgeMessages = [];
+    window.addEventListener('message', event => { if (event.data?.sessionId === 'roam-cache-smoke') window.roamBridgeMessages.push(event.data); });
+    document.querySelector('iframe').contentWindow.postMessage({ channel: 'zending.digital-twin.bridge', version: 1,
+      sessionId: 'roam-cache-smoke', type: 'host.hello' }, location.origin);
+  });
+  await page.waitForFunction(() => window.roamBridgeMessages.some(message => message.type === 'viewer.ready'), null, { timeout: 15000 });
+  await page.evaluate(() => document.querySelector('iframe').contentWindow.postMessage({ channel: 'zending.digital-twin.bridge', version: 1,
+    sessionId: 'roam-cache-smoke', type: 'command.startManualRoam', requestId: 'start-roam-cache' }, location.origin));
+  await frame.getByText('共享骨骼动作', { exact: true }).waitFor({ state: 'visible', timeout: 20000 });
+  await frame.getByRole('button', { name: '结束漫游', exact: true }).click();
+  const beforeRoam = snapshot();
+  await context.setOffline(true);
+  try {
+    for (let i = 0; i < 2; i++) {
+      await frame.getByRole('button', { name: '开始漫游', exact: true }).click();
+      await frame.getByText('共享骨骼动作', { exact: true }).waitFor({ state: 'visible' });
+      await frame.locator('canvas').click();
+      await page.keyboard.down('KeyW');
+      await page.waitForTimeout(300);
+      await page.keyboard.up('KeyW');
+      assert.ok((await renderedPixels(frame)).colors > 5);
+      await page.screenshot({ path: path.join(output, `offline-manual-roam-${i + 1}.png`) });
+      await frame.getByRole('button', { name: '结束漫游', exact: true }).click();
+    }
+    assertNoStaticDownloads(beforeRoam, '1', '断网反复进入共享骨骼漫游');
+    samples.push({ name: 'offline-manual-roam', version: '1', animation: 'shared-skeleton', iterations: 2 });
+  } finally { await context.setOffline(false); }
 
   before = snapshot();
   assert.equal((await fetchLazy(frame)).sha256, sha256(lazyBody));

@@ -1,1 +1,0 @@
-import{t as e}from"./procedural.vertex-Cqvl7fIT.js";export{e as proceduralVertexShader};

@@ -23,3 +23,8 @@ output/
 artifacts
 SharedResources
 Platforms
+# AI 助手 / 工具运行时状态与一次性验收产物
+.omx
+.superpowers
+test-artifacts
+.tmp-*

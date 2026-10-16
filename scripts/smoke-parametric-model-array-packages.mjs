@@ -151,9 +151,9 @@ function modelScriptNames(meta) {
 }
 
 const VISUAL_FIXTURE_MIRRORS = {
-  Shelf: ['output/playwright/shelf-assets/shelf.model.ts', 'output/playwright/shelf-assets/shelf.model.txt'],
-  Stacker: ['output/playwright/stacker-assets/stacker.model.ts', 'output/playwright/stacker-assets/stacker.model.txt'],
-  YZJ: ['output/playwright/yzj-assets/yzj.model.ts', 'output/playwright/yzj-assets/yzj.model.txt'],
+  Shelf: ['tests/fixtures/model-packages/shelf-assets/shelf.model.ts', 'tests/fixtures/model-packages/shelf-assets/shelf.model.txt'],
+  Stacker: ['tests/fixtures/model-packages/stacker-assets/stacker.model.ts', 'tests/fixtures/model-packages/stacker-assets/stacker.model.txt'],
+  YZJ: ['tests/fixtures/model-packages/yzj-assets/yzj.model.ts', 'tests/fixtures/model-packages/yzj-assets/yzj.model.txt'],
 };
 
 async function verifyPackageSynchronization(packageName, meta, modelName) {
