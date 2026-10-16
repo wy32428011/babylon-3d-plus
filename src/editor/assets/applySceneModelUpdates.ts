@@ -10,7 +10,7 @@ import { hasModelDataDrivenMotionKey } from '../model/telemetryBinding';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from './mergeModelAssetUpdate';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelDataDrivenConfig } from '../model/telemetryBinding';
-import { normalizeBuiltInSlotBindingConfig } from '../model/builtInSlotBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from '../model/builtInSlotBinding';
 
 export type SceneModelReplacement = { sourceUrls: string[]; asset: ProjectModelAssetEntry };
 export type SceneModelUpdateIssue = { resourceKind: 'model' | 'combo' | 'environment'; resourceId?: string; message: string };
@@ -19,10 +19,13 @@ function createUpdatedTemplate(asset: ProjectModelAssetEntry, sourceKey: string,
   const parameterConfig = normalizeModelParameterConfig(asset.parameterConfig);
   const dataDrivenConfig = asset.dataDrivenConfig ? normalizeModelDataDrivenConfig(asset.dataDrivenConfig) : undefined;
   const builtInSlotBindingConfig = asset.builtInSlotBindingConfig ? normalizeBuiltInSlotBindingConfig(asset.builtInSlotBindingConfig) : undefined;
+  const layerChangePlatformBindingConfig = asset.layerChangePlatformBindingConfig ? normalizeLayerChangePlatformBindingConfig(asset.layerChangePlatformBindingConfig) : undefined;
   if ((asset.parameterConfig !== undefined && !parameterConfig) || (asset.dataDrivenConfig && !dataDrivenConfig)
-    || (asset.builtInSlotBindingConfig && !builtInSlotBindingConfig)) onWarning?.(`模型「${asset.name}」的部分新版参数或绑定配置无效，已忽略无效配置并应用新版模型。`);
+    || (asset.builtInSlotBindingConfig && !builtInSlotBindingConfig)
+    || (asset.layerChangePlatformBindingConfig && !layerChangePlatformBindingConfig)) onWarning?.(`模型「${asset.name}」的部分新版参数或绑定配置无效，已忽略无效配置并应用新版模型。`);
   const target = createModelGeneratorTargetFromAsset({ ...asset, parameterConfig: parameterConfig ?? undefined,
-    dataDrivenConfig: dataDrivenConfig ?? undefined, builtInSlotBindingConfig: builtInSlotBindingConfig ?? undefined });
+    dataDrivenConfig: dataDrivenConfig ?? undefined, builtInSlotBindingConfig: builtInSlotBindingConfig ?? undefined,
+    layerChangePlatformBindingConfig: layerChangePlatformBindingConfig ?? undefined });
   const key = getClickEventModelResourceKey(asset.sourceUrl);
   if (!target || !key) throw new Error('新版模型资源或身份无效，原场景保持不变。');
   const [kind, resourceId, modelPath] = key.split(':') as ['model' | 'combo', string, string];

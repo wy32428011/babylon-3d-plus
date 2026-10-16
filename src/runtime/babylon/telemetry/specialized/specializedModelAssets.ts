@@ -162,6 +162,7 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     forkTargetOffset: 0,
     forkStroke: null,
     cargoBaseHomeY: null,
+    travelBodyHome: null,
     forkCatchUp: false,
     cargoKey: null,
     cargoBoundToFork: false,
@@ -189,6 +190,7 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.forkTargetOffset = 0;
   model.shuttleTelemetry.forkStroke = null;
   model.shuttleTelemetry.cargoBaseHomeY = null;
+  model.shuttleTelemetry.travelBodyHome = null;
   model.shuttleTelemetry.forkCatchUp = false;
   model.shuttleTelemetry.cargoKey = null;
   model.shuttleTelemetry.cargoBoundToFork = false;

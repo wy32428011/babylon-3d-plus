@@ -4,7 +4,7 @@ import type { ModelScriptAsset, PoiEffectKind } from '../model/components';
 import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../assets/imageAssets';
 import { findSyncedImageAssetByReference } from '../../assets/syncedImageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
-import { normalizeBuiltInSlotBindingConfig, type BuiltInSlotBindingConfig } from '../model/builtInSlotBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig, type BuiltInSlotBindingConfig, type LayerChangePlatformBindingConfig } from '../model/builtInSlotBinding';
 import { isPoiEffectKind } from '../model/poiEffect';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
@@ -34,6 +34,7 @@ export type AssetEntry = {
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
+  layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
@@ -217,6 +218,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     const parameterConfig = normalizeModelParameterConfig(payload.parameterConfig);
     const dataDrivenConfig = normalizeModelDataDrivenConfig(payload.dataDrivenConfig);
     const builtInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(payload.builtInSlotBindingConfig);
+    const layerChangePlatformBindingConfig = normalizeLayerChangePlatformBindingConfig(payload.layerChangePlatformBindingConfig);
 
     if (packagePath) asset.packagePath = packagePath;
     if (assetRevision) asset.assetRevision = assetRevision;
@@ -235,6 +237,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (parameterConfig) asset.parameterConfig = parameterConfig;
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
+    if (layerChangePlatformBindingConfig) asset.layerChangePlatformBindingConfig = layerChangePlatformBindingConfig;
     const source = payload.source === 'project' || payload.source === 'data-platform' ? payload.source : undefined;
     const availability = payload.availability === 'active' || payload.availability === 'stale'
       || payload.availability === 'unavailable' || payload.availability === 'deleted'

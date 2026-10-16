@@ -588,6 +588,10 @@ export type LocatorRuntimeEntry = {
   aisleCode: string;
   rowNumber: number;
   storageDepth: LocatorStorageDepth;
+  /** 绑定种类：'slot' 普通货格（缺省）；'layerChangePlatform' 换层站台（固定 1 列，位于暂存台头部）。 */
+  kind: 'slot' | 'layerChangePlatform';
+  /** 换层站台的轨道尽头端面世界坐标（仅 kind='layerChangePlatform' 且 layout 声明 trackEndX 时存在）；小车走行钳制边界。 */
+  platformTrackEndWorld: Vector3 | null;
 };
 
 /** 单格高亮状态：entityId 为货格（虚拟定位线框）实体，coordinate 为业务 排-列-层。 */
@@ -626,6 +630,17 @@ type BuiltInSlotLayoutInfo = {
   depthCenterZ: number;
   /** 多排布局；缺省表示单排（等价于用 depthCenterZ 与货格自身宽度）。 */
   rows?: BuiltInSlotRowLayoutInfo[];
+};
+
+/** 货架脚本写入 contentRoot metadata 的换层站台布局（暂存台头部 1 列），坐标为货架实体根节点局部米空间。 */
+type LayerChangePlatformLayoutInfo = {
+  /** 站台格中心 X（列向） */
+  centerX: number;
+  firstLayerSurfaceY: number;
+  layerStepY: number;
+  depthCenterZ: number;
+  /** 轨道尽头端面 X（列向，宿主局部坐标）：站台远端锚点，小车车体不得越过此边界。 */
+  trackEndX?: number;
 };
 
 type CadReferenceRuntimeEntry = {
@@ -1165,6 +1180,7 @@ export class SceneRuntime {
       findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
       findLocatorByAisle: (aisleCode, x, y, z) => this.findLocatorByAisle(aisleCode, x, y, z),
       findLocatorsByAisle: (aisleCode) => this.findLocatorsByAisle(aisleCode),
+      findLayerChangePlatformLocator: (assetCode, aisleCode) => this.findLayerChangePlatformLocator(assetCode, aisleCode),
       findBuiltInSlotLocatorForHostModel: (hostEntityId) => this.findBuiltInSlotLocatorForHostModel(hostEntityId),
       resolveBuiltInSlotHost: (locatorEntityId) => this.resolveBuiltInSlotHost(locatorEntityId),
       resolveCargoGeneratorForModel: (model) => this.resolveCargoGeneratorForModel(model),
@@ -4619,6 +4635,17 @@ export class SceneRuntime {
     return result;
   }
 
+  /** 按设备编号或巷道编号找换层站台 Locator：deviceAssetCode 命中优先，其次 aisleCode 匹配。 */
+  findLayerChangePlatformLocator(assetCode: string, aisleCode: string): LocatorRuntimeEntry | null {
+    let aisleMatch: LocatorRuntimeEntry | null = null;
+    for (const entry of this.locators.values()) {
+      if (entry.kind !== 'layerChangePlatform') continue;
+      if (assetCode && entry.deviceAssetCode === assetCode) return entry;
+      if (!aisleMatch && aisleCode && entry.aisleCode === aisleCode) aisleMatch = entry;
+    }
+    return aisleMatch;
+  }
+
   /** 按宿主实体 ID 找其内置货格运行时条目（无绑定返回 null）。 */
   private findBuiltInSlotLocatorForHostModel(hostEntityId: string): LocatorRuntimeEntry | null {
     for (const entry of this.locators.values()) {
@@ -4807,14 +4834,17 @@ export class SceneRuntime {
       : undefined;
     const columnSplit = hostBindingConfig ? deriveColumnSplitFromBinding(hostBindingConfig, hostParameterValues) : 1;
     const columnSign = hostBindingConfig?.columnDirection === '-x' ? -1 : 1;
-    const layout = bound
-      ? this.readBuiltInSlotLayout(hostEntry?.contentRoot.metadata ?? arrayHostRenderEntry?.contentRoot.metadata)
-      : null;
+    const isLayerChangePlatform = binding?.kind === 'layerChangePlatform';
+    const hostMetadata = hostEntry?.contentRoot.metadata ?? arrayHostRenderEntry?.contentRoot.metadata;
+    const layout = bound && !isLayerChangePlatform ? this.readBuiltInSlotLayout(hostMetadata) : null;
+    const platformLayout = bound && isLayerChangePlatform ? this.readLayerChangePlatformLayout(hostMetadata) : null;
     const bindingSteps = bound
       ? {
           // layout 写的是物理格距，按列向分裂比例细分为逻辑列步距；layout 未就绪时 locator.length 已是派生后的逻辑格宽
-          columnStepX: columnSign * (layout ? layout.columnSpacing / columnSplit : locator.length + locator.columnGap),
-          layerStepY: layout?.layerStepY ?? locator.height + locator.layerGap,
+          columnStepX: isLayerChangePlatform
+            ? locator.length + locator.columnGap
+            : columnSign * (layout ? layout.columnSpacing / columnSplit : locator.length + locator.columnGap),
+          layerStepY: (isLayerChangePlatform ? platformLayout?.layerStepY : layout?.layerStepY) ?? locator.height + locator.layerGap,
         }
       : null;
     // 多排绑定：按排索引取本排布局（越界落到末排）。排进深可能小于货格自身宽度（例如一个整格沿进深均分），
@@ -4850,7 +4880,16 @@ export class SceneRuntime {
 
     if (bound && binding && (hostEntry || arrayHostEntity)) {
       const offset = binding.originOffset;
-      const localPosition = layout
+      const localPosition = isLayerChangePlatform
+        ? (platformLayout
+            ? {
+                x: platformLayout.centerX + offset.x,
+                y: platformLayout.firstLayerSurfaceY + offset.y,
+                z: platformLayout.depthCenterZ + offset.z,
+              }
+            // 布局 metadata 未就绪（脚本尚未运行），先落在货架局部原点，脚本就绪后由 refreshBuiltInSlotBindings 修正。
+            : { x: offset.x, y: offset.y, z: offset.z })
+        : layout
         ? {
             // 逻辑首格中心 = 物理首格中心沿列向退让 (物理格宽−逻辑格宽)/2；
             // 退让方向由 columnDirection 决定（'-x' 时改向 +x 退），故符号只作用在退让量上。
@@ -4866,6 +4905,12 @@ export class SceneRuntime {
         runtimeLocator.root.rotationQuaternion = null;
         runtimeLocator.root.rotation.set(0, 0, 0);
         runtimeLocator.root.scaling.set(1, 1, 1);
+        runtimeLocator.platformTrackEndWorld = isLayerChangePlatform && platformLayout?.trackEndX !== undefined
+          ? Vector3.TransformCoordinates(
+              new Vector3(platformLayout.trackEndX + offset.x, localPosition.y, localPosition.z),
+              hostEntry.root.getWorldMatrix(),
+            )
+          : null;
       } else if (arrayHostEntity) {
         // 阵列副本在场景中没有宿主节点：把源布局点经副本实体 transform 转到世界空间。
         const hostTransform = arrayHostEntity.components.transform;
@@ -4883,11 +4928,18 @@ export class SceneRuntime {
         runtimeLocator.root.rotationQuaternion = null;
         runtimeLocator.root.rotation.set(hostTransform.rotation.x, hostTransform.rotation.y, hostTransform.rotation.z);
         runtimeLocator.root.scaling.set(hostTransform.scale.x, hostTransform.scale.y, hostTransform.scale.z);
+        runtimeLocator.platformTrackEndWorld = isLayerChangePlatform && platformLayout?.trackEndX !== undefined
+          ? Vector3.TransformCoordinates(
+              new Vector3(platformLayout.trackEndX + offset.x, localPosition.y, localPosition.z),
+              hostMatrix,
+            )
+          : null;
       }
       // 宿主可能被阵列批次挂起（根节点保持启用），货格显隐由绑定条件统一计算。
       runtimeLocator.root.setEnabled(this.computeBuiltInSlotRenderable(entity, highlightSet));
     } else {
       if (runtimeLocator.root.parent) runtimeLocator.root.parent = null;
+      runtimeLocator.platformTrackEndWorld = null;
       this.applyTransform(runtimeLocator.root, entity.components.transform);
     }
     // 覆写前捕获旧拓扑：供货格网格增量更新判定（拓扑不变走原地刷新，避免参数调整时数万顶点销毁重建）
@@ -4909,6 +4961,7 @@ export class SceneRuntime {
     runtimeLocator.startLayer = locator.startLayer;
     runtimeLocator.columnReversed = locator.columnReversed;
     runtimeLocator.storageDepth = locator.storageDepth;
+    runtimeLocator.kind = locator.builtInBinding?.kind === 'layerChangePlatform' ? 'layerChangePlatform' : 'slot';
     runtimeLocator.cellSize = { length: effectiveLocator.length, height: effectiveLocator.height, width: effectiveLocator.width };
 
     const locatorMetadata = { assetId: locator.assetId };
@@ -6521,7 +6574,7 @@ export class SceneRuntime {
     columnLabelsRoot.setEnabled(false);
     const columnLabels = this.buildLocatorColumnLabels(entityId, locator, cellSteps, columnLabelsRoot);
 
-    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, aisleCode: locator.aisleCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth };
+    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, aisleCode: locator.aisleCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth, kind: locator.builtInBinding?.kind === 'layerChangePlatform' ? 'layerChangePlatform' : 'slot', platformTrackEndWorld: null };
   }
 
   /**
@@ -6802,6 +6855,21 @@ export class SceneRuntime {
       }
     }
     return { firstCellCenterX, firstLayerSurfaceY, columnSpacing, layerStepY, depthCenterZ, ...(rows.length > 0 ? { rows } : {}) };
+  }
+
+  /** 读取货架脚本写入 contentRoot metadata 的换层站台布局；字段缺失或非有限数字时视为未就绪。 */
+  private readLayerChangePlatformLayout(metadata: unknown): LayerChangePlatformLayoutInfo | null {
+    if (!isPlainRecord(metadata)) return null;
+    const layout = metadata.layerChangePlatformLayout;
+    if (!isPlainRecord(layout)) return null;
+    const read = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+    const centerX = read(layout.centerX);
+    const firstLayerSurfaceY = read(layout.firstLayerSurfaceY);
+    const layerStepY = read(layout.layerStepY);
+    const depthCenterZ = read(layout.depthCenterZ);
+    if (centerX === null || firstLayerSurfaceY === null || layerStepY === null || depthCenterZ === null) return null;
+    const trackEndX = read(layout.trackEndX);
+    return { centerX, firstLayerSurfaceY, layerStepY, depthCenterZ, ...(trackEndX !== null ? { trackEndX } : {}) };
   }
 
   private createLocatorSignature(locator: LocatorComponent, bindingSteps?: LocatorBindingSteps | null): string {

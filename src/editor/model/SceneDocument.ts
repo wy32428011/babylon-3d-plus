@@ -27,7 +27,7 @@ import {
   createDefaultTelemetryBinding,
   normalizeModelDataDrivenConfig,
 } from './telemetryBinding';
-import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from './builtInSlotBinding';
 import {
   normalizeDataPlatformViewportScreen,
   type DataPlatformViewportScreenComponent,
@@ -1462,11 +1462,13 @@ export function createModelEntity(
   assetRevision?: string,
   dataDrivenConfig?: unknown,
   builtInSlotBindingConfig?: unknown,
+  layerChangePlatformBindingConfig?: unknown,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
   const normalizedDataDrivenConfig = normalizeModelDataDrivenConfig(dataDrivenConfig);
   const normalizedBuiltInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(builtInSlotBindingConfig);
+  const normalizedLayerChangePlatformBindingConfig = normalizeLayerChangePlatformBindingConfig(layerChangePlatformBindingConfig);
   const assetCode = createModelAssetCode(normalizedDataDrivenConfig?.device.defaultAssetCode ?? defaultAssetCodePrefix, id);
   const telemetryBinding = normalizedDataDrivenConfig?.device.devType
     ? createDefaultTelemetryBinding(normalizedDataDrivenConfig.device.devType)
@@ -1503,6 +1505,7 @@ export function createModelEntity(
           : {}),
         ...(normalizedDataDrivenConfig ? { dataDrivenConfig: normalizedDataDrivenConfig } : {}),
         ...(normalizedBuiltInSlotBindingConfig ? { builtInSlotBindingConfig: normalizedBuiltInSlotBindingConfig } : {}),
+        ...(normalizedLayerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: normalizedLayerChangePlatformBindingConfig } : {}),
       },
       ...(telemetryBinding ? { telemetryBinding } : {}),
     },

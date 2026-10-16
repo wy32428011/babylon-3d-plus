@@ -68,7 +68,7 @@ import {
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
 } from '../model/telemetryBinding';
-import { normalizeBuiltInSlotBindingConfig, normalizeLocatorBuiltInBinding } from '../model/builtInSlotBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig, normalizeLocatorBuiltInBinding } from '../model/builtInSlotBinding';
 import {
   normalizeDataPlatformScreenComponent,
   normalizeDataPlatformViewportScreen,
@@ -1164,6 +1164,10 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ? null
     : normalizeBuiltInSlotBindingConfig(modelAsset.builtInSlotBindingConfig);
   if ('builtInSlotBindingConfig' in modelAsset && !builtInSlotBindingConfig) throwUnsupportedSceneFileError();
+  const layerChangePlatformBindingConfig = modelAsset.layerChangePlatformBindingConfig === undefined
+    ? null
+    : normalizeLayerChangePlatformBindingConfig(modelAsset.layerChangePlatformBindingConfig);
+  if ('layerChangePlatformBindingConfig' in modelAsset && !layerChangePlatformBindingConfig) throwUnsupportedSceneFileError();
 
   return {
     assetCode,
@@ -1180,6 +1184,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
+    ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig } : {}),
   };
 }
 

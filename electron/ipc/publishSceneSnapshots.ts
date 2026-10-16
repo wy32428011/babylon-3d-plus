@@ -17,7 +17,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const RESOURCE_FIELDS = new Set(['id', 'name', 'displayName', 'sourceUrl', 'sourcePath', 'path', 'assetId', 'assetRevision',
   'dataPlatformModel', 'sourceSnapshot', 'packagePath', 'metadataPath', 'thumbnailPath', 'thumbnailUrl', 'scriptPaths', 'scriptAssets',
   'parameterConfig', 'parameterScriptMetadata', 'animationScriptMetadata', 'animationConfig', 'fileSizeBytes',
-  'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig']);
+  'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig']);
 
 type ParameterTemplate = { parameterConfig?: unknown };
 type ParameterConfig = { parameters?: Array<{ key?: string; type?: string; defaultValue?: unknown }> };

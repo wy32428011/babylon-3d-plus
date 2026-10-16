@@ -459,6 +459,7 @@ export type AssetEntry = {
   parameterConfig?: unknown;
   dataDrivenConfig?: unknown;
   builtInSlotBindingConfig?: unknown;
+  layerChangePlatformBindingConfig?: unknown;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
   dataPlatformResourceId?: string;

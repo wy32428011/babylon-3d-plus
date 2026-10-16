@@ -68,6 +68,7 @@ export async function validateSceneModelResourceReferences(
     // 专用驱动读取新版脚本声明，旧 dataDrivenConfig 只是保留的 Inspector 摘要，不能拿旧节点名误拦新版脚本。
     validateDataDrivenBindings(object(asset.dataDrivenConfig), targets, label, warnings);
     validateBuiltInSlotParameters(object(asset.builtInSlotBindingConfig), effectiveConfig, label, warnings);
+    validateBuiltInSlotParameters(object(asset.layerChangePlatformBindingConfig), effectiveConfig, label, warnings, 'layerChangePlatformBinding');
     const oldDefinitions = new Map(array(oldConfig?.parameters).map((definition) => {
       const value = object(definition);
       return [value?.key, value] as const;
@@ -150,7 +151,7 @@ function validateDataDrivenBindings(config: JsonObject | undefined, targets: Mod
 }
 
 /** 内置货格绑定引用参数 key，而非 GLB 节点；新版无效映射只提示，不阻止应用新模型。 */
-function validateBuiltInSlotParameters(config: JsonObject | undefined, parameters: JsonObject | undefined, label: string, warnings: string[]): void {
+function validateBuiltInSlotParameters(config: JsonObject | undefined, parameters: JsonObject | undefined, label: string, warnings: string[], fieldName = 'builtInSlotBinding'): void {
   if (!config) return;
   const keys = new Set(array(parameters?.parameters).map(definition => object(definition)?.key));
   const mapping = object(config.dimensionMapping);
@@ -162,7 +163,7 @@ function validateBuiltInSlotParameters(config: JsonObject | undefined, parameter
   for (const value of references) {
     if (typeof value !== 'string' || !value.trim()) continue;
     if (!keys.has(value.trim())) {
-      warnings.push(`模型更新提示 [${label}] builtInSlotBinding 参数 "${value.trim()}" 在新版模型中不存在，对应映射已跳过，模型继续替换。`);
+      warnings.push(`模型更新提示 [${label}] ${fieldName} 参数 "${value.trim()}" 在新版模型中不存在，对应映射已跳过，模型继续替换。`);
     }
   }
 }

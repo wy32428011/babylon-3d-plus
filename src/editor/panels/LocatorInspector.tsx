@@ -47,6 +47,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     ? `未绑定（跟随场景默认：${sceneDefaultGeneratorName}）`
     : '未绑定（内置立方体）';
   const builtInBinding = component.builtInBinding;
+  const isLayerChangePlatform = builtInBinding?.kind === 'layerChangePlatform';
 
   function handleDimensionChange(field: LocatorDimensionField, rawValue: string) {
     if (rawValue === '') return;
@@ -78,7 +79,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
   return (
     <>
     <fieldset className="transform-fieldset">
-      <legend>虚拟定位线框</legend>
+      <legend>{isLayerChangePlatform ? '换层站台' : '虚拟定位线框'}</legend>
       <label className="inspector-row">
         <span>资产编号</span>
         <input
@@ -113,6 +114,8 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           title="与堆垛机、多穿车等运载设备上的巷道编号对应；一条巷道对应多台运载设备和多个库位"
         />
       </label>
+      {!isLayerChangePlatform ? (
+      <>
       <label className="inspector-row">
         <span>排号 ({'to_z'})</span>
         <input
@@ -141,21 +144,24 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           <option value="far">远排（二段货叉）</option>
         </select>
       </label>
+      </>
+      ) : null}
       <label className="inspector-row">
         <span>起始列</span>
         <input
           type="number"
           disabled={disabled}
-          min={0}
+          min={isLayerChangePlatform ? -99 : 0}
           max={999}
           step={1}
           value={component.startColumn}
           onChange={(event) => {
             const value = Number(event.target.value);
-            if (Number.isFinite(value) && value >= 0 && value <= 999) {
+            if (Number.isFinite(value) && value >= (isLayerChangePlatform ? -99 : 0) && value <= 999) {
               updateSelectedLocator({ startColumn: Math.round(value) });
             }
           }}
+          title={isLayerChangePlatform ? '换层站台位于货架头部（列 0 之前），允许负值；小车遥测 x=-1 即进入本站台' : undefined}
         />
       </label>
       <label className="inspector-row">
@@ -190,12 +196,13 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
           <span>{label}</span>
           <input
             type="number"
-            disabled={disabled || Boolean(builtInBinding)}
+            disabled={disabled || Boolean(builtInBinding) || (isLayerChangePlatform && key === 'columns')}
             min={min}
             max={Number.isFinite(max) ? max : undefined}
             step={step}
             value={component[key]}
             onChange={(event) => handleDimensionChange(key, event.target.value)}
+            title={isLayerChangePlatform && key === 'columns' ? '换层站台固定 1 列' : undefined}
           />
         </label>
       ))}
@@ -203,7 +210,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     </fieldset>
     {builtInBinding ? (
       <fieldset className="transform-fieldset">
-        <legend>内置货格</legend>
+        <legend>{isLayerChangePlatform ? '换层站台' : '内置货格'}</legend>
         <p className="muted">位置与维度由货架驱动；基点微调用于在货架局部坐标内微调对齐。</p>
         {(['x', 'y', 'z'] as const).map((axis) => (
           <label className="inspector-row" key={axis}>
@@ -219,6 +226,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
         ))}
       </fieldset>
     ) : null}
+    {!isLayerChangePlatform ? (
     <fieldset className="transform-fieldset">
       <legend>Fetch 数据驱动</legend>
       <p className="muted">运行预览时按排号从 Fetch 接口拉取库存并渲染到本线框库位；排号、起始列使用上方已有配置。</p>
@@ -242,6 +250,7 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
       </label>
       {cargoGeneratorMissing ? <p className="telemetry-runtime-error">绑定的模型生成器已被删除，运行时将回退场景默认或内置立方体。</p> : null}
     </fieldset>
+    ) : null}
     </>
   );
 }

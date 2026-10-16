@@ -6,7 +6,7 @@ import { isAllowedTextureReference } from '../model/textureReferences';
 const RESOURCE_FIELDS = [
   'sourcePath', 'sourceUrl', 'sourceSnapshot', 'assetRevision', 'lengthUnit', 'unitScaleToMeters',
   'scriptAssets', 'parameterScriptMetadata', 'animationScriptMetadata', 'parameterConfig',
-  'parameterValues', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'dataPlatformModel',
+  'parameterValues', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig', 'dataPlatformModel',
 ] as const;
 
 function acceptsValue(definition: ModelParameterDefinition, value: unknown): boolean {
@@ -39,7 +39,7 @@ export function mergeSceneModelAssetUpdate<T extends ModelAssetTemplate>(
   if (previous.lengthUnit !== next.lengthUnit || previous.unitScaleToMeters !== next.unitScaleToMeters) {
     onWarning?.(`模型同步 [${context}]：源单位发生变化，已采用新版单位并保留实例摆放。`);
   }
-  for (const field of ['dataDrivenConfig', 'builtInSlotBindingConfig'] as const) {
+  for (const field of ['dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig'] as const) {
     if (JSON.stringify(previous[field]) !== JSON.stringify(next[field])) {
       onWarning?.(`模型同步 [${context}]：${field} 已采用新版模型配置，场景业务关联保持。`);
     }

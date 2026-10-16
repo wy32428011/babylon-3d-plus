@@ -55,6 +55,8 @@ type ShuttleTargetCell = {
   toX: number;
   toY: number;
   row: number;
+  /** 换层站台货格（x 负值语义）：站台不支持装卸货，Status=1/2 伸叉被抑制。 */
+  isLayerChangePlatform?: boolean;
 };
 
 /** to_Depth 位值 → 排号：1→排1，2→排2，4→排3，8→排4。 */
@@ -129,13 +131,20 @@ export class ShuttleTelemetryDriver {
   }
 
   /**
-   * to_x/to_y/to_Depth 目标货格解析：三字段全部缺失或全为 0（无目标/任务完结）返回无目标；
+   * 目标货格解析：x 字段优先于 to_x/to_y/to_Depth——
+   * x=-1/-2 指向换层站台货格（层取 y 字段，排固定站台排），x>=0 或字段缺失走原 to_x/to_y/to_Depth 逻辑：
+   * 三字段全部缺失或全为 0（无目标/任务完结）返回无目标；
    * to_Depth 位值非法、或绑定设备与绑定巷道两路都匹配不到货格时一次性告警并冻结（mismatch）。
    */
   private resolveShuttleTargetCell(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
   ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
+    const x = readIntegerField(snapshot.fields, 'x');
+    if (x === -1 || x === -2) {
+      return this.resolveLayerChangePlatformCell(model, snapshot, x);
+    }
+
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
     const toDepth = readIntegerField(snapshot.fields, 'to_Depth');
@@ -162,6 +171,50 @@ export class ShuttleTelemetryDriver {
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, toX, toY);
     if (!supportPosition) return { cell: null, key: null, mismatch: true };
     return { cell: { locator, supportPosition, toX, toY, row }, key: JSON.stringify([toX, toY, row]), mismatch: false };
+  }
+
+  /**
+   * x=-1（驶入站台等待提升）/ x=-2（换层中，Y 随 y 闪现）的站台货格解析：
+   * 层取 y 字段（非 to_y），排固定站台排（rowNumber），列固定站台起始列（-1）。
+   * y 缺失/非法或未匹配到站台时一次性告警并冻结（mismatch）。
+   */
+  private resolveLayerChangePlatformCell(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    x: number,
+  ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
+    const y = readIntegerField(snapshot.fields, 'y');
+    if (y === null || y < 1) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-layer:${y ?? 'missing'}`;
+      if (!this.state.reportedMissingTargets.has(reportKey)) {
+        this.state.reportedMissingTargets.add(reportKey);
+        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} x=${x} 进入换层流程但 y=${y ?? '缺失'} 非法（层号需 ≥1），已冻结移动。`);
+      }
+      return { cell: null, key: null, mismatch: true };
+    }
+
+    const aisleCode = this.resolveShuttleAisleCode(model);
+    const locator = this.host.findLayerChangePlatformLocator(snapshot.assetCode, aisleCode);
+    if (!locator) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-missing`;
+      if (!this.state.reportedMissingTargets.has(reportKey)) {
+        this.state.reportedMissingTargets.add(reportKey);
+        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} x=${x} 请求换层站台，但未匹配到换层站台（设备绑定与巷道${aisleCode || '未配置'}均无站台货格），已冻结移动。`);
+      }
+      return { cell: null, key: null, mismatch: true };
+    }
+
+    const supportPosition = this.resolveLocatorBoxSupportPosition(locator, locator.startColumn, y);
+    if (!supportPosition) return { cell: null, key: null, mismatch: true };
+    const cell: ShuttleTargetCell = {
+      locator,
+      supportPosition,
+      toX: locator.startColumn,
+      toY: y,
+      row: locator.rowNumber,
+      isLayerChangePlatform: true,
+    };
+    return { cell, key: JSON.stringify(['platform', y]), mismatch: false };
   }
 
   /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位超出货格列层范围。 */
@@ -238,7 +291,7 @@ export class ShuttleTelemetryDriver {
     if (state.lastTargetCellKey === null) {
       state.lastTargetCellKey = key;
       state.lastTargetCellChangedAtMs = nowMs;
-      if (cell) this.snapShuttleToCell(model, cell.supportPosition);
+      if (cell) this.snapShuttleToCell(model, cell);
       return;
     }
     if (key === state.lastTargetCellKey) return;
@@ -263,16 +316,10 @@ export class ShuttleTelemetryDriver {
   }
 
   /** 首帧吸附：走行一步到位对齐目标格（仍受轨道约束钳制），货叉保持原点。 */
-  private snapShuttleToCell(model: ModelRuntimeEntry, supportPosition: Vector3): void {
+  private snapShuttleToCell(model: ModelRuntimeEntry, cell: ShuttleTargetCell): void {
     const state = model.shuttleTelemetry;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
-    const referenceCoordinate = this.getShuttleTravelReferenceCoordinate(model, travelAxis);
-    const targetTravelOffset = Vector3.Dot(supportPosition, travelAxis) - referenceCoordinate;
-    state.rootPosition = this.constrainShuttleTravelPosition(
-      model,
-      state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
-      travelAxis,
-    );
+    state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
   }
 
   /**
@@ -333,8 +380,8 @@ export class ShuttleTelemetryDriver {
   // ===== 走行（仅 Status=3，Z 轴） =====
 
   /**
-   * Status=3 且有目标格支撑位时沿走行轴向目标推进，其余状态车体停驻；
-   * 返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
+   * Status=3 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1 时不等 Status=3 即触发走行
+   * （x=-2 换层中水平冻结），其余状态车体停驻；返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
    */
   private applyShuttleTravelMotion(
     model: ModelRuntimeEntry,
@@ -347,7 +394,9 @@ export class ShuttleTelemetryDriver {
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     state.rootPosition ??= state.rootBasePosition.clone();
 
-    if (snapshot.faulted || status !== 3 || !cell) {
+    const x = readIntegerField(snapshot.fields, 'x');
+    const platformTravelTrigger = cell?.isLayerChangePlatform === true && x === -1;
+    if (snapshot.faulted || !cell || (status !== 3 && !platformTravelTrigger)) {
       return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
 
@@ -375,9 +424,35 @@ export class ShuttleTelemetryDriver {
     return Vector3.Distance(state.rootPosition ?? state.rootBasePosition, rootTargetPosition) <= SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
   }
 
-  /** 目标格支撑位换算出的走行虚拟目标位置：叉收回位中心对准货格支撑位即到位（受轨道约束钳制）。 */
+  /**
+   * 目标格支撑位换算出的走行虚拟目标位置：普通货格对齐叉收回位中心（受轨道约束钳制）；
+   * 换层站台对齐车体包围盒底部中点，且朝轨道尽头一侧的车体端面不得越过站台轨道边界（尽力对齐、越界钳回）。
+   */
   private resolveShuttleTravelTargetPosition(model: ModelRuntimeEntry, cell: ShuttleTargetCell, travelAxis: Vector3): Vector3 {
     const state = model.shuttleTelemetry;
+    if (cell.isLayerChangePlatform) {
+      const home = this.getShuttleTravelBodyHome(model, travelAxis, getModelAxis(model.root, 'y'));
+      if (home) {
+        const bodyAxisCenter = (home.axisMin + home.axisMax) / 2;
+        const cellCenterCoordinate = Vector3.Dot(cell.supportPosition, travelAxis);
+        let targetCoordinate = cellCenterCoordinate;
+        const trackEnd = cell.locator.platformTrackEndWorld;
+        if (trackEnd) {
+          const endCoordinate = Vector3.Dot(trackEnd, travelAxis);
+          const halfLength = (home.axisMax - home.axisMin) / 2;
+          const direction = Math.sign(endCoordinate - cellCenterCoordinate) || 1;
+          const limit = endCoordinate - direction * halfLength;
+          targetCoordinate = direction > 0
+            ? Math.min(cellCenterCoordinate, limit)
+            : Math.max(cellCenterCoordinate, limit);
+        }
+        return this.constrainShuttleTravelPosition(
+          model,
+          state.rootBasePosition.add(travelAxis.scale(targetCoordinate - bodyAxisCenter)),
+          travelAxis,
+        );
+      }
+    }
     const referenceCoordinate = this.getShuttleTravelReferenceCoordinate(model, travelAxis);
     const targetTravelOffset = Vector3.Dot(cell.supportPosition, travelAxis) - referenceCoordinate;
     return this.constrainShuttleTravelPosition(
@@ -444,15 +519,19 @@ export class ShuttleTelemetryDriver {
   // ===== Y 层闪现 =====
 
   /**
-   * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移，使载货基准面（载货平面包围盒顶面，
-   * 环抱式机构中货物底面所在高度）与货格底面（支撑位）持平；无目标格回零（回待机层高位）。
+   * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移。普通货格使载货基准面（载货平面包围盒顶面，
+   * 环抱式机构中货物底面所在高度）与货格底面（支撑位）持平；换层站台使车体包围盒底面与站台底面持平
+   * （整车被提升机托举）；无目标格回零（回待机层高位）。
    */
   private resolveShuttleYFlashOffset(model: ModelRuntimeEntry, cell: ShuttleTargetCell | null): Vector3 {
     if (!cell) return Vector3.Zero();
     const upAxis = getModelAxis(model.root, 'y');
     const cargoBaseHomeY = this.getShuttleCargoBaseHomeY(model, upAxis);
     if (cargoBaseHomeY === null) return Vector3.Zero();
-    return upAxis.scale(Vector3.Dot(cell.supportPosition, upAxis) - cargoBaseHomeY);
+    const homeY = cell.isLayerChangePlatform
+      ? this.getShuttleTravelBodyHome(model, getHorizontalModelAxis(model.root, 'z'), upAxis)?.bottomY ?? cargoBaseHomeY
+      : cargoBaseHomeY;
+    return upAxis.scale(Vector3.Dot(cell.supportPosition, upAxis) - homeY);
   }
 
   /** 载货基准面在无 Y 偏移时的世界高度：首个目标格帧缓存（此时节点尚未施加 Y 偏移，避免自污染）。 */
@@ -462,7 +541,29 @@ export class ShuttleTelemetryDriver {
     const topY = this.getShuttleCargoBaseTopY(model, upAxis);
     if (topY === null) return null;
     state.cargoBaseHomeY = topY;
+    // 车体原位量必须同帧缓存：之后再测会叠上已施加的 Y 闪现/走行偏移
+    this.getShuttleTravelBodyHome(model, getHorizontalModelAxis(model.root, 'z'), upAxis);
     return topY;
+  }
+
+  /** 行走车体贴（travelNodes）包围盒的无偏移原位量：中心、底面高度与走行轴投影区间；换层站台对齐与轨道尽头钳制用。 */
+  private getShuttleTravelBodyHome(
+    model: ModelRuntimeEntry,
+    travelAxis: Vector3,
+    upAxis: Vector3,
+  ): { center: Vector3; bottomY: number; axisMin: number; axisMax: number } | null {
+    const state = model.shuttleTelemetry;
+    if (state.travelBodyHome) return state.travelBodyHome;
+    const bounds = getNodesWorldBounds(this.findShuttleTravelNodes(model));
+    if (!bounds) return null;
+    const projected = projectWorldBoundsOntoAxis(bounds, travelAxis);
+    state.travelBodyHome = {
+      center: bounds.minimum.add(bounds.maximum).scale(0.5),
+      bottomY: projectWorldBoundsOntoAxis(bounds, upAxis).min,
+      axisMin: projected.min,
+      axisMax: projected.max,
+    };
+    return state.travelBodyHome;
   }
 
   /** 载货基准面顶面高度：优先载货平面节点（cargoDeckNodes）包围盒顶面，未声明时回退二段叉顶面。 */
@@ -504,6 +605,16 @@ export class ShuttleTelemetryDriver {
     }
     // 目标位失配/缺失：冻结伸叉（滞留伸出由 Status 离开或目标恢复后的相位逻辑处理）
     if (target.mismatch || !target.cell) return;
+    // 换层站台只承载整车等待/换层，不支持装卸货：一次性告警并保持收叉
+    if (target.cell.isLayerChangePlatform) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-fork:${status}`;
+      if (!this.state.reportedMissingTargets.has(reportKey)) {
+        this.state.reportedMissingTargets.add(reportKey);
+        this.host.pushLog(`多穿小车 ${snapshot.assetCode} 当前目标为换层站台，站台不支持装卸货（Status=${status}），已忽略伸叉。`);
+      }
+      this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds);
+      return;
+    }
     // 车未到位不伸叉：走行期间或尚未对准目标格时保持收叉
     if (travel.moving || !travel.arrived) {
       this.retractShuttleForkToHome(model, forkSpeed, deltaSeconds);

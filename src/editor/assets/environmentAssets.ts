@@ -11,7 +11,7 @@ import {
 } from '../model/sceneUnits';
 
 // 环境读取不消费设备参数元数据，兼容主进程原始资产与编辑器资产。
-type EnvironmentAsset = Omit<AssetEntry, 'parameterConfig' | 'dataDrivenConfig' | 'builtInSlotBindingConfig'>;
+type EnvironmentAsset = Omit<AssetEntry, 'parameterConfig' | 'dataDrivenConfig' | 'builtInSlotBindingConfig' | 'layerChangePlatformBindingConfig'>;
 
 type ModelPackageVariant = {
   name: string;

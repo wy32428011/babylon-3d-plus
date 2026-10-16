@@ -348,6 +348,7 @@ type ModelParameterConfig = import('./editor/model/modelParameters').ModelParame
 type ModelScriptAsset = import('./editor/model/components').ModelScriptAsset;
 type ModelDataDrivenConfig = import('./editor/model/telemetryBinding').ModelDataDrivenConfig;
 type BuiltInSlotBindingConfig = import('./editor/model/builtInSlotBinding').BuiltInSlotBindingConfig;
+type LayerChangePlatformBindingConfig = import('./editor/model/builtInSlotBinding').LayerChangePlatformBindingConfig;
 
 type AssetEntry = {
   id: string;
@@ -372,6 +373,7 @@ type AssetEntry = {
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
+  layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';

@@ -477,6 +477,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
+    layerChangePlatformBindingConfig: isPlainObject(asset.layerChangePlatformBindingConfig) ? asset.layerChangePlatformBindingConfig : undefined,
     source,
     availability,
     dataPlatformResourceId,

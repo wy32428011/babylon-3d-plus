@@ -25,7 +25,7 @@ import {
 } from '../model/entityHierarchy';
 import { containsManualRoamSpawnEntity } from '../model/manualRoamSpawn';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
-import { findBuiltInSlotEntities } from '../model/builtInSlotBinding';
+import { findBuiltInSlotEntities, findLayerChangePlatformEntity } from '../model/builtInSlotBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { DeviceSpawnerInspector } from './DeviceSpawnerInspector';
@@ -377,6 +377,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const isGeneratorEntity = Boolean(modelGenerator || deviceSpawner);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
+  const layerChangePlatformEntity = modelAsset ? findLayerChangePlatformEntity(scene, selectedEntity.id) : null;
   const transformDisabled = isLocked || isBuiltInBound;
   const transformFields: readonly TransformField[] = light
     ? getLightEditorCapabilities(light.lightKind).transformFields
@@ -763,6 +764,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 </label>
               );
             })}
+            {layerChangePlatformEntity ? (
+              <label className="inspector-row">
+                <span>换层站台</span>
+                <button
+                  type="button"
+                  disabled={isLocked}
+                  onClick={() => requestRevealHierarchyEntity(layerChangePlatformEntity.id)}
+                >
+                  跳转定位
+                </button>
+              </label>
+            ) : null}
           </fieldset>
           {isSpecializedTelemetryDeviceType(modelAsset.dataDrivenConfig?.device.devType) ? (
             <>

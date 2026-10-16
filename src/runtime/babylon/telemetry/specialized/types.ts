@@ -499,6 +499,8 @@ export type ShuttleModelTelemetryState = {
   forkStroke: number | null;
   /** 载货基准面（cargoDeckNodes 包围盒顶面，缺失时回退二段叉顶面）在无 Y 闪现偏移时的世界高度（首个目标格帧缓存，此时节点尚未施加 Y 偏移）；null 表示尚未测量。 */
   cargoBaseHomeY: number | null;
+  /** 行走车体（travelNodes）包围盒无偏移时的原位量：center=世界中心、bottomY=底面高度、axisMin/Max=走行轴投影区间；换层站台目标的车体对齐与轨道尽头钳制用，与 cargoBaseHomeY 同帧缓存防污染。 */
+  travelBodyHome: { center: Vector3; bottomY: number; axisMin: number; axisMax: number } | null;
   /** true 表示库位跳变收尾中：货叉加速收回，收回前冻结走行。 */
   forkCatchUp: boolean;
   /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示叉上/滞留货格有货。 */
@@ -586,6 +588,8 @@ export interface SpecializedTelemetryHost {
   findLocatorByAisle(aisleCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
   /** 返回巷道绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
   findLocatorsByAisle(aisleCode: string): LocatorRuntimeEntry[];
+  /** 按设备编号或巷道编号找换层站台 Locator（多穿小车 x 负值语义用）：deviceAssetCode 命中优先，其次 aisleCode 匹配。 */
+  findLayerChangePlatformLocator(assetCode: string, aisleCode: string): LocatorRuntimeEntry | null;
   /** 按宿主实体 ID 找其内置货格运行时条目（无绑定返回 null）。 */
   findBuiltInSlotLocatorForHostModel(hostEntityId: string): LocatorRuntimeEntry | null;
   /** 反查内置货格的宿主模型与其货格条目（非内置货格返回 null）。 */

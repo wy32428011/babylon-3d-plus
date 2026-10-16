@@ -7,6 +7,8 @@ const MODEL_PARAMETER_SCHEMA = 'babylon-editor.model-parameters';
 const INFO_FIELD_KEYS = new Set(['modelKey', 'deviceType', 'deviceName', 'description']);
 const BUILT_IN_SLOT_BINDING_EXPORT_NAME = 'builtInSlotBinding';
 const BUILT_IN_SLOT_DIMENSION_KEYS = new Set(['columns', 'layers', 'length', 'height', 'width']);
+const LAYER_CHANGE_PLATFORM_BINDING_EXPORT_NAME = 'layerChangePlatformBinding';
+const LAYER_CHANGE_PLATFORM_DIMENSION_KEYS = new Set(['layers', 'length', 'height', 'width']);
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
@@ -201,23 +203,40 @@ function normalizeBuiltInSlotBinding(source) {
   };
 }
 
-/** 从 .model.ts 源码提取 `export const builtInSlotBinding = {...}` 的 JSON 值；未声明返回 null，声明非法返回 undefined。 */
-function extractBuiltInSlotBindingFromScript(sourceText) {
+/** 与 src/editor/model/builtInSlotBinding.ts 的 normalizeLayerChangePlatformBindingConfig 保持一致。 */
+function normalizeLayerChangePlatformBinding(source) {
+  if (!isPlainObject(source)) return null;
+  const enabledParam = typeof source.enabledParam === 'string' ? source.enabledParam.trim() : '';
+  if (!enabledParam) return null;
+
+  const dimensionMapping = {};
+  if (isPlainObject(source.dimensionMapping)) {
+    for (const [key, paramKey] of Object.entries(source.dimensionMapping)) {
+      if (!LAYER_CHANGE_PLATFORM_DIMENSION_KEYS.has(key)) continue;
+      if (typeof paramKey === 'string' && paramKey.trim()) dimensionMapping[key] = paramKey.trim();
+    }
+  }
+
+  return { enabledParam, dimensionMapping };
+}
+
+/** 从 .model.ts 源码提取 `export const <exportName> = {...}` 的 JSON 值；未声明返回 null，声明非法返回 undefined。 */
+function extractBindingExportFromScript(sourceText, exportName) {
   const sourceFile = ts.createSourceFile('model.ts', sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   for (const statement of sourceFile.statements) {
     if (!ts.isVariableStatement(statement)) continue;
     const hasExport = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
     if (!hasExport) continue;
     for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== BUILT_IN_SLOT_BINDING_EXPORT_NAME) continue;
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== exportName) continue;
       return expressionToJsonValue(declaration.initializer) ?? undefined;
     }
   }
   return null;
 }
 
-/** 读取模型包内声明了绑定的 .model.ts，返回同步后的 builtInSlotBinding 字段值。 */
-async function readPackageBuiltInSlotBinding(packageDirectory, metadata) {
+/** 读取模型包内声明了指定绑定导出的 .model.ts，返回同步后的绑定字段值。 */
+async function readPackageBindingExport(packageDirectory, metadata, exportName, normalize) {
   const scriptFileNames = new Set();
   for (const section of [metadata.parameterScripts, metadata.animationScripts]) {
     if (!Array.isArray(section)) continue;
@@ -235,9 +254,9 @@ async function readPackageBuiltInSlotBinding(packageDirectory, metadata) {
     } catch {
       continue;
     }
-    const extracted = extractBuiltInSlotBindingFromScript(sourceText);
+    const extracted = extractBindingExportFromScript(sourceText, exportName);
     if (extracted === null) continue;
-    const normalized = extracted === undefined ? null : normalizeBuiltInSlotBinding(extracted);
+    const normalized = extracted === undefined ? null : normalize(extracted);
     if (!normalized) return { status: 'invalid', scriptFileName };
     return { status: 'declared', value: normalized, scriptFileName };
   }
@@ -255,6 +274,13 @@ function parseArgs() {
 }
 
 async function getPackageDirectories(root) {
+  // 根目录本身就是模型包（含 meta.json）时只处理这一个包，避免整库扫描改写无关包
+  try {
+    await fs.access(path.join(root, 'meta.json'));
+    return [root];
+  } catch {
+    // 不是单包目录，按整库扫描
+  }
   const entries = await fs.readdir(root, { withFileTypes: true });
   return entries.filter((entry) => entry.isDirectory()).map((entry) => path.join(root, entry.name));
 }
@@ -279,13 +305,26 @@ async function main() {
     }
 
     const modelParameters = createModelParameters(metadata);
-    const bindingResult = await readPackageBuiltInSlotBinding(packageDirectory, metadata);
+    const bindingResult = await readPackageBindingExport(
+      packageDirectory, metadata, BUILT_IN_SLOT_BINDING_EXPORT_NAME, normalizeBuiltInSlotBinding,
+    );
+    const platformBindingResult = await readPackageBindingExport(
+      packageDirectory, metadata, LAYER_CHANGE_PLATFORM_BINDING_EXPORT_NAME, normalizeLayerChangePlatformBinding,
+    );
 
     if (bindingResult.status === 'invalid') {
       summary.push({
         package: path.basename(packageDirectory),
         status: 'skip',
         reason: `${bindingResult.scriptFileName} 中 export const builtInSlotBinding 声明非法`,
+      });
+      continue;
+    }
+    if (platformBindingResult.status === 'invalid') {
+      summary.push({
+        package: path.basename(packageDirectory),
+        status: 'skip',
+        reason: `${platformBindingResult.scriptFileName} 中 export const layerChangePlatformBinding 声明非法`,
       });
       continue;
     }
@@ -299,6 +338,9 @@ async function main() {
     // builtInSlotBinding 以 .model.ts 导出常量为单一源头：已声明则写回，未声明则移除 meta.json 陈旧字段。
     if (bindingResult.status === 'declared') nextMetadata.builtInSlotBinding = bindingResult.value;
     else delete nextMetadata.builtInSlotBinding;
+    // layerChangePlatformBinding 同理：换层站台绑定声明的单一源头也是 .model.ts 导出常量。
+    if (platformBindingResult.status === 'declared') nextMetadata.layerChangePlatformBinding = platformBindingResult.value;
+    else delete nextMetadata.layerChangePlatformBinding;
     const nextContent = `${JSON.stringify(nextMetadata, null, 2)}\n`;
     const changed = nextContent !== originalContent;
 
@@ -312,6 +354,7 @@ async function main() {
       status: changed ? (write ? 'updated' : 'pending') : 'unchanged',
       parameters: modelParameters.parameters.length,
       builtInSlotBinding: bindingResult.status,
+      layerChangePlatformBinding: platformBindingResult.status,
     });
   }
 

@@ -14,7 +14,7 @@ import type {
 import { createDefaultModelParameterValues, normalizeModelParameterConfig, restoreModelParameterValues } from './modelParameters';
 import { createModelLengthUnitInfo, normalizeModelLengthUnitInfo } from './sceneUnits';
 import { normalizeModelDataDrivenConfig } from './telemetryBinding';
-import { normalizeBuiltInSlotBindingConfig } from './builtInSlotBinding';
+import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from './builtInSlotBinding';
 import { normalizeModelSourceSnapshot } from './modelSourceSnapshot';
 
 /** 模型生成器从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
@@ -38,6 +38,7 @@ type ModelGeneratorSourceAsset = {
   parameterConfig?: ModelAssetTemplate['parameterConfig'];
   dataDrivenConfig?: ModelAssetTemplate['dataDrivenConfig'];
   builtInSlotBindingConfig?: ModelAssetTemplate['builtInSlotBindingConfig'];
+  layerChangePlatformBindingConfig?: ModelAssetTemplate['layerChangePlatformBindingConfig'];
 };
 
 /** 单个模型生成器允许保存的最大规则数。 */
@@ -144,6 +145,10 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     ? null
     : normalizeBuiltInSlotBindingConfig(value.builtInSlotBindingConfig);
   if (value.builtInSlotBindingConfig !== undefined && !builtInSlotBindingConfig) return null;
+  const layerChangePlatformBindingConfig = value.layerChangePlatformBindingConfig === undefined
+    ? null
+    : normalizeLayerChangePlatformBindingConfig(value.layerChangePlatformBindingConfig);
+  if (value.layerChangePlatformBindingConfig !== undefined && !layerChangePlatformBindingConfig) return null;
   const scriptAssets = sanitizeModelScriptAssets(value.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(value.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(value.animationScriptMetadata);
@@ -170,6 +175,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
       : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
+    ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig } : {}),
   };
 }
 
@@ -180,6 +186,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
   const unitInfo = createModelLengthUnitInfo(asset.lengthUnit);
   const dataDrivenConfig = asset.dataDrivenConfig ? normalizeModelDataDrivenConfig(asset.dataDrivenConfig) : null;
   const builtInSlotBindingConfig = asset.builtInSlotBindingConfig ? normalizeBuiltInSlotBindingConfig(asset.builtInSlotBindingConfig) : null;
+  const layerChangePlatformBindingConfig = asset.layerChangePlatformBindingConfig ? normalizeLayerChangePlatformBindingConfig(asset.layerChangePlatformBindingConfig) : null;
   const scriptAssets = sanitizeModelScriptAssets(asset.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(asset.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(asset.animationScriptMetadata);
@@ -198,6 +205,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
     ...(parameterConfig ? { parameterConfig, parameterValues: createDefaultModelParameterValues(parameterConfig) } : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(dataDrivenConfig) } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(builtInSlotBindingConfig) } : {}),
+    ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: cloneJsonValue(layerChangePlatformBindingConfig) } : {}),
   };
 }
 

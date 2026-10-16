@@ -4,7 +4,7 @@ import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTw
 import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
 import type { Vector3Data } from './math';
-import type { BuiltInSlotBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
+import type { BuiltInSlotBindingConfig, LayerChangePlatformBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
@@ -147,6 +147,8 @@ export type ModelAssetTemplate = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   /** 模型包声明的内置货格绑定映射；缺省表示该模型不支持内置货格。 */
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
+  /** 模型包声明的换层站台绑定映射；缺省表示该模型不支持换层站台。 */
+  layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
 };
 
 /** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */

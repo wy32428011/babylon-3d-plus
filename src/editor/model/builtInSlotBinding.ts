@@ -33,6 +33,19 @@ export type LocatorBuiltInBinding = {
   rowIndex: number;
   /** 基点微调（米，宿主模型局部米空间，叠加在自动对齐结果上） */
   originOffset: Vector3Data;
+  /** 绑定种类：缺省 'slot'（内置货格）；'layerChangePlatform' 为换层站台（固定 1 列，置于暂存台头部） */
+  kind?: 'slot' | 'layerChangePlatform';
+};
+
+/**
+ * 模型包声明的换层站台绑定映射（与内置货格平行的一套声明）。
+ * 站台固定 1 列（起始列缺省 -1，允许用户改为其他负值）、排固定 1，故维度映射不含 columns。
+ */
+export type LayerChangePlatformBindingConfig = {
+  /** 启用开关的模型参数 key（boolean 类型参数） */
+  enabledParam: string;
+  /** 站台维度字段 ← 模型参数 key；缺省的字段保持站台自身值 */
+  dimensionMapping: Partial<Record<'layers' | 'length' | 'height' | 'width', string>>;
 };
 
 const DIMENSION_KEYS = ['columns', 'layers', 'length', 'height', 'width'] as const;
@@ -73,6 +86,31 @@ export function getBuiltInSlotBindingConfig(entity: Entity | null | undefined): 
   return entity?.components.modelAsset?.builtInSlotBindingConfig;
 }
 
+/** 校验并归一化来自 meta.json 的换层站台绑定声明；非法输入返回 undefined。 */
+export function normalizeLayerChangePlatformBindingConfig(source: unknown): LayerChangePlatformBindingConfig | undefined {
+  if (!source || typeof source !== 'object') return undefined;
+  const record = source as Record<string, unknown>;
+  const enabledParam = typeof record.enabledParam === 'string' ? record.enabledParam.trim() : '';
+  if (!enabledParam) return undefined;
+
+  const mappingSource = record.dimensionMapping;
+  const dimensionMapping: LayerChangePlatformBindingConfig['dimensionMapping'] = {};
+  if (mappingSource && typeof mappingSource === 'object') {
+    for (const key of ['layers', 'length', 'height', 'width'] as const) {
+      const paramKey = (mappingSource as Record<string, unknown>)[key];
+      if (typeof paramKey === 'string' && paramKey.trim()) {
+        dimensionMapping[key] = paramKey.trim();
+      }
+    }
+  }
+  return { enabledParam, dimensionMapping };
+}
+
+/** 读取实体模型资产上声明的换层站台绑定配置。 */
+export function getLayerChangePlatformBindingConfig(entity: Entity | null | undefined): LayerChangePlatformBindingConfig | undefined {
+  return entity?.components.modelAsset?.layerChangePlatformBindingConfig;
+}
+
 /** 校验并归一化货格实体上的内置绑定标记；结构非法时返回 undefined（视为未绑定）。 */
 export function normalizeLocatorBuiltInBinding(source: unknown): LocatorBuiltInBinding | undefined {
   if (!source || typeof source !== 'object') return undefined;
@@ -84,7 +122,8 @@ export function normalizeLocatorBuiltInBinding(source: unknown): LocatorBuiltInB
   const read = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
   const rawRowIndex = record.rowIndex;
   const rowIndex = typeof rawRowIndex === 'number' && Number.isInteger(rawRowIndex) && rawRowIndex >= 0 ? rawRowIndex : 0;
-  return { hostEntityId, rowIndex, originOffset: { x: read(offset.x), y: read(offset.y), z: read(offset.z) } };
+  const kind = record.kind === 'layerChangePlatform' ? 'layerChangePlatform' as const : undefined;
+  return { hostEntityId, rowIndex, originOffset: { x: read(offset.x), y: read(offset.y), z: read(offset.z) }, ...(kind ? { kind } : {}) };
 }
 
 /** 判断实体是否为已启用的内置货格（绑定标记存在且指向有效宿主）。 */
@@ -160,16 +199,75 @@ function sanitizeDimensionValue(key: DimensionKey, value: number): number {
   return Math.max(0.01, value);
 }
 
-/** 查找绑定到指定宿主的全部内置货格实体，按排索引升序（排索引相同则保持场景顺序）。 */
+/** 按声明的维度映射从宿主模型参数值派生换层站台维度（仅 layers/length/height/width，列恒 1）。 */
+export function deriveLayerChangePlatformDimensionsFromBinding(
+  config: LayerChangePlatformBindingConfig,
+  parameterValues: ModelParameterValues | undefined,
+): Partial<Pick<LocatorComponent, 'layers' | 'length' | 'width' | 'height'>> {
+  const result: Partial<Pick<LocatorComponent, 'layers' | 'length' | 'width' | 'height'>> = {};
+  if (!parameterValues) return result;
+  for (const key of ['layers', 'length', 'height', 'width'] as const) {
+    const paramKey = config.dimensionMapping[key];
+    if (!paramKey) continue;
+    const raw = parameterValues[paramKey];
+    const value = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(value)) continue;
+    result[key] = sanitizeDimensionValue(key, value);
+  }
+  return result;
+}
+
+/**
+ * 把宿主模型参数派生的站台维度写入其换层站台实体。
+ * 宿主未声明站台绑定、无站台实体或维度无变化时返回原 scene。
+ */
+export function patchLayerChangePlatformDimensions(scene: SceneDocument, hostEntityId: string): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  const config = getLayerChangePlatformBindingConfig(host);
+  if (!host || !config) return scene;
+
+  const platform = findLayerChangePlatformEntity(scene, hostEntityId);
+  const locator = platform?.components.locator;
+  if (!platform || !locator) return scene;
+
+  const derived = deriveLayerChangePlatformDimensionsFromBinding(config, host.components.modelAsset?.parameterValues);
+  const entries = Object.entries(derived).filter(([key, value]) => locator[key as 'layers' | 'length' | 'width' | 'height'] !== value);
+  if (entries.length === 0) return scene;
+  return {
+    ...scene,
+    entities: {
+      ...scene.entities,
+      [platform.id]: {
+        ...platform,
+        components: { ...platform.components, locator: { ...locator, ...derived } },
+      },
+    },
+  };
+}
+
+/** 查找绑定到指定宿主的全部内置货格实体（不含换层站台），按排索引升序（排索引相同则保持场景顺序）。 */
 export function findBuiltInSlotEntities(scene: SceneDocument, hostEntityId: string): Entity[] {
   const matched: Entity[] = [];
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
-    if (entity?.components.locator?.builtInBinding?.hostEntityId === hostEntityId) matched.push(entity);
+    const binding = entity?.components.locator?.builtInBinding;
+    if (binding?.hostEntityId !== hostEntityId) continue;
+    if (binding.kind === 'layerChangePlatform') continue;
+    matched.push(entity);
   }
   return matched.sort((left, right) => (
     (left.components.locator?.builtInBinding?.rowIndex ?? 0) - (right.components.locator?.builtInBinding?.rowIndex ?? 0)
   ));
+}
+
+/** 查找绑定到指定宿主的换层站台实体（每台宿主最多一个）。 */
+export function findLayerChangePlatformEntity(scene: SceneDocument, hostEntityId: string): Entity | null {
+  for (const entityId of scene.entityIds) {
+    const entity = scene.entities[entityId];
+    const binding = entity?.components.locator?.builtInBinding;
+    if (binding?.hostEntityId === hostEntityId && binding.kind === 'layerChangePlatform') return entity;
+  }
+  return null;
 }
 
 /** 查找绑定到指定宿主的内置货格实体 ID（取排索引最小的一排）。 */

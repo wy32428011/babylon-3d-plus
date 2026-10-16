@@ -180,10 +180,15 @@ import { vector3 } from '../model/math';
 import {
   deriveLocatorDimensionsFromBinding,
   deriveBuiltInSlotRowCountFromBinding,
+  deriveLayerChangePlatformDimensionsFromBinding,
   findBuiltInSlotEntities,
+  findLayerChangePlatformEntity,
   getBuiltInSlotBindingConfig,
+  getLayerChangePlatformBindingConfig,
   patchBuiltInSlotDimensions,
+  patchLayerChangePlatformDimensions,
   type BuiltInSlotBindingConfig,
+  type LayerChangePlatformBindingConfig,
 } from '../model/builtInSlotBinding';
 import {
   createIdleEnvironmentRuntimeSnapshot,
@@ -1144,6 +1149,8 @@ function sanitizeLocatorBuiltInBindingPatch(
       y: read(value.originOffset?.y, before.originOffset.y),
       z: read(value.originOffset?.z, before.originOffset.z),
     },
+    // kind 由创建路径决定，UI patch 不可改写
+    ...(before.kind ? { kind: before.kind } : {}),
   };
 }
 
@@ -1179,7 +1186,8 @@ function areLocatorBuiltInBindingsEqual(
     left.rowIndex === right.rowIndex &&
     left.originOffset.x === right.originOffset.x &&
     left.originOffset.y === right.originOffset.y &&
-    left.originOffset.z === right.originOffset.z
+    left.originOffset.z === right.originOffset.z &&
+    (left.kind ?? 'slot') === (right.kind ?? 'slot')
   );
 }
 
@@ -1313,6 +1321,7 @@ function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset: Asset
     ...(asset.animationScriptMetadata?.length ? { animationScriptMetadata: cloneJsonValue(asset.animationScriptMetadata) } : {}),
     ...(asset.dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(asset.dataDrivenConfig) } : {}),
     ...(asset.builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(asset.builtInSlotBindingConfig) } : {}),
+    ...(asset.layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: cloneJsonValue(asset.layerChangePlatformBindingConfig) } : {}),
     ...(parameterConfig
       ? {
           parameterConfig,
@@ -1342,6 +1351,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     areJsonValuesEqual(left.animationScriptMetadata, right.animationScriptMetadata) &&
     areJsonValuesEqual(left.dataDrivenConfig, right.dataDrivenConfig) &&
     areJsonValuesEqual(left.builtInSlotBindingConfig, right.builtInSlotBindingConfig) &&
+    areJsonValuesEqual(left.layerChangePlatformBindingConfig, right.layerChangePlatformBindingConfig) &&
     areJsonValuesEqual(left.parameterConfig, right.parameterConfig) &&
     areModelParameterValuesEqual(left.parameterValues ?? {}, right.parameterValues ?? {})
   );
@@ -2312,6 +2322,79 @@ function applyBuiltInSlotSideEffects(scene: SceneDocument, hostEntityId: string)
   if (!host || !config) return scene;
 
   return reconcileBuiltInSlotEntitiesInScene(scene, hostEntityId, config);
+}
+
+/**
+ * 为声明了换层站台绑定的宿主实体创建站台实体（固定 1 列、起始列 -1、排 1）。
+ * 站台与宿主同级，绑定身份记录在 builtInBinding.hostEntityId + kind='layerChangePlatform'。
+ */
+function createLayerChangePlatformEntityInScene(
+  scene: SceneDocument,
+  hostEntityId: string,
+  config: LayerChangePlatformBindingConfig,
+): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  if (!host) return scene;
+
+  const platformEntity = createLocatorEntity(host.components.transform.position);
+  platformEntity.name = '换层站台';
+  platformEntity.parentId = host.parentId;
+  const derived = deriveLayerChangePlatformDimensionsFromBinding(config, host.components.modelAsset?.parameterValues);
+  platformEntity.components.locator = {
+    ...platformEntity.components.locator!,
+    ...derived,
+    columns: 1,
+    startColumn: -1,
+    startLayer: 1,
+    rowNumber: 1,
+    // 资产编号由宿主货架驱动，创建即对齐，之后随货架编号同步
+    assetId: host.components.modelAsset?.assetCode ?? platformEntity.components.locator!.assetId,
+    builtInBinding: { hostEntityId, rowIndex: 0, originOffset: vector3(), kind: 'layerChangePlatform' },
+  };
+
+  const hostIndex = scene.entityIds.indexOf(hostEntityId);
+  const entityIds = [...scene.entityIds];
+  entityIds.splice(hostIndex >= 0 ? hostIndex + 1 : entityIds.length, 0, platformEntity.id);
+
+  const hostParent = host.parentId ? scene.entities[host.parentId] : null;
+  return {
+    ...scene,
+    entityIds,
+    entities: {
+      ...scene.entities,
+      ...(hostParent?.isFolder
+        ? { [hostParent.id]: { ...hostParent, childrenIds: [...hostParent.childrenIds, platformEntity.id] } }
+        : {}),
+      [platformEntity.id]: platformEntity,
+    },
+  };
+}
+
+/** 换层站台对账：启用时确保存在唯一站台实体，未启用（或未声明）时删除；幂等。 */
+export function reconcileLayerChangePlatformEntityInScene(
+  scene: SceneDocument,
+  hostEntityId: string,
+  config: LayerChangePlatformBindingConfig,
+): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  if (!host) return scene;
+
+  const enabled = host.components.modelAsset?.parameterValues?.[config.enabledParam] === true;
+  const existing = findLayerChangePlatformEntity(scene, hostEntityId);
+  if (!enabled) {
+    return existing ? deleteEntitiesInScene(scene, [existing.id]) : scene;
+  }
+  const next = existing ? scene : createLayerChangePlatformEntityInScene(scene, hostEntityId, config);
+  return patchLayerChangePlatformDimensions(next, hostEntityId);
+}
+
+/** 宿主模型参数变化后的换层站台副作用：按启用参数对账站台（幂等），并按声明派生维度。 */
+function applyLayerChangePlatformSideEffects(scene: SceneDocument, hostEntityId: string): SceneDocument {
+  const host = scene.entities[hostEntityId];
+  const config = getLayerChangePlatformBindingConfig(host);
+  if (!host || !config) return scene;
+
+  return reconcileLayerChangePlatformEntityInScene(scene, hostEntityId, config);
 }
 
 /** 批量删除实体；文件夹保持非级联语义，未删除内容提升到最近仍存在的父级。 */
@@ -4407,6 +4490,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       asset.assetRevision,
       asset.dataDrivenConfig,
       asset.builtInSlotBindingConfig,
+      asset.layerChangePlatformBindingConfig,
     );
     const modelIdentity = createModelTypeIdentityFromAsset(asset);
     if (modelIdentity && entity.components.modelAsset) entity.components.modelAsset.dataPlatformModel = modelIdentity;
@@ -5353,6 +5437,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       if (!isRuntimeEntityEditable(state.scene, entity) || !locator) return state;
 
       const before = cloneLocator(locator);
+      // 换层站台位于货架头部（列 0 之前），起始列允许负值；普通货格仍从 0 起。
+      const startColumnMin = before.builtInBinding?.kind === 'layerChangePlatform' ? -99 : 0;
       const after: LocatorComponent = {
         // 内置货格资产编号始终跟随宿主货架，忽略外部 patch
         assetId: before.builtInBinding ? before.assetId : sanitizeLocatorAssetId(patch.assetId, before.assetId),
@@ -5362,7 +5448,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         height: sanitizeLocatorDimension(patch.height, before.height),
         columns: sanitizeLocatorInt(patch.columns, before.columns, 1, 100),
         layers: sanitizeLocatorInt(patch.layers, before.layers, 1, 100),
-        startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, 0, 999),
+        startColumn: sanitizeLocatorInt(patch.startColumn, before.startColumn, startColumnMin, 999),
         startLayer: sanitizeLocatorInt(patch.startLayer, before.startLayer, 0, 999),
         columnReversed: patch.columnReversed ?? before.columnReversed,
         columnGap: sanitizeLocatorGap(patch.columnGap, before.columnGap),
@@ -5676,10 +5762,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const after = patchModelParameterValue(before, key, sanitizedValue);
       if (areModelParameterValuesEqual(before, after)) return state;
 
-      // 声明了内置货格绑定时，参数变化与货格副作用（创建/删除/维度派生）合并为单条快照命令，保证 undo 整体回滚。
-      const command = getBuiltInSlotBindingConfig(entity)
-        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyBuiltInSlotSideEffects(
-            updateModelParameterValuesCommand(entity.id, before, after).execute(scene),
+      // 声明了内置货格/换层站台绑定时，参数变化与绑定副作用（创建/删除/维度派生）合并为单条快照命令，保证 undo 整体回滚。
+      const command = getBuiltInSlotBindingConfig(entity) || getLayerChangePlatformBindingConfig(entity)
+        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyLayerChangePlatformSideEffects(
+            applyBuiltInSlotSideEffects(
+              updateModelParameterValuesCommand(entity.id, before, after).execute(scene),
+              entity.id,
+            ),
             entity.id,
           ))
         : updateModelParameterValuesCommand(entity.id, before, after);
@@ -5724,9 +5813,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         },
       };
 
-      // preview 不写撤销历史，仅同步派生货格维度；创建/解绑由 commit 路径处理。
+      // preview 不写撤销历史，仅同步派生货格/站台维度；创建/解绑由 commit 路径处理。
       return {
-        scene: patchBuiltInSlotDimensions(previewScene, entity.id),
+        scene: patchLayerChangePlatformDimensions(patchBuiltInSlotDimensions(previewScene, entity.id), entity.id),
       };
     });
   },
@@ -5743,9 +5832,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const sanitizedAfter = sanitizeEditedModelParameterValues(modelAsset.parameterConfig, before, after);
       if (areModelParameterValuesEqual(sanitizedBefore, sanitizedAfter)) return state;
 
-      const command = getBuiltInSlotBindingConfig(entity)
-        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyBuiltInSlotSideEffects(
-            updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter).execute(scene),
+      const command = getBuiltInSlotBindingConfig(entity) || getLayerChangePlatformBindingConfig(entity)
+        ? updateSceneDocumentCommand('更新模型参数', (scene) => applyLayerChangePlatformSideEffects(
+            applyBuiltInSlotSideEffects(
+              updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter).execute(scene),
+              entity.id,
+            ),
             entity.id,
           ))
         : updateModelParameterValuesCommand(entity.id, sanitizedBefore, sanitizedAfter);
