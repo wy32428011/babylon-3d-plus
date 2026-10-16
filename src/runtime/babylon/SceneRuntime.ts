@@ -1181,9 +1181,9 @@ export class SceneRuntime {
         }
         return models;
       },
-      findLocatorByDevice: (assetCode, x, y, z) => this.findLocatorByDevice(assetCode, x, y, z),
+      findLocatorByDevice: (assetCode, x, y, z, storageDepth) => this.findLocatorByDevice(assetCode, x, y, z, storageDepth),
       findLocatorsByDevice: (assetCode) => this.findLocatorsByDevice(assetCode),
-      findLocatorByAisle: (aisleCode, x, y, z) => this.findLocatorByAisle(aisleCode, x, y, z),
+      findLocatorByAisle: (aisleCode, x, y, z, storageDepth) => this.findLocatorByAisle(aisleCode, x, y, z, storageDepth),
       findLocatorsByAisle: (aisleCode) => this.findLocatorsByAisle(aisleCode),
       findLayerChangePlatformLocator: (assetCode, aisleCode) => this.findLayerChangePlatformLocator(assetCode, aisleCode),
       findBuiltInSlotLocatorForHostModel: (hostEntityId) => this.findBuiltInSlotLocatorForHostModel(hostEntityId),
@@ -4581,12 +4581,16 @@ export class SceneRuntime {
     }
   }
 
-  /** 按设备编号 + 排号 + 列/层范围查找目标 Locator：front_ 定位要求 (x, y, z) 唯一命中，零个或多个（同排范围重叠）命中都返回 null。 */
+  /**
+   * 按设备编号 + 排号 + 列/层范围查找目标 Locator：front_ 定位要求 (x, y, z) 唯一命中，零个或多个（同排范围重叠）命中都返回 null。
+   * 传 storageDepth 时按排深过滤（同排可同时存在浅/深库位，多穿小车靠排深区分）。
+   */
   private findLocatorByDevice(
     deviceAssetCode: string,
     toX: number,
     toY: number,
     toZ: number,
+    storageDepth?: LocatorStorageDepth,
   ): LocatorRuntimeEntry | null {
     const rowMap = this.locatorDeviceIndex.get(deviceAssetCode);
     if (!rowMap) return null;
@@ -4594,6 +4598,7 @@ export class SceneRuntime {
     if (!list?.length) return null;
     let matched: LocatorRuntimeEntry | null = null;
     for (const locator of list) {
+      if (storageDepth && locator.storageDepth !== storageDepth) continue;
       const covered = toX >= locator.startColumn && toX < locator.startColumn + locator.columns
         && toY >= locator.startLayer && toY < locator.startLayer + locator.layers;
       if (!covered) continue;
@@ -4612,12 +4617,16 @@ export class SceneRuntime {
     return result;
   }
 
-  /** 按巷道编号 + 排号 + 列/层范围查找目标 Locator：多穿小车 front_ 定位要求 (x, y, z) 唯一命中，零个或多个命中都返回 null。 */
+  /**
+   * 按巷道编号 + 排号 + 列/层范围查找目标 Locator：多穿小车 front_ 定位要求 (x, y, z) 唯一命中，零个或多个命中都返回 null。
+   * 传 storageDepth 时按排深过滤（同排可同时存在浅/深库位，多穿小车靠排深区分）。
+   */
   private findLocatorByAisle(
     aisleCode: string,
     toX: number,
     toY: number,
     toZ: number,
+    storageDepth?: LocatorStorageDepth,
   ): LocatorRuntimeEntry | null {
     const rowMap = this.locatorAisleIndex.get(aisleCode);
     if (!rowMap) return null;
@@ -4625,6 +4634,7 @@ export class SceneRuntime {
     if (!list?.length) return null;
     let matched: LocatorRuntimeEntry | null = null;
     for (const locator of list) {
+      if (storageDepth && locator.storageDepth !== storageDepth) continue;
       const covered = toX >= locator.startColumn && toX < locator.startColumn + locator.columns
         && toY >= locator.startLayer && toY < locator.startLayer + locator.layers;
       if (!covered) continue;

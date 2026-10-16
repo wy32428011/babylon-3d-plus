@@ -42,6 +42,8 @@ function makeLocator(
     startLayer?: number;
     aisleCode?: string;
     deviceAssetCode?: string;
+    rowNumber?: number;
+    storageDepth?: 'near' | 'far';
     cellSteps?: { columnStepX: number; layerStepY: number };
     rootPosition?: Vector3;
     rootRotationY?: number;
@@ -68,8 +70,8 @@ function makeLocator(
     columnReversed: false,
     deviceAssetCode: options.deviceAssetCode ?? '',
     aisleCode: options.aisleCode ?? 'A1',
-    rowNumber: 2,
-    storageDepth: 'near',
+    rowNumber: options.rowNumber ?? 2,
+    storageDepth: options.storageDepth ?? 'near',
   } as unknown as LocatorRuntimeEntry;
 }
 
@@ -92,30 +94,42 @@ function makeHarness() {
     },
   } as unknown as ModelRuntimeEntry;
 
-  const ref: { locator: LocatorRuntimeEntry | null } = { locator: null };
+  const ref: { locator: LocatorRuntimeEntry | null; extraLocators: LocatorRuntimeEntry[] } = { locator: null, extraLocators: [] };
   const logs: string[] = [];
-  // 与 SceneRuntime.findLocatorByDevice/findLocatorByAisle 同规则：绑定一致 + 排号一致且列/层落在货格范围内才命中
-  const matchLocator = (locator: LocatorRuntimeEntry, x: number, y: number, z: number) => {
+  const activeLocators = (): LocatorRuntimeEntry[] => (ref.locator ? [ref.locator, ...ref.extraLocators] : [...ref.extraLocators]);
+  // 与 SceneRuntime.findLocatorByDevice/findLocatorByAisle 同规则：绑定一致 + 排号一致 + 排深一致（传值时）+ 列/层落在范围内，且唯一命中（多个命中返回 null）
+  const matchLocator = (locator: LocatorRuntimeEntry, x: number, y: number, z: number, storageDepth?: 'near' | 'far') => {
     if (locator.rowNumber !== z) return null;
+    if (storageDepth && locator.storageDepth !== storageDepth) return null;
     return x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers
       ? locator
       : null;
   };
+  const findOne = (
+    pick: (locator: LocatorRuntimeEntry) => boolean,
+    x: number,
+    y: number,
+    z: number,
+    storageDepth?: 'near' | 'far',
+  ): LocatorRuntimeEntry | null => {
+    let matched: LocatorRuntimeEntry | null = null;
+    for (const locator of activeLocators()) {
+      if (!pick(locator)) continue;
+      if (!matchLocator(locator, x, y, z, storageDepth)) continue;
+      if (matched) return null;
+      matched = locator;
+    }
+    return matched;
+  };
   const host = {
     pushLog: (message: string) => { logs.push(message); },
     collectModels: () => [{ entityId: 'e1', model }],
-    findLocatorByDevice: (assetCode: string, x: number, y: number, z: number) => {
-      const locator = ref.locator;
-      if (!locator || locator.deviceAssetCode !== assetCode || !assetCode) return null;
-      return matchLocator(locator, x, y, z);
-    },
-    findLocatorsByDevice: (assetCode: string) => (ref.locator && ref.locator.deviceAssetCode === assetCode && assetCode ? [ref.locator] : []),
-    findLocatorByAisle: (aisleCode: string, x: number, y: number, z: number) => {
-      const locator = ref.locator;
-      if (!locator || locator.aisleCode !== aisleCode) return null;
-      return matchLocator(locator, x, y, z);
-    },
-    findLocatorsByAisle: (aisleCode: string) => (ref.locator && ref.locator.aisleCode === aisleCode ? [ref.locator] : []),
+    findLocatorByDevice: (assetCode: string, x: number, y: number, z: number, storageDepth?: 'near' | 'far') =>
+      (assetCode ? findOne((locator) => locator.deviceAssetCode === assetCode, x, y, z, storageDepth) : null),
+    findLocatorsByDevice: (assetCode: string) => (assetCode ? activeLocators().filter((locator) => locator.deviceAssetCode === assetCode) : []),
+    findLocatorByAisle: (aisleCode: string, x: number, y: number, z: number, storageDepth?: 'near' | 'far') =>
+      findOne((locator) => locator.aisleCode === aisleCode, x, y, z, storageDepth),
+    findLocatorsByAisle: (aisleCode: string) => activeLocators().filter((locator) => locator.aisleCode === aisleCode),
     resolveBuiltInSlotHost: () => null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
@@ -201,11 +215,11 @@ function declareShuttleMotion(h: ReturnType<typeof makeHarness>): void {
 }
 
 /**
- * 新协议帧：x/y 仅诊断；to_x/to_y 列层 + to_Depth 位值（1/2/4/8 → 排 1-4）指向当前阶段目标格；
- * Status：0 待机 / 1 装货 / 2 卸货 / 3 移动中。Locator 排号固定 2 → to_Depth=2。
+ * 新协议帧：x/y 仅诊断；to_x/to_y/to_z 列/层/排 + to_Depth 排深（2 浅库位 / 8 深库位）指向当前阶段目标格；
+ * Status：0 待机 / 1 装货 / 2 卸货 / 3 移动中。Locator 排号固定 2、排深 near → to_z=2, to_Depth=2。
  */
-function targetFrame(status: number, toX: number, toY: number, toDepth = 2, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { x: 0, y: 0, to_x: toX, to_y: toY, to_Depth: toDepth, Status: status, errorCode: 0, ...extra };
+function targetFrame(status: number, toX: number, toY: number, toZ = 2, toDepth = 2, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { x: 0, y: 0, to_x: toX, to_y: toY, to_z: toZ, to_Depth: toDepth, Status: status, errorCode: 0, ...extra };
 }
 
 test('货格匹配：绑定巷道一致 + 列层范围命中才动作，失配一次性报错并冻结', () => {
@@ -218,7 +232,7 @@ test('货格匹配：绑定巷道一致 + 列层范围命中才动作，失配�
     h.apply(MOVE);
     const errors = h.logs.filter((message) => message.includes('未匹配到任何已绑定货格'));
     assert.equal(errors.length, 1, '同一目标位重复上报只能报错一次');
-    assert.ok(errors[0].includes('巷道A1') && errors[0].includes('排2 列10 层1'), `报错须含巷道/排/列/层，实际：${errors[0]}`);
+    assert.ok(errors[0].includes('巷道A1') && errors[0].includes('排2 浅库位 列10 层1'), `报错须含巷道/排/排深/列/层，实际：${errors[0]}`);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z) < 1e-9, '巷道失配时不得移动');
 
     // 巷道改回 A1：命中并吸附到货格支撑位（列 10 → z=20）
@@ -278,7 +292,7 @@ test('Status=3 走行：向目标格连续推进并收敛，Status=0 停驻', ()
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 15) < 1e-6, `必须收敛到目标列 5 支撑位 z=15，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
 
     // 任务完结 to_ 清零且 Status=0：车体停驻保持原位
-    h.apply(targetFrame(0, 0, 0, 0), 0.1, 5);
+    h.apply(targetFrame(0, 0, 0, 0, 0), 0.1, 5);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 15) < 1e-6, 'Status=0 且无目标时必须保持原位');
   } finally {
     h.dispose();
@@ -301,7 +315,7 @@ test('目标位失配与非法 to_Depth：冻结走行并各一次性告警', ()
       '目标位失配告警必须只报一次',
     );
 
-    const BAD_DEPTH = targetFrame(3, 5, 1, 3);
+    const BAD_DEPTH = targetFrame(3, 5, 1, 2, 3);
     h.apply(BAD_DEPTH, 0.1, 10);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, 'to_Depth 非法必须冻结走行');
     assert.equal(
@@ -314,13 +328,68 @@ test('目标位失配与非法 to_Depth：冻结走行并各一次性告警', ()
   }
 });
 
+test('目标格联合排深匹配：同排浅/深两库位由 to_Depth 区分命中', () => {
+  const h = makeHarness();
+  try {
+    // 同排（排 2）两个库位：浅位列 10 支撑位 z=20、深位列 10 支撑位 z=21
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, storageDepth: 'near', rootPosition: new Vector3(0, 2, 11) });
+    h.ref.extraLocators = [
+      makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, storageDepth: 'far', rootPosition: new Vector3(0, 2, 12) }),
+    ];
+
+    // to_z=2 排 + to_Depth=2 浅库位：吸附 z=20
+    h.apply(targetFrame(3, 10, 1, 2, 2), 0.1, 1);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, `浅库位必须吸附 z=20，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+
+    // to_Depth=8 深库位：目标格键变化（含排深），走行到 z=21
+    h.apply(targetFrame(3, 10, 1, 2, 8), 0.1, 400);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 21) < 1e-6, `深库位必须走行到 z=21，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    assert.equal(
+      h.logs.filter((message) => message.includes('未匹配到任何已绑定货格') || message.includes('超出已绑定货格范围')).length,
+      0,
+      '排深参与匹配后同排两库位必须唯一命中，不得报失配',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('目标字段缺失或 to_Depth 非 2/8：一次性告警并冻结，不降级猜测', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply(targetFrame(3, 10, 1, 2, 2), 0.1, 1);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6);
+
+    // 旧协议帧（缺 to_z）：必须冻结，不按旧 to_Depth 位编码回退
+    const MISSING_Z = { x: 0, y: 0, to_x: 5, to_y: 1, to_Depth: 2, Status: 3, errorCode: 0 };
+    h.apply(MISSING_Z, 0.1, 10);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, 'to_z 缺失必须冻结走行');
+    assert.equal(h.logs.filter((message) => message.includes('缺 to_z')).length, 1, 'to_z 缺失告警必须只报一次');
+
+    // to_Depth=4（既非 2 浅库位也非 8 深库位）：同样冻结
+    const BAD_DEPTH = targetFrame(3, 5, 1, 2, 4);
+    h.apply(BAD_DEPTH, 0.1, 10);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, '非法排深必须冻结走行');
+    assert.equal(h.logs.filter((message) => message.includes('to_Depth=4 非法')).length, 1, '非法排深告警必须只报一次');
+
+    // 目标字段整体缺失（心跳帧）：无目标，不告警也不移动
+    const HEARTBEAT = { x: 0, y: 0, Status: 0, errorCode: 0 };
+    h.apply(HEARTBEAT, 0.1, 5);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, '无目标帧必须保持原位');
+    assert.equal(h.logs.filter((message) => message.includes('目标字段非法')).length, 2, '仅缺 to_z 与非法排深各报一次，心跳帧不得告警');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('装货（Status=1）：到位自动伸叉刷货，伸满绑定上叉，自动收回完结且同相位不重复', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h);
     // 列沿世界 +X 排布：列 10 支撑位在 (20, 2, 0)，叉收回位中心 x=0
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(11, 2, 0), rootRotationY: 0 });
-    const FETCH = targetFrame(1, 10, 1, 2, { task: 7001 });
+    const FETCH = targetFrame(1, 10, 1, 2, 2, { task: 7001 });
 
     // 到位（首帧吸附）后自动进入伸叉相位并刷出货物，货物暂留货格
     h.apply(FETCH, 0.1, 1);
@@ -353,7 +422,7 @@ test('装货（Status=1）：到位自动伸叉刷货，伸满绑定上叉，自
     assert.equal(h.model.shuttleTelemetry.forkOffset, 0, '同相位不得重复伸叉');
 
     // Status=1→3 伴随目标格跳变（行走开始）：已绑定货物随叉随行，不得进入 catch-up 也不得销毁
-    h.apply(targetFrame(3, 5, 1, 2, { task: 7001 }), 0.1, 1);
+    h.apply(targetFrame(3, 5, 1, 2, 2, { task: 7001 }), 0.1, 1);
     assert.equal(h.model.shuttleTelemetry.forkCatchUp, false, '已绑定货物随行不得进入 catch-up');
     assert.equal(h.state.shuttleCargoMeshes.size, 1, '目标格跳变不得销毁已绑定货物');
     assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, true, '货物必须保持绑定随叉随行');
@@ -418,7 +487,7 @@ test('环抱式载货：载货平面顶面（cargoDeckNodes）替代叉顶面作
     assert.ok(Math.abs(deck.position.y - 2.95) < 1e-6, `载货平面中心 y 必须为 2.95（顶面 3.0 贴支撑位），实际 ${deck.position.y}`);
 
     // 装货全流程：货物底面贴载货平面顶面（=货格支撑位 y=3），交接无跳变
-    const FETCH = targetFrame(1, 10, 2, 2, { task: 7008 });
+    const FETCH = targetFrame(1, 10, 2, 2, 2, { task: 7008 });
     h.apply(FETCH, 0.1, 1);
     assert.equal(h.model.shuttleTelemetry.forkPhase, 'extending', '到位后必须自动进入伸叉相位');
     h.apply(FETCH, 0.1, 800);
@@ -462,13 +531,13 @@ test('目标格跳变 catch-up：货叉加速收回原点后才允许走行', ()
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
 
     // 装货伸叉途中（8 帧 × 0.025m = 0.2m，未伸满未绑定）
-    const FETCH = targetFrame(1, 10, 1, 2, { task: 7002 });
+    const FETCH = targetFrame(1, 10, 1, 2, 2, { task: 7002 });
     h.apply(FETCH, 0.1, 8);
     assert.ok(h.model.shuttleTelemetry.forkOffset > 0.05, '货叉必须已伸出');
     assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false);
 
     // 目标格跳到列 5 且 Status=3（设备转场）：进入 catch-up，收叉期间整机冻结
-    const MOVE5 = targetFrame(3, 5, 1, 2, { task: 7002 });
+    const MOVE5 = targetFrame(3, 5, 1, 2, 2, { task: 7002 });
     h.apply(MOVE5, 0.1, 1);
     assert.equal(h.model.shuttleTelemetry.forkCatchUp, true, '目标格跳变且货叉已伸出必须进入 catch-up');
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-9, '收叉期间走行必须冻结');
@@ -494,7 +563,7 @@ test('卸货（Status=2）：补建绑定、伸满解绑落格、收回完结销
     makeShuttleGeometry(h);
     // 列 10 支撑位 (0, 2, 20)：货格正对叉中心，伸叉行程回退叉全长 0.4m
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
-    const PLACE = targetFrame(2, 10, 1, 2, { task: 7003 });
+    const PLACE = targetFrame(2, 10, 1, 2, 2, { task: 7003 });
 
     // 卸货相位入口补建叉上货物并立即绑定
     h.apply(PLACE, 0.1, 1);
@@ -540,7 +609,7 @@ test('卸货到 conveyor 站台：落货当场交付（placeShuttleCargoIntoConv
       h.driver.detachClaimedCargoByKey(cargoKey);
       return true;
     };
-    const PLACE = targetFrame(2, 10, 1, 2, { task: 7007 });
+    const PLACE = targetFrame(2, 10, 1, 2, 2, { task: 7007 });
 
     h.apply(PLACE, 0.1, 1);
     assert.equal(h.state.shuttleCargoMeshes.size, 1, '卸货相位必须补建叉上货物');

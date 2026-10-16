@@ -1,6 +1,6 @@
 import type { Mesh, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
 import { Quaternion, Vector3 } from '@babylonjs/core';
-import type { ModelGeneratorComponent } from '../../../../editor/model/components';
+import type { LocatorStorageDepth, ModelGeneratorComponent } from '../../../../editor/model/components';
 import type { ExternalModelScriptRuntime, ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type {
   GeneratedOutputOwnerRuntimeEntry,
@@ -543,7 +543,7 @@ export type ShuttleModelTelemetryState = {
   /** 当前 Status=1/2 相位的取/放动作已完结：同相位内不再重复触发，Status 变化时复位。 */
   statusActionDone: boolean;
   nodeBaselines: Map<TransformNode, Vector3>;
-  /** 上一帧目标货格键（to_x/to_y/to_Depth 解码）；变化时触发动作收尾（catch-up）。 */
+  /** 上一帧目标货格键（to_x/to_y/to_z + to_Depth 解码）；变化时触发动作收尾（catch-up）。 */
   lastTargetCellKey: string | null;
   /** 最近一次目标货格键变化的时间戳（performance.now()）；null 表示尚未收到过有效目标。 */
   lastTargetCellChangedAtMs: number | null;
@@ -608,9 +608,10 @@ export interface SpecializedTelemetryHost {
   pushLog(message: string): void;
   /** models + modelArrayParameterVariants 的合并视图（entityId 用 representativeEntityId）。 */
   collectModels(): Iterable<{ entityId: string; model: ModelRuntimeEntry }>;
-  findLocatorByDevice(assetCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  /** 按设备编号 + 排号 + 列/层范围查找目标 Locator；传 storageDepth 时按排深过滤（同排浅/深库位区分）。 */
+  findLocatorByDevice(assetCode: string, x: number, y: number, z: number, storageDepth?: LocatorStorageDepth): LocatorRuntimeEntry | null;
   /** 按巷道编号 + 排号 + 列/层范围查找目标 Locator（多穿小车等巷道设备用），语义同 findLocatorByDevice。 */
-  findLocatorByAisle(aisleCode: string, x: number, y: number, z: number): LocatorRuntimeEntry | null;
+  findLocatorByAisle(aisleCode: string, x: number, y: number, z: number, storageDepth?: LocatorStorageDepth): LocatorRuntimeEntry | null;
   /** 返回巷道绑定的全部 Locator（所有排），无绑定返回空数组；用于区分「未绑定」与「坐标越界」。 */
   findLocatorsByAisle(aisleCode: string): LocatorRuntimeEntry[];
   /** 按设备编号或巷道编号找换层站台 Locator（多穿小车 x 负值语义用）：deviceAssetCode 命中优先，其次 aisleCode 匹配。 */

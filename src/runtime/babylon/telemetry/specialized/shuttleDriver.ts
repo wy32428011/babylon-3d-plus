@@ -48,22 +48,23 @@ import {
   type SpecializedTelemetrySharedState,
 } from './types';
 
-/** 遥测解析出的目标货格：to_x/to_y 列层 + to_Depth 位解码出的排号与支撑位世界坐标。 */
+/** 遥测解析出的目标货格：to_x/to_y 列层 + to_z 排号 + to_Depth 解码出的排深与支撑位世界坐标。 */
 type ShuttleTargetCell = {
   locator: LocatorRuntimeEntry;
   supportPosition: Vector3;
   toX: number;
   toY: number;
   row: number;
+  /** 目标货格排深（to_Depth 解码）：near 浅库位 / far 深库位。 */
+  storageDepth: LocatorRuntimeEntry['storageDepth'];
   /** 换层站台货格（x 负值语义）：站台不支持装卸货，Status=1/2 伸叉被抑制。 */
   isLayerChangePlatform?: boolean;
 };
 
-/** to_Depth 位值 → 排号：1→排1，2→排2，4→排3，8→排4。 */
-function decodeShuttleDepthRow(toDepth: number): number | null {
-  if (toDepth === 1 || toDepth === 2 || toDepth === 4 || toDepth === 8) {
-    return Math.log2(toDepth) + 1;
-  }
+/** to_Depth 值 → 库位排深：2→浅库位（near），8→深库位（far）。 */
+function decodeShuttleStorageDepth(toDepth: number | null): LocatorRuntimeEntry['storageDepth'] | null {
+  if (toDepth === 2) return 'near';
+  if (toDepth === 8) return 'far';
   return null;
 }
 
@@ -75,7 +76,7 @@ const HCLIFT_PLATFORM_SURFACE_STALE_MS = 2000;
 /**
  * 多穿小车遥测驱动：Status 单字段状态机（0 待机 / 1 装货 / 2 卸货 / 3 移动中）。
  * - 走行仅 Z 轴（Status=3 向目标格推进），Y 层变换无动画、每帧闪现对齐目标格层高（载货平面顶面与货格底面持平）；
- * - 目标货格由 to_x/to_y/to_Depth 指向当前阶段动作格，先按绑定设备匹配、再按绑定巷道（aisleCode）匹配；
+ * - 目标货格由 to_x/to_y/to_z（列/层/排）与 to_Depth（2=浅、8=深库位）指向当前阶段动作格，先按绑定设备匹配、再按绑定巷道（aisleCode）匹配；
  * - 两段货叉沿 X 比例联动：二段偏移 = forkOffset，一段 = forkOffset / 2，同步启动同步到位；
  * - Status=1 货从格到车（伸满绑定、收回完结），Status=2 货从车到格（伸满解绑落格、收回完结）。
  */
@@ -133,10 +134,10 @@ export class ShuttleTelemetryDriver {
   }
 
   /**
-   * 目标货格解析：x 字段优先于 to_x/to_y/to_Depth——
-   * x=-1/-2 指向换层站台货格（层取 y 字段，排固定站台排），x>=0 或字段缺失走原 to_x/to_y/to_Depth 逻辑：
-   * 三字段全部缺失或全为 0（无目标/任务完结）返回无目标；
-   * to_Depth 位值非法、或绑定设备与绑定巷道两路都匹配不到货格时一次性告警并冻结（mismatch）。
+   * 目标货格解析：x 字段优先于 to_x/to_y/to_z/to_Depth——
+   * x=-1/-2 指向换层站台货格（层取 y 字段，排固定站台排），x>=0 或字段缺失走原 to_x/to_y/to_z/to_Depth 逻辑：
+   * 列/层/排全 0（无目标/任务完结）、或目标字段整体缺失（本帧未报目标）返回无目标；
+   * to_x/to_y/to_z 任一缺失、to_Depth 非 2/8、或绑定设备与绑定巷道两路都匹配不到货格时一次性告警并冻结（mismatch）。
    */
   private resolveShuttleTargetCell(
     model: ModelRuntimeEntry,
@@ -149,30 +150,63 @@ export class ShuttleTelemetryDriver {
 
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
+    const toZ = readIntegerField(snapshot.fields, 'to_z');
     const toDepth = readIntegerField(snapshot.fields, 'to_Depth');
-    if (toX === null || toY === null || toDepth === null) return { cell: null, key: null, mismatch: false };
-    if (toX === 0 && toY === 0 && toDepth === 0) return { cell: null, key: null, mismatch: false };
+    // 目标字段整体缺失：设备本帧未报目标（心跳/诊断帧），不告警
+    if (toX === null && toY === null && toZ === null && toDepth === null) {
+      return { cell: null, key: null, mismatch: false };
+    }
+    // 列/层/排全 0：无目标或任务完结
+    if (toX === 0 && toY === 0 && toZ === 0) return { cell: null, key: null, mismatch: false };
 
-    const row = decodeShuttleDepthRow(toDepth);
-    if (row === null) {
-      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:depth:${toDepth}`;
-      if (!this.state.reportedMissingTargets.has(reportKey)) {
-        this.state.reportedMissingTargets.add(reportKey);
-        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} to_Depth=${toDepth} 非法（仅支持 1/2/4/8 对应排 1-4），已冻结移动。`);
-      }
+    const storageDepth = decodeShuttleStorageDepth(toDepth);
+    if (toX === null || toY === null || toZ === null || storageDepth === null) {
+      this.reportShuttleTargetFieldError(snapshot, toX, toY, toZ, toDepth, storageDepth);
       return { cell: null, key: null, mismatch: true };
     }
 
     const aisleCode = this.resolveShuttleAisleCode(model);
-    const locator = this.host.findLocatorByDevice(snapshot.assetCode, toX, toY, row)
-      ?? (aisleCode ? this.host.findLocatorByAisle(aisleCode, toX, toY, row) : null);
+    const locator = this.host.findLocatorByDevice(snapshot.assetCode, toX, toY, toZ, storageDepth)
+      ?? (aisleCode ? this.host.findLocatorByAisle(aisleCode, toX, toY, toZ, storageDepth) : null);
     if (!locator) {
-      this.reportShuttleTargetCellMiss(model, snapshot, aisleCode, toX, toY, row);
+      this.reportShuttleTargetCellMiss(model, snapshot, aisleCode, toX, toY, toZ, storageDepth);
       return { cell: null, key: null, mismatch: true };
     }
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, toX, toY);
     if (!supportPosition) return { cell: null, key: null, mismatch: true };
-    return { cell: { locator, supportPosition, toX, toY, row }, key: JSON.stringify([toX, toY, row]), mismatch: false };
+    return {
+      cell: { locator, supportPosition, toX, toY, row: toZ, storageDepth },
+      key: JSON.stringify([toX, toY, toZ, storageDepth]),
+      mismatch: false,
+    };
+  }
+
+  /**
+   * 目标字段非法的一次性报错：to_x/to_y/to_z 任一缺失，或 to_Depth 非 2/8（浅/深库位）。
+   * 用于替代旧的「to_Depth 位编码排号」协议，字段不完整即冻结，不做降级猜测。
+   */
+  private reportShuttleTargetFieldError(
+    snapshot: DeviceTelemetrySnapshot,
+    toX: number | null,
+    toY: number | null,
+    toZ: number | null,
+    toDepth: number | null,
+    storageDepth: LocatorRuntimeEntry['storageDepth'] | null,
+  ): void {
+    const reasons: string[] = [];
+    const missing = ([['to_x', toX], ['to_y', toY], ['to_z', toZ]] as const)
+      .filter(([, value]) => value === null)
+      .map(([name]) => name);
+    if (missing.length > 0) reasons.push(`缺 ${missing.join('/')}`);
+    if (storageDepth === null) {
+      reasons.push(toDepth === null
+        ? 'to_Depth 缺失（仅支持 2=浅库位 / 8=深库位）'
+        : `to_Depth=${toDepth} 非法（仅支持 2=浅库位 / 8=深库位）`);
+    }
+    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:target-field:${reasons.join('|')}`;
+    if (this.state.reportedMissingTargets.has(reportKey)) return;
+    this.state.reportedMissingTargets.add(reportKey);
+    this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标字段非法（${reasons.join('；')}），已冻结移动。`);
   }
 
   /**
@@ -220,6 +254,7 @@ export class ShuttleTelemetryDriver {
       toX: locator.startColumn,
       toY: y,
       row: locator.rowNumber,
+      storageDepth: locator.storageDepth,
       isLayerChangePlatform: true,
     };
     return { cell, key: JSON.stringify(['platform', y]), mismatch: false };
@@ -244,7 +279,7 @@ export class ShuttleTelemetryDriver {
     return byAssetCode;
   }
 
-  /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位超出货格列层范围。 */
+  /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位（排+排深+列层）超出货格范围。 */
   private reportShuttleTargetCellMiss(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
@@ -252,22 +287,24 @@ export class ShuttleTelemetryDriver {
     toX: number,
     toY: number,
     row: number,
+    storageDepth: LocatorRuntimeEntry['storageDepth'],
   ): void {
     const deviceLocators = this.host.findLocatorsByDevice(snapshot.assetCode);
     const aisleLocators = aisleCode ? this.host.findLocatorsByAisle(aisleCode) : [];
     const boundLocators = deviceLocators.length > 0 ? deviceLocators : aisleLocators;
     const kind = boundLocators.length > 0 ? 'target-range' : 'target-cell';
-    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${row}:${toX}:${toY}`;
+    const target = `排${row} ${storageDepth === 'near' ? '浅' : '深'}库位 列${toX} 层${toY}`;
+    const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${row}:${storageDepth}:${toX}:${toY}`;
     if (this.state.reportedMissingTargets.has(reportKey)) return;
     this.state.reportedMissingTargets.add(reportKey);
     if (boundLocators.length === 0) {
-      this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（排${row} 列${toX} 层${toY}）未匹配到任何已绑定货格（绑定设备 ${deviceLocators.length} 个，巷道${aisleCode || '未配置'} ${aisleLocators.length} 个），已冻结移动。`);
+      this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（${target}）未匹配到任何已绑定货格（绑定设备 ${deviceLocators.length} 个，巷道${aisleCode || '未配置'} ${aisleLocators.length} 个），已冻结移动。`);
       return;
     }
     const ranges = boundLocators
-      .map((entry) => `排${entry.rowNumber}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层${entry.startLayer}-${entry.startLayer + entry.layers - 1}`)
+      .map((entry) => `排${entry.rowNumber}${entry.storageDepth === 'near' ? '浅' : '深'}：列${entry.startColumn}-${entry.startColumn + entry.columns - 1} 层${entry.startLayer}-${entry.startLayer + entry.layers - 1}`)
       .join('；');
-    this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（排${row} 列${toX} 层${toY}）超出已绑定货格范围（${ranges}），已冻结移动。`);
+    this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 目标位（${target}）超出已绑定货格范围（${ranges}），已冻结移动。`);
   }
 
   /** 解析目标格口的支撑位世界坐标：水平取 box 中心、高度取 box 底面，越界时返回 null 由调用方冻结。 */

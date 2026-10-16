@@ -226,8 +226,8 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:76
 ### MQTT 消费
 Status 单字段状态机，无 command/movement/mode 体系。
 - `x/y` = 当前列/层。`x` 为负时进入**换层站台语义**（优先级高于 `to_x/to_y`，见下节）；`x>=0` 或缺失时 `x/y` 仅诊断日志。
-- `to_x/to_y/to_Depth` = **当前动作阶段的目标货格**（装货时=取货格，卸货时=放货格）；`to_x/to_y` 全 0 或缺失 = 无目标。
-- `to_Depth` 位编码排号：1→排1、2→排2、4→排3、8→排4；非法值一次性告警并忽略本次目标（`to_z` 弃用）。
+- `to_x/to_y/to_z` = **当前动作阶段的目标货格**列/层/排（装货时=取货格，卸货时=放货格）；三者全 0、或目标字段整体缺失 = 无目标。
+- `to_Depth` = 目标货格的**库位排深**：2→浅库位（Locator `storageDepth='near'`）、8→深库位（`'far'`），与排号联合定位（同排近/远两个货格靠深度区分）；非 2/8 的值、或 `to_z` 缺失时一次性告警并冻结本次目标。
 - `Status`：0 待机 / 1 装货（货：货格→小车，装完即完结）/ 2 卸货（货：小车→货格）/ 3 移动中。
 - `task`、`containerCode`：货物身份（全局 task 接管用，缺失则匿名自建）。
 
@@ -237,13 +237,13 @@ Status 单字段状态机，无 command/movement/mode 体系。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=3），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
 - `x=-2`：换层中——水平冻结在站台列不走行，**Y 随 `y` 字段逐层闪现**（复用 Y 层对齐机制，cell 支撑位随 y 解析层变化）。
-- `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_Depth` 任务目标解析。
+- `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
 - 站台目标下 `Status=1/2`（装/卸）被抑制：不伸叉，一次性告警「换层站台不支持装卸货」。
-- 站台 locator 参与通用巷道/设备索引（`startColumn=-1, columns=1` 覆盖 [-1,0)，与货格 [1,N+1) 不重叠）；运行时不消费 `to_Depth`（排固定 1）。
+- 站台 locator 参与通用巷道/设备索引（`startColumn=-1, columns=1` 覆盖 [-1,0)，与货格 [1,N+1) 不重叠）；运行时不消费 `to_z/to_Depth`（排固定 1，无排深）。
 
 ### fetch 响应
-与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取本次 `to_Depth` 解码值。
+与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取目标货格的 fetch 排号（`suppressFetchCellForLocator` / `resolveFetchDriveRowForLocator`）。
 
 ### 动画
 每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=3 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=3 期间叉强制收回原点；Status=1/2 须车体对准目标格（到位余量 2cm）才伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
