@@ -2,6 +2,29 @@
 
 当前默认使用 v2：`EQ_People_rigged_v2.glb` 与 `locomotion-v2.glb`。原始人物、v1 人物与动作包保留，已有 v1 自定义人物继续匹配 v1 动作，新默认人物和 v2 人物使用 v2 动作。
 
+## 普通蒙皮人物自动适配
+
+选中“手动漫游初始位置”，在“漫游人物模型”上传自包含 GLB。上传后打开“人物动作预览”，可直接查看站立、行走、跑步、跳跃、飞行和右键转身；点击“应用此人物”才修改场景，关闭预览保留原人物。已有项目人物可通过“预览人物动作”检查。预览使用正式漫游控制器，关闭时释放独立场景、动画、骨架和输入监听。
+
+没有专用 profile 的人物，只要包含同一有效骨架、完整的 22 个可识别人形关节和有效蒙皮，就会尝试自动适配 v2 共享动作。支持 Mixamo 前缀、UE 常用骨名和 Blender 常用 `DEF-` / 左右后缀；允许语义关节之间存在静态辅助节点。用户无需改名、填写 reference pose 或自带动画。自动校准支持 Y 向上的 T/A 站姿、可识别的脚前向及均匀骨骼缩放；最多保留 8 个骨骼影响，不删除额外骨骼、裁剪权重或更改原 inverse bind。未知命名、缺关节、重复/歧义映射、不完整蒙皮和多个独立骨架不能自动适配。
+
+导入器只在项目副本根节点的 `extras.manualRoamHumanoid` 保存语义节点索引、适配版本和源文件 SHA-256，原始文件不改写，BIN 与其它 chunk 原字节保留。该数据是识别缓存，不是“动作效果已合格”的标记；运行时仍核对实际骨架和权重，并为目标人物生成动作。场景保存、SOURCE 和 Viewer 包沿用原 GLB 资源收集路径。新能力需要使用新版 Viewer 构建后重新发布；旧 Viewer 不会因此自动获得通用适配能力。
+
+基础动作与脚部贴地分别检查。自动人物按足骨及其后代的真实蒙皮影响提取脚底，不要求独立鞋网格或特定材质名称。足部候选顶点超出有界缓存、足底存在形态变形或无法可靠测量时，保留基础动作并明确提示贴地未启用，不改用默认人物鞋底伪装成功。完全不能自动适配时显示具体原因，继续使用原模型内嵌动画或静态姿态；无骨骼人物不自动绑骨。已有明确 v1/v2 声明仍走原严格校验。
+
+验证入口：
+
+```powershell
+npm run test:manual-roam
+npm run test:manual-roam:integration
+node scripts/smoke-manual-roam-humanoid.mjs
+node scripts/smoke-manual-roam-humanoid-terrain.mjs
+node scripts/smoke-manual-roam-avatar-upload.mjs
+# 构建最新 Viewer 后再检查发布外壳与缓存
+npm run build:viewer
+node scripts/smoke-manual-roam-humanoid-viewer.mjs
+```
+
 ## 离线构建与验证
 
 ```powershell
@@ -39,7 +62,8 @@ v1 将原有行走姿态的网格先烘焙到 T-Pose，再播放动画，产生�
 | WalkLeft/Right | 原生侧跑降低下肢幅度、减少起伏并重定时，明确属于编辑派生，未称为原生侧走动捕 |
 | WalkBackward | 原生 Walking_Backwards 调整迈步幅度，保留方向和膝盖屈伸轴 |
 | RunBackward | 原生 Walking_Backwards 重定时，属于快速后退派生，并非独立后跑动捕 |
-| JumpStart/JumpUp/Fall/Land、FlyIdle/FlyMove | 原有原创骨骼关键帧，来源明确记录 |
+| JumpStart/JumpUp/Fall/Land | 原有原创骨骼关键帧，来源明确记录 |
+| FlyIdle/FlyMove | 以放松站姿上身衔接的原创悬停/飞行关键帧，前臂使用Y轴屈肘，避免大幅外展及长轴扭转拉开衣身 |
 
 导出时读取源完整层级的世界姿态差，再转换到目标父链；不会对膝盖和小腿整链做 Y 轴 90 度旋转。测试直接检查左右侧移膝盖横向旋转分量，v1 原动作约 67 度会失败，v2 通过。
 

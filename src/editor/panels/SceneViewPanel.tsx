@@ -2717,6 +2717,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         return;
       }
       const target = event.target;
+      if (target instanceof Element && target.closest('dialog.manual-roam-avatar-preview[open]')) return;
       const inputFocused = target instanceof HTMLInputElement
         || target instanceof HTMLTextAreaElement
         || target instanceof HTMLSelectElement

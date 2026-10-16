@@ -116,7 +116,9 @@ export function ManualRoamControls(props: ManualRoamControlsProps) {
   }
 
   const rotationMultiplier = snapshot.config.mouseSensitivity / DEFAULT_MOUSE_SENSITIVITY;
-  const animationLabel = snapshot.avatarAnimationMode === 'shared-skeleton'
+  const animationLabel = snapshot.avatarAnimationMode === 'auto-skeleton'
+    ? '自动适配动作'
+    : snapshot.avatarAnimationMode === 'shared-skeleton'
     ? '共享骨骼动作'
     : snapshot.avatarAnimationMode === 'embedded'
     ? '模型动画'

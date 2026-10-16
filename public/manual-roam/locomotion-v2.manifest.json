@@ -993,7 +993,7 @@
     },
     "animation": {
       "path": "manual-roam/locomotion-v2.glb",
-      "sha256": "6ae81ce61447c006427a8b2d75745cfd1a363ee348e6864ae31f28bdd31e0855"
+      "sha256": "e5c4f1e562cfeda22518c8abb706bc10e85e5b1a57c97d9dc4a73445f580f09a"
     }
   },
   "sources": [

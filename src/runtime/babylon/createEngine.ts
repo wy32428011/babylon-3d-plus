@@ -318,6 +318,8 @@ function createCameraFlyKeyControls(
     if (!CAMERA_FLY_KEY_CODES.has(event.code)) return;
     const active = document.activeElement;
     if (active && active !== document.body && !(active instanceof HTMLCanvasElement)) return;
+    // 人物预览等独立画布拥有自己的键盘输入，不能同时推动底层编辑器相机。
+    if (active instanceof HTMLCanvasElement && active !== engine.getRenderingCanvas()) return;
     const navigationMode = getNavigationMode();
     if (navigationMode === 'transition' || (navigationMode === 'standard' && (event.code === 'Space' || event.code === 'KeyC'))) {
       event.preventDefault();

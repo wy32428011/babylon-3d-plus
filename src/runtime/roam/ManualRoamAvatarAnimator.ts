@@ -5,6 +5,7 @@ import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { MANUAL_ROAM_RIG_PROFILE, MANUAL_ROAM_RIG_PROFILE_V2, getManualRoamRigProfile, prepareManualRoamReferencePose, validateManualRoamAvatarRig, validateManualRoamRigNodes, validateManualRoamRestCompatibility } from './manualRoamAvatarRig.ts';
 import { MANUAL_ROAM_CLIPS, MANUAL_ROAM_TURN_CLIPS, createManualRoamAnimationState, stepManualRoamAnimationState, type ManualRoamClip, type ManualRoamAnimationFrame, type ManualRoamGaitTiming } from './manualRoamAnimationState.ts';
 import type { ManualRoamTurnClip } from './manualRoamTurnState.ts';
+import { humanoidLegLength, identifyRuntimeHumanoid, prepareHumanoidReference, retargetHumanoidGroup, sampleHumanoidFootReference, type ManualRoamRigBinding } from './manualRoamHumanoid.ts';
 
 type ClipDefinition = { name: string; loop: boolean; referenceSpeed?: number; cycleDistanceMeters?: number; phaseOffset?: number; duration?:number;rotationProgress?:number[];contacts?:{left:number[]|number[][];right:number[]|number[][]} };
 type MotionManifest = { version: number; profile: string; clips: Record<ManualRoamClip, ClipDefinition> };
@@ -31,34 +32,42 @@ export class ManualRoamAvatarAnimator {
     const groups = new Map<ManualRoamClip, AnimationGroup>();
     try {
       for (const group of container.animationGroups) group.stop();
+      const profile = getManualRoamRigProfile(container);
       prepareManualRoamReferencePose(container);
       for (const skeleton of container.skeletons) skeleton.returnToRest();
-      const target = validateManualRoamAvatarRig(container);
+      let binding: ManualRoamRigBinding = profile
+        ? { joints: validateManualRoamAvatarRig(container), automatic: false, facingYaw: 0, warnings: [], legLength: 0 }
+        : identifyRuntimeHumanoid(container);
+      const target = binding.joints as Map<string, TransformNode>;
       const acquired = acquireSource(scene, options);
       const entry = acquired.entry; release = acquired.release;
       const source = await entry.promise;
       if (scene.isDisposed || entry.disposed) throw new Error('动作加载期间场景已释放。');
-      if (source.manifest.profile !== getManualRoamRigProfile(container)) throw new Error('人物与动作骨架版本不一致。');
-      validateManualRoamRestCompatibility(source.nodes, target);
-      const legScale = legLength(target) / legLength(source.nodes);
+      if (source.manifest.profile !== (profile ?? MANUAL_ROAM_RIG_PROFILE_V2)) throw new Error('人物与动作骨架版本不一致。');
+      if (binding.automatic) binding = prepareHumanoidReference(container, binding, source.nodes);
+      else validateManualRoamRestCompatibility(source.nodes, target);
+      const footReference = binding.automatic ? sampleHumanoidFootReference(source.nodes, source.groups.get('Idle')!) : undefined;
+      const legScale = binding.automatic ? binding.legLength / humanoidLegLength(source.nodes) : legLength(target) / legLength(source.nodes);
       const avatar = new AnimatorAvatar('manual-roam', undefined, false);
       avatar.skeletons = new Set(container.skeletons);
       avatar.showWarnings = false;
       const id = ++nextAnimatorId;
       for (const clip of source.groups.keys()) {
         const original = source.groups.get(clip)!;
-        const group = avatar.retargetAnimationGroup(original, { animationGroupName: `manual-roam-${id}-${clip}`, checkHierarchy: true, retargetAnimationKeys: true, fixRootPosition: false, fixGroundReference: false });
+        const group = binding.automatic
+          ? retargetHumanoidGroup(original, source.nodes, binding, `manual-roam-${id}-${clip}`, footReference)
+          : avatar.retargetAnimationGroup(original, { animationGroupName: `manual-roam-${id}-${clip}`, checkHierarchy: true, retargetAnimationKeys: true, fixRootPosition: false, fixGroundReference: false });
         groups.set(clip, group);
-        if (group.targetedAnimations.length !== original.targetedAnimations.length || group.targetedAnimations.some(track => target.get(track.target.name) !== track.target)) throw new Error(`动作轨道无法完整绑定：${clip}`);
+        if (group.targetedAnimations.length !== original.targetedAnimations.length || group.targetedAnimations.some(track => ![...target.values()].includes(track.target))) throw new Error(`动作轨道无法完整绑定：${clip}`);
         // retarget 已保留目标 rest 基高；再按腿长缩放骨盆局部起伏，始终锁定水平根位移。
         const hips = target.get('Hips')!;
         for (const track of group.targetedAnimations) {
-          if (track.target !== hips || track.animation.targetProperty !== 'position') continue;
+          if (binding.automatic || track.target !== hips || track.animation.targetProperty !== 'position') continue;
           for (const key of track.animation.getKeys()) key.value.set(hips.position.x, hips.position.y + (key.value.y - hips.position.y) * legScale, hips.position.z);
         }
         group.stop();
       }
-      return new ManualRoamAvatarAnimator(groups, source.manifest, release, legScale, options.enableStrideWarp === true);
+      return new ManualRoamAvatarAnimator(groups, source.manifest, release, legScale, options.enableStrideWarp === true, binding);
     } catch (error) {
       for (const group of groups.values()) group.dispose();
       release();
@@ -84,8 +93,10 @@ export class ManualRoamAvatarAnimator {
   private readonly legScale: number;
   private readonly clips: ManualRoamClip[];
   private readonly sampledProgress = new Map<ManualRoamClip,number>();
+  private readonly rigBinding: ManualRoamRigBinding;
 
-  private constructor(groups: Map<ManualRoamClip, AnimationGroup>, manifest: MotionManifest, release: () => void, legScale: number, enableStrideWarp: boolean) {
+  private constructor(groups: Map<ManualRoamClip, AnimationGroup>, manifest: MotionManifest, release: () => void, legScale: number, enableStrideWarp: boolean, rigBinding: ManualRoamRigBinding) {
+    this.rigBinding = rigBinding;
     this.groups = groups; this.manifest = manifest; this.release = release;
     this.clips=[...groups.keys()];
     this.legScale = legScale;
@@ -180,6 +191,8 @@ export class ManualRoamAvatarAnimator {
   }
 
   getStrideScale(): number { return this.state.strideScale; }
+  setStrideWarpEnabled(enabled: boolean): void { this.timing.enableStrideWarp = enabled && this.manifest.profile === MANUAL_ROAM_RIG_PROFILE_V2; }
+  getRigBinding(): ManualRoamRigBinding { return this.rigBinding; }
 
   getTurnMotion(): {turnDurations:Partial<Record<ManualRoamTurnClip,number>>;turnRotationCurves:Partial<Record<ManualRoamTurnClip,readonly number[]>>} {
     const turnDurations:Partial<Record<ManualRoamTurnClip,number>>={},turnRotationCurves:Partial<Record<ManualRoamTurnClip,readonly number[]>>={};

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
 import { createServer } from 'vite';
-import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Vector3 } from '@babylonjs/core';
+import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Skeleton, Vector3 } from '@babylonjs/core';
 
 const server = await createServer({ appType: 'custom', configFile: false, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
 const { ManualRoamRuntime } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamRuntime.ts');
 const { EditorManualRoamSpawnRuntime } = await server.ssrLoadModule('/src/runtime/babylon/EditorManualRoamSpawnRuntime.ts');
 const { createManualRoamSpawnEntity } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
+const { ManualRoamAvatarAnimator } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamAvatarAnimator.ts');
 after(() => server.close());
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -20,6 +21,99 @@ function createAvatar(scene: Scene, name: string, animated = false) {
   container.removeAllFromScene();
   return { container, mesh };
 }
+
+test('普通蒙皮人物自动尝试共享动作，脚部增强失败不撤销已成功的动作', async (t) => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: Object.assign(new EventTarget(), { baseURI: 'https://assets.test/' }), configurable: true });
+  const avatar = createAvatar(scene, 'ordinary-skinned');
+  avatar.mesh.skeleton = new Skeleton('ordinary', 'ordinary', scene);
+  avatar.container.skeletons.push(avatar.mesh.skeleton);
+  let created = 0, disposed = 0;
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(ManualRoamAvatarAnimator, 'create', async () => {
+    created++;
+    return { sampleIdle() {}, pause() {}, setStrideWarpEnabled() {}, dispose() { disposed++; },
+      getRigBinding: () => ({ joints: new Map(), automatic: true, facingYaw: Math.PI / 2, warnings: [], legLength: 1 }) };
+  });
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(), avatarUrl: 'https://assets.test/ordinary.glb', setOrbitControlsEnabled() {} });
+  try {
+    await flush();
+    assert.equal(created, 1, '无专用 profile 的蒙皮人物也必须进入自动适配');
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'auto-skeleton');
+    assert.match(runtime.getSnapshot().statusMessage, /贴地/);
+    assert.equal(disposed, 0, '脚部检测失败不能销毁已成功的动作');
+    avatar.mesh.computeWorldMatrix(true);
+    const center = avatar.mesh.getBoundingInfo().boundingBox.centerWorld;
+    assert.ok(Math.hypot(center.x, center.z) < 1e-5, '自动修正朝向后人物仍应位于碰撞体中央');
+    runtime.dispose();
+    assert.equal(disposed, 1);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('旧人物动作晚到失败不能销毁新人物已绑定的动作', async (t) => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: Object.assign(new EventTarget(), { baseURI: 'https://assets.test/' }), configurable: true });
+  const avatars = ['old', 'new'].map(name => {
+    const avatar = createAvatar(scene, name);
+    avatar.mesh.skeleton = new Skeleton(name, name, scene); avatar.container.skeletons.push(avatar.mesh.skeleton); return avatar;
+  });
+  let loaded = 0, rejectOld!: (reason: Error) => void, newDisposed = 0;
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatars[loaded++].container);
+  t.mock.method(ManualRoamAvatarAnimator, 'create', async (_scene, container) => {
+    if (container === avatars[0].container) return new Promise((_resolve, reject) => { rejectOld = reject; });
+    return { sampleIdle() {}, pause() {}, setStrideWarpEnabled() {}, dispose() { newDisposed++; },
+      getRigBinding: () => ({ joints: new Map(), automatic: true, facingYaw: 0, warnings: [], legLength: 1 }) };
+  });
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(), avatarUrl: 'https://assets.test/old.glb', setOrbitControlsEnabled() {} });
+  try {
+    await flush(); runtime.setAvatarUrl('https://assets.test/new.glb'); await flush();
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'auto-skeleton');
+    rejectOld(new Error('旧动作下载失败')); await flush();
+    assert.equal(newDisposed, 0, '过期失败不得释放当前人物动作');
+    assert.equal(avatars[1].mesh.isDisposed(), false);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('普通人物适配失败保留自带动画并显示具体原因', async (t) => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: Object.assign(new EventTarget(), { baseURI: 'https://assets.test/' }), configurable: true });
+  const avatar = createAvatar(scene, 'unsupported', true);
+  avatar.mesh.skeleton = new Skeleton('incomplete', 'incomplete', scene);
+  avatar.container.skeletons.push(avatar.mesh.skeleton);
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(ManualRoamAvatarAnimator, 'create', async () => { throw new Error('缺少左腿'); });
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(), avatarUrl: 'https://assets.test/incomplete.glb', setOrbitControlsEnabled() {} });
+  try {
+    await flush();
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'embedded');
+    assert.match(runtime.getSnapshot().statusMessage, /缺少左腿/);
+    assert.equal(avatar.mesh.isDisposed(), false);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
 
 test('漫游切换忽略过期加载，适配身高，识别动画并清理卸载后的请求', async (t) => {
   const engine = new NullEngine();
@@ -102,6 +196,37 @@ test('编辑态切换人物重建显示并丢弃旧模型', async (t) => {
     assert.equal(second.mesh.isDisposed(), true);
   } finally {
     runtime.dispose(); scene.dispose(); engine.dispose();
+  }
+});
+
+test('编辑态普通人物自动绑定待机，修正朝向后仍居中于指定出生点', async (t) => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', { value: Object.assign(new EventTarget(), { baseURI: 'https://assets.test/' }), configurable: true });
+  const avatar = createAvatar(scene, 'editor-ordinary');
+  avatar.mesh.skeleton = new Skeleton('ordinary', 'ordinary', scene);
+  avatar.container.skeletons.push(avatar.mesh.skeleton);
+  let idle = 0, paused = 0, disposed = 0;
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(ManualRoamAvatarAnimator, 'create', async () => ({
+    sampleIdle() { idle++; }, pause() { paused++; }, dispose() { disposed++; },
+    getRigBinding: () => ({ joints: new Map(), automatic: true, facingYaw: Math.PI / 2, warnings: [], legLength: 1 }),
+  }));
+  const runtime = new EditorManualRoamSpawnRuntime(scene);
+  const spawn = createManualRoamSpawnEntity({ x: 10, y: 3, z: 5 });
+  spawn.components.transform.rotation.y = .7;
+  spawn.components.manualRoamSpawn = { avatar: { name: 'ordinary', sourcePath: 'ordinary.glb', sourceUrl: 'https://assets.test/ordinary.glb' } };
+  try {
+    runtime.sync(spawn, true, true, true); await flush();
+    assert.equal(idle, 1); assert.equal(paused, 1, '编辑态只采样待机，不持续播放');
+    avatar.mesh.computeWorldMatrix(true);
+    const bounds = avatar.mesh.getBoundingInfo().boundingBox;
+    assert.ok(Math.hypot(bounds.centerWorld.x - 10, bounds.centerWorld.z - 5) < 1e-5);
+    assert.ok(Math.abs(bounds.minimumWorld.y - 3) < 1e-5);
+    runtime.dispose(); assert.equal(disposed, 1);
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
   }
 });
 

@@ -57,16 +57,21 @@ window.checkOcclusion = async (mode, selected) => {
   runtime = new EditorManualRoamSpawnRuntime(scene);
   const spawn = createManualRoamSpawnEntity();
   if (mode === 'custom') spawn.components.manualRoamSpawn = { avatar: { name: 'custom', sourcePath: 'custom.glb', sourceUrl: new URL('/custom.glb', location.href).href } };
+  if (mode === 'automatic') {
+    spawn.components.manualRoamSpawn = { avatar: { name: 'ordinary', sourcePath: 'Xbot.glb', sourceUrl: new URL('/scripts/manual-roam-assets/sources/Xbot.glb', location.href).href } };
+    spawn.components.transform.rotation.y = .7;
+  }
   runtime.sync(spawn, selected, true, true);
   await loaded;
   await new Promise(resolve => setTimeout(resolve, 0));
   SceneLoader.LoadAssetContainerAsync = originalLoader;
-  if (mode === 'default') {
+  if (mode === 'default' || mode === 'automatic') {
     const deadline = performance.now() + 30000;
     while (!runtime.getWorldBoundsMeshes(spawn.id).some(mesh => mesh.skeleton)) {
       if (performance.now() > deadline) throw new Error('默认骨骼人物及共享待机姿态未完成装配');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
+    if (mode === 'automatic' && !runtime.entries.get(spawn.id)?.avatarAnimator?.getRigBinding().automatic) throw new Error('编辑态普通人物必须实际完成自动动作绑定');
   }
   await scene.whenReadyAsync();
   const root = runtime.getTransformTarget(spawn.id);
@@ -132,7 +137,7 @@ try {
   console.log('Loading manual-roam WebGL fixture');
   await page.goto(server.resolvedUrls.local[0] + '__manual_roam_occlusion__', { waitUntil: 'commit' });
   await page.waitForFunction(() => typeof window.checkOcclusion === 'function', null, { timeout: 60_000 });
-  for (const mode of ['default', 'custom', 'placeholder']) {
+  for (const mode of ['default', 'automatic', 'custom', 'placeholder']) {
     for (const selected of [false, true]) {
       const result = await page.evaluate(({ mode, selected }) => window.checkOcclusion(mode, selected), { mode, selected });
       console.log(JSON.stringify({ mode, selected, ...result }));
@@ -144,7 +149,7 @@ try {
   }
   assert.deepEqual(errors, []);
   await page.evaluate(() => window.disposeFixture());
-  console.log('PASS: 默认人物、自定义人物、失败占位模型在选中和未选中时均遵循场景遮挡。');
+  console.log('PASS: 默认人物、自动适配人物、自定义人物、失败占位模型在选中和未选中时均遵循场景遮挡。');
 } catch (error) {
   if (page) await page.screenshot({ path: path.join(outputDir, 'failure.png') });
   console.error(errors);

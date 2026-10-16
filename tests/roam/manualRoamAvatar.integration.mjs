@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,15 @@ const userData = path.join(root, 'user-data');
 await mkdir(userData);
 app.setPath('userData', userData);
 
+function inspectAdaptedGlb(bytes) {
+  const jsonLength = bytes.readUInt32LE(12);
+  const json = JSON.parse(bytes.subarray(20, 20 + jsonLength).toString().trimEnd());
+  const metadata = json.nodes.find(node => node.extras?.manualRoamHumanoid)?.extras.manualRoamHumanoid;
+  assert.equal(metadata?.motionProfile, 'mixamo-humanoid-v2');
+  assert.equal(Object.keys(metadata.joints).length, 22);
+  return { metadata, tail: bytes.subarray(20 + jsonLength) };
+}
+
 async function run() {
   const { importManualRoamAvatarIntoProject } = await import('../../dist-electron/ipc/manualRoamAvatarStore.js');
   const { setCurrentProjectRoot, listProjectAssets } = await import('../../dist-electron/ipc/projectAssetStore.js');
@@ -19,11 +29,18 @@ async function run() {
   const projectRoot = path.join(root, 'project');
   await mkdir(projectRoot);
   setCurrentProjectRoot(projectRoot);
-  const fixture = path.resolve('public/manual-roam/EQ_People.glb');
+  const fixture = path.resolve('scripts/manual-roam-assets/sources/Xbot.glb');
+  const originalBytes = await readFile(fixture);
+  const originalHash = createHash('sha256').update(originalBytes).digest('hex');
   const first = await importManualRoamAvatarIntoProject(projectRoot, fixture);
   const second = await importManualRoamAvatarIntoProject(projectRoot, fixture);
   assert.notEqual(first.path, second.path, '同名人物不得覆盖已引用文件');
-  assert.deepEqual(await readFile(first.path), await readFile(fixture));
+  const adaptedBytes = await readFile(first.path);
+  const adapted = inspectAdaptedGlb(adaptedBytes);
+  assert.equal(adapted.metadata.sourceHash, originalHash);
+  assert.deepEqual(adapted.tail, originalBytes.subarray(20 + originalBytes.readUInt32LE(12)), '上传完整保留原蒙皮、纹理和动作二进制');
+  assert.deepEqual(await readFile(fixture), originalBytes, '原始人物文件保持不变');
+  assert.deepEqual(await readFile(second.path), adaptedBytes, '同一人物重复上传生成确定的适配结果');
   assert.equal((await listProjectAssets()).assets.length, 2);
 
   const broken = path.join(root, 'broken.glb');
@@ -47,6 +64,8 @@ async function run() {
   const deployment = await prepareDeploymentExport(content, '人物导出', [], new AbortController().signal, () => {});
   assert.equal(deployment.assetFiles.filter((file) => file.sourcePath === first.path).length, 1);
   assert.equal(deployment.assetFiles.some((file) => file.sourcePath === second.path), false);
+  const deployedFile = deployment.assetFiles.find(file => file.sourcePath === first.path);
+  assert.deepEqual(await readFile(deployedFile.sourcePath), adaptedBytes, 'Viewer 收集派生人物及其完整适配数据');
   const deployedAvatar = JSON.parse(deployment.sceneContent).scene.entities.spawn.components.manualRoamSpawn.avatar;
   assert.match(deployedAvatar.sourceUrl, /^editor-asset:\/\/local\//);
   assert.notEqual(deployedAvatar.sourcePath, first.path);
@@ -66,6 +85,10 @@ async function run() {
   const names = archive.files.map((file) => file.path.replaceAll('\\', '/'));
   assert.ok(names.includes(path.relative(projectRoot, first.path).replaceAll('\\', '/')));
   assert.ok(!names.includes(path.relative(projectRoot, second.path).replaceAll('\\', '/')));
+  const avatarEntry = archive.files.find(file => file.path.replaceAll('\\', '/') === path.relative(projectRoot, first.path).replaceAll('\\', '/'));
+  const packagedBytes = await avatarEntry.buffer();
+  assert.deepEqual(packagedBytes, adaptedBytes, 'SOURCE ZIP 包含已确认的派生人物，重新打开不依赖源文件');
+  assert.equal(inspectAdaptedGlb(packagedBytes).metadata.sourceHash, originalHash);
   const sceneEntry = archive.files.find((file) => file.path.replaceAll('\\', '/') === 'Scenes/main.scene.json');
   const portableAvatar = JSON.parse((await sceneEntry.buffer()).toString()).scene.entities.spawn.components.manualRoamSpawn.avatar;
   assert.match(portableAvatar.sourcePath, /^Assets\/Models\/RoamAvatar-/);
@@ -83,12 +106,12 @@ async function run() {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [fixture] });
     const imported = await window.webContents.executeJavaScript('window.editorApi.importManualRoamAvatar()');
     assert.equal(imported.canceled, false);
-    assert.deepEqual(await readFile(imported.importedAsset.path), await readFile(fixture));
+    assert.deepEqual(await readFile(imported.importedAsset.path), adaptedBytes);
   } finally {
     window.destroy();
     dialog.showOpenDialog = originalDialog;
   }
-  console.log('PASS: 人物上传、同名保留、损坏/外部资源拒绝、项目索引、Viewer 资源改写、SOURCE ZIP、sandbox preload 上传及取消。');
+  console.log('PASS: 普通 Mixamo 人物自动适配、源文件/蒙皮保留、同名隔离、损坏/外部资源拒绝、项目索引、Viewer 派生资源改写、SOURCE ZIP 适配数据保留、sandbox preload 上传及取消。');
 }
 
 app.whenReady().then(run).then(async () => {

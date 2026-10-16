@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { authorizeAssetFile } from './assetRegistry.js';
 import { inspectGlbModelFile, scanModelPackage } from './modelPackageScanner.js';
+import { copyManualRoamAvatarWithAdaptation } from './manualRoamAvatarAdaptation.js';
 import {
   getProjectModelsRoot,
   readProjectAssetIndex,
@@ -24,7 +25,7 @@ export async function importManualRoamAvatarIntoProject(
   const packagePath = await fs.mkdtemp(path.join(modelsRoot, 'RoamAvatar-'));
   const targetPath = path.join(packagePath, path.basename(sourceFilePath));
   try {
-    await fs.copyFile(sourceFilePath, targetPath);
+    await copyManualRoamAvatarWithAdaptation(sourceFilePath, targetPath);
     await inspectGlbModelFile(targetPath);
     const scanned = await scanModelPackage(packagePath);
     if (!scanned.asset) throw new Error(scanned.skipped?.reason ?? '人物模型扫描失败。');

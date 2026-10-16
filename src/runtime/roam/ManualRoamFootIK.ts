@@ -6,6 +6,11 @@ import { createManualRoamFootPhaseState, stepManualRoamFootPhase, type ManualRoa
 export type ManualRoamGroundHit = { point: Vector3; normal: Vector3 } | { height: number; normal: Vector3 };
 export type ManualRoamFootIKOptions = {
   probeGround: (x: number, z: number, originY: number, length: number) => ManualRoamGroundHit | null;
+  /** 自动人物保留原骨骼名称，以语义映射连接现有动作及脚部校准。 */
+  joints?: ReadonlyMap<string, TransformNode>;
+  automatic?: boolean;
+  /** 自动姿态校准前捕获的脚骨局部朝上；原始mesh bind坐标不一定是Y向上。 */
+  footReferenceUp?: ReadonlyMap<string, Vector3>;
   /** 作者米制的脚踝到鞋底距离；由真实人物根缩放换算成世界距离。 */
   soleHeight?: number;
   /** 世界米，限制视觉纠正，不能用 IK 代替碰撞器登阶。 */
@@ -42,7 +47,7 @@ export type ManualRoamFootIKFootDebug = {
   residualCorrection: number;
   lockPoint: Vector3|null;
 };
-type Leg = { soleUp: Vector3; thigh: TransformNode; knee: TransformNode; foot: TransformNode; toe: TransformNode; sole:ManualRoamSoleGeometry; solePoints:Vector3[]; strideOffset:Vector3; lock: Vector3 | null; lockId:number;releaseReason:string;plantOffsets:Vector3[]|null; phase:ManualRoamFootPhaseState; previousClearance:number|null; pole:Vector3|null; ground:{point:Vector3;normal:Vector3}|null; debug: ManualRoamFootIKFootDebug };
+type Leg = { soleUp: Vector3; soleForward: Vector3 | null; thigh: TransformNode; knee: TransformNode; foot: TransformNode; toe: TransformNode | null; sole:ManualRoamSoleGeometry; solePoints:Vector3[]; strideOffset:Vector3; lock: Vector3 | null; lockId:number;releaseReason:string;plantOffsets:Vector3[]|null; phase:ManualRoamFootPhaseState; previousClearance:number|null; pole:Vector3|null; ground:{point:Vector3;normal:Vector3}|null; debug: ManualRoamFootIKFootDebug };
 const emptyDebug = (reason = 'inactive'): ManualRoamFootIKFootDebug => ({ locked: false, target: null, targetError: 0, normalAlignment: 1, kneeForward: 0, reason,phase:'Swing',weights:{position:0,rotation:0,plant:0},pelvisOffset:0,poleCorrectionRadians:0,lockId:0,releaseReason:reason,soleResidualBefore:0,soleResidualAfter:0,residualIterations:0,residualCorrection:0,lockPoint:null });
 /** 参考姿态把脚骨拉平，鞋网格仍按真实绑定蒙皮；资产在脚骨局部记录“鞋底自然朝上”的方向，缺省时回退脚骨Up轴。 */
 function readSoleUp(foot: TransformNode): Vector3 {
@@ -55,6 +60,9 @@ const finiteVector = (value: Vector3): boolean => value.asArray().every(Number.i
 const position = (node: TransformNode): Vector3 => { node.computeWorldMatrix(true); return node.getAbsolutePosition().clone(); };
 const worldDirection = (node: TransformNode, local: Vector3): Vector3 => Vector3.TransformNormal(local, node.computeWorldMatrix(true)).normalize();
 const project = (value: Vector3, normal: Vector3): Vector3 => value.subtract(normal.scale(Vector3.Dot(value, normal)));
+const footForward = (leg: Leg): Vector3 => leg.soleForward
+  ? worldDirection(leg.foot, leg.soleForward)
+  : position(leg.toe!).subtract(position(leg.foot)).normalize();
 
 function fromTo(from: Vector3, to: Vector3): Quaternion {
   const a = from.normalizeToNew(), b = to.normalizeToNew(), dot = Math.max(-1, Math.min(1, Vector3.Dot(a,b)));
@@ -81,6 +89,7 @@ function aim(node: TransformNode, fromWorld: Vector3, toWorld: Vector3): void {
 /** 必须在本帧动画姿态求值后调用；只修改视觉骨骼，不移动人物根或碰撞器。 */
 export class ManualRoamFootIK {
   private readonly hips: TransformNode;
+  private readonly bodyForward: Vector3;
   private readonly legs: Record<'left' | 'right', Leg>;
   private readonly options: ManualRoamFootIKOptions;
   private readonly soleHeight: number;
@@ -94,18 +103,36 @@ export class ManualRoamFootIK {
   constructor(container: AssetContainer, options: ManualRoamFootIKOptions) {
     this.options = options;
     const get = (name: string): TransformNode => {
+      if (options.joints) {
+        const mapped = options.joints.get(name);
+        if (!mapped) throw new Error(`足部 IK 关节未映射：${name}`);
+        return mapped;
+      }
       const found = container.transformNodes.filter(node => node.name === name);
       if (found.length !== 1) throw new Error(`足部 IK 关节缺失或重名：${name}`);
       return found[0];
     };
     this.hips = get('Hips');
     const leg = (side: string): Leg => {
-      const thigh = get(side+'UpLeg'), knee = get(side+'Leg'), foot = get(side+'Foot'), toe = get(side+'ToeBase');
-      if (thigh.parent !== this.hips || knee.parent !== thigh || foot.parent !== knee || toe.parent !== foot) throw new Error(`足部 IK 层级无效：${side}`);
-      const sole=measureManualRoamSole(container,foot,side,options.soleHeight??0.065);
-      return { soleUp:readSoleUp(foot),thigh,knee,foot,toe,sole,solePoints:sole.points,strideOffset:Vector3.Zero(),lock:null,lockId:0,releaseReason:'inactive',plantOffsets:null,phase:createManualRoamFootPhaseState(),previousClearance:null,pole:null,ground:null,debug:emptyDebug() };
+      const thigh = get(side+'UpLeg'), knee = get(side+'Leg'), foot = get(side+'Foot');
+      const toe = options.automatic ? options.joints?.get(side+'ToeBase') ?? null : get(side+'ToeBase');
+      const connected = (child: TransformNode, parent: TransformNode) => options.automatic ? child.isDescendantOf(parent) : child.parent === parent;
+      if (!connected(thigh,this.hips) || !connected(knee,thigh) || !connected(foot,knee) || (toe && !connected(toe,foot))) throw new Error(`足部 IK 层级无效：${side}`);
+      const sole=measureManualRoamSole(container,foot,side,options.soleHeight??0.065,options);
+      const inverse = Matrix.Invert(foot.computeWorldMatrix(true));
+      const up = options.automatic ? options.footReferenceUp?.get(side+'Foot')?.clone().normalize() ?? Vector3.TransformNormal(Vector3.Up(),inverse).normalize() : readSoleUp(foot);
+      // 原始脚骨的轴可能沿小腿；沿用校准前站姿的鞋底朝上，不将mesh的inverse bind误认为节点的原站姿。
+      const forward = toe ? position(toe).subtract(position(foot)) : Vector3.TransformNormal(Vector3.Forward(),this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity());
+      const soleForward = options.automatic ? project(Vector3.TransformNormal(forward,inverse),up).normalize() : null;
+      if (options.automatic && (!finiteVector(up) || !finiteVector(soleForward!) || soleForward!.lengthSquared()<1e-8)) throw new Error(`足底参考朝向无法确定：${side}`);
+      return { soleUp:up,soleForward,thigh,knee,foot,toe,sole,solePoints:sole.points,strideOffset:Vector3.Zero(),lock:null,lockId:0,releaseReason:'inactive',plantOffsets:null,phase:createManualRoamFootPhaseState(),previousClearance:null,pole:null,ground:null,debug:emptyDebug() };
     };
     this.legs = { left:leg('Left'),right:leg('Right') };
+    const initialForward = project(footForward(this.legs.left).add(footForward(this.legs.right)),Vector3.Up());
+    this.bodyForward = options.automatic
+      ? Vector3.TransformNormal(initialForward,Matrix.Invert(this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity())).normalize()
+      : Vector3.Forward();
+    if (!finiteVector(this.bodyForward) || this.bodyForward.lengthSquared()<1e-8) throw new Error('足部 IK 无法确定人体前向。');
     this.soleHeight = options.soleHeight ?? 0.065;
     this.maxCorrection = options.maxCorrection ?? 0.26;
     const slope = options.maxSlopeDegrees ?? 50;
@@ -121,7 +148,7 @@ export class ManualRoamFootIK {
     if(!frame.grounded||frame.fly){this.resetLegs();this.applyPelvis(0,frame.dt);return;}
     const moving=(frame.speed??0)>0.03;
     const stride=Number.isFinite(frame.strideScale)?Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,frame.strideScale!)):1;
-    const forward=worldDirection(this.hips.parent as TransformNode,Vector3.Forward()),center=position(this.hips);
+    const forward=Vector3.TransformNormal(this.bodyForward,this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity()).normalize(),center=position(this.hips);
     for(const side of ['left','right'] as const){const leg=this.legs[side];leg.solePoints=leg.sole.sample();leg.strideOffset=forward.scale(Vector3.Dot(position(leg.foot).subtract(center),forward)*(stride-1));this.prepareLeg(leg,frame.footContacts[side],moving,frame.dt);}
     this.fitPelvis(moving,frame.dt);
     for (const side of ['left','right'] as const) this.updateLeg(this.legs[side],frame.footContacts[side],moving,!!frame.turning);
@@ -137,7 +164,7 @@ export class ManualRoamFootIK {
     const flatPoint=Vector3.TransformNormal(original[lowest],flatMatrix);
     // 锁平脚参考点；前掌/后跟只贡献相对平脚的滚动位移，避免最低点切换时踝部横跳一整只鞋长。
     const offset=leg.lock&&leg.plantOffsets?.length===points.length?points[lowest].subtract(leg.plantOffsets[lowest]):normal.scale(Vector3.Dot(points[lowest],normal)).add(project(points[lowest].subtract(flatPoint),normal));
-    return {offset,reference:points[lowest].subtract(offset),up:rotate(up),forward:rotate(position(leg.toe).subtract(position(leg.foot)).normalize())};
+    return {offset,reference:points[lowest].subtract(offset),up:rotate(up),forward:rotate(footForward(leg))};
   }
 
   private prepareLeg(leg:Leg,contact:number,moving:boolean,dt:number):void {
@@ -197,10 +224,15 @@ export class ManualRoamFootIK {
     const sole=this.solePose(leg,normal,moving,leg.phase.rotationWeight);
     let target = ground.subtract(sole.offset);
     const penetration=Math.max(0,Vector3.Dot(target.subtract(foot),normal));
+    // 普通人物的摆动脚可能前掌已越过台边、最低后跟仍在低处；释放前先核查实际轮廓上的局部高地面。
+    const edgeLift=this.options.automatic&&moving&&weight<.15
+      ? this.terrainLift(leg.solePoints.map(point=>Vector3.TransformCoordinates(point,leg.foot.getWorldMatrix())),foot.y,scale,normal)
+      : 0;
     if(weight<0.15&&moving) {
-      if(penetration<=1e-6&&leg.strideOffset.lengthSquared()<1e-10){this.release(leg,'swing');return;}
+      if(penetration<=1e-6&&edgeLift<=1e-6&&leg.strideOffset.lengthSquared()<1e-10){this.release(leg,'swing');return;}
       // 摆动脚只做必要法向抬升，不锁水平位置，也不把高空脚吸向地面。
       target=foot.add(leg.strideOffset).add(normal.scale(penetration));
+      target.y+=Math.max(0,edgeLift-penetration*normal.y);
     }
     if (Vector3.Distance(foot,target) > this.maxCorrection) { if(allowFallback&&(moving||leg.lock)){this.groundFallback(leg,turning?'turn-correction-limit':'stance-correction-limit');return;}this.release(leg,'correction-limit');return; }
     const upper = Vector3.Distance(hip,knee), lower = Vector3.Distance(knee,foot);let distance = Vector3.Distance(hip,target);
@@ -222,7 +254,7 @@ export class ManualRoamFootIK {
     if(moving)effectiveTarget.addInPlace(normal.scale(Math.max(0,penetration-Vector3.Dot(effectiveTarget.subtract(foot),normal))));
     const axis = effectiveTarget.subtract(hip).normalize();
     const bodyWorld = this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity();
-    const forward = Vector3.TransformNormal(Vector3.Forward(),bodyWorld).normalize();
+    const forward = Vector3.TransformNormal(this.bodyForward,bodyWorld).normalize();
     const originalPole=project(knee.subtract(hip),axis),safeForward=project(forward,axis).normalize();
     let pole=originalPole.clone();
     if(pole.lengthSquared()<1e-8&&leg.pole)pole=project(leg.pole,axis);
@@ -258,6 +290,11 @@ export class ManualRoamFootIK {
     let lift=-Infinity,minPlane=Infinity,maxPlane=-Infinity;const queried=new Map<string,number|null>();
     const check=(p:Vector3)=>{const key=p.x+':'+p.z;let y=queried.get(key);if(y===undefined){const hit=this.options.probeGround(p.x,p.z,originY+this.maxCorrection,this.maxCorrection*2+.2);y=hit&&finiteVector(hit.normal)&&hit.normal.lengthSquared()>1e-8&&hit.normal.normalizeToNew().y>=this.minimumNormalY?('point'in hit?hit.point.y:hit.height):null;queried.set(key,y);}if(y===null||!Number.isFinite(y))return;lift=Math.max(lift,y-p.y);const plane=Vector3.Dot(new Vector3(p.x,y,p.z),normal);minPlane=Math.min(minPlane,plane);maxPlane=Math.max(maxPlane,plane);};
     for(const p of cells.values())check(p);
+    if(this.options.automatic){
+      // 坐标极值覆盖刚踏入台面的窄前/后掌，不能被分区里更低、但仍悬在台外的顶点取代。
+      // 探到不同平面后仍核查全部缓存点，不裁剪实际足底几何，也不提高纠正预算。
+      for(const axis of ['x','z'] as const){let minimum=points[0],maximum=points[0];for(const p of points){if(p[axis]<minimum[axis])minimum=p;if(p[axis]>maximum[axis])maximum=p;}check(minimum);check(maximum);}
+    }
     if(maxPlane-minPlane>.001)for(const p of points)check(p);
     return Number.isFinite(lift)?allowDown?lift:Math.max(0,lift):0;
   }
@@ -270,7 +307,7 @@ export class ManualRoamFootIK {
     aim(leg.thigh,knee.subtract(hip),desiredKnee.subtract(hip));
     const nextKnee=position(leg.knee);aim(leg.knee,position(leg.foot).subtract(nextKnee),target.subtract(nextKnee));
     aim(leg.foot,worldDirection(leg.foot,leg.soleUp),up);
-    aim(leg.foot,project(position(leg.toe).subtract(position(leg.foot)),up),project(forward,up));
+    aim(leg.foot,project(footForward(leg),up),project(forward,up));
     return true;
   }
 

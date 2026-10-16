@@ -221,16 +221,31 @@ function authoredPose(name,t,duration) {
   if(name==='Fall'){crouch=0.12+0.03*wave;raise=0.4+0.04*wave;}
   if(name==='Land'){crouch=0.65*Math.sin(fraction*Math.PI);raise=0.25*(1-fraction);}
   const flying=name.startsWith('Fly');
-  set('Spine',flying?0.12+0.015*wave:crouch*0.22);
+  if(flying){
+    // 飞行衔接已验证的放松上身，避免从T形参考姿态大幅外展，牵开当前衣身绑定。
+    const pose=relaxedIdlePose(t,duration),moving=name==='FlyMove';
+    pose.local[names.indexOf('Spine')]=rotation([1,0,0],moving?.06:.025);
+    for(const side of ['Left','Right']){
+      const sign=side==='Left'?1:-1;
+      pose.local[names.indexOf(side+'Arm')]=rotation([0,0,1],-sign*(moving?1.36:1.40));
+      // 参考臂骨沿X，屈肘使用Y轴；绕X只会扭转袖口和手腕。
+      pose.local[names.indexOf(side+'ForeArm')]=rotation([0,1,0],-sign*(moving?.22:.18));
+      pose.local[names.indexOf(side+'UpLeg')]=rotation([1,0,0],.16+.02*wave);
+      pose.local[names.indexOf(side+'Leg')]=rotation([1,0,0],.32+.04*wave);
+      pose.local[names.indexOf(side+'Foot')]=rotation([1,0,0],-.16-.02*wave);
+    }
+    return {...pose,hipY:.008*wave};
+  }
+  set('Spine',crouch*0.22);
   for(const side of ['Left','Right']){
     const sign=side==='Left'?1:-1;
-    set(side+'Arm',-raise*0.8,0,sign*(flying?(name==='FlyMove'?-0.7:-0.9):-1.35+raise*0.7));
-    set(side+'ForeArm',flying?-0.25-0.03*wave:-0.15-raise*0.5);
-    set(side+'UpLeg',flying?0.2+0.04*wave:-crouch);
-    set(side+'Leg',flying?0.45+0.06*wave:crouch*1.8);
-    set(side+'Foot',flying?-0.2:-crouch*0.8);
+    set(side+'Arm',-raise*0.8,0,sign*(-1.35+raise*0.7));
+    set(side+'ForeArm',-0.15-raise*0.5);
+    set(side+'UpLeg',-crouch);
+    set(side+'Leg',crouch*1.8);
+    set(side+'Foot',-crouch*0.8);
   }
-  return {local:q,hipY:flying?0.015*wave:-crouch*0.08};
+  return {local:q,hipY:-crouch*0.08};
 }
 function relaxedIdlePose(t,duration) {
   const local=names.map(identity),wave=Math.sin(t/duration*Math.PI*2);
