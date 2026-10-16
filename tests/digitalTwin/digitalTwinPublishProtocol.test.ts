@@ -37,6 +37,39 @@ test('资源键只接受稳定数据中台目录命名', () => {
   assert.equal(parseDataPlatformResourceKey('D:/Assets/Models/MyModel/main.glb'), null);
 });
 
+test('超过一百万个节点的场景仍完整扫描尾部资源引用', () => {
+  const content = JSON.stringify({
+    scene: {
+      metadata: Array.from({ length: 1_000_001 }, () => 0),
+      resources: [
+        { sourcePath: 'Assets/Models/Model-9007199254740993/main.glb' },
+        { packagePath: 'Assets/Environments/Env-404-Factory' },
+        { scriptPaths: ['Assets/Models/ComboModels/Combo-303-Line/runtime.ts'] },
+        { sourcePath: 'Assets/Models/Model-202/main.glb' },
+      ],
+    },
+  });
+  assert.deepEqual(collectDigitalTwinResourceIds([content]), {
+    modelIds: ['202', '9007199254740993'],
+    envModelIds: ['404'],
+    comboModelIds: ['303'],
+  });
+});
+
+test('多个场景的累计节点超过一百万时仍完整合并并去重资源', () => {
+  const createScene = (id: string) => JSON.stringify({
+    scene: {
+      metadata: Array.from({ length: 500_001 }, () => 0),
+      model: { sourcePath: `Assets/Models/Model-${id}/main.glb` },
+    },
+  });
+  assert.deepEqual(collectDigitalTwinResourceIds([createScene('101'), createScene('202'), createScene('101')]), {
+    modelIds: ['101', '202'],
+    envModelIds: [],
+    comboModelIds: [],
+  });
+});
+
 test('断点分片规划跳过已上传分片并保持有界索引', () => {
   assert.deepEqual(createPendingChunkIndexes(35, 10, [1, 3, 99, -1, 1]), [0, 2]);
   assert.deepEqual(createPendingChunkIndexes(0, 10, []), []);
