@@ -216,7 +216,8 @@ function declareShuttleMotion(h: ReturnType<typeof makeHarness>): void {
 
 /**
  * 新协议帧：x/y 仅诊断；to_x/to_y/to_z 列/层/排 + to_Depth 排深（2 浅库位 / 8 深库位）指向当前阶段目标格；
- * Status：0 待机 / 1 装货 / 2 卸货 / 3 移动中。Locator 排号固定 2、排深 near → to_z=2, to_Depth=2。
+ * Status：0 待机 / 1 取货中 / 2 取货完成 / 3 卸货中 / 4 卸货完成 / 5 移动中 / 6 移动完成 / 10 急停 / 11 未知。
+ * _finish 事件不保证送达，测试主要走 1→5→3 的非 finish 转场。Locator 排号固定 2、排深 near → to_z=2, to_Depth=2。
  */
 function targetFrame(status: number, toX: number, toY: number, toZ = 2, toDepth = 2, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return { x: 0, y: 0, to_x: toX, to_y: toY, to_z: toZ, to_Depth: toDepth, Status: status, errorCode: 0, ...extra };
@@ -227,7 +228,7 @@ test('货格匹配：绑定巷道一致 + 列层范围命中才动作，失配�
   try {
     // 货格巷道 A2 ≠ 小车参数 A1：目标位失配，报错一次且整机不动
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, aisleCode: 'A2', rootPosition: new Vector3(0, 2, 11) });
-    const MOVE = targetFrame(3, 10, 1);
+    const MOVE = targetFrame(5, 10, 1);
     h.apply(MOVE);
     h.apply(MOVE);
     const errors = h.logs.filter((message) => message.includes('未匹配到任何已绑定货格'));
@@ -249,7 +250,7 @@ test('货格匹配：绑定设备（deviceAssetCode）命中时无需巷道匹�
   try {
     // 货格绑定设备 SH1，巷道 A9 ≠ 小车参数 A1：设备路径优先命中
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, aisleCode: 'A9', deviceAssetCode: 'SH1', rootPosition: new Vector3(0, 2, 11) });
-    h.apply(targetFrame(3, 10, 1), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1), 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, '绑定设备货格必须命中并吸附');
     assert.equal(h.logs.filter((message) => message.includes('未匹配到任何已绑定货格')).length, 0, '设备命中不得报失配');
   } finally {
@@ -263,7 +264,7 @@ test('绑定设备与巷道都无货格时报错一次，整机保持不动', ()
     (h.model.entitySnapshot as { components: { modelAsset: { parameterValues: Record<string, unknown> } } })
       .components.modelAsset.parameterValues = {};
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, aisleCode: 'A2', rootPosition: new Vector3(0, 2, 11) });
-    const MOVE = targetFrame(3, 10, 1);
+    const MOVE = targetFrame(5, 10, 1);
     h.apply(MOVE);
     h.apply(MOVE);
     const errors = h.logs.filter((message) => message.includes('未匹配到任何已绑定货格'));
@@ -275,16 +276,16 @@ test('绑定设备与巷道都无货格时报错一次，整机保持不动', ()
   }
 });
 
-test('Status=3 走行：向目标格连续推进并收敛，Status=0 停驻', () => {
+test('Status=5 走行：向目标格连续推进并收敛，Status=0 停驻', () => {
   const h = makeHarness();
   try {
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 3, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
     // 目标列 10（支撑位 z=20）：首帧吸附到位
-    h.apply(targetFrame(3, 10, 1), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1), 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6);
 
     // 目标列 5（支撑位 z=15）：走行必须立即连续移动并最终收敛
-    const MOVE5 = targetFrame(3, 5, 1);
+    const MOVE5 = targetFrame(5, 5, 1);
     h.apply(MOVE5, 0.1, 1);
     const zAfter1 = h.model.shuttleTelemetry.rootPosition!.z;
     assert.ok(zAfter1 < 20 && zAfter1 > 15, `走行必须立即向列 5 连续移动，实际 z=${zAfter1}`);
@@ -303,10 +304,10 @@ test('目标位失配与非法 to_Depth：冻结走行并各一次性告警', ()
   const h = makeHarness();
   try {
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
-    h.apply(targetFrame(3, 10, 1), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1), 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6);
 
-    const BAD_CELL = targetFrame(3, 99, 1);
+    const BAD_CELL = targetFrame(5, 99, 1);
     h.apply(BAD_CELL, 0.1, 10);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, '目标位失配必须冻结走行');
     assert.equal(
@@ -315,7 +316,7 @@ test('目标位失配与非法 to_Depth：冻结走行并各一次性告警', ()
       '目标位失配告警必须只报一次',
     );
 
-    const BAD_DEPTH = targetFrame(3, 5, 1, 2, 3);
+    const BAD_DEPTH = targetFrame(5, 5, 1, 2, 3);
     h.apply(BAD_DEPTH, 0.1, 10);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, 'to_Depth 非法必须冻结走行');
     assert.equal(
@@ -338,11 +339,11 @@ test('目标格联合排深匹配：同排浅/深两库位由 to_Depth 区分命
     ];
 
     // to_z=2 排 + to_Depth=2 浅库位：吸附 z=20
-    h.apply(targetFrame(3, 10, 1, 2, 2), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1, 2, 2), 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, `浅库位必须吸附 z=20，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
 
     // to_Depth=8 深库位：目标格键变化（含排深），走行到 z=21
-    h.apply(targetFrame(3, 10, 1, 2, 8), 0.1, 400);
+    h.apply(targetFrame(5, 10, 1, 2, 8), 0.1, 400);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 21) < 1e-6, `深库位必须走行到 z=21，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
     assert.equal(
       h.logs.filter((message) => message.includes('未匹配到任何已绑定货格') || message.includes('超出已绑定货格范围')).length,
@@ -358,17 +359,17 @@ test('目标字段缺失或 to_Depth 非 2/8：一次性告警并冻结，不降
   const h = makeHarness();
   try {
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
-    h.apply(targetFrame(3, 10, 1, 2, 2), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1, 2, 2), 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6);
 
     // 旧协议帧（缺 to_z）：必须冻结，不按旧 to_Depth 位编码回退
-    const MISSING_Z = { x: 0, y: 0, to_x: 5, to_y: 1, to_Depth: 2, Status: 3, errorCode: 0 };
+    const MISSING_Z = { x: 0, y: 0, to_x: 5, to_y: 1, to_Depth: 2, Status: 5, errorCode: 0 };
     h.apply(MISSING_Z, 0.1, 10);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, 'to_z 缺失必须冻结走行');
     assert.equal(h.logs.filter((message) => message.includes('缺 to_z')).length, 1, 'to_z 缺失告警必须只报一次');
 
     // to_Depth=4（既非 2 浅库位也非 8 深库位）：同样冻结
-    const BAD_DEPTH = targetFrame(3, 5, 1, 2, 4);
+    const BAD_DEPTH = targetFrame(5, 5, 1, 2, 4);
     h.apply(BAD_DEPTH, 0.1, 10);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-6, '非法排深必须冻结走行');
     assert.equal(h.logs.filter((message) => message.includes('to_Depth=4 非法')).length, 1, '非法排深告警必须只报一次');
@@ -383,7 +384,7 @@ test('目标字段缺失或 to_Depth 非 2/8：一次性告警并冻结，不降
   }
 });
 
-test('装货（Status=1）：到位自动伸叉刷货，伸满绑定上叉，自动收回完结且同相位不重复', () => {
+test('取货（Status=1）：到位自动伸叉刷货，伸满绑定上叉，自动收回完结且同相位不重复', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h);
@@ -421,8 +422,8 @@ test('装货（Status=1）：到位自动伸叉刷货，伸满绑定上叉，自
     assert.equal(h.state.shuttleCargoMeshes.size, 1, '同相位不得重复刷货');
     assert.equal(h.model.shuttleTelemetry.forkOffset, 0, '同相位不得重复伸叉');
 
-    // Status=1→3 伴随目标格跳变（行走开始）：已绑定货物随叉随行，不得进入 catch-up 也不得销毁
-    h.apply(targetFrame(3, 5, 1, 2, 2, { task: 7001 }), 0.1, 1);
+    // Status=1→5 伴随目标格跳变（行走开始，无 take_finish 帧）：已绑定货物随叉随行，不得进入 catch-up 也不得销毁
+    h.apply(targetFrame(5, 5, 1, 2, 2, { task: 7001 }), 0.1, 1);
     assert.equal(h.model.shuttleTelemetry.forkCatchUp, false, '已绑定货物随行不得进入 catch-up');
     assert.equal(h.state.shuttleCargoMeshes.size, 1, '目标格跳变不得销毁已绑定货物');
     assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, true, '货物必须保持绑定随叉随行');
@@ -458,13 +459,13 @@ test('Y 层闪现：每帧对齐目标格层高，二段叉顶面与货格底面
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 3, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
 
     // 目标层 2：叉顶面（收回位 y=0.30）必须闪现到 y=3（叉面中心 2.95）
-    h.apply(targetFrame(3, 10, 2), 0.1, 1);
+    h.apply(targetFrame(5, 10, 2), 0.1, 1);
     const fork = h.scene.getMeshByName('huocha1')!;
     assert.ok(Math.abs(fork.position.y - 2.95) < 1e-6, `层 2 闪现后叉面中心 y 必须为 2.95，实际 ${fork.position.y}`);
     assert.ok(Math.abs(fork.position.z - 20) < 1e-6, `同时必须吸附到目标列 z=20，实际 ${fork.position.z}`);
 
     // 目标层跳到层 1：直接闪现，无竖直动画
-    h.apply(targetFrame(3, 10, 1), 0.1, 1);
+    h.apply(targetFrame(5, 10, 1), 0.1, 1);
     assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `层变换必须直接闪现到叉面中心 y=1.95，实际 ${fork.position.y}`);
   } finally {
     h.dispose();
@@ -480,7 +481,7 @@ test('环抱式载货：载货平面顶面（cargoDeckNodes）替代叉顶面作
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 3, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
 
     // 目标层 2：载货平面顶面（收回位 y=0.40）闪现到 y=3 → 整车 Y 偏移 2.60，叉面中心 y=2.85（非托起基准的 2.95）
-    h.apply(targetFrame(3, 10, 2), 0.1, 1);
+    h.apply(targetFrame(5, 10, 2), 0.1, 1);
     const fork = h.scene.getMeshByName('huocha1')!;
     assert.ok(Math.abs(fork.position.y - 2.85) < 1e-6, `层 2 闪现须以载货平面顶面对齐（叉面中心 y=2.85），实际 ${fork.position.y}`);
     const deck = h.scene.getMeshByName('对象020')!;
@@ -536,8 +537,8 @@ test('目标格跳变 catch-up：货叉加速收回原点后才允许走行', ()
     assert.ok(h.model.shuttleTelemetry.forkOffset > 0.05, '货叉必须已伸出');
     assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false);
 
-    // 目标格跳到列 5 且 Status=3（设备转场）：进入 catch-up，收叉期间整机冻结
-    const MOVE5 = targetFrame(3, 5, 1, 2, 2, { task: 7002 });
+    // 目标格跳到列 5 且 Status=5（设备转场）：进入 catch-up，收叉期间整机冻结
+    const MOVE5 = targetFrame(5, 5, 1, 2, 2, { task: 7002 });
     h.apply(MOVE5, 0.1, 1);
     assert.equal(h.model.shuttleTelemetry.forkCatchUp, true, '目标格跳变且货叉已伸出必须进入 catch-up');
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 20) < 1e-9, '收叉期间走行必须冻结');
@@ -557,13 +558,13 @@ test('目标格跳变 catch-up：货叉加速收回原点后才允许走行', ()
   }
 });
 
-test('卸货（Status=2）：补建绑定、伸满解绑落格、收回完结销毁，同相位不重复补建', () => {
+test('卸货（Status=3）：补建绑定、伸满解绑落格、收回完结销毁，同相位不重复补建', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h);
     // 列 10 支撑位 (0, 2, 20)：货格正对叉中心，伸叉行程回退叉全长 0.4m
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
-    const PLACE = targetFrame(2, 10, 1, 2, 2, { task: 7003 });
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7003 });
 
     // 卸货相位入口补建叉上货物并立即绑定
     h.apply(PLACE, 0.1, 1);
@@ -609,7 +610,7 @@ test('卸货到 conveyor 站台：落货当场交付（placeShuttleCargoIntoConv
       h.driver.detachClaimedCargoByKey(cargoKey);
       return true;
     };
-    const PLACE = targetFrame(2, 10, 1, 2, 2, { task: 7007 });
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7007 });
 
     h.apply(PLACE, 0.1, 1);
     assert.equal(h.state.shuttleCargoMeshes.size, 1, '卸货相位必须补建叉上货物');
@@ -624,6 +625,63 @@ test('卸货到 conveyor 站台：落货当场交付（placeShuttleCargoIntoConv
     h.apply(PLACE, 0.1, 10);
     assert.equal(h.state.shuttleCargoMeshes.size, 0, '交接成功后不得补建第二个货物');
     assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false, '叉上不得再有绑定货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('_finish 帧缺失：Status 直接 1→5→3 仍能自行完结取货并启动卸货', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    // 列沿走行轴 Z 排布：列 10 支撑位 z=20、列 5 支撑位 z=15
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+
+    // 取货全程不发送 take_finish=2：动作由收叉动画自行完结
+    const FETCH = targetFrame(1, 10, 1, 2, 2, { task: 7100 });
+    h.apply(FETCH, 0.1, 1000);
+    assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, true, '取货动作必须由收叉动画自行完结');
+    assert.equal(h.model.shuttleTelemetry.statusActionDone, true);
+
+    // 直接 1→5 移动（无 take_finish / move_finish）：走行到列 5
+    h.apply(targetFrame(5, 5, 1, 2, 2, { task: 7100 }), 0.1, 400);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 15) < 1e-6, `无 finish 帧也必须走到列 5，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+
+    // 直接 5→3 卸货（无 move_finish 前置）：同样进入伸叉相位并自行完结
+    const PLACE = targetFrame(3, 5, 1, 2, 2, { task: 7100 });
+    h.apply(PLACE, 0.1, 1);
+    assert.equal(h.model.shuttleTelemetry.forkPhase, 'extending', '无 unload_finish 前置也必须进入卸货伸叉');
+    h.apply(PLACE, 0.1, 1000);
+    assert.equal(h.model.shuttleTelemetry.statusActionDone, true, '卸货动作必须由收叉动画自行完结');
+    assert.equal(h.model.shuttleTelemetry.cargoKey, null, '卸货完结后货物引用必须清空');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('Status=10 急停：冻结货叉与走行，状态恢复后从冻结位置继续动作', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(11, 2, 0), rootRotationY: 0 });
+
+    // 取货伸叉途中（8 帧 × 0.025m = 0.2m，未伸满未绑定）
+    const FETCH = targetFrame(1, 10, 1, 2, 2, { task: 7101 });
+    h.apply(FETCH, 0.1, 8);
+    const frozenOffset = h.model.shuttleTelemetry.forkOffset;
+    const frozenPosition = h.model.shuttleTelemetry.rootPosition!.clone();
+    assert.ok(frozenOffset > 0.05, '货叉必须已伸出');
+
+    // 急停：货叉保持当前位置，不收叉也不继续伸出
+    h.apply(targetFrame(10, 10, 1, 2, 2, { task: 7101 }), 0.1, 20);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.forkOffset - frozenOffset) < 1e-9, '急停期间货叉必须冻结');
+    assert.ok(Vector3.Distance(h.model.shuttleTelemetry.rootPosition!, frozenPosition) < 1e-9, '急停期间车体必须停驻');
+    assert.equal(h.state.shuttleCargoMeshes.size, 1, '急停不得销毁货物');
+    assert.ok(h.logs.some((message) => message.includes('急停触发')), '急停必须提示');
+
+    // 恢复取货：从冻结位置继续伸叉
+    h.apply(FETCH, 0.1, 1);
+    assert.ok(h.model.shuttleTelemetry.forkOffset > frozenOffset, '状态恢复后必须继续伸叉');
   } finally {
     h.dispose();
   }

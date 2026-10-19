@@ -503,7 +503,8 @@ export type HcliftModelTelemetryState = {
 /**
  * 多穿小车遥测运行态：堆垛机的水平裁剪版——仅 Z 轴走行（Y 层变换直接闪现）、
  * 两段货叉沿 X 比例联动（一段=二段偏移的一半，二段几何中心锚定货箱）。
- * Status 单字段驱动：0 待机 / 1 装货 / 2 卸货 / 3 移动中。
+ * Status 单字段驱动：0 空闲待机 / 1 取货中 / 2 取货完成 / 3 卸货中 / 4 卸货完成 / 5 移动中 / 6 移动完成 / 10 急停 / 11 未知；
+ * _finish 事件不保证送达，不用于动作门控。
  */
 export type ShuttleModelTelemetryState = {
   rootBasePosition: Vector3;
@@ -540,7 +541,7 @@ export type ShuttleModelTelemetryState = {
   lastStatus: number | null;
   /** 货叉相位：idle 收回位 / extending 伸出中 / retracting 收回中。 */
   forkPhase: 'idle' | 'extending' | 'retracting';
-  /** 当前 Status=1/2 相位的取/放动作已完结：同相位内不再重复触发，Status 变化时复位。 */
+  /** 当前 Status=1/3 相位的取/卸动作已完结：同相位内不再重复触发，Status 变化时复位。 */
   statusActionDone: boolean;
   nodeBaselines: Map<TransformNode, Vector3>;
   /** 上一帧目标货格键（to_x/to_y/to_z + to_Depth 解码）；变化时触发动作收尾（catch-up）。 */
