@@ -14,6 +14,7 @@ import {
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
 import type { EffectRuntimeTarget } from '../../editor/model/effectConfiguration';
 import { effectReferenceFromGeneratorTarget } from './GeneratedEffectTargets';
+import { countModelMeshTriangles } from './modelTriangleStatistics';
 import type { LocatorRuntimeEntry } from './SceneRuntime';
 import { createMeshModelGeneratorTarget, createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
 
@@ -50,6 +51,8 @@ type ThinInstanceBatch = {
   meshes: Mesh[];
   materials: Material[];
   instances: CargoInstance[];
+  /** 已提交的有效格口矩阵数量；零实例不会按源几何补计一份。 */
+  instanceCount: number;
 };
 
 type ApplyRecordsContext = {
@@ -80,6 +83,10 @@ export class LocatorFetchRuntime {
   private disposed = false;
   private missingGeneratorReported = false;
   private applyGeneration = 0;
+  private statisticsPhase: 'loading' | 'ready' | 'error' = 'ready';
+  private statisticsErrorGeneration = -1;
+  private statisticsNotificationQueued = false;
+  onStatisticsChanged?: () => void;
   private effectTargets = new Map<string, EffectInstanceEntry>();
   private readonly effectPoseNodes = new Map<string, { node: TransformNode; usedAt: number }>();
 
@@ -109,6 +116,8 @@ export class LocatorFetchRuntime {
   ): Promise<void> {
     if (this.disposed) return;
     const generation = ++this.applyGeneration;
+    this.statisticsPhase = 'loading';
+    this.queueStatisticsChanged();
 
     const releaseAbsentSuppressedCells = options.releaseAbsentSuppressedCells === true;
     this.lastApplyContext = {
@@ -159,7 +168,17 @@ export class LocatorFetchRuntime {
     }
 
     this.prepareEffectTargets(nextInstances, options.generatorId ?? null, generation);
-    await this.syncBatches(nextInstances, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate, generation);
+    try {
+      await this.syncBatches(nextInstances, locatorEntry, getLocatorBoxWorldMatrix, loadModelTemplate, generation);
+    } catch (error) {
+      if (!this.disposed && generation === this.applyGeneration) this.statisticsErrorGeneration = generation;
+      throw error;
+    } finally {
+      if (!this.disposed && generation === this.applyGeneration) {
+        this.statisticsPhase = this.statisticsErrorGeneration === generation ? 'error' : 'ready';
+        this.queueStatisticsChanged();
+      }
+    }
   }
 
   /** 按规则顺序匹配记录字段；属性名留空默认比较 containerType。 */
@@ -282,6 +301,7 @@ export class LocatorFetchRuntime {
         meshes,
         materials,
         instances: [...instances],
+        instanceCount: 0,
       };
       this.batches.set(signature, batch);
       this.updateBatchMatrices(batch, instances, locatorEntry, getLocatorBoxWorldMatrix);
@@ -357,6 +377,7 @@ export class LocatorFetchRuntime {
     for (const instance of instances) {
       const worldMatrix = getLocatorBoxWorldMatrix(locatorEntry, instance.column, instance.layer);
       if (worldMatrix) matrices.push(worldMatrix);
+      else this.statisticsErrorGeneration = this.applyGeneration;
       const effect = this.effectTargets.get(this.effectTargetId(instance));
       if (effect) {
         effect.matrix = worldMatrix?.clone() ?? null;
@@ -367,6 +388,7 @@ export class LocatorFetchRuntime {
       }
     }
 
+    batch.instanceCount = matrices.length;
     const enabled = matrices.length > 0;
     const buffer = new Float32Array(matrices.length * 16);
     for (let index = 0; index < matrices.length; index += 1) {
@@ -374,11 +396,15 @@ export class LocatorFetchRuntime {
     }
     for (const mesh of batch.meshes) {
       mesh.setEnabled(enabled);
-      if (!enabled) continue;
+      if (!enabled) {
+        mesh.thinInstanceCount = 0;
+        continue;
+      }
       mesh.thinInstanceSetBuffer('matrix', buffer, 16, true);
       mesh.thinInstanceEnablePicking = true;
       mesh.thinInstanceRefreshBoundingInfo?.(true);
     }
+    this.queueStatisticsChanged();
   }
 
   private effectTargetId(instance: CargoInstance): string {
@@ -408,11 +434,35 @@ export class LocatorFetchRuntime {
   }
 
   private markEffectTargetsFailed(instances: CargoInstance[], message: string): void {
+    this.statisticsErrorGeneration = this.applyGeneration;
+    this.queueStatisticsChanged();
     for (const instance of instances) {
       const effect = this.effectTargets.get(this.effectTargetId(instance));
       if (!effect) continue;
       effect.target.state = 'error'; effect.target.message = message; effect.matrix = null;
     }
+  }
+
+  /** 返回实际 Fetch 批次面数；模板和无有效矩阵的批次不计，隐藏状态不影响总量。 */
+  getTriangleStatistics(): { triangleCount: number; phase: 'loading' | 'ready' | 'error' } {
+    let triangleCount = 0;
+    for (const batch of this.batches.values()) {
+      if (batch.instanceCount === 0) continue;
+      for (const mesh of batch.meshes) {
+        triangleCount += countModelMeshTriangles(mesh, { includeThinInstances: false }) * batch.instanceCount;
+      }
+    }
+    return { triangleCount, phase: this.statisticsPhase };
+  }
+
+  /** 同一拍的矩阵、加载与清空变化合并通知；销毁后不再触发宿主回调。 */
+  private queueStatisticsChanged(): void {
+    if (this.disposed || this.statisticsNotificationQueued) return;
+    this.statisticsNotificationQueued = true;
+    queueMicrotask(() => {
+      this.statisticsNotificationQueued = false;
+      if (!this.disposed) this.onStatisticsChanged?.();
+    });
   }
 
   /** 仅返回渲染实例的只读描述，不为库存列表分配 Babylon 节点。 */
@@ -459,6 +509,8 @@ export class LocatorFetchRuntime {
   /** 清空全部 thinInstance batch；退出运行预览回编辑态时调用，runtime 本身保留复用 */
   clearAllBatches(): void {
     this.applyGeneration += 1;
+    this.statisticsPhase = 'ready';
+    this.statisticsErrorGeneration = -1;
     this.effectTargets.clear();
     for (const { node } of this.effectPoseNodes.values()) node.dispose();
     this.effectPoseNodes.clear();
@@ -467,6 +519,7 @@ export class LocatorFetchRuntime {
     for (const signature of [...this.batches.keys()]) {
       this.disposeBatch(signature);
     }
+    this.queueStatisticsChanged();
   }
 
   /** 抑制某格口的 fetch 渲染：设备（如 stacker）接管该格口货物期间调用，幂等。 */
@@ -506,6 +559,7 @@ export class LocatorFetchRuntime {
     for (const mesh of batch.meshes) mesh.dispose();
     for (const material of batch.materials) material.dispose();
     this.batches.delete(signature);
+    this.queueStatisticsChanged();
   }
 
   dispose(): void {
