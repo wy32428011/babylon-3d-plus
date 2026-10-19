@@ -36,7 +36,7 @@ function makeSnapshot(fields: Record<string, unknown>, receivedAt: number = Date
   };
 }
 
-function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: boolean } | null) {
+function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: boolean; cargoTravelSpeed?: number } | null) {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const state = createSpecializedTelemetrySharedState();
@@ -108,6 +108,30 @@ test('telemetryBinding 归一化保留 cargoAutoDispose/cargoOriginDevice 显式
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoAutoDispose, undefined);
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoOriginDevice: true })?.cargoOriginDevice, true);
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoOriginDevice, undefined);
+});
+
+test('telemetryBinding 归一化保留正的 cargoTravelSpeed，非法值丢弃并封顶 100', () => {
+  const base = { enabled: true, sourceId: 'default', deviceType: 'conveyor' };
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoTravelSpeed: 1.25 })?.cargoTravelSpeed, 1.25);
+  assert.equal(normalizeTelemetryBindingComponent(base)?.cargoTravelSpeed, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoTravelSpeed: 0 })?.cargoTravelSpeed, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoTravelSpeed: -1 })?.cargoTravelSpeed, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoTravelSpeed: Number.NaN })?.cargoTravelSpeed, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoTravelSpeed: 500 })?.cargoTravelSpeed, 100);
+});
+
+test('货物输送速度实例覆盖：cargoTravelSpeed 优先于模型脚本默认速度', () => {
+  const h = makeHarness({ cargoTravelSpeed: 1.2 });
+  try {
+    h.apply(RUNNING);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '前置：货物必须已刷出');
+    const offset = h.model.conveyorTelemetry.cargoTravelOffset;
+    h.apply(RUNNING);
+    const delta = h.model.conveyorTelemetry.cargoTravelOffset - offset;
+    assert.ok(Math.abs(delta - 1.2 * 0.1) < 1e-6, `货物应按覆盖速度 1.2 m/s 走行，实际单帧位移 ${delta}`);
+  } finally {
+    h.dispose();
+  }
 });
 
 test('非起点设备探测点无上游时不刷出，仅进入等待', () => {

@@ -311,7 +311,7 @@ export class ConveyorTelemetryDriver {
     if (!cargo) return;
 
     const plan = this.resolveConveyorTravelPlan(model);
-    const cargoSpeed = travelConfig.speed;
+    const cargoSpeed = this.resolveConveyorCargoTravelSpeed(model, travelConfig.speed);
     // 每帧按当前货箱实测模板长度钳制偏移：货箱前沿到端即停住，参数化改长度后旧偏移也不会把货箱留在机外。
     const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
     // 上游来货恒以站台为终点：按交付流向把终点收敛到站台支撑位，与站台在 A/B 端无关；
@@ -360,6 +360,12 @@ export class ConveyorTelemetryDriver {
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
+  }
+
+  /** 货物走行速度：实例级 telemetryBinding.cargoTravelSpeed 优先，缺省沿用模型脚本 dataDriven.cargo.travel.speed。 */
+  private resolveConveyorCargoTravelSpeed(model: ModelRuntimeEntry, defaultSpeed: number): number {
+    const override = model.telemetryBinding?.cargoTravelSpeed;
+    return typeof override === 'number' && Number.isFinite(override) && override > 0 ? override : defaultSpeed;
   }
 
   /**

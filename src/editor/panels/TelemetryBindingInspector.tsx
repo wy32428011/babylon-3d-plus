@@ -542,6 +542,24 @@ function LiftLayerBindingsEditor(props: {
             />
             起点设备（探测点无上游设备时自行创建货箱）
           </label>
+          <label className="number-row">
+            <span>货物输送速度(m/s)</span>
+            <input
+              type="number"
+              disabled={props.disabled}
+              min="0.001"
+              max="100"
+              step="0.01"
+              placeholder="模型默认"
+              value={binding.cargoTravelSpeed ?? ''}
+              onChange={(event) => {
+                const raw = event.target.value.trim();
+                const next = raw === '' ? undefined : Number(raw);
+                commit({ cargoTravelSpeed: next !== undefined && Number.isFinite(next) && next > 0 ? next : undefined });
+              }}
+            />
+          </label>
+          <p className="muted">留空沿用模型包 dataDriven.cargo.travel.speed 默认值。</p>
           <ConveyorSurfaceArrowsInspector
             entityId={props.entityId}
             config={binding.surfaceArrows}

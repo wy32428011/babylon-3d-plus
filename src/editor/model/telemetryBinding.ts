@@ -69,6 +69,8 @@ export type TelemetryBindingComponent = {
   cargoAutoDispose?: boolean;
   /** 输送线专用：起点设备——探测点未触及上游设备时允许自行创建货箱；缺省关闭。 */
   cargoOriginDevice?: boolean;
+  /** 输送线专用：货物走行速度覆盖（米/秒）；缺省沿用模型脚本 dataDriven.cargo.travel.speed。 */
+  cargoTravelSpeed?: number;
   /** 堆垛机专用：货叉瞄准基点相对货格支撑位的竖直偏移（米）——只计入升降目标，叉顶面定位到支撑位 + 间隙（插入货物底部货槽）；货物在货格内落位保持支撑位不变；允许负值；缺省 0。 */
   stackerCargoGapY?: number;
 };
@@ -263,6 +265,9 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
+    ...(typeof value.cargoTravelSpeed === 'number' && Number.isFinite(value.cargoTravelSpeed) && value.cargoTravelSpeed > 0
+      ? { cargoTravelSpeed: Math.min(value.cargoTravelSpeed, 100) }
+      : {}),
     ...(typeof value.stackerCargoGapY === 'number' ? { stackerCargoGapY: normalizeFiniteNumber(value.stackerCargoGapY, 0, -1, 1) } : {}),
   };
 }
