@@ -830,6 +830,35 @@ test('换层结束后出梯：Status=1 未到位时先走到取货站台再伸�
   }
 });
 
+test('进梯途中 x=-1 的 y=0 瞬时帧：保持最近有效层，不闪到 to_y 目标层', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    const frame = { to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+    const fork = h.scene.getMeshByName('huocha1')!;
+
+    h.apply({ ...frame, x: -1, y: 1 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `层 1 叉面应为 2.05，实际 ${fork.position.y}`);
+
+    // 实测数据 line 3599：进梯瞬间 x=-1,y=0,to_y=3
+    h.apply({ ...frame, x: -1, y: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `y=0 瞬时帧必须保持层 1，实际 ${fork.position.y}`);
+
+    // 实测数据 line 398：进梯过渡帧 x=255,y=0,to_y=3
+    h.apply({ ...frame, x: 255, y: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `x=255 过渡帧必须保持层 1，实际 ${fork.position.y}`);
+
+    h.apply({ ...frame, x: -2, y: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `进入提升机后仍保持层 1，实际 ${fork.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('x=-2 进梯但提升机数据未发布：保持进梯前层，不闪到 to_y 目标层', () => {
   const h = makeHarness();
   try {

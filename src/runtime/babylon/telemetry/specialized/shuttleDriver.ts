@@ -109,6 +109,9 @@ const SHUTTLE_STATUS_LABELS: Record<number, string> = {
   [SHUTTLE_STATUS.unknown]: '未知',
 };
 
+/** 列号未知哨兵：进出换层提升机的过渡帧会上报 255 且 y=0，此时按载货台过渡处理而非普通目标。 */
+const SHUTTLE_COLUMN_UNKNOWN = 255;
+
 /** 走行到位判定余量（米）：Status=1/3 伸叉前要求车体已对准目标格。 */
 const SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS = 0.02;
 /** hclift 台面高度发布的保鲜阈值：超过视为失联滞留值，小车回退按层闪现。 */
@@ -191,6 +194,15 @@ export class ShuttleTelemetryDriver {
     if (x === -1 || x === -2) {
       return this.resolveLayerChangePlatformCell(model, snapshot, x);
     }
+    // 进出提升机的过渡帧：列号未知且层号为 0/缺失，按载货台过渡处理，避免用 to_y 目标层闪现
+    const currentY = readIntegerField(snapshot.fields, 'y');
+    if (x === SHUTTLE_COLUMN_UNKNOWN && (currentY === null || currentY < 1)) {
+      const platform = this.host.findLayerChangePlatformLocator(
+        snapshot.assetCode,
+        this.resolveShuttleAisleCode(model),
+      );
+      if (platform) return this.resolveLayerChangePlatformCell(model, snapshot, -2);
+    }
 
     const toX = readIntegerField(snapshot.fields, 'to_x');
     const toY = readIntegerField(snapshot.fields, 'to_y');
@@ -267,13 +279,11 @@ export class ShuttleTelemetryDriver {
   ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
     const reportedY = readIntegerField(snapshot.fields, 'y');
     const fallbackY = readIntegerField(snapshot.fields, 'to_y');
-    // x=-2 且 y=0（提升中）：优先保持进梯前层，等提升机台面数据发布后再跟随；
-    // x=-1 出梯瞬间 y=0 时回退到 to_y（新层）。
+    // 进/出提升机时 y 可能短暂为 0：优先保持最近有效层，避免按 to_y 目标层闪现
+    // （典型：进梯途中 x=-1→x=-2 的 y=0 帧按 to_y 跳到目标层再回退）。
     const y = reportedY !== null && reportedY >= 1
       ? reportedY
-      : x === -2
-        ? model.shuttleTelemetry.lastHcliftLayer ?? fallbackY
-        : fallbackY;
+      : model.shuttleTelemetry.lastHcliftLayer ?? fallbackY;
     if (reportedY !== null && reportedY >= 1) model.shuttleTelemetry.lastHcliftLayer = reportedY;
     if (y === null || y < 1) {
       const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-layer:${reportedY ?? 'missing'}`;
@@ -354,7 +364,9 @@ export class ShuttleTelemetryDriver {
     const state = model.shuttleTelemetry;
     const x = readIntegerField(snapshot.fields, 'x');
     const hcliftKey = cell?.hcliftKey ?? null;
-    if (!cell || !hcliftKey || (x !== -1 && x !== -2)) {
+    const onPlatform = x === -1 || x === -2
+      || (x === SHUTTLE_COLUMN_UNKNOWN && hcliftKey !== null && cell?.isLayerChangePlatform === true);
+    if (!cell || !hcliftKey || !onPlatform) {
       this.releaseShuttleDeckOccupancy(model);
       return;
     }
@@ -585,7 +597,7 @@ export class ShuttleTelemetryDriver {
       return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
     const platformTravelTrigger = cell?.isLayerChangePlatform === true
-      && (x === -1 || (x === -2 && cell.deckCenter !== undefined));
+      && (x === -1 || ((x === -2 || x === SHUTTLE_COLUMN_UNKNOWN) && cell.deckCenter !== undefined));
     // 取/卸状态但尚未到位（典型：出梯后 PLC 立即报 Status=1 而车还在站台）时先补走行，到位后再伸叉
     const actionTravelTrigger = cell !== null && !cell.isLayerChangePlatform
       && (status === SHUTTLE_STATUS.taking || status === SHUTTLE_STATUS.unloading);
