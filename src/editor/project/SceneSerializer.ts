@@ -974,6 +974,8 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
 
   const fetchDrive = normalizeLocatorFetchDrive(locator.fetchDrive);
   const builtInBinding = normalizeLocatorBuiltInBinding(locator.builtInBinding);
+  // 换层站台位于货架头部，起始列允许负值；普通货格仍从 0 起。
+  const isLayerChangePlatform = builtInBinding?.kind === 'layerChangePlatform';
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
     storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
@@ -982,7 +984,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     height: normalizeLocatorDimension(locator.height),
     columns: normalizeLocatorInt(locator.columns, 1, 1, 100),
     layers: normalizeLocatorInt(locator.layers, 1, 1, 100),
-    startColumn: normalizeLocatorInt(locator.startColumn, 1, 0, 999),
+    startColumn: normalizeLocatorInt(locator.startColumn, isLayerChangePlatform ? -1 : 1, isLayerChangePlatform ? -99 : 0, 999),
     startLayer: normalizeLocatorInt(locator.startLayer, 1, 0, 999),
     columnReversed: locator.columnReversed === true,
     columnGap: normalizeLocatorGap(locator.columnGap),
