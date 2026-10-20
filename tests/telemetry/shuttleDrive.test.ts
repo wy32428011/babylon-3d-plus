@@ -791,6 +791,67 @@ test('x=-2 驶入 hclift 载货台：以 deckCenter 为目标并发布 entering/
   }
 });
 
+test('换层结束后出梯：Status=1 未到位时先走到取货站台再伸叉', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    // 换层站台列 -1；取货站台列 0（位于 z=12，与站台 z=11 相隔 1m）
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    h.ref.extraLocators = [
+      makeLocator(h.scene, {
+        columns: 1, layers: 4, startColumn: 0, rowNumber: 1, storageDepth: 'near',
+        rootPosition: new Vector3(0, 2, 12),
+      }),
+    ];
+    h.state.hcliftPlatformSurfaces.set('hclift1', {
+      assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673), updatedAtMs: Date.now(),
+    });
+
+    // 进梯 → 换层 → 出梯回站台
+    h.apply({ x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 2);
+    h.apply({ x: -2, y: 0, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 40);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6, '必须驶入载货台');
+    h.apply({ x: -1, y: 3, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 40);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, '出梯必须回到站台中心');
+
+    // 出梯后 PLC 立即报 Status=1（取货中），此时车必须补走到取货站台再伸叉
+    const fetchFrame = { x: 0, y: 3, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 1, errorCode: 0 };
+    h.apply(fetchFrame, 0.1, 15);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 12) < 1e-6,
+      `必须补走到取货站台 z=12，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    assert.equal(h.model.shuttleTelemetry.forkPhase, 'extending', '到位后必须开始伸叉取货');
+    assert.equal(h.state.shuttleCargoMeshes.size, 1, '取货开始必须刷出货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('x=-2 进梯但提升机数据未发布：保持进梯前层，不闪到 to_y 目标层', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+
+    // 进梯前在层 1：叉面中心 = 支撑位 y=2 - 车底 0.20 + 叉基线 0.25 = 2.05
+    h.apply({ x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 1);
+    const fork = h.scene.getMeshByName('huocha1')!;
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `进梯前必须保持层 1（叉面 2.05），实际 ${fork.position.y}`);
+
+    // 进入提升机且 y=0、无 hclift 台面数据：不得按 to_y=3 闪现到层 3（叉面 4.05）
+    h.apply({ x: -2, y: 0, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 2.05) < 1e-6, `缺台面数据时必须保持进梯前层 1，实际 ${fork.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('x=-2 载货台已被其他小车占用：不覆盖占位并保持原位', () => {
   const h = makeHarness();
   try {

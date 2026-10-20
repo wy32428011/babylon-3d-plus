@@ -237,7 +237,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 换层站台是绑定在货架上的特殊 locator（`builtInBinding.kind='layerChangePlatform'`），由货架模型包声明 `layerChangePlatformBinding`（开关参数 `enableLayerChangePlatform`）自动生成，实体名「换层站台」，固定 1 列、排固定 1，置于暂存台头部、进深居中在两侧货架之间的过道正中；起始列缺省 -1（Inspector 可改，允许负值），巷道/设备绑定与普通货格同规则（`aisleCode` 或 `deviceAssetCode`）。尺寸全部跟随模型参数（参数变更即重派生）：长度 = `layerChangePlatformLength`（远端始终锚定轨道尽头轨道003.maxX，向货架方向延伸）、宽度 = `aisleWidth`、层高 = `slotHeight`、层数 = `slotCountHeight`。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
-- `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（无 hclift 数据时回退按层闪现）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），此时回退取 `to_y` 目标层。x=-1/-2 期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
+- `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（无 hclift 数据时保持进梯前层 `lastHcliftLayer`，不直接闪到 `to_y` 目标层）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知）：x=-2 优先保持进梯前层，x=-1 出梯时回退取 `to_y` 新层。x=-1/-2 期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
 - 站台目标下 `Status=1/3`（取/卸）被抑制：不伸叉，一次性告警「换层站台不支持装卸货」。
@@ -247,7 +247,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取目标货格的 fetch 排号（`suppressFetchCellForLocator` / `resolveFetchDriveRowForLocator`）。
 
 ### 动画
-每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=5 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=5 期间叉强制收回原点；Status=1/3 须车体对准目标格（到位余量 2cm）才伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
+每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=5 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=5 期间叉强制收回原点；Status=1/3 若尚未对准目标格（典型：出梯后 PLC 立即报取货中，虚拟车还停在站台）会先补走行到目标格（到位余量 2cm）再伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
 
 ### 时序（取/放节拍）
 Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管）→ 两段叉同步伸出 → 伸满绑定（货水平锚定二段叉几何中心、底面贴载货平面顶面，随叉收回）→ 自动收叉完结。Status=5：运载（层变化闪现）。Status=3：无货先补建并绑定 → 两段叉伸出 → 伸满解绑落目标格支撑位（conveyor 站台当场交接）→ 收叉完结。动作完结只依赖驱动自身的动画归零，不等待 2/4/6 的 _finish 帧；Status 离开 1/3 的边沿做不计 finish 的兜底收尾（防报文丢帧），故障或 Status=10 急停冻结。

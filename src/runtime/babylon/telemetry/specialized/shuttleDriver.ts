@@ -267,7 +267,14 @@ export class ShuttleTelemetryDriver {
   ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
     const reportedY = readIntegerField(snapshot.fields, 'y');
     const fallbackY = readIntegerField(snapshot.fields, 'to_y');
-    const y = reportedY !== null && reportedY >= 1 ? reportedY : fallbackY;
+    // x=-2 且 y=0（提升中）：优先保持进梯前层，等提升机台面数据发布后再跟随；
+    // x=-1 出梯瞬间 y=0 时回退到 to_y（新层）。
+    const y = reportedY !== null && reportedY >= 1
+      ? reportedY
+      : x === -2
+        ? model.shuttleTelemetry.lastHcliftLayer ?? fallbackY
+        : fallbackY;
+    if (reportedY !== null && reportedY >= 1) model.shuttleTelemetry.lastHcliftLayer = reportedY;
     if (y === null || y < 1) {
       const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-layer:${reportedY ?? 'missing'}`;
       if (!this.state.reportedMissingTargets.has(reportKey)) {
@@ -579,7 +586,11 @@ export class ShuttleTelemetryDriver {
     }
     const platformTravelTrigger = cell?.isLayerChangePlatform === true
       && (x === -1 || (x === -2 && cell.deckCenter !== undefined));
-    if (snapshot.faulted || !cell || (status !== SHUTTLE_STATUS.moving && !platformTravelTrigger)) {
+    // 取/卸状态但尚未到位（典型：出梯后 PLC 立即报 Status=1 而车还在站台）时先补走行，到位后再伸叉
+    const actionTravelTrigger = cell !== null && !cell.isLayerChangePlatform
+      && (status === SHUTTLE_STATUS.taking || status === SHUTTLE_STATUS.unloading);
+    if (snapshot.faulted || !cell
+      || (status !== SHUTTLE_STATUS.moving && !platformTravelTrigger && !actionTravelTrigger)) {
       return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
 
@@ -666,9 +677,14 @@ export class ShuttleTelemetryDriver {
     if (state.targetReferencePosition) return Vector3.Dot(state.targetReferencePosition, travelAxis);
 
     const bounds = getNodesWorldBounds(this.findShuttleForkStage2Nodes(model));
-    const reference = bounds
-      ? bounds.minimum.add(bounds.maximum).scale(0.5)
-      : state.rootBasePosition.clone();
+    let reference: Vector3;
+    if (bounds) {
+      // 首个普通目标可能出现在换层站台之后：节点已叠加平台走行偏移，需扣除后还原叉心原位
+      const travelOffset = (state.rootPosition ?? state.rootBasePosition).subtract(state.rootBasePosition);
+      reference = bounds.minimum.add(bounds.maximum).scale(0.5).subtract(travelOffset);
+    } else {
+      reference = state.rootBasePosition.clone();
+    }
     state.targetReferencePosition = reference;
     return Vector3.Dot(reference, travelAxis);
   }

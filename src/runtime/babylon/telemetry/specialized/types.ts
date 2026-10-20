@@ -554,6 +554,8 @@ export type ShuttleModelTelemetryState = {
   targetCellChangeIntervalMs: number | null;
   /** 当前占用的 hclift 载货台键（共享占位表 key）；null 表示未在提升机上。离开时用于清除自己的占位。 */
   hcliftOccupancyKey: string | null;
+  /** 最近一次换层站台有效层号：x=-2 且提升机台面数据尚未发布时用它保持进梯前高度，避免闪到目标层。 */
+  lastHcliftLayer: number | null;
 };
 
 export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
