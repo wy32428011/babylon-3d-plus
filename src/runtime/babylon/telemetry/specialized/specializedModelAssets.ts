@@ -435,6 +435,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     cargoDriveEngaged: false,
     lastSnapshotReceivedAt: 0,
     cargoTravelOffset: 0,
+    handoffEntryOffset: null,
+    entryHandoffPending: false,
     platformInboundCargo: false,
     platformInboundDirection: 1,
   };
@@ -458,6 +460,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.cargoDriveEngaged = false;
   model.conveyorTelemetry.lastSnapshotReceivedAt = 0;
   model.conveyorTelemetry.cargoTravelOffset = 0;
+  model.conveyorTelemetry.handoffEntryOffset = null;
+  model.conveyorTelemetry.entryHandoffPending = false;
   model.conveyorTelemetry.platformInboundCargo = false;
   model.conveyorTelemetry.platformInboundDirection = 1;
 }

@@ -24,7 +24,7 @@ import {
   readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
-import { resolveConveyorCargoTravelHalfRange } from '../conveyorCargoTravel';
+import { resolveConveyorCargoTravelHalfRange, resolvePerpendicularHandoffOffset } from '../conveyorCargoTravel';
 import { readConveyorMotionSignal, resolveConveyorTrajectoryForwardSign } from '../conveyorMotionSignal';
 import { resolveLocatorCellSupportWorldPosition } from '../stackerStorageLocation';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
@@ -217,6 +217,8 @@ export class ConveyorTelemetryDriver {
         const heldTask = heldCargo?.task ?? '';
         this.disposeConveyorCargoForAssetCode(model.assetCode);
         state.cargoCode = null;
+        state.handoffEntryOffset = null;
+        state.entryHandoffPending = false;
         if (heldTask) {
           this.notifyTaken(model, heldTask, null, movementDirection !== 0 ? movementDirection : this.resolveFlowDirection(model));
         }
@@ -249,6 +251,8 @@ export class ConveyorTelemetryDriver {
           const oldTask = heldCargo.task;
           this.disposeConveyorCargoForAssetCode(model.assetCode);
           state.cargoCode = null;
+          state.handoffEntryOffset = null;
+          state.entryHandoffPending = false;
           this.notifyTaken(model, oldTask, null, flowDirection);
           state.waitingTask = state.pendingTask;
           this.sendSubscribe(model, state.pendingTask, probeDirection);
@@ -285,6 +289,8 @@ export class ConveyorTelemetryDriver {
           state.waitingTask = null;
           state.cargoTravelOffset = -probeDirection * plan.forwardSign * this.resolveTravelHalfRangeMeters(null, plan);
           state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+          state.handoffEntryOffset = null;
+          state.entryHandoffPending = false;
           state.platformInboundCargo = false;
           state.cargoDriveEngaged = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
@@ -318,6 +324,12 @@ export class ConveyorTelemetryDriver {
     // stacker 放货/滞留箱复用的持货不钳站台（platformInboundCargo=false），可正常驶离。
     let minOffset = -travelHalfRange;
     let maxOffset = travelHalfRange;
+    // 直角接驳从拐角进入：进入侧钳制先放宽到交叉点，货物沿本机轴驶入后恢复常规行程。
+    const handoffEntryOffset = state.handoffEntryOffset;
+    if (handoffEntryOffset !== null) {
+      minOffset = Math.min(minOffset, handoffEntryOffset);
+      maxOffset = Math.max(maxOffset, handoffEntryOffset);
+    }
     if (state.platformInboundCargo) {
       const platform = this.resolvePlatformLocator(model);
       const platformOffset = platform ? this.resolvePlatformTravelOffset(plan.travelContext, platform) : null;
@@ -327,6 +339,22 @@ export class ConveyorTelemetryDriver {
         } else {
           minOffset = Math.max(platformOffset, -travelHalfRange);
         }
+      }
+    }
+    // 直角接驳：本机走行终点钳制到与相邻 conveyor 中心线的交叉点（拐角），
+    // 货箱停在交叉点由下游沿其中心轴继续，不再开到设备边沿后横向平移。
+    // 首次持货时才扫描邻居（此时模型集合已稳定），避免把加载期的残缺视图缓存进行程计划。
+    const perpendicularEndOffsets = plan.perpendicularEndOffsets
+      ?? (plan.perpendicularEndOffsets = this.resolvePerpendicularEndOffsets(model, plan.travelContext));
+    if (perpendicularEndOffsets) {
+      const flowDirection = movementDirection !== 0
+        ? movementDirection
+        : state.selfDriveDirection !== 0 ? state.selfDriveDirection : this.resolveFlowDirection(model);
+      const exitSign = flowDirection * plan.forwardSign;
+      if (exitSign > 0 && perpendicularEndOffsets.positive !== null) {
+        maxOffset = Math.min(maxOffset, perpendicularEndOffsets.positive);
+      } else if (exitSign < 0 && perpendicularEndOffsets.negative !== null) {
+        minOffset = Math.max(minOffset, perpendicularEndOffsets.negative);
       }
     }
     // 字段接管是暂时的：movement 归 0 后持货已被驱动过且未达流向终点则按流向重新登记自驱续行，
@@ -342,12 +370,20 @@ export class ConveyorTelemetryDriver {
       if (!atFlowEnd) state.selfDriveDirection = flowDirection;
     }
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
-    const cargoDirection = movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
+    // 直角交接插值期间冻结走行：目标点固定在拐角，货物沿上游轴滑到拐角后再沿本机轴驱动。
+    const awaitingEntryHandoff = state.entryHandoffPending && cargo.handoff !== null;
+    const cargoDirection = awaitingEntryHandoff
+      ? 0
+      : movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
     if (!snapshot.faulted && cargoDirection !== 0) {
       state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
       state.cargoDriveEngaged = true;
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
+    // 货物已驶入常规行程后解除拐角进入放宽，反向再走也不会退到机外。
+    if (state.handoffEntryOffset !== null && Math.abs(state.cargoTravelOffset) <= travelHalfRange + CONVEYOR_TRAVEL_ENDPOINT_EPSILON) {
+      state.handoffEntryOffset = null;
+    }
 
     this.host.syncGeneratedCargoVisual(
       cargo, 'conveyor', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
@@ -360,6 +396,8 @@ export class ConveyorTelemetryDriver {
       deltaSeconds,
     );
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation);
+    // 插值到达拐角后解除冻结，下一帧开始沿本机轴走行。
+    if (state.entryHandoffPending && !cargo.handoff) state.entryHandoffPending = false;
   }
 
   /** 货物走行速度：实例级 telemetryBinding.cargoTravelSpeed 优先，缺省沿用模型脚本 dataDriven.cargo.travel.speed。 */
@@ -424,6 +462,8 @@ export class ConveyorTelemetryDriver {
   private handleAvailableMessage(model: ModelRuntimeEntry, msg: ConveyorLinkMessage): void {
     const state = model.conveyorTelemetry;
     const prevHop = msg.visited[msg.visited.length - 1];
+    const previousLink = state.upstreamLinks.get(prevHop);
+    const newUpstreamPath = !previousLink || previousLink.task !== msg.task || previousLink.holderAssetCode !== msg.originAssetCode;
     state.upstreamLinks.set(prevHop, {
       task: msg.task,
       holderAssetCode: msg.originAssetCode,
@@ -431,8 +471,10 @@ export class ConveyorTelemetryDriver {
       direction: msg.direction,
     });
     // 本机正等该 task 且无货：立即沿注册路径向上订阅（覆盖新出现的持货方路径）。
-    // 去重：waitingTask 已是该 task 说明订阅在链，仅刷新上位链路登记，不再发波（防止 available 波放大为全链重订阅风暴）。
-    if (state.pendingTask === msg.task && state.cargoCode === null && state.waitingTask !== msg.task) {
+    // 去重：waitingTask 已是该 task 且上游路径未变化时只刷新登记；但新持货方路径首次出现时仍必须补发订阅——
+    // 直角相邻设备的探测点跨不过拐角，原订阅可能从未到达该上游。
+    if (state.pendingTask === msg.task && state.cargoCode === null
+      && (state.waitingTask !== msg.task || newUpstreamPath)) {
       state.waitingTask = msg.task;
       this.sendSubscribe(model, msg.task, msg.direction);
     }
@@ -655,7 +697,7 @@ export class ConveyorTelemetryDriver {
       holder?.conveyorTelemetry?.downstreamLinks.delete(target.subscriber.assetCode);
       task = target.link.task;
       direction = target.link.direction;
-      this.settleCargoTransfer(cargo, target.subscriber, task, target.link.hops, direction);
+      this.settleCargoTransfer(cargo, target.subscriber, task, target.link.hops, direction, false, holder);
       const next = this.findDeliveryTarget(target.subscriber, cargo);
       if (!next) {
         // 接力终点：唯一一次 taken + available
@@ -682,23 +724,67 @@ export class ConveyorTelemetryDriver {
     hops: number,
     direction: number,
     preserveAxialPosition = false,
+    upstream: ModelRuntimeEntry | null = null,
   ): void {
     const subscriberState = subscriber.conveyorTelemetry;
     cargo.assetCode = subscriber.assetCode;
     cargo.task = task;
-    cargo.handoff = createCargoHandoffState(cargo, CARGO_HANDOFF_SECONDS / Math.max(hops, 1));
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
     // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点计算行程。
-    const travelHalfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
+    const cargoAxialLength = this.resolveCargoAxialLengthMeters(cargo, plan.travelContext);
+    const travelHalfRange = resolveConveyorCargoTravelHalfRange(
+      plan.travelContext.spanMeters ?? 0,
+      cargoAxialLength,
+    );
+    // 直角相邻：起点落在两条中心轨迹的交叉点，先沿上游轴到拐角，再沿下游轴走行；
+    // 拐角可落在下游几何端面外一个货箱长度内（现场直角接驳由第三方/过渡段填充），
+    // 记录进入偏移供走行钳制放宽。非直角/交叉点远离设备时回退到进入端。
+    let perpendicularOffset: number | null = null;
+    if (!preserveAxialPosition && upstream && upstream !== subscriber && isConveyorRuntimeModel(upstream)) {
+      const upstreamPlan = this.resolveConveyorTravelPlan(upstream);
+      // 拐角允许超出正常停靠点：下游端面之外的过渡段 + 一个货箱长度。
+      const downstreamHalfSpan = (plan.travelContext.spanMeters ?? 0) / 2;
+      const downstreamOverhang = Math.max(0, downstreamHalfSpan - travelHalfRange) + cargoAxialLength;
+      perpendicularOffset = resolvePerpendicularHandoffOffset(
+        {
+          center: upstreamPlan.travelContext.center,
+          axis: upstreamPlan.travelContext.travelAxis,
+          halfSpanMeters: upstreamPlan.travelContext.spanMeters === null
+            ? null
+            : upstreamPlan.travelContext.spanMeters / 2,
+        },
+        { center: plan.travelContext.center, axis: plan.travelContext.travelAxis, halfSpanMeters: null },
+        travelHalfRange,
+        downstreamOverhang,
+      );
+    }
+    subscriberState.handoffEntryOffset = perpendicularOffset;
+    // 直角交接：下游先等插值把货物送到拐角，再沿本机轴驱动（否则目标点随走行前移会被拉成斜线）。
+    subscriberState.entryHandoffPending = perpendicularOffset !== null;
     subscriberState.cargoTravelOffset = preserveAxialPosition
       ? clampNumber(
           Vector3.Dot(cargo.root.position.subtract(plan.travelContext.center), plan.travelContext.travelAxis),
           -travelHalfRange,
           travelHalfRange,
         )
-      : -direction * plan.forwardSign * travelHalfRange;
+      : perpendicularOffset ?? -direction * plan.forwardSign * travelHalfRange;
+    // 交接插值时长按本机货物输送速度折算（上限仍为 1s/hops）：调高实例速度时设备间移动同步加快，
+    // 否则频繁逐台交付时视觉速度被固定 1s 插值主导，速度参数看不出效果。
+    const handoffTarget = this.getConveyorCargoPosition(subscriber, plan.travelContext, subscriberState.cargoTravelOffset);
+    const handoffSpeed = this.resolveConveyorCargoTravelSpeed(
+      subscriber,
+      readConveyorCargoTravelConfig(subscriber).speed,
+    );
+    cargo.handoff = createCargoHandoffState(
+      cargo,
+      clampNumber(
+        Vector3.Distance(cargo.root.position, handoffTarget) / Math.max(handoffSpeed, 0.01),
+        0.1,
+        CARGO_HANDOFF_SECONDS / Math.max(hops, 1),
+      ),
+    );
     subscriberState.pendingTask = null;
     subscriberState.waitingTask = null;
     // 承接即走行：登记自驱方向，快照断流或 movement=0 期间由帧调度继续驱动，movement 非 0 的新消息才接管字段驱动。
@@ -978,6 +1064,8 @@ export class ConveyorTelemetryDriver {
       const cargoCode = model.conveyorTelemetry.cargoCode;
       if (cargoCode !== null && this.getConveyorCargoKey(model.assetCode, cargoCode) === key) {
         model.conveyorTelemetry.cargoCode = null;
+        model.conveyorTelemetry.handoffEntryOffset = null;
+        model.conveyorTelemetry.entryHandoffPending = false;
         model.conveyorTelemetry.platformInboundCargo = false;
       }
     }
@@ -1035,6 +1123,8 @@ export class ConveyorTelemetryDriver {
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(model.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
     state.cargoCode = CONVEYOR_CARGO_IDENTITY;
     state.cargoTravelOffset = platformOffset;
+    state.handoffEntryOffset = null;
+    state.entryHandoffPending = false;
     state.platformInboundCargo = false;
     // 站台落座为滞留停泊：未驱动前不允许字段静默续行，等待 task 复用才驶离。
     state.cargoDriveEngaged = false;
@@ -1109,6 +1199,42 @@ export class ConveyorTelemetryDriver {
     };
     state.travelPlan = plan;
     return plan;
+  }
+
+  /**
+   * 本机中心线与其它 conveyor 中心线的直角交叉点（沿本机轴偏移）。
+   * 只认落在本机跨度内、且交叉点不远离对方设备的直角交叉：这类设备是现场直角接驳的过渡段，
+   * 货箱应停在交叉点转向，而不是开到本机边沿再横向平移。
+   */
+  private resolvePerpendicularEndOffsets(
+    model: ModelRuntimeEntry,
+    self: ConveyorCargoTravelPlan['travelContext'],
+  ): { positive: number | null; negative: number | null } {
+    const result: { positive: number | null; negative: number | null } = { positive: null, negative: null };
+    const selfHalfSpan = (self.spanMeters ?? 0) / 2;
+    if (!(selfHalfSpan > 0)) return result;
+    // 交叉点必须落在本机跨度内（中心线交点在设备长度范围内），才作为走行终点
+    for (const { model: candidate } of this.host.collectModels()) {
+      if (candidate === model || !isConveyorRuntimeModel(candidate)) continue;
+      // 不使用 resolveConveyorTravelPlan 缓存，避免两台设备互相解析时递归
+      const other = this.resolveConveyorCargoTravelContext(candidate);
+      const offset = resolvePerpendicularHandoffOffset(
+        {
+          center: other.center,
+          axis: other.travelAxis,
+          halfSpanMeters: other.spanMeters === null ? null : other.spanMeters / 2,
+        },
+        { center: self.center, axis: self.travelAxis, halfSpanMeters: null },
+        selfHalfSpan,
+      );
+      if (offset === null || Math.abs(offset) < 1e-3) continue;
+      if (offset > 0) {
+        result.positive = result.positive === null ? offset : Math.min(result.positive, offset);
+      } else {
+        result.negative = result.negative === null ? offset : Math.max(result.negative, offset);
+      }
+    }
+    return result;
   }
 
   /**

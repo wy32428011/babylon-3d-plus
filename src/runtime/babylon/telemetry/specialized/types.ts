@@ -315,6 +315,11 @@ export type ConveyorCargoTravelPlan = {
     readonly surfaceLiftMeters: number;
   };
   readonly forwardSign: 1 | -1;
+  /**
+   * 本机中心线与其它 conveyor 中心线的直角交叉点（沿本机轴偏移，米；null=该侧无交叉）。
+   * 走行到该侧的终点钳制到交叉点：货箱停在拐角而不是设备边沿，交给下游沿其中心轴继续。
+   */
+  perpendicularEndOffsets?: { positive: number | null; negative: number | null };
 };
 
 export type ConveyorModelTelemetryState = {
@@ -352,6 +357,16 @@ export type ConveyorModelTelemetryState = {
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;
+  /**
+   * 直角接驳进入偏移（米，沿本机行走轴）：交付落点取两条中心线交叉点且超出正常行程半径时记录，
+   * 走行钳制在进入侧放宽到该点，货物从拐角开始沿本机轴走行；进入正常行程范围后清空。
+   */
+  handoffEntryOffset: number | null;
+  /**
+   * 直角交接插值未完成：true 时本机暂停走行，等货物沿上游轴滑到拐角后再沿本机轴驱动。
+   * 否则交接目标会随本机偏移持续前移，货物被拉成斜线直接飞向下游终点。
+   */
+  entryHandoffPending: boolean;
   /** 当前持货为上游交付来货且以站台为终点：true 时按 platformInboundDirection 把终点钳制收敛到站台支撑位；stacker 放货/滞留箱复用后为 false（不钳，可驶离）。 */
   platformInboundCargo: boolean;
   /** 交付流向（settleCargoTransfer 的 direction，±1）：×forwardSign 得偏移空间的站台钳制方向。 */

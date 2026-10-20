@@ -52,6 +52,8 @@ function makeSnapshot(
 
 type HarnessDeviceConfig = {
   centerX: number;
+  /** 世界 Z 中心（缺省 0）：直角布局校验用。 */
+  centerZ?: number;
   autoDispose?: boolean;
   /** 起点设备：探测点无上游时允许自行创建货箱（telemetryBinding.cargoOriginDevice）。 */
   origin?: boolean;
@@ -81,6 +83,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
   for (const [assetCode, config] of Object.entries(layout)) {
     const root = new TransformNode(`${assetCode}_root`, scene);
     if (config.rotationY !== undefined) root.rotation.y = config.rotationY;
+    if (config.centerZ !== undefined) root.position.z = config.centerZ;
     // 代理条目必须把根节点放到自身位姿：相对矩阵换算依赖宿主与代理的根节点世界矩阵差。
     if (config.proxyOf) root.position.x = config.centerX;
     const binding: Record<string, unknown> = {};
@@ -149,11 +152,19 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     getModelWorldBounds: (model: ModelRuntimeEntry) => {
       const config = layout[model.assetCode];
       const centerX = config?.centerX ?? 0;
+      const centerZ = config?.centerZ ?? 0;
       const halfSpanX = config?.halfSpanX ?? SPAN_HALF;
-      return {
-        minimum: new Vector3(centerX - halfSpanX, 0, -0.5),
-        maximum: new Vector3(centerX + halfSpanX, 1, 0.5),
-      };
+      // 绕 Y 轴旋转 ±90° 后包围盒长边沿世界 Z：与真实模型实测一致，行程轴投影才正确。
+      const quarterTurn = config?.rotationY !== undefined && Math.abs(Math.sin(config.rotationY)) > 0.99;
+      return quarterTurn
+        ? {
+            minimum: new Vector3(centerX - 0.5, 0, centerZ - halfSpanX),
+            maximum: new Vector3(centerX + 0.5, 1, centerZ + halfSpanX),
+          }
+        : {
+            minimum: new Vector3(centerX - halfSpanX, 0, centerZ - 0.5),
+            maximum: new Vector3(centerX + halfSpanX, 1, centerZ + 0.5),
+          };
     },
   };
 
@@ -336,6 +347,85 @@ test('上游持货后事件驱动交付：available 通知触发订阅，当帧�
       Math.abs(h.models.CV2.conveyorTelemetry.cargoTravelOffset - (selfDrivenOffset + CARGO_SPEED * 0.1 * 10)) < 1e-6,
       `自驱必须继续推进到 ${selfDrivenOffset + CARGO_SPEED * 0.1 * 10}，实际 ${h.models.CV2.conveyorTelemetry.cargoTravelOffset}`,
     );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('直角相邻：交付落点取两条中心轨迹交叉点，不再落到下游进入端', () => {
+  // CV1 沿 +X、中心 (-4,0,0)；CV2 旋转 -90° 后沿 +Z、中心 (-2,0,0)，中心线交叉于 (-2,0,0)
+  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: -2, rotationY: -Math.PI / 2 } });
+  try {
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    h.apply('CV1', { task: 7, movement_x: 1 });
+
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.cargoCode, 'cargo', '货物必须交付给下游');
+    assert.ok(Math.abs(cv2.cargoTravelOffset) < 1e-6,
+      `直角交付必须落在交叉点（下游偏移 0），实际 ${cv2.cargoTravelOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('直角接驳：本机走行终点钳制到中心线交叉点，不再开到设备边沿', () => {
+  // CV1 沿 +X、中心线 z=0；CV2 旋转 -90° 后沿 +Z，中心 (-2, 0, -1)、跨度 ±2。
+  // 中心线交叉于 (-2,0)，沿 CV2 轴偏移 +1（在其跨度内、但小于正常行程半径 1.64）。
+  const h = makeHarness({
+    CV1: { centerX: -4, origin: true },
+    CV2: { centerX: -2, centerZ: -1, halfSpanX: 2, rotationY: -Math.PI / 2 },
+  });
+  try {
+    // 先让上游刷出并摆好位姿，再让下游订阅：货物带历史位姿，交接插值才存在
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.cargoCode, 'cargo', '货物必须交付给下游');
+    assert.ok(Math.abs(cv2.cargoTravelOffset - 1) < 1e-6, `交付落点应在交叉点 +1，实际 ${cv2.cargoTravelOffset}`);
+
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 100);
+    assert.ok(Math.abs(cv2.cargoTravelOffset - 1) < 1e-6,
+      `走行终点必须停在交叉点 +1，不得开到设备边沿 1.64，实际 ${cv2.cargoTravelOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('直角接驳有过渡段：交叉点超出下游正常行程时仍从拐角进入并沿轴驶入，不瞬移到进入端', () => {
+  // CV1 沿 +X、中心 (-4,0,0)；CV2 旋转 -90° 后沿 +Z，中心线 x=-2，包围盒 Z∈[0.5,2.5]、中心 z=1.5。
+  // 交叉点 (-2,0) 距 CV2 中心 -1.5m，超出其正常行程半径 0.64m（跨度 2m、货箱 0.72m），
+  // 但仍在“端面 + 一个货箱长度”的过渡允许范围内。
+  const h = makeHarness({
+    CV1: { centerX: -4, origin: true },
+    CV2: { centerX: -2, centerZ: 1.5, halfSpanX: 1, rotationY: -Math.PI / 2 },
+  });
+  try {
+    // 先让上游刷出并摆好位姿，再让下游订阅：货物带历史位姿，交接插值才存在
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    h.apply('CV2', { task: 7, movement_x: 1 });
+
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.cargoCode, 'cargo', '货物必须交付给下游');
+    assert.ok(Math.abs(cv2.cargoTravelOffset + 1.5) < 1e-6,
+      `直角交付必须落在交叉点（下游偏移 -1.5），实际 ${cv2.cargoTravelOffset}`);
+    assert.ok(Math.abs((cv2.handoffEntryOffset ?? 0) + 1.5) < 1e-6, '拐角进入偏移必须记录，供走行钳制放宽');
+    assert.equal(cv2.entryHandoffPending, true, '直角交接插值期间必须冻结下游走行');
+
+    // 交接插值（1s）期间货物固定在拐角，不得提前沿下游轴跑走
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 9);
+    assert.ok(Math.abs(cv2.cargoTravelOffset + 1.5) < 1e-6,
+      `交接插值期间货物必须停在拐角，实际 ${cv2.cargoTravelOffset}`);
+
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 1);
+    assert.equal(cv2.entryHandoffPending, false, '插值完成后解除冻结');
+
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 10);
+    assert.ok(cv2.cargoTravelOffset > -1.5 && cv2.cargoTravelOffset < -1.19,
+      `货物应从拐角连续驶入而不是瞬移，实际 ${cv2.cargoTravelOffset}`);
+
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 80);
+    assert.ok(cv2.cargoTravelOffset > -0.64 + 1e-6, `驶入常规行程后继续沿轴走行，实际 ${cv2.cargoTravelOffset}`);
+    assert.equal(cv2.handoffEntryOffset, null, '进入常规行程范围后必须解除拐角放宽');
   } finally {
     h.dispose();
   }

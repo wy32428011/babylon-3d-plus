@@ -111,6 +111,12 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 交接
 - **conveyor→conveyor**：探测邻居(:814-861) + `available/taken` 下行泛洪、`subscribe/unsubscribe` 上行传递（`dispatchLinkMessage` :406）；越级直达 `runCargoDeliveryRelay`(:630-664)，K 跳仅终点发一次 taken+available，`visited` 防环。
+- **直角相邻交接落点**：`settleCargoTransfer` 通过 `resolvePerpendicularHandoffOffset`（conveyorCargoTravel.ts）求上游/下游两条中心轨迹的 XZ 交叉点；近似直角（|dot|≤0.3）、层高差≤0.5m、交叉点不远离上游中心时，交付落点取交叉点沿下游轴的偏移，而不是下游进入端——货箱先沿线走到拐角交叉点，再沿下游中心轴继续，横向平移瞬间不再脱离下游中心轨迹。
+- **走行终点取交叉点**：行程计划首次持货时扫描其它 conveyor 中心线，求落在本机跨度内、对方跨度附近（+0.5m 容差）的直角交叉，缓存为 `perpendicularEndOffsets`（正/负两侧）。走行到该侧时终点钳制到交叉点，货箱停在拐角（而非设备边沿），再由下游沿其中心轴继续；没有直角邻居的一侧保持原行程半径。
+- **拐角过渡段**：现场直角接驳的交叉点常落在下游几何端面之外（第三方设备/短过渡段填充），允许超出正常行程半径至 `下游端面外过渡段 + 一个货箱轴向长度`。此时 `ConveyorModelTelemetryState.handoffEntryOffset` 记录进入偏移，走行钳制在进入侧放宽到该点，货物从拐角开始沿本机轴连续驶入；一旦进入常规行程范围即清空。平行/非直角/交叉点明显偏离时仍回退原进入端落点。
+- **直角交接冻结**：直角交付时置 `entryHandoffPending`，交接插值完成前下游不走行——目标点固定在拐角，货物沿上游轴滑到交叉点后才沿下游轴驱动。否则下游一交付就开始走行，插值目标持续前移，货物会被拉成斜线直接飞向设备终点。
+- **交接时长按速度折算**：交接插值时长 = 货箱到落点距离 / 本机货物输送速度，上限仍为 `1s/hops`、下限 0.1s。调高实例 `cargoTravelSpeed` 时设备间移动同步加快；否则频繁逐台交付时视觉速度被固定 1s 插值主导，速度参数看不出效果。
+- **直角链路的订阅补发**：直角相邻时下游探测点可能够不到上游，链路靠 available 泛洪建立；`handleAvailableMessage` 在已处于 `waitingTask` 时，若发现的上一跳（`holderAssetCode`）与已登记链路不同（新上游路径），仍补发一次 subscribe，否则货物已在路上却永远收不到交付。
 - **外部持货（rgv/stacker）**：无链路能力，经 `externalPulls` 帧尾 `pullExternalHolderCargo` 代交付(:370-405)，门控 `isRgvCargoReadyForExternalPull` / `isStackerCargoPendingPlatformHandoff`(:386-390)。
 - **stacker↔conveyor 站台**：locator 事件驱动不经链路 — `adoptPlatformCargoForStacker`(:978)、`acceptPlatformPlacedCargo`(:1011)。
 - **rgv 列放货**：`acceptRgvColumnPlacedCargo`(:1058)，由 rgvDriver.ts:586-600 发起。
