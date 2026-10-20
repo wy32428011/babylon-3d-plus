@@ -1,5 +1,11 @@
 # 任务记录
 
+## 2026-10-20 提升机运动箭头 Git 交付
+
+- 已快进合并远端货格留存货物开关、直角接驳中心线落点相关更新，恢复本地提升机运动箭头改动，无冲突。
+- 本次按用户要求不运行测试、构建或代码验证；原实现阶段记录不代表对合并后版本重新验证。
+- 使用中文标题及四项编号说明提交推送，最终结果以本次交付回复为准。
+
 ## 2026-10-20 Git 同步交付
 
 - 已拉取并快进合并远端设备驱动更新，保留本地 Overlay 与巡检辅助标记优化，无合并冲突。
@@ -43,3 +49,15 @@
 - 真实浏览器：Edge硬件WebGL2，Intel UHD630/ANGLE，现有真实SceneViewPanel/SceneSettingsPanel fixture，19项检查，pageErrors=[]。验证48/120立方体、隐藏与相机不变、删除撤销、合法本地场景文件阵列10+环境1=11、同ID/空场景重开、缺失模型失败与删除恢复、异步加载占位与完成更新、100立方体+环境1=1201、精确数字选择、键盘说明与明细、320px外侧面板无横向溢出。
 - 证据：output/playwright/scene-model-statistics/result.json、implemented-panel.png、implemented-scene.png、narrow-320.png；模型字节为已知单三角面glTF，通过测试本地资源路由供真实加载器读取。
 - 验证边界：本地源码、真实浏览器WebGL与NullEngine回归；未重打安装包，未验证已安装版本或现场远程资源。无本轮必要功能遗留。
+
+## 2026-10-20 提升机与换层提升机运动箭头
+
+- 需求：编辑器运行和发布场景沿用现有运动箭头逻辑。验收清单见 docs/tasks/2026-10-20-lift-motion-arrows.md，六项均完成。
+- 配置与交互：lift 三路（升降/前工位/后工位）、hclift 单路升降；十样式及拖放、颜色/动画/挂点/独立编辑预览，统一 telemetryBinding.liftMotionArrows 保存、复制、撤销重做和 SOURCE/DIST 序列化。缺省关闭、显式零值保留、预览仅当前会话。
+- 运行：驱动后发布 WeakMap 同帧实际位移；工位沿已有真实输送轴，排除首帧/初层吸附/补齐/约束纠偏。升降固定柱全高度并动态避让载货台，工位跟随台面；共享台面沿安全交段分半，斜向宽度和自动长度留在台面范围内。正常停机120ms淡出，故障/work_state=10/过期/冲突/缺帧/隐藏即时关闭，删除和切换释放。
+- 复核修复：摘要不得主动调用有副作用的业务轴解析器，改为仅读已建立缓存并覆盖层模型晚就绪；急停增加独立门控；补斜向台面四角/侧面回归。未改参数化脚本或原有 MQTT/动作规则。
+- 定向回归：配置/会话/编辑store 15/15；原及新驱动/摘要先33/33，旁路修复后受影响lift+摘要27/27（hclift7项证据仍有效），最终驱动合计34项；Renderer12/12；System6/6。合计67项有效回归，testGroups机制另5/5。npm run build（含TypeScript、编辑器与Viewer）、npm run build:electron通过；修改源文件ESLint 0错误，既有SceneRuntime29、liftDriver2条警告；git diff --check和新增文件UTF-8检查通过。
+- 真实编辑器：Microsoft Edge/Intel UHD630/ANGLE硬件WebGL2，四通道正反预览/动画/停止、保存重开、窄视口、两类MQTT上下行、立柱固定与动态缺口、急停断流通过；MQTT task101/102由真实conveyor依次生成两箱并取入后/前工位，两路箭头direction1且实物ID独立，停预览货物清理通过，errors=[]。
+- 发布：实际Electron SOURCE/DIST各4场景（main/legacy/disabled/zero）保留配置、两模型与脚本、重开、源文件不变；最终源码build后重新解包的DIST Viewer验证两类升降、动画、故障/急停/断流、前后工位真实MQTT取货及旧/关/零值场景，errors=[]，硬件WebGL2。
+- 证据：output/lift-motion-arrows/{editor-result,packages-result,viewer-result}.json、build.log、eslint.json，mqtt-up-gap-moved.png、mqtt-front-pickup.png、viewer-up.png、viewer-front-pickup.png。使用说明 docs/lift-motion-arrows.md，README已加入入口。
+- 既有问题与边界：test:entries因HEAD原有test:manual-roam入口与scripts/test-entry-manifest.json漂移失败，当前命令与HEAD一致，未扩大修复。现场Broker/实际业务模型包/已安装版本/线上部署未验收；未提交推送Git。本轮必要功能无遗留，任务浏览器与动态端口服务均已关闭。

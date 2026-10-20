@@ -12,6 +12,7 @@ import { SearchableSelect } from '../ui/SearchableSelect';
 import { ConveyorSurfaceArrowsInspector } from './ConveyorSurfaceArrowsInspector';
 import { StackerMotionArrowsInspector } from './StackerMotionArrowsInspector';
 import { RgvMotionArrowsInspector } from './RgvMotionArrowsInspector';
+import { LiftMotionArrowsInspector } from './LiftMotionArrowsInspector';
 
 /** RGV 列绑定/提升机层绑定共用的目标选项：除自身外的 conveyor 设备。 */
 function buildConveyorTargetOptions(scene: SceneDocument, excludeEntityId: string): { id: string; name: string }[] {
@@ -595,6 +596,15 @@ function LiftLayerBindingsEditor(props: {
           config={binding.rgvMotionArrows}
           disabled={props.disabled}
           onChange={(rgvMotionArrows) => commit({ rgvMotionArrows })}
+        />
+      ) : null}
+      {binding.deviceType === 'lift' || binding.deviceType === 'hclift' ? (
+        <LiftMotionArrowsInspector
+          entityId={props.entityId}
+          deviceType={binding.deviceType}
+          config={binding.liftMotionArrows}
+          disabled={props.disabled}
+          onChange={(liftMotionArrows) => commit({ liftMotionArrows })}
         />
       ) : null}
       <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={binding} modelAssetCode={props.modelAssetCode} />

@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 export const groups = {
-  core: ['test:digital-twin:unit', 'test:build-analysis', 'test:dev-asset-paths', 'test:typescript-build', 'test:expression', 'test:groups'],
-  integration: ['test:digital-twin:integration'],
-  smoke: ['smoke:scene-capacity'],
+  core: ['test:lift-motion-arrows', 'test:digital-twin:unit', 'test:build-analysis', 'test:dev-asset-paths', 'test:typescript-build', 'test:expression', 'test:groups'],
+  integration: ['test:digital-twin:integration', 'test:lift-motion-arrows:integration'],
+  smoke: ['smoke:scene-capacity', 'smoke:lift-motion-arrows'],
 };
 
 export function auditEntries(scripts, manifest) {

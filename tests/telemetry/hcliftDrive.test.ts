@@ -8,6 +8,7 @@ import { HcliftTelemetryDriver } from '../../src/runtime/babylon/telemetry/speci
 import { createHcliftTelemetryState, createShuttleTelemetryState } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { createSpecializedTelemetrySharedState } from '../../src/runtime/babylon/telemetry/specialized/types';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
+import { getLiftMotionFrame } from '../../src/runtime/babylon/telemetry/liftMotionState';
 
 function makeSnapshot(fields: Record<string, unknown>): DeviceTelemetrySnapshot {
   return {
@@ -211,4 +212,40 @@ test('小车占用载货台但急停：hclift 不得升降', () => {
   } finally {
     h.dispose();
   }
+});
+
+
+test('换层提升机摘要排除初层吸附，实际升降后按方向和真实速度输出', () => {
+  const h = makeHarness({ withShuttle: false });
+  try {
+    h.apply({ lift_current_level: 2, task_target_level: 2 });
+    let frame = getLiftMotionFrame(h.hcliftModel)!;
+    assert.equal(frame.lift.direction, 0);
+    assert.deepEqual(frame.front, { direction: 0, speed: 0 });
+    assert.deepEqual(frame.back, { direction: 0, speed: 0 });
+    h.apply({ lift_current_level: 2, task_target_level: 3 });
+    frame = getLiftMotionFrame(h.hcliftModel)!;
+    assert.equal(frame.lift.direction, 1);
+    assert.ok(Math.abs(frame.lift.speed - 1) < 1e-6);
+    h.apply({ lift_current_level: 2, task_target_level: 1 });
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, -1);
+    h.apply({ lift_current_level: 2, task_target_level: 1, work_state: 10 });
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0);
+  } finally { h.dispose(); }
+});
+
+test('换层提升机门控未满足与约束纠偏不产生箭头', () => {
+  const h = makeHarness({ withShuttle: true });
+  try {
+    h.apply({ lift_current_level: 1, task_target_level: 1 });
+    const fields = { lift_current_level: 1, task_target_level: 3, work_state: 2 };
+    h.apply(fields);
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0);
+    h.setOccupancy({ phase: 'loaded' });
+    h.apply(fields);
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 1);
+    h.hcliftModel.hcliftTelemetry.liftOffset = -100;
+    h.apply(fields);
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0, '范围纠偏不能解释为运行');
+  } finally { h.dispose(); }
 });

@@ -16,6 +16,7 @@ import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import { readIntegerField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { clearLiftMotionFrame, getLiftMotionFrame, publishLiftMotionFrame } from '../liftMotionState';
 import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   CARGO_HANDOFF_SECONDS,
@@ -41,6 +42,16 @@ type LiftLayerCandidate = { entityId: string; surfacePoint: Vector3; conveyor: M
 /** work_state ∈ {1 取货中, 3 卸货中} 且载货台未到位时的赶位速度倍率。 */
 const LIFT_RUSH_SPEED_MULTIPLIER = 4;
 
+type LiftMotionObservation = {
+  runtimeState: ModelRuntimeEntry['liftTelemetry'];
+  baseline: Vector3;
+  deviceIdentity: string;
+  initialized: boolean;
+  front: number;
+  back: number;
+  deliveries: Map<LiftCargoRuntimeEntry, { position: Vector3; axis: Vector3; stationIndex: 0 | 1 }>;
+};
+
 /**
  * 物料提升机（lift）遥测驱动：RGV 的垂直版——载货台沿模型 Y 轴升降，层绑定分来料/送料两张表。
  * reference_upper_step（1=来料侧/2=送料侧）+ level_upper（该侧目标层号）组成目标键做边沿检测，
@@ -53,6 +64,7 @@ const LIFT_RUSH_SPEED_MULTIPLIER = 4;
  * 目标层不在绑定表内则不响应不移动（一次性 Console 提示）。货箱全程只平移不旋转。
  */
 export class LiftTelemetryDriver {
+  private readonly motionObservations = new WeakMap<ModelRuntimeEntry, LiftMotionObservation>();
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {
@@ -69,12 +81,58 @@ export class LiftTelemetryDriver {
 
   /** 对单台提升机应用载货台升降与交接的遥测驱动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+    const motion = this.getMotionObservation(model, snapshot);
+    motion.front = 0;
+    motion.back = 0;
+    this.observeOutgoingCargoMotion(motion);
     this.reportLiftRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
     this.applyLiftWorkState(model, snapshot);
-    this.applyLiftMotion(model, snapshot, deltaSeconds);
+    const lift = this.applyLiftMotion(model, snapshot, deltaSeconds);
     this.applyLiftNodeMotionOffsets(model);
     this.applyLiftCargoHandoff(model, snapshot, deltaSeconds);
+    const active = motion.initialized && !this.isLiftFrozen(model, snapshot);
+    publishLiftMotionFrame(model, this.scene.getFrameId(), active ? deltaSeconds : 0, {
+      lift, front: motion.front, back: motion.back, axis: this.readObservedTravelAxis(model)?.axis,
+    });
+    motion.initialized = true;
+  }
+
+  /** 箭头仅读业务已建立的有效轨迹轴，不提前解析或缓存尚未就绪的层绑定。 */
+  private readObservedTravelAxis(model: ModelRuntimeEntry): LiftTravelAxisCache | null {
+    const travel = model.liftTelemetry.travelAxis;
+    return travel && travel.axis.lengthSquared() > 1e-8 ? travel : null;
+  }
+
+  /** 设备、遥测或基准更换时只废弃箭头观察，不触碰动作与货物状态。 */
+  private getMotionObservation(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): LiftMotionObservation {
+    const runtimeState = model.liftTelemetry;
+    const deviceIdentity = JSON.stringify([snapshot.sourceId, snapshot.deviceType, snapshot.assetCode]);
+    let motion = this.motionObservations.get(model);
+    if (!motion || motion.runtimeState !== runtimeState || motion.baseline !== runtimeState.rootBasePosition
+      || motion.deviceIdentity !== deviceIdentity || !getLiftMotionFrame(model)) {
+      motion = { runtimeState, baseline: runtimeState.rootBasePosition, deviceIdentity, initialized: false, front: 0, back: 0, deliveries: new Map() };
+      this.motionObservations.set(model, motion);
+      clearLiftMotionFrame(model);
+    }
+    return motion;
+  }
+
+  /** 离台动画归接收输送线驱动；在其承接期间观察实际位移，引用清空不提前熄灭箭头。 */
+  private observeOutgoingCargoMotion(motion: LiftMotionObservation): void {
+    for (const [cargo, delivery] of motion.deliveries) {
+      if (cargo.root.isDisposed()) {
+        motion.deliveries.delete(cargo);
+        continue;
+      }
+      // 生成货物 root 无父级；直接读已写入位姿，避免同一渲染帧的世界矩阵缓存延迟一帧。
+      const position = cargo.root.position;
+      const displacement = Vector3.Dot(position.subtract(delivery.position), delivery.axis);
+      if (delivery.stationIndex === 0) motion.front += displacement;
+      else motion.back += displacement;
+      delivery.position.copyFrom(position);
+      if (!cargo.handoff) motion.deliveries.delete(cargo);
+    }
   }
 
   /** 每帧读入 work_state 原始值（缺失为 null，走兼容路径），并按 task_num_fin_* 标注对应工位货物身份。 */
@@ -105,7 +163,7 @@ export class LiftTelemetryDriver {
   // ===== 载货台升降 =====
 
   /** 目标层信号驱动载货台沿 Y 轴升降；目标键变化时重解析层绑定并换算目标偏移。work_state=1/3 且未到位时 4 倍速赶位。 */
-  private applyLiftMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+  private applyLiftMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): number {
     const state = model.liftTelemetry;
     const upAxis = getModelAxis(model.root, 'y');
     const frozen = this.isLiftFrozen(model, snapshot);
@@ -136,6 +194,8 @@ export class LiftTelemetryDriver {
       // 解析失败不记录目标键，后续帧持续重试（告警一次性）
     }
 
+    const before = state.liftOffset;
+    const correctedBefore = this.clampLiftOffset(model, before);
     if (!frozen && state.liftTargetOffset !== null) {
       const rushing = (state.workState === 1 || state.workState === 3) && state.arrivedTargetKey !== state.targetKey;
       const speed = this.readLiftSpeed(model) * (rushing ? LIFT_RUSH_SPEED_MULTIPLIER : 1);
@@ -146,6 +206,7 @@ export class LiftTelemetryDriver {
     }
 
     state.liftOffset = this.clampLiftOffset(model, state.liftOffset);
+    return frozen || before !== correctedBefore ? 0 : state.liftOffset - before;
   }
 
   /** 载货面节点包围盒顶面在基线（liftOffset=0）时的世界 Y 投影坐标。 */
@@ -433,8 +494,21 @@ export class LiftTelemetryDriver {
         targetPosition = Vector3.Lerp(station.cargoHoldPosition, anchor.position, station.transferProgress);
       }
 
+      const previousPosition = cargo.root.position.clone();
       const pose = resolveCargoHandoffPose(cargo, targetPosition, anchor.rotation, deltaSeconds);
       this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, null);
+      const motion = this.motionObservations.get(model);
+      const travel = this.readObservedTravelAxis(model);
+      // work_state=2 是强制补齐，不能把该次吸附解释为运行；世界轴投影自动排除随台升降。
+      if (motion && travel && state.workState !== 2) {
+        const displacement = Vector3.Dot(pose.position.subtract(previousPosition), travel.axis);
+        if (stationIndex === 0) motion.front += displacement;
+        else {
+          motion.back += displacement;
+          // 送料侧前工位排队到后工位，两个台面区域共同参与本次连续移行。
+          if (state.targetSide === 1) motion.front += displacement;
+        }
+      }
     }
   }
 
@@ -639,8 +713,12 @@ export class LiftTelemetryDriver {
     const cargo = this.state.liftCargoMeshes.get(key);
     if (!cargo) return null;
     for (const { model } of this.host.collectModels()) {
-      for (const station of model.liftTelemetry.stations) {
+      for (let stationIndex = 0 as 0 | 1; stationIndex < 2; stationIndex++) {
+        const station = model.liftTelemetry.stations[stationIndex];
         if (station.cargoKey === key) {
+          const motion = this.motionObservations.get(model);
+          const travel = this.readObservedTravelAxis(model);
+          if (motion && travel) motion.deliveries.set(cargo, { position: cargo.root.position.clone(), axis: travel.axis.clone(), stationIndex });
           this.clearLiftStationState(station);
           model.liftTelemetry.outgoingHandoffCooldown = CARGO_HANDOFF_SECONDS;
         }

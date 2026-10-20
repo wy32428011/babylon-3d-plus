@@ -17,6 +17,7 @@ import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition } from '
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import { isShuttleRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { clearLiftMotionFrame, getLiftMotionFrame, publishLiftMotionFrame } from '../liftMotionState';
 import {
   HCLIFT_DECK_OCCUPANCY_STALE_MS,
   LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
@@ -35,6 +36,9 @@ import {
  * 只托举多穿小车（hcliftPlatformSurfaces 发布台面实时高度供 shuttle x=-2 跟随），不交接货箱。
  */
 export class HcliftTelemetryDriver {
+  private readonly motionObservations = new WeakMap<ModelRuntimeEntry, {
+    runtimeState: ModelRuntimeEntry['hcliftTelemetry']; baseline: Vector3; deviceIdentity: string;
+  }>();
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {
@@ -51,23 +55,31 @@ export class HcliftTelemetryDriver {
 
   /** 对单台小车提升机应用载货台升降的遥测驱动，并发布载货台实时台面高度。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+    const runtimeState = model.hcliftTelemetry;
+    const previous = this.motionObservations.get(model);
+    const deviceIdentity = JSON.stringify([snapshot.sourceId, snapshot.deviceType, snapshot.assetCode]);
+    const initialized = previous?.runtimeState === runtimeState && previous.baseline === runtimeState.rootBasePosition
+      && previous.deviceIdentity === deviceIdentity && getLiftMotionFrame(model) !== null;
+    if (!initialized) clearLiftMotionFrame(model);
     this.reportHcliftRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
     model.hcliftTelemetry.workState = readIntegerField(snapshot.fields, 'work_state');
-    this.applyHcliftMotion(model, snapshot, deltaSeconds);
+    const lift = this.applyHcliftMotion(model, snapshot, deltaSeconds);
     this.applyHcliftNodeMotionOffsets(model);
     this.publishPlatformSurface(model, snapshot);
+    publishLiftMotionFrame(model, this.scene.getFrameId(), initialized && !this.isHcliftFrozen(model, snapshot) ? deltaSeconds : 0, { lift, front: 0, back: 0 });
+    this.motionObservations.set(model, { runtimeState, baseline: runtimeState.rootBasePosition, deviceIdentity });
   }
 
   // ===== 载货台升降 =====
 
-  private applyHcliftMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+  private applyHcliftMotion(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): number {
     const state = model.hcliftTelemetry;
     const upAxis = getModelAxis(model.root, 'y');
     const frozen = this.isHcliftFrozen(model, snapshot);
 
     const locator = this.resolvePlatformLocator(model, snapshot);
-    if (!locator) return;
+    if (!locator) return 0;
 
     const currentLevel = readIntegerField(snapshot.fields, 'lift_current_level');
     if (!state.hasInitialLevel && currentLevel !== null && currentLevel >= 1) {
@@ -90,11 +102,15 @@ export class HcliftTelemetryDriver {
       }
     }
 
+    // 初层吸附在此前完成，只观察其后真正执行的连续升降。
+    const before = state.liftOffset;
+    const correctedBefore = this.clampLiftOffset(model, before);
     if (this.isHcliftLiftAllowed(model, snapshot) && state.liftTargetOffset !== null) {
       state.liftOffset = moveNumberTowards(state.liftOffset, state.liftTargetOffset, this.readHcliftSpeed(model) * deltaSeconds);
     }
 
     state.liftOffset = this.clampLiftOffset(model, state.liftOffset);
+    return frozen || before !== correctedBefore ? 0 : state.liftOffset - before;
   }
 
   /**

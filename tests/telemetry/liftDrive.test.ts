@@ -14,9 +14,11 @@ import {
   CONVEYOR_CARGO_SIZE,
   createSpecializedTelemetrySharedState,
   type GeneratedCargoRuntimeEntry,
+  type LiftTravelAxisCache,
 } from '../../src/runtime/babylon/telemetry/specialized/types';
 import { resolveConveyorCargoTravelHalfRange } from '../../src/runtime/babylon/telemetry/conveyorCargoTravel';
 import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
+import { getLiftMotionFrame } from '../../src/runtime/babylon/telemetry/liftMotionState';
 
 /**
  * lift 双工位 + work_state 状态机测试布局：
@@ -227,6 +229,7 @@ function makeHarness(options: HarnessOptions = {}) {
     state,
     logs,
     delivered,
+    deckPoints,
     liftModel,
     liftDriver,
     conveyorDriver,
@@ -776,4 +779,138 @@ test('pull 排队门控：step2 占用时 step1 货不可被外部拉取，step2
   } finally {
     h.dispose();
   }
+});
+
+
+test('提升机摘要首帧不亮，连续升降输出实际速度、到位与急停清零', () => {
+  const h = makeHarness();
+  try {
+    const fields = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 0);
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 1);
+    assert.ok(Math.abs(getLiftMotionFrame(h.liftModel)!.lift.speed - 1) < 1e-6);
+    h.applyLift({ ...fields, work_state: 10 });
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 0);
+    runUntil(h, fields, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 0);
+    h.applyLift({ reference_upper_step: 1, level_upper: 1, work_state: 6 });
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, -1);
+  } finally { h.dispose(); }
+});
+
+test('提升机工位按真实取货位移独立输出，取货补齐与无货不推断运行', () => {
+  const h = makeHarness();
+  try {
+    const fields = { reference_upper_step: 1, level_upper: 1, work_state: 1 };
+    h.applyLift(fields);
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.back.direction, 0);
+    h.insertConveyorCargo('CIN', '901');
+    h.applyLift(fields);
+    let frame = getLiftMotionFrame(h.liftModel)!;
+    assert.equal(frame.front.direction, 0);
+    assert.equal(frame.back.direction, 1);
+    assert.deepEqual(frame.back.axis, { x: 1, y: 0, z: 0 });
+    h.applyLift({ ...fields, work_state: 2 });
+    frame = getLiftMotionFrame(h.liftModel)!;
+    assert.equal(frame.back.direction, 0, '取货完成的强制补齐不作为连续运行');
+    h.insertConveyorCargo('CIN', '902');
+    h.applyLift(fields);
+    frame = getLiftMotionFrame(h.liftModel)!;
+    assert.equal(frame.front.direction, 1);
+    assert.equal(frame.back.direction, 0);
+  } finally { h.dispose(); }
+});
+
+test('前工位排队到后工位时两通道同向，最后一帧仍保留实际位移', () => {
+  const h = makeHarness({ outgoingSurfaceY: DECK_TOP_BASE_Y });
+  try {
+    adoptTwoCargos(h);
+    const fields = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
+    h.applyLift(fields);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null);
+    runUntil(h, fields, () => h.liftModel.liftTelemetry.stations[1].transferActive);
+    h.applyLift(fields);
+    let frame = getLiftMotionFrame(h.liftModel)!;
+    assert.equal(frame.front.direction, 1);
+    assert.equal(frame.back.direction, 1);
+    // 构造仍有明确剩余行程的末帧，排除浮点进度仅差机器精度时的零位移。
+    const back = h.liftModel.liftTelemetry.stations[1];
+    back.transferProgress = 0.99;
+    const cargo = h.state.liftCargoMeshes.get(back.cargoKey!)!;
+    cargo.root.position.x = STATION_OFFSET - 0.005;
+    h.applyLift(fields);
+    assert.equal(back.cargoOnBoard, true);
+    frame = getLiftMotionFrame(h.liftModel)!;
+    assert.equal(frame.front.direction, 1);
+    assert.equal(frame.back.direction, 1);
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.front.direction, 0);
+  } finally { h.dispose(); }
+});
+
+test('工位离台引用清空后，接收方承接期间继续观察真实位移', () => {
+  const h = makeHarness({ outgoingSurfaceY: DECK_TOP_BASE_Y });
+  try {
+    const { a } = adoptTwoCargos(h);
+    const fields = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
+    h.applyLift(fields);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null);
+    a.handoff = { fromPosition: a.root.position.clone(), fromRotation: Quaternion.Identity(), progress: 0.5, durationSeconds: 1 };
+    a.root.position.x += 0.1;
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.back.direction, 1);
+    assert.ok(Math.abs(getLiftMotionFrame(h.liftModel)!.back.speed - 1) < 1e-6);
+    a.root.position.x += 0.02;
+    a.handoff = null;
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.back.direction, 1, '完成承接的最后位移仍应可见');
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.back.direction, 0);
+  } finally { h.dispose(); }
+});
+
+test('提升机设备身份更换后重新屏蔽首帧，不继承旧设备工位观察', () => {
+  const h = makeHarness();
+  try {
+    const fields = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    h.applyLift(fields);
+    h.applyLift(fields);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 1);
+    const snapshot = { ...makeLiftSnapshot(fields), sourceId: 'new-source' };
+    h.liftDriver.applyToModel(h.liftModel, snapshot, 0.1);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 0);
+    h.liftDriver.applyToModel(h.liftModel, snapshot, 0.1);
+    assert.equal(getLiftMotionFrame(h.liftModel)!.lift.direction, 1);
+  } finally { h.dispose(); }
+});
+
+
+test('空载运动观察不缓存轨迹轴，绑定层晚就绪后业务仍正常解析前后工位', () => {
+  const h = makeHarness();
+  try {
+    const incomingSurface = h.deckPoints.e_CIN;
+    const outgoingSurface = h.deckPoints.e_COUT;
+    delete h.deckPoints.e_CIN;
+    delete h.deckPoints.e_COUT;
+    for (let frame = 0; frame < 3; frame++) h.applyLift({ work_state: 0 });
+    assert.equal(h.liftModel.liftTelemetry.travelAxis, null, '空载箭头观察不能提前写入空轴或默认轴缓存');
+    assert.equal(getLiftMotionFrame(h.liftModel)!.front.axis, undefined);
+
+    h.deckPoints.e_CIN = incomingSurface;
+    h.deckPoints.e_COUT = outgoingSurface;
+    const cargo = h.insertConveyorCargo('CIN', 'late-ready');
+    const fields = { reference_upper_step: 1, level_upper: 1, work_state: 1 };
+    h.applyLift(fields);
+    // applyLift 会更新业务缓存，显式重新读取以免沿用调用前 null 的类型收窄。
+    const travel = h.liftModel.liftTelemetry.travelAxis as LiftTravelAxisCache | null;
+    assert.ok(travel, '取货业务应在层模型就绪后建立轨迹轴');
+    assert.ok(travel.axis.equalsWithEpsilon(new Vector3(1, 0, 0)));
+    runUntil(h, fields, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard);
+    assert.ok(Math.abs(cargo.root.position.x - STATION_OFFSET) < 1e-6, '后工位应保持独立锚点，不能退化至台面中心');
+    assert.deepEqual(getLiftMotionFrame(h.liftModel)!.back.axis, { x: 1, y: 0, z: 0 });
+  } finally { h.dispose(); }
 });

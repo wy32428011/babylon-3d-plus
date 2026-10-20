@@ -108,7 +108,10 @@
     "test:expression": "node --experimental-strip-types --test tests/runtime/modelParameterExpression.test.ts",
     "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-include=src/runtime/babylon/modelParameterExpression.ts --test tests/runtime/modelParameterExpression.test.ts",
     "test:entries": "node scripts/test-groups.mjs --check",
-    "typecheck:quality": "tsc -p tsconfig.quality.json"
+    "typecheck:quality": "tsc -p tsconfig.quality.json",
+    "test:lift-motion-arrows": "node scripts/telemetry-test.mjs liftMotionState.test.ts liftDrive.test.ts hcliftDrive.test.ts && node --experimental-strip-types --test --test-concurrency=1 tests/telemetry/liftMotionArrowsConfig.test.ts tests/telemetry/liftMotionArrowSession.test.ts tests/editor/liftMotionArrows.integration.test.mjs tests/runtime/liftMotionArrowRenderer.test.mjs tests/runtime/liftMotionArrowSystem.test.mjs",
+    "test:lift-motion-arrows:integration": "npm run build:electron && electron tests/digitalTwin/liftMotionArrowPackages.integration.mjs",
+    "smoke:lift-motion-arrows": "npm run build && node scripts/smoke-lift-motion-arrows.mjs && npm run test:lift-motion-arrows:integration && node scripts/smoke-lift-motion-arrow-viewer.mjs"
   },
   "engines": {
     "node": "^22.15.0 || >=24.0.0"

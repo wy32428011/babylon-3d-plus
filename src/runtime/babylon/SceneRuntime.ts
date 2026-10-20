@@ -110,6 +110,8 @@ import { StackerMotionArrowSystem } from './telemetry/StackerMotionArrowSystem';
 import { StackerMotionArrowRenderer } from './effects/StackerMotionArrowRenderer';
 import { RgvMotionArrowSystem } from './telemetry/RgvMotionArrowSystem';
 import { RgvMotionArrowRenderer } from './effects/RgvMotionArrowRenderer';
+import { LiftMotionArrowSystem } from './telemetry/LiftMotionArrowSystem';
+import { LiftMotionArrowRenderer } from './effects/LiftMotionArrowRenderer';
 import {
   createModelGeneratorTargetSignature,
   createRuntimeModelAssetFromTarget,
@@ -1003,6 +1005,8 @@ export class SceneRuntime {
   private hasStackerMotionArrows = false;
   private readonly rgvMotionArrowSystem: RgvMotionArrowSystem;
   private hasRgvMotionArrows = false;
+  private readonly liftMotionArrowSystem: LiftMotionArrowSystem;
+  private hasLiftMotionArrows = false;
   private hasConveyorSurfaceArrows = false;
   private readonly themeRuntime: SceneThemeRuntime;
   private themeSignature = '';
@@ -1124,6 +1128,7 @@ export class SceneRuntime {
     this.conveyorSurfaceArrowSystem = new ConveyorSurfaceArrowSystem(new ConveyorSurfaceArrowRenderer(scene));
     this.stackerMotionArrowSystem = new StackerMotionArrowSystem(new StackerMotionArrowRenderer(scene));
     this.rgvMotionArrowSystem = new RgvMotionArrowSystem(new RgvMotionArrowRenderer(scene));
+    this.liftMotionArrowSystem = new LiftMotionArrowSystem(new LiftMotionArrowRenderer(scene));
     this.deviceSpawnerRuntime = new DeviceSpawnerRuntime({
       pushLog: (message) => this.pushLog(message),
       spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
@@ -1145,6 +1150,7 @@ export class SceneRuntime {
       this.updateConveyorSurfaceArrows();
       this.updateStackerMotionArrows();
       this.updateRgvMotionArrows();
+      this.updateLiftMotionArrows();
       this.modelEntranceRuntime.tick(Math.min(this.scene.getEngine().getDeltaTime() / 1000, 0.1), this.modelEntranceVisible);
     });
     this.modelStatisticsMeshAddedObserver = scene.onNewMeshAddedObservable.add(() => this.invalidateModelStatistics());
@@ -1742,6 +1748,7 @@ export class SceneRuntime {
     this.conveyorSurfaceArrowSystem.clear();
     this.stackerMotionArrowSystem.clear();
     this.rgvMotionArrowSystem.clear();
+    this.liftMotionArrowSystem.clear();
     this.lightMarkerRuntime.setPreviewActive(true);
     this.autoPatrolMarkerRuntime.setPreviewActive(true);
     this.manualRoamSpawnRuntime.setPreviewActive(true);
@@ -1777,6 +1784,7 @@ export class SceneRuntime {
     this.conveyorSurfaceArrowSystem.clear();
     this.stackerMotionArrowSystem.clear();
     this.rgvMotionArrowSystem.clear();
+    this.liftMotionArrowSystem.clear();
     this.alarmRuntime.reset();
     for (const id of this.alarmManagerIds) this.meshes.get(id)?.setEnabled(this.isEntityVisible(id));
     this.lightMarkerRuntime.setPreviewActive(false);
@@ -3891,6 +3899,9 @@ export class SceneRuntime {
     const hasRgvArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.rgvMotionArrows?.enabled);
     if (this.hasRgvMotionArrows && !hasRgvArrows) this.rgvMotionArrowSystem.clear();
     this.hasRgvMotionArrows = hasRgvArrows;
+    const hasLiftArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.liftMotionArrows?.enabled);
+    if (this.hasLiftMotionArrows && !hasLiftArrows) this.liftMotionArrowSystem.clear();
+    this.hasLiftMotionArrows = hasLiftArrows;
     for (const [key, failure] of this.modelReadinessErrors) {
       if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.modelReadinessErrors.delete(key);
     }
@@ -4539,6 +4550,7 @@ export class SceneRuntime {
     this.conveyorSurfaceArrowSystem.dispose();
     this.stackerMotionArrowSystem.dispose();
     this.rgvMotionArrowSystem.dispose();
+    this.liftMotionArrowSystem.dispose();
     this.specializedTelemetryRuntime.dispose();
     for (const [entityId, light] of this.lights.entries()) {
       this.disposeLight(entityId, light);
@@ -6366,6 +6378,16 @@ export class SceneRuntime {
     const models = [...this.specializedTelemetryRuntime.host.collectModels()];
     const delta = Math.min(.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
     this.rgvMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
+      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.isEntityVisible(entityId),
+    })), this.telemetryPreviewActive, delta, this.scene.getFrameId());
+  }
+
+  /** 提升机与换层提升机在驱动后读取本帧实际运动；缺省关闭时不收集模型。 */
+  private updateLiftMotionArrows(): void {
+    if (!this.hasLiftMotionArrows) return;
+    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+    const delta = Math.min(.25, Math.max(0, this.scene.getEngine().getDeltaTime() / 1000));
+    this.liftMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
       entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.isEntityVisible(entityId),
     })), this.telemetryPreviewActive, delta, this.scene.getFrameId());
   }
