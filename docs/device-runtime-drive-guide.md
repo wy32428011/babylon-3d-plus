@@ -349,11 +349,11 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **2 取货完成**：同为取货门控（允许取货）；取货插值未播完则补齐到完成态（货物上台）。doing/done 都是「允许执行/赶着到位」的门控，不死锁货箱。
 - **3 卸货中**（送料层目标）：未到位先 ×4 赶位；到位后按序卸货——step2 有货先出；step2 空且 step1 有货时，step1 货先沿轨迹轴插值平移到 step2 锚点再出；**上一货离台后平移延迟一个承接时长（`CARGO_HANDOFF_SECONDS`，`outgoingHandoffCooldown`）再启动**——离台货在接收方侧还有承接平滑，两货动画须先后而非并发（否则视觉上 step1 先动）。交付无视 task 匹配、目标 conveyor 无货即可（接收方等待中的 task 由交付瞬间标注接管）；**接收方被占用时货留 step2 锚点原位等待、每帧重试，不预播送出动画**（否则滑入输送线撞上在机货），接收方一空闲当帧交付，离台动画由接收方侧承接平滑承担；有人接立即给，**不销毁**。
 - **5 卸货完成**：同为卸货门控（允许交付，不等 doing 才撒手）；放货无台上插值，无需补齐。
-- **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不交接。
+- **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；但 3/5 期间已启动的出站交接（`outgoingHandoffActive`）会继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
 - **10 急停**：并入 faulted 冻结（不动、不交接、一次性告警）。
 
 ### 状态机（LiftModelTelemetryState, types.ts）
-`liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetKey` / `arrivedTargetKey`（到位锁，防重复触发）/ `workState`（null=未提供，走兼容路径）/ `stations[2]`（index0=step1 前、index1=step2 后；每项 cargoKey/cargoOnBoard/transferProgress/transferActive/cargoHoldPosition/Rotation，cargoKey=`JSON.stringify([assetCode, stationIndex])`）/ `outgoingHandoffCooldown`（出站承接冷却，离台瞬间置 `CARGO_HANDOFF_SECONDS`，期内阻塞 step1→step2 排队平移）/ `travelAxis` 缓存（axis/锚点偏移/绑定签名）/ `nodeBaselines`（载货台节点基线）。faulted 冻结；断流停摆（无 applyWhenStale）。
+`liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetKey` / `arrivedTargetKey`（到位锁，防重复触发）/ `workState`（null=未提供，走兼容路径）/ `stations[2]`（index0=step1 前、index1=step2 后；每项 cargoKey/cargoOnBoard/transferProgress/transferActive/cargoHoldPosition/Rotation，cargoKey=`JSON.stringify([assetCode, stationIndex])`）/ `outgoingHandoffCooldown`（出站承接冷却，离台瞬间置 `CARGO_HANDOFF_SECONDS`，期内阻塞 step1→step2 排队平移）/ `outgoingHandoffActive`（出站交接已启动：work_state 回落后仍继续完成队列平移与交付，目标侧切换或无货时复位）/ `travelAxis` 缓存（axis/锚点偏移/绑定签名）/ `nodeBaselines`（载货台节点基线）。faulted 冻结；断流停摆（无 applyWhenStale）。
 
 ### 交接
 - **conveyor→lift（来料层取货）**：到位后 liftDriver 经门面 `adoptConveyorCargoForLift(entityId, liftAssetCode)` → 复用 conveyorDriver `adoptPlatformCargoForStacker`（无视 task 接管、发 taken 波），交接插值上台到分配工位。取货锚点 = **货物在来料输送线上的实际位置**（通常停在紧靠提升机的末端），不取输送线台面中心——否则插值起点落在货物后方半个机身，先向后滑再上台（后摇）。

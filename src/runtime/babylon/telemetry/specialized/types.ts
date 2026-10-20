@@ -431,6 +431,8 @@ export type LiftModelTelemetryState = {
   stations: [LiftStationState, LiftStationState];
   /** 出站交付后 step1→step2 排队平移的延迟剩余秒数：让离台货在接收方的承接平滑先播完，避免两货动画同时启动视觉上 step1 先动。 */
   outgoingHandoffCooldown: number;
+  /** 出站交接已启动（work_state 3/5 期间）：协议状态回落后仍允许完成第二箱排队平移与交付；目标侧切换或无货时复位。 */
+  outgoingHandoffActive: boolean;
   /** 载物台货物轨迹轴缓存（来料→送料水平方向 + 工位锚点偏移），按绑定表签名失效重建。 */
   travelAxis: LiftTravelAxisCache | null;
   nodeBaselines: Map<TransformNode, Vector3>;

@@ -166,6 +166,7 @@ export function createLiftTelemetryState(root: TransformNode): LiftModelTelemetr
     workState: null,
     stations: [createLiftStationState(), createLiftStationState()],
     outgoingHandoffCooldown: 0,
+    outgoingHandoffActive: false,
     travelAxis: null,
     nodeBaselines: new Map(),
   };
@@ -185,6 +186,7 @@ export function resetLiftTelemetryState(model: ModelRuntimeEntry): void {
   model.liftTelemetry.workState = null;
   model.liftTelemetry.stations = [createLiftStationState(), createLiftStationState()];
   model.liftTelemetry.outgoingHandoffCooldown = 0;
+  model.liftTelemetry.outgoingHandoffActive = false;
   model.liftTelemetry.travelAxis = null;
   model.liftTelemetry.nodeBaselines.clear();
 }

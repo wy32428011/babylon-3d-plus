@@ -548,6 +548,26 @@ test('conveyor 仅查无货预检：requireTaskMatch=false 时等待中的 task 
   }
 });
 
+test('出站窗口较短：work_state 回落后第二箱仍继续排队并交付', () => {
+  const h = makeHarness();
+  try {
+    const { a, b } = adoptTwoCargos(h);
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
+    runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+    runUntil(h, outgoing, () => h.delivered.length === 1);
+    assert.deepEqual(h.delivered, [a], '前置：step2 第一箱已交付');
+    h.models.COUT.conveyorTelemetry.cargoCode = null; // 模拟下游把第一箱运走，接收方恢复空闲
+
+    // 模拟实测数据：第一箱交付后很快进入 ws=5，随后 refU/ws 清零（第二箱仍在排队）
+    h.applyLift({ reference_upper_step: 2, level_upper: 2, work_state: 5 });
+    runFrames(h, { reference_upper_step: 0, level_upper: 0, work_state: 0 }, 50);
+    assert.deepEqual(h.delivered, [a, b], 'work_state 回落 0 后第二箱仍必须完成平移并交付');
+    assert.equal(h.state.liftCargoMeshes.size, 0, '两箱都必须离台');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('work_state=2（取货完成）同为取货门控：到位即取货并补齐动画上台', () => {
   const h = makeHarness();
   try {

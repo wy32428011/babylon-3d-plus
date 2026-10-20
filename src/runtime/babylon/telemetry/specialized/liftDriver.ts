@@ -46,7 +46,8 @@ const LIFT_RUSH_SPEED_MULTIPLIER = 4;
  * reference_upper_step（1=来料侧/2=送料侧）+ level_upper（该侧目标层号）组成目标键做边沿检测，
  * 目标层绑定 conveyor 的货物支撑面世界 Y 决定载货台目标偏移；movement_y 字段不消费。
  * work_state 存在时交接动作由状态机门控（1/2 取货、3/5 卸货，doing/done 同为门控；未到位 4 倍速赶位；
- * 2/5 补齐交接动画；0/6/7/11 只移动不交接；10 急停冻结）；字段缺失走旧的到位自动交接兼容路径。
+ * 2/5 补齐交接动画；0/6/7/11 只移动不发起新交接，但 3/5 期间已启动的出站交接会继续完成第二箱排队与交付；
+ * 10 急停冻结）；字段缺失走旧的到位自动交接兼容路径。
  * 双工位载货：载物台按货物轨迹轴分前（step1，stations[0]）后（step2，stations[1]）两区，
  * 来料先收进 step2、后收进 step1；送料侧 step2 先出，step1 先平移到 step2 再出。
  * 目标层不在绑定表内则不响应不移动（一次性 Console 提示）。货箱全程只平移不旋转。
@@ -270,7 +271,8 @@ export class LiftTelemetryDriver {
    * 送料侧接收方未空闲时货物滞留台上持续重试，不销毁。
    * work_state 存在时动作门控（doing/done 同为门控：允许执行或赶着到位，不死锁货箱）：
    * 1/2 允许取货、3/5 允许卸货（接收方被占用则货留 step2 锚点每帧重试，有人接立即给），2 同时补齐取货动画、
-   * 0/6/7/11 只移动不交接；缺失（null）走兼容路径——到位即自动交接。
+   * 0/6/7/11 只移动不发起新交接；但 3/5 期间已启动的出站交接（outgoingHandoffActive）会继续完成队列平移与交付，
+   * 避免出站窗口短于 1s 承接冷却 + 1.5s 排队平移时第二箱卡在台上；缺失（null）走兼容路径——到位即自动交接。
    */
   private applyLiftCargoHandoff(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
@@ -284,9 +286,19 @@ export class LiftTelemetryDriver {
     const workState = state.workState;
 
     const pickupAllowed = arrived && state.targetSide === 0 && (workState === null || workState === 1 || workState === 2);
-    const deliveryAllowed = arrived && state.targetSide === 1 && (workState === null || workState === 3 || workState === 5);
+    // 出站交接一旦在 work_state 3/5 期间启动，协议侧状态回落（如 5→0）后仍允许完成队列平移与交付。
+    // 否则双工位下料窗口较短时，第二箱会卡在 step1 或平移途中，等下一轮出站才动。
+    const outgoingHasCargo = state.stations[0].cargoKey !== null || state.stations[1].cargoKey !== null;
+    if (state.targetSide !== 1 || !outgoingHasCargo) {
+      state.outgoingHandoffActive = false;
+    } else if (arrived && (workState === null || workState === 3 || workState === 5)) {
+      state.outgoingHandoffActive = true;
+    }
+    const outgoingHandoffInProgress = state.outgoingHandoffActive;
+    const deliveryAllowed = arrived && state.targetSide === 1
+      && (workState === null || workState === 3 || workState === 5 || outgoingHandoffInProgress);
     const transferAdvancing = !frozen
-      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5);
+      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5 || outgoingHandoffInProgress);
 
     if (pickupAllowed) {
       const stationIndex = state.stations[1].cargoKey === null ? 1 : state.stations[0].cargoKey === null ? 0 : null;
