@@ -36,6 +36,7 @@ import { createBakedEnvironmentMaterial, type ShadowBakeSurface } from './Enviro
 import { applyGroundShadowUv } from './staticShadowReceivers';
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
 import { freezeEnvironmentTransforms } from './environmentTransformPreparation';
+import { countModelMeshTriangles } from './modelTriangleStatistics';
 import {
   calculateEnvironmentOriginLeftOffset,
   calculateEnvironmentSceneBaseOffset,
@@ -913,8 +914,7 @@ export class SceneEnvironmentRuntime {
         : 1;
       primitiveCount += Math.max(1, mesh.subMeshes?.length ?? 0) * instanceMultiplier;
       vertexCount += mesh.getTotalVertices() * instanceMultiplier;
-      const indexCount = mesh.getTotalIndices();
-      triangleCount += Math.floor((indexCount > 0 ? indexCount : mesh.getTotalVertices()) / 3) * instanceMultiplier;
+      triangleCount += countModelMeshTriangles(mesh);
     }
 
     return {

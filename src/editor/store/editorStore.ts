@@ -177,6 +177,7 @@ import {
 } from '../model/autoPatrolInspection';
 import type { AutoPatrolPlaybackSnapshot } from '../../runtime/babylon/AutoPatrolPlaybackController';
 import { vector3 } from '../model/math';
+import type { SceneModelStatisticsSnapshot } from '../model/sceneModelStatistics';
 import {
   deriveLocatorDimensionsFromBinding,
   deriveBuiltInSlotRowCountFromBinding,
@@ -537,6 +538,7 @@ type EditorState = {
   localSceneEnvironmentRecoveryChoice: NonNullable<LocalSceneResourceSyncResult['environmentRecoveryChoice']> | null;
   localSceneEnvironmentRecoveryAcceptance: NonNullable<LocalSceneResourceSyncRequest['acceptEnvironmentRevision']> | null;
   environmentRuntimeSnapshot: EnvironmentRuntimeSnapshot;
+  sceneModelStatistics: SceneModelStatisticsSnapshot | null;
   environmentAdjustmentActive: boolean;
   environmentFocusRequest: { id: string } | null;
   projectAssetFocusRequest: ProjectAssetFocusRequest | null;
@@ -595,6 +597,7 @@ type EditorState = {
   completeEnvironmentApply: (requestId: string, result: EnvironmentApplyResult) => void;
   failEnvironmentApply: (requestId: string, message: string) => void;
   setEnvironmentRuntimeSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void;
+  setSceneModelStatistics: (snapshot: SceneModelStatisticsSnapshot | null, expectedSceneSessionId: string) => void;
   updateEnvironmentDisplay: (patch: EnvironmentDisplayPatch, label: string) => void;
   previewEnvironmentTransform: (transform: SceneEnvironmentTransform) => void;
   commitEnvironmentTransform: (
@@ -800,6 +803,7 @@ function createLoadedSceneState(state: EditorState, scene: SceneDocument, messag
       ? sceneSessionId
       : null,
     environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
+    sceneModelStatistics: null,
     environmentAdjustmentActive: false,
     environmentFocusRequest: null,
     projectAssetFocusRequest: null,
@@ -2907,6 +2911,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   localSceneEnvironmentRecoveryAcceptance: null,
   environmentStartupRelinkSessionId: null,
   environmentRuntimeSnapshot: createIdleEnvironmentRuntimeSnapshot(),
+  sceneModelStatistics: null,
   environmentAdjustmentActive: false,
   environmentFocusRequest: null,
   projectAssetFocusRequest: null,
@@ -3486,6 +3491,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         },
         logs: prependLog(state.logs, `环境模型加载失败：${message}`),
       };
+    });
+  },
+  setSceneModelStatistics: (snapshot, expectedSceneSessionId) => {
+    set((state) => {
+      // 场景重开可能沿用同一文档 ID，必须同时校验会话以拒绝旧异步结果。
+      if (state.sceneSessionId !== expectedSceneSessionId || (snapshot && snapshot.sceneId !== state.scene.id)) return state;
+      const previous = state.sceneModelStatistics;
+      if (previous === snapshot || (previous && snapshot
+        && previous.sceneId === snapshot.sceneId && previous.phase === snapshot.phase
+        && previous.modelTriangleCount === snapshot.modelTriangleCount
+        && previous.environmentTriangleCount === snapshot.environmentTriangleCount)) return state;
+      return { sceneModelStatistics: snapshot };
     });
   },
   setEnvironmentRuntimeSnapshot: (snapshot) => {

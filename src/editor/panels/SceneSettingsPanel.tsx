@@ -1,4 +1,5 @@
 import { SceneModelEntrancePanel } from './SceneModelEntrancePanel';
+import { SceneModelStatisticsPanel } from './SceneModelStatisticsPanel';
 import { SceneOpeningAnimationPanel } from './SceneOpeningAnimationPanel';
 import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
 import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
@@ -607,6 +608,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onKeyDown={handleSceneNameKeyDown}
           />
         </label>
+        <SceneModelStatisticsPanel />
         <div className="scene-settings-button-row">
           <button type="button" disabled={props.readOnly} onClick={handleResetScene}>场景初始化</button>
           <button type="button" disabled={props.readOnly} onClick={() => void importCadReference()}>导入CAD</button>

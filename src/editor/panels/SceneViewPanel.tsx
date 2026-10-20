@@ -319,6 +319,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const effectDrawing = useSyncExternalStore(subscribeEffectPathDrawing, getEffectPathDrawing, getEffectPathDrawing);
   const sceneDocumentRef = useRef<SceneDocument | null>(null);
   const editRuntimeSceneDocumentRef = useRef<SceneDocument | null>(null);
+  const statisticsSceneSessionRef = useRef<string | null>(null);
   const editModeThinInstancePlanRef = useRef<EditModeModelThinInstancePlan | null>(null);
   const editModeThinInstancePlanPerformanceRef = useRef<EditModeThinInstancePlanPerformanceMetrics>({
     planCount: 0,
@@ -1440,6 +1441,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         },
         setEnvironmentRuntimeSnapshot,
       );
+      runtime.onModelStatisticsChanged = (snapshot) => {
+        const state = useEditorStore.getState();
+        const session = statisticsSceneSessionRef.current;
+        if (runtimeRef.current !== runtime || !session || session !== state.sceneSessionId) return;
+        state.setSceneModelStatistics(snapshot, session);
+      };
       autoPatrolIntegration = new AutoPatrolRuntimeIntegration({
         engine: viewport.engine,
         scopeId: (sceneDocumentRef.current ?? useEditorStore.getState().scene).id,
@@ -1779,6 +1786,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       viewport?.dispose();
       setViewportCamera(null);
       setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
+      const failedState = useEditorStore.getState();
+      failedState.setSceneModelStatistics({ sceneId: failedState.scene.id, phase: 'error',
+        modelTriangleCount: 0, environmentTriangleCount: 0 }, failedState.sceneSessionId);
       stopRuntimePreview();
       return;
     }
@@ -1856,6 +1866,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       initializedAutoPatrolIntegration?.dispose();
       setAutoPatrolRecordStore(null);
       initializedGizmo.dispose();
+      initializedRuntime.onModelStatisticsChanged = undefined;
+      statisticsSceneSessionRef.current = null;
+      const currentState = useEditorStore.getState();
+      currentState.setSceneModelStatistics(null, currentState.sceneSessionId);
       initializedRuntime.dispose();
       initializedViewport.dispose();
       viewportRef.current = null;
@@ -1959,6 +1973,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
     if (sceneRuntimeStartupDeferred) return;
 
+    statisticsSceneSessionRef.current = sceneSessionId;
     gizmo.cancelActiveGroupDrag();
     if (modelParameterSyncEntityId) {
       runtime.syncModelParameters(
@@ -1974,9 +1989,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         { modelArrayIdentityMode: 'visual' },
       );
     }
+    // 同一文档重开时运行时可能复用相同统计；新会话仍需主动发布首份快照。
+    useEditorStore.getState().setSceneModelStatistics(runtime.getModelStatistics(), sceneSessionId);
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
   }, [
+    sceneSessionId,
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
     modelParameterSyncEntityId,

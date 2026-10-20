@@ -1,4 +1,6 @@
 import { SceneThemeRuntime } from './SceneThemeRuntime';
+import type { SceneModelStatisticsSnapshot } from '../../editor/model/sceneModelStatistics';
+import { countModelMeshTriangles } from './modelTriangleStatistics';
 import { ModelEntranceRuntime } from './ModelEntranceRuntime';
 import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
 import { ENVIRONMENT_EFFECT_TARGET_ID } from '../../editor/model/environmentBuildingEffect';
@@ -30,6 +32,7 @@ import {
   GreasedLineMeshMaterialType,
   type GreasedLineSimpleMaterial,
   HemisphericLight,
+  InstancedMesh,
   LinesMesh,
   Light,
   Material,
@@ -883,6 +886,15 @@ export class SceneRuntime {
   private readonly unavailableParameterTextures = new WeakSet<Texture>();
   private readonly observedParameterTextures = new WeakSet<Texture>();
   private shadowDocument: SceneDocument | null = null;
+  /** 模型统计只在业务结构变化后失效；没有订阅方时不主动扫描。 */
+  public onModelStatisticsChanged?: (snapshot: SceneModelStatisticsSnapshot) => void;
+  private modelStatisticsSnapshot: SceneModelStatisticsSnapshot | null = null;
+  private modelStatisticsDirty = true;
+  private modelStatisticsNotificationPending = false;
+  private modelStatisticsEnvironmentSourceUrl: string | null | undefined;
+  private readonly modelStatisticsFallbackMeshes = new Set<Mesh>();
+  private readonly modelStatisticsMeshAddedObserver: Nullable<Observer<AbstractMesh>>;
+  private readonly modelStatisticsMeshRemovedObserver: Nullable<Observer<AbstractMesh>>;
   private shadowBakeRunning = false;
   private readonly meshes = new Map<string, Mesh>();
   private readonly chartMarkerPresentation = new ChartMarkerPresentation();
@@ -1100,7 +1112,10 @@ export class SceneRuntime {
       },
       waitForRenderReady: (signal) => this.waitForEnvironmentRenderReady(signal),
       onAssetContainerSettled: (container) => this.settleEnvironmentAssetContainerLoad(container),
-      onSnapshot: onEnvironmentSnapshot,
+      onSnapshot: snapshot => {
+        onEnvironmentSnapshot(snapshot);
+        this.invalidateModelStatistics();
+      },
       pushLog: this.pushLog,
     });
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(scene, this.createSpecializedTelemetryHost());
@@ -1130,6 +1145,8 @@ export class SceneRuntime {
       this.updateRgvMotionArrows();
       this.modelEntranceRuntime.tick(Math.min(this.scene.getEngine().getDeltaTime() / 1000, 0.1), this.modelEntranceVisible);
     });
+    this.modelStatisticsMeshAddedObserver = scene.onNewMeshAddedObservable.add(() => this.invalidateModelStatistics());
+    this.modelStatisticsMeshRemovedObserver = scene.onMeshRemovedObservable.add(() => this.invalidateModelStatistics());
     // 跟随相机应读取本帧设备/货物运动处理后的最终位置。
     this.poiEffectRuntime.moveFrameObserverToEnd();
   }
@@ -1645,6 +1662,7 @@ export class SceneRuntime {
     if (!fetchRuntime) return;
     fetchRuntime.dispose();
     this.locatorFetchRuntimes.delete(entityId);
+    this.invalidateModelStatistics();
   }
 
   /** 开场占用镜头时暂停相机跟随，设备和遥测继续更新。 */
@@ -3507,6 +3525,7 @@ export class SceneRuntime {
       this.fullSyncCount += 1;
       this.lastFullSyncDurationMs = durationMs;
       this.maxFullSyncDurationMs = Math.max(this.maxFullSyncDurationMs, durationMs);
+      this.invalidateModelStatistics();
     }
   }
 
@@ -3547,6 +3566,7 @@ export class SceneRuntime {
     this.syncModelArrayTelemetryProxies();
     this.disposeStaleModelArrayGizmoProxy();
     this.rebuildModelSelectionOutline();
+    this.invalidateModelStatistics();
   }
 
   /** 把高亮状态依赖宿主/副本的绑定货格实体 ID 追加进刷新集合。 */
@@ -3638,6 +3658,136 @@ export class SceneRuntime {
     return items;
   }
 
+  /** 返回当前场景的完整模型三角面数，不依赖相机裁剪后的渲染批次。 */
+  public getModelStatistics(): SceneModelStatisticsSnapshot {
+    if (this.modelStatisticsDirty || !this.modelStatisticsSnapshot) {
+      this.modelStatisticsSnapshot = this.collectModelStatistics();
+      this.modelStatisticsDirty = false;
+    }
+    return { ...this.modelStatisticsSnapshot };
+  }
+
+  /** 同步事务与异步加载共享一个微任务通知，避免同一批网格创建触发多次汇总。 */
+  private invalidateModelStatistics(): void {
+    this.modelStatisticsDirty = true;
+    if (this.disposed || !this.onModelStatisticsChanged || this.modelStatisticsNotificationPending) return;
+    this.modelStatisticsNotificationPending = true;
+    queueMicrotask(() => {
+      this.modelStatisticsNotificationPending = false;
+      if (this.disposed || !this.onModelStatisticsChanged) return;
+      const previous = this.modelStatisticsSnapshot;
+      const snapshot = this.getModelStatistics();
+      if (previous && Object.keys(snapshot).every(key => snapshot[key as keyof SceneModelStatisticsSnapshot] === previous[key as keyof SceneModelStatisticsSnapshot])) return;
+      this.onModelStatisticsChanged(snapshot);
+    });
+  }
+
+  private collectModelStatistics(): SceneModelStatisticsSnapshot {
+    let phase: SceneModelStatisticsSnapshot['phase'] = 'ready';
+    let modelTriangleCount = 0;
+    const setPhase = (next: SceneModelStatisticsSnapshot['phase']) => {
+      if (next === 'error' || (next === 'loading' && phase !== 'error')) phase = next;
+    };
+    const countModel = (model: ModelRuntimeEntry): number => {
+      if (model.readinessError || model.externalScriptRuntime?.getInitializationError()) setPhase('error');
+      else if (!model.measurementReady || model.externalScriptStarting) setPhase('loading');
+      // 特效为 InstancedMesh 建立的替身不能使原模型消失，也不能重复贡献三角面。
+      const currentMeshes = [...new Set([...model.meshes, ...model.contentRoot.getChildMeshes(false)])];
+      const effectProxyParents = new Map<number, Node | null>();
+      for (const mesh of currentMeshes) {
+        const sourceId = mesh.metadata?.digitalTwinEffectSourceMeshUniqueId;
+        if (mesh.metadata?.digitalTwinEffectProxy && typeof sourceId === 'number' && mesh.isEnabled(false)) {
+          effectProxyParents.set(sourceId, mesh.parent);
+        }
+      }
+      let triangles = 0;
+      for (const mesh of currentMeshes) {
+        let ancestor = mesh.parent;
+        let enabledAncestors = true;
+        while (ancestor && ancestor !== model.root) {
+          if (!ancestor.isEnabled(false)) enabledAncestors = false;
+          ancestor = ancestor.parent;
+        }
+        const replacedInstance = mesh instanceof InstancedMesh && !mesh.isDisposed() && mesh.isVisible && mesh.visibility > 0
+          && enabledAncestors && ancestor === model.root && effectProxyParents.get(mesh.uniqueId) === mesh.parent;
+        if (!this.isModelBoundsMesh(model, mesh) && !replacedInstance) continue;
+        triangles += countModelMeshTriangles(mesh);
+      }
+      return triangles;
+    };
+    const perModel = new Map<ModelRuntimeEntry, number>();
+    const modelCount = (model: ModelRuntimeEntry): number => {
+      if (!perModel.has(model)) perModel.set(model, countModel(model));
+      return perModel.get(model)!;
+    };
+    for (const failure of this.modelReadinessErrors.values()) if (failure.error) setPhase('error');
+    if (this.activeModelLoadProgress.size > 0) setPhase('loading');
+    for (const [id, mesh] of this.meshes) {
+      if (this.syncedEntities.get(id)?.components.meshRenderer) modelTriangleCount += countModelMeshTriangles(mesh);
+    }
+    for (const model of this.models.values()) {
+      if (model.telemetryProxySource) continue;
+      modelTriangleCount += modelCount(model) * (1 + (model.entitySnapshot?.components.modelArray?.items.length ?? 0));
+    }
+    // 隐藏逻辑实体不一定存在于GPU批次或权威可见映射，参数宿主的实体登记仍是全量。
+    const variants = new Map<string, ModelRuntimeEntry>();
+    for (const variant of this.modelArrayParameterVariants.values()) {
+      for (const entity of variant.entities) {
+        const current = this.modelArrayInstanceEntities.get(entity.id);
+        const asset = current?.components.modelAsset;
+        if (!variants.has(entity.id) || (asset && variant.renderSignature === this.createModelArrayRenderSignature(asset, current?.components.telemetryBinding))) {
+          variants.set(entity.id, variant.model);
+        }
+      }
+    }
+    for (const [id, entity] of this.modelArrayInstanceEntities) {
+      if (this.models.has(id)) continue;
+      const sourceId = entity.components.modelArrayInstance?.sourceEntityId;
+      const source = sourceId ? this.models.get(sourceId) : undefined;
+      const asset = entity.components.modelAsset;
+      const sourceAsset = source?.entitySnapshot?.components.modelAsset;
+      const canUseSource = !asset || !sourceAsset || this.createModelArrayRenderSignature(asset, entity.components.telemetryBinding)
+        === this.createModelArrayRenderSignature(sourceAsset, source?.entitySnapshot?.components.telemetryBinding);
+      const model = variants.get(id) ?? this.modelArrayParameterVariantByEntityId.get(id)?.model ?? (canUseSource ? source : undefined);
+      if (model) modelTriangleCount += modelCount(model);
+      else setPhase('loading');
+    }
+    for (const model of this.spawnedDeviceModels.values()) modelTriangleCount += modelCount(model);
+    for (const owner of this.generatedOutputOwners.values()) {
+      if (owner.readinessError) setPhase('error');
+      const output = owner.output;
+      if (!output) {
+        if (owner.activeTargetSignature && !owner.readinessError) setPhase('loading');
+        continue;
+      }
+      if (output.kind === 'mesh') modelTriangleCount += countModelMeshTriangles(output.mesh);
+      else if (output.kind === 'model') modelTriangleCount += modelCount(output.model);
+      else for (const member of output.members) {
+        // 组合阵列以 interactive:false 创建，不执行视锥裁剪；完整批次已含源自身，宿主不重复计数。
+        if (member.arrayBatch) {
+          if (member.model) modelCount(member.model);
+          for (const mesh of member.arrayBatch.meshes) {
+            if (mesh instanceof Mesh && mesh.thinInstanceCount > 0) modelTriangleCount += countModelMeshTriangles(mesh);
+          }
+        } else if (member.model) modelTriangleCount += modelCount(member.model);
+        else if (member.mesh) modelTriangleCount += countModelMeshTriangles(member.mesh);
+      }
+    }
+    for (const mesh of this.modelStatisticsFallbackMeshes) modelTriangleCount += countModelMeshTriangles(mesh);
+    for (const runtime of this.locatorFetchRuntimes.values()) {
+      const statistics = runtime.getTriangleStatistics();
+      modelTriangleCount += statistics.triangleCount;
+      setPhase(statistics.phase);
+    }
+    const environment = this.environmentRuntime.getSnapshot();
+    if (environment.phase === 'loading' || environment.phase === 'error') setPhase(environment.phase);
+    const expectedEnvironmentSource = this.modelStatisticsEnvironmentSourceUrl === undefined
+      ? this.shadowDocument?.sceneSettings.environment?.activeVariantUrl : this.modelStatisticsEnvironmentSourceUrl;
+    if (expectedEnvironmentSource && (environment.phase === 'idle' || environment.sourceUrl !== expectedEnvironmentSource)) setPhase('loading');
+    return { sceneId: this.shadowDocument?.id ?? null, phase, modelTriangleCount,
+      environmentTriangleCount: environment.statistics?.triangleCount ?? 0 };
+  }
+
   /** 返回 Scene View HUD 使用的低频运行时同步指标快照。 */
   getPerformanceMetrics(): SceneRuntimePerformanceMetrics {
     const modelArrayBatches = new Set<EntityArrayThinInstanceBatch>();
@@ -3695,6 +3845,10 @@ export class SceneRuntime {
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
   private syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
+    if (this.shadowDocument?.id !== document.id
+      || this.shadowDocument?.sceneSettings.environment?.activeVariantUrl !== document.sceneSettings.environment?.activeVariantUrl) {
+      this.modelStatisticsEnvironmentSourceUrl = undefined;
+    }
     this.shadowDocument = document;
     if (this.compositionArrayPreview) {
       const preview = this.compositionArrayPreview;
@@ -4162,7 +4316,9 @@ export class SceneRuntime {
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
+    this.modelStatisticsEnvironmentSourceUrl = environment?.activeVariantUrl ?? null;
     this.environmentRuntime.sync(environment);
+    this.invalidateModelStatistics();
   }
 
   /** 单独同步场景级默认模型生成器：该设置只改 sceneSettings，不触发实体全量同步，须由编辑器显式推送。 */
@@ -4263,6 +4419,8 @@ export class SceneRuntime {
     environment: SceneEnvironmentSettings,
     options: SceneEnvironmentApplyOptions,
   ): Promise<EnvironmentApplyResult> {
+    this.modelStatisticsEnvironmentSourceUrl = environment.activeVariantUrl;
+    this.invalidateModelStatistics();
     return this.environmentRuntime.apply(environment, options);
   }
 
@@ -4288,6 +4446,11 @@ export class SceneRuntime {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.modelStatisticsNotificationPending = false;
+    this.onModelStatisticsChanged = undefined;
+    this.modelStatisticsFallbackMeshes.clear();
+    this.scene.onNewMeshAddedObservable.remove(this.modelStatisticsMeshAddedObserver);
+    this.scene.onMeshRemovedObservable.remove(this.modelStatisticsMeshRemovedObserver);
     this.modelEntranceRuntime.dispose();
     this.modelReadinessErrors.clear();
     this.progressNotificationPending = false;
@@ -5025,7 +5188,9 @@ export class SceneRuntime {
 
     if (locator.fetchDrive?.enabled) {
       if (!this.locatorFetchRuntimes.has(entity.id)) {
-        this.locatorFetchRuntimes.set(entity.id, new LocatorFetchRuntime(this.scene, entity.id, (message) => this.pushLog(message)));
+        const fetchRuntime = new LocatorFetchRuntime(this.scene, entity.id, (message) => this.pushLog(message));
+        fetchRuntime.onStatisticsChanged = () => this.invalidateModelStatistics();
+        this.locatorFetchRuntimes.set(entity.id, fetchRuntime);
       }
     } else {
       this.disposeLocatorFetchRuntime(entity.id);
@@ -5260,6 +5425,7 @@ export class SceneRuntime {
           this.disposeModel(entity.id, activeEntry);
           const message = error instanceof Error ? error.message : String(error);
           this.modelReadinessErrors.set(entity.id, { entityIds: [entity.id], error: message });
+          this.invalidateModelStatistics();
           this.pushLog(`模型加载失败：${message}`);
         }
       });
@@ -5366,6 +5532,7 @@ export class SceneRuntime {
 
   /** 有订阅方时重新计算并推送模型加载进度快照。 */
   private notifyModelLoadProgressChanged(): void {
+    this.invalidateModelStatistics();
     if (!this.onModelLoadProgress || this.disposed) return;
     if (this.activeModelLoadProgress.size === 0) {
       this.progressNotificationPending = false;
@@ -5504,6 +5671,7 @@ export class SceneRuntime {
 
   /** 同批异步模型就绪只刷新一次选区与分组目标；直接选择/拖拽路径仍同步执行。 */
   private scheduleModelPresentationRefresh(): void {
+    this.invalidateModelStatistics();
     if (this.disposed || this.modelPresentationRefreshPending) return;
     this.modelPresentationRefreshPending = true;
     queueMicrotask(() => {
@@ -5668,6 +5836,7 @@ export class SceneRuntime {
 
     if (target.kind === 'mesh') {
       runtimeEntry.output = this.createModelGeneratorMeshOutput(runtimeEntry, target);
+      this.invalidateModelStatistics();
       this.applyGeneratedOutputPresentation(runtimeEntry);
       return;
     }
@@ -5750,6 +5919,7 @@ export class SceneRuntime {
 
     const model = this.createGeneratedModelRuntimeEntry(runtimeEntry.entityId, runtimeEntry.root, modelAsset);
     runtimeEntry.output = { kind: 'model', model };
+    this.invalidateModelStatistics();
     const generatorLoadToken = runtimeEntry.loadToken;
     this.applyGeneratedOutputPresentation(runtimeEntry);
 
@@ -5821,6 +5991,7 @@ export class SceneRuntime {
         }
 
         activeEntry.output = output;
+        this.invalidateModelStatistics();
         // 组合成员模型在 buildCompositionGeneratorOutput 内各自加载，统一在此补齐产物点击元数据。
         this.refreshModelGeneratorModelMeshes(activeEntry);
         this.applyGeneratedOutputPresentation(activeEntry);
@@ -6059,10 +6230,12 @@ export class SceneRuntime {
         snapshot: resolution.snapshot,
       });
       runtimeEntry.readinessError = error instanceof Error ? error.message : String(error);
+      this.invalidateModelStatistics();
       return;
     }
 
     runtimeEntry.readinessError = error instanceof Error ? error.message : String(error);
+    this.invalidateModelStatistics();
     runtimeEntry.onTerminalLoadFailure?.();
     this.applyGeneratedOutputPresentation(runtimeEntry);
   }
@@ -6338,11 +6511,15 @@ export class SceneRuntime {
       fallback: true,
     };
     cargo.fallback = { mesh, material };
+    this.modelStatisticsFallbackMeshes.add(mesh);
+    this.invalidateModelStatistics();
   }
 
   /** 释放普通货物的旧版 Box 回退，不影响已加载生成模板。 */
   private disposeGeneratedCargoFallback(cargo: GeneratedCargoRuntimeEntry): void {
     if (!cargo.fallback) return;
+    this.modelStatisticsFallbackMeshes.delete(cargo.fallback.mesh);
+    this.invalidateModelStatistics();
     cargo.fallback.material.dispose();
     cargo.fallback.mesh.dispose();
     cargo.fallback = null;
@@ -7477,6 +7654,7 @@ export class SceneRuntime {
     if (!output) return;
     this.disposeModelGeneratorOutputValue(output);
     runtimeEntry.output = null;
+    this.invalidateModelStatistics();
   }
 
   /** 释放单个生成模型条目，普通生成模型与组合成员模型共用。 */
@@ -8651,6 +8829,7 @@ export class SceneRuntime {
     for (const mesh of model.meshes) {
       mesh.metadata = { ...(mesh.metadata ?? {}), ...metadata };
     }
+    this.invalidateModelStatistics();
   }
 
   /** 在文档实体完成同步后，按源模型统一刷新全部独立逻辑实例的矩阵批次。 */
@@ -8806,6 +8985,9 @@ export class SceneRuntime {
       ));
     const legacyItems = entity.components.modelArray?.items ?? [];
     if (instanceEntities.length === 0 && legacyItems.length === 0) {
+      for (const [key, failure] of this.modelReadinessErrors) {
+        if (key.startsWith('variant:') && failure.entityIds[0] === entity.id) this.modelReadinessErrors.delete(key);
+      }
       this.disposeModelArrayBatch(model);
       this.disposeModelArrayParameterVariantsForSource(entity.id);
       model.modelArrayFailureSignature = '';
@@ -8857,6 +9039,12 @@ export class SceneRuntime {
       for (const instanceEntity of entities) targetVariantByEntityId.set(instanceEntity.id, variant);
     }
 
+    // 参数回到基础模型或另一参数组后，旧变体失败不再属于当前场景要求。
+    for (const [key, failure] of this.modelReadinessErrors) {
+      if (key.startsWith('variant:') && failure.entityIds[0] === entity.id && !activeVariantKeys.has(key.slice('variant:'.length))) {
+        this.modelReadinessErrors.delete(key);
+      }
+    }
     const renderEntitiesByVariant = new Map<ModelArrayParameterVariantRuntimeEntry, Entity[]>();
     const renderEntityIdsByVariant = new Map<ModelArrayParameterVariantRuntimeEntry, Set<string>>();
     const fallbackBaseInstances: Entity[] = [];
@@ -9243,6 +9431,7 @@ export class SceneRuntime {
         this.modelReadinessErrors.set(`variant:${key}`, {
           entityIds: [sourceEntity.id, ...activeVariant.entities.map(item => item.id)], error: message,
         });
+        this.invalidateModelStatistics();
         this.pushLog(`模型“${representative.name}”阵列参数脚本宿主加载失败：${message}`);
       });
 
@@ -9724,6 +9913,7 @@ export class SceneRuntime {
         onSettled(current);
       } finally {
         this.endModelArrayHostRenderSuppression(current);
+        this.invalidateModelStatistics();
       }
     };
 
@@ -9762,6 +9952,7 @@ export class SceneRuntime {
       model.readinessError = undefined;
       model.externalScriptStarting = true;
       model.measurementReady = false;
+      this.invalidateModelStatistics();
       model.stackerTelemetryReady = false;
       model.externalScriptRuntime?.dispose();
       model.externalScriptRuntime = new ExternalModelScriptRuntime(model.contentRoot, modelAsset);

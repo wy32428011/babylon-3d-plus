@@ -387,7 +387,7 @@ export class TargetModelEffects {
       edgesColor: mesh.edgesColor.clone(), edgesWidth: mesh.edgesWidth, ownsEdges: false, roof: false,
     };
     if (proxy) {
-      mesh.metadata = { ...source.metadata, digitalTwinEffectProxy: true };
+      mesh.metadata = { ...source.metadata, digitalTwinEffectProxy: true, digitalTwinEffectSourceMeshUniqueId: source.uniqueId };
       mesh.isPickable = source.isPickable;
       mesh.setEnabled(state.originalEnabled);
       this.copyInstanceTransform(state);
