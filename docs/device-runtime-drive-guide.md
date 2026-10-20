@@ -336,7 +336,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），仅用于给对应工位货物标注 `cargo.task`（值变化才写），不驱动状态机。
 - `reference_upper_step/level_upper` 两字段经 `normalizeLiftCompatibleFields`（deviceTelemetry.ts）原地 `Math.trunc` 归一为整数。
 - **`movement_y` 不存在于协议**：载货台运动完全由目标层驱动，脚本 `motion.lift` 仅保留 speed/nodes/travelAxis 供驱动读取。
-- **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`）；接收方正在等待的 task（`pendingTask/waitingTask`）不挡交付，交付瞬间货物改标接收方等待的 task 接入仲裁链（无等待则匿名）。
+- **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`）；接收方正在等待的 task（`pendingTask/waitingTask`）不挡交付，交付瞬间优先改标接收方等待的 task；接收方未挂单时保留 lift 货物自身 task（`task_num_fin_*` 标注），避免匿名货无法沿 task 链路继续交付、只能等下一份 task 到来自救。
 
 **不消费 fetch**。
 
@@ -357,7 +357,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ### 交接
 - **conveyor→lift（来料层取货）**：到位后 liftDriver 经门面 `adoptConveyorCargoForLift(entityId, liftAssetCode)` → 复用 conveyorDriver `adoptPlatformCargoForStacker`（无视 task 接管、发 taken 波），交接插值上台到分配工位。取货锚点 = **货物在来料输送线上的实际位置**（通常停在紧靠提升机的末端），不取输送线台面中心——否则插值起点落在货物后方半个机身，先向后滑再上台（后摇）。
-- **lift→conveyor（送料层放货）**：到位后 `deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)` → conveyor 预检仅查无货（`requireTaskMatch=false`：等待中的 `pendingTask/waitingTask` 不挡交付，交付时改标该 task 接入仲裁链）+ settle 入链。交付只在货于 step2 锚点原位（onBoard）时发起，lift 侧恒 `preserveAxialPosition=false` 进入端落地（放货无台上插值，无滞后承接投影；该参数保留给 RGV 列路径）。交付早于接收方 task 边沿时货物匿名落机，后续边沿走滞留箱复用盖戳（规则三销毁对 lift 豁免，见 §1 状态机）。
+- **lift→conveyor（送料层放货）**：到位后 `deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)` → conveyor 预检仅查无货（`requireTaskMatch=false`：等待中的 `pendingTask/waitingTask` 不挡交付，交付时改标该 task 接入仲裁链）+ settle 入链。交付只在货于 step2 锚点原位（onBoard）时发起，lift 侧恒 `preserveAxialPosition=false` 进入端落地（放货无台上插值，无滞后承接投影；该参数保留给 RGV 列路径）。交付早于接收方 task 边沿时保留货物自身 task 落机（不再匿名），后续 task 边沿仍走滞留箱复用盖戳（规则三销毁对 lift 豁免，见 §1 状态机）。
 - **externalPulls 兜底**：conveyor 订阅波触达 lift 持货时帧尾拉取，门控 `isLiftCargoReadyForExternalPull` = 到位锁 + 对应工位 onBoard + 非交接中 + **排队顺序**（step1 货在 step2 占用时不可拉，保证 step2 先出）。探测邻居过滤含 lift（`findProbeNeighborAssetCode`），订阅波才能触达。
 - 支撑面口径：`resolveConveyorDeckSurfacePoint` = deck center + upAxis × surfaceLift（surfaceLift 优先脚本 metadata 链面顶 conveyorSurfaceY），与 conveyor 自家货物落点同口径。用途限定：层对齐的目标支撑面 Y；**不**作取货插值锚点（取货锚货物实际位置，见上）。
 

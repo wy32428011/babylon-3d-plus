@@ -191,7 +191,7 @@ function makeHarness(options: HarnessOptions = {}) {
       if (conveyorState.cargoCode !== null) return false;
       const cargo = liftDriver.detachClaimedCargoByKey(cargoKey);
       if (!cargo) return false;
-      cargo.task = conveyorState.pendingTask ?? conveyorState.waitingTask ?? '';
+      cargo.task = conveyorState.pendingTask ?? conveyorState.waitingTask ?? cargo.task ?? '';
       cargo.assetCode = model.assetCode;
       conveyorState.pendingTask = null;
       conveyorState.waitingTask = null;
@@ -583,6 +583,23 @@ test('work_state=5（卸货完成）同为卸货门控：到位即交付，不�
   }
 });
 
+test('接收方未挂单：交付保留提升机货物自身 task，不得匿名滞留', () => {
+  const h = makeHarness();
+  try {
+    const { a } = adoptTwoCargos(h);
+    // 模拟数据里的 task_num_fin_second_up：step2 货物带 task 7001
+    h.applyLift({ reference_upper_step: 1, level_upper: 1, task_num_fin_second_up: 7001 });
+    assert.equal(a.task, '7001');
+    assert.equal(h.models.COUT.conveyorTelemetry.pendingTask, null, '前置：接收方未挂单');
+
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
+    runUntil(h, outgoing, () => h.delivered.length === 1);
+    assert.equal(a.task, '7001', '接收方未挂单时必须保留货物自身 task，避免匿名货无法继续交付');
+  } finally {
+    h.dispose();
+  }
+});
+
 /** COUT 轨迹终点世界 x：root(2,0,0) + 行程半径（span 4m、内置货箱 x 长 0.72）。 */
 const COUT_TRAVEL_END_X = 2 + resolveConveyorCargoTravelHalfRange(4, CONVEYOR_CARGO_SIZE.x);
 
@@ -660,16 +677,16 @@ test('输送线先取（订阅波 pull）：探测登记触达 lift，step2 货�
   }
 });
 
-test('提升机先给 + 输送线后接 task：匿名交付滞留，新 task 复用盖戳走到轨迹终点，step1 货接续交付', () => {
+test('提升机先给 + 输送线后接 task：保留自身 task 交付滞留，新 task 复用盖戳走到轨迹终点，step1 货接续交付', () => {
   const h = makeHarness();
   try {
     const { a, b } = adoptTwoCargos(h);
 
-    // ws=5 升送料层：到位帧 step2 的 A 当场匿名交付给无 task 的 COUT
+    // ws=5 升送料层：到位帧 step2 的 A 当场按自身 task 交付给无 task 的 COUT
     const delivering = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
     runUntil(h, delivering, () => h.delivered.length === 1);
     assert.deepEqual(h.delivered, [a]);
-    assert.equal(a.task, '', '接收方无 task 时必须匿名交付');
+    assert.equal(a.task, '901', '接收方无 task 时必须保留货物自身 task，避免匿名滞留');
     assert.equal(h.models.COUT.conveyorTelemetry.cargoCode, 'cargo');
 
     // COUT 后接到 task 12：滞留箱复用盖戳（lift 上 B task=902 ≠ 12，不触发销毁等传递分支）
@@ -691,15 +708,15 @@ test('提升机先给 + 输送线后接 task：匿名交付滞留，新 task 复
   }
 });
 
-test('回归：lift 持同 task 标注在途货不触发规则三销毁——先交付的匿名滞留货必须复用盖戳', () => {
+test('回归：lift 持同 task 标注在途货不触发规则三销毁——先交付的滞留货必须复用盖戳', () => {
   const h = makeHarness();
   try {
     const { a, b } = adoptTwoCargos(h);
 
-    // ws=5 升送料层：step2 的 A 当场匿名交付给无 task 的 COUT（交付早于接收方 task 边沿）
+    // ws=5 升送料层：step2 的 A 按自身 task 交付给无 task 的 COUT（交付早于接收方 task 边沿）
     const delivering = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
     runUntil(h, delivering, () => h.delivered.length === 1);
-    assert.equal(a.task, '');
+    assert.equal(a.task, '901');
     assert.equal(h.models.COUT.conveyorTelemetry.cargoCode, 'cargo');
 
     // lift 滞留的 B 被 task_num_fin 标注为 12（实测数据：step1 货 rekey 到 step2 后被 task_num_fin_second_up 改写）

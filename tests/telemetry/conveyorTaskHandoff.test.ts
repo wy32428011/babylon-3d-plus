@@ -477,6 +477,31 @@ test('起点设备刷货前检查外部持货：RGV 已持有同 task 在途实�
   }
 });
 
+test('lift 放货接收方未挂单：保留货物自身 task，不得改成匿名', () => {
+  const h = makeHarness({ CV1: { centerX: 0 } });
+  try {
+    const cargo = h.insertRgvCargo('RGV1', '7001');
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    const model = h.models.CV1;
+    assert.equal(model.conveyorTelemetry.pendingTask, null, '前置：接收方未挂单');
+    assert.equal(model.conveyorTelemetry.waitingTask, null);
+
+    // requireTaskMatch=false（lift 送料层交付），task 参数为空
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, cargo as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(cargo.task, '7001', '接收方未挂单时必须保留货物自身 task，避免匿名货无法继续交付');
+
+    // 接收方有挂单时仍优先改标接收方 task
+    const cargo2 = h.insertRgvCargo('RGV1', '7002');
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    model.conveyorTelemetry.cargoCode = null;
+    model.conveyorTelemetry.pendingTask = '777';
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, cargo2 as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(cargo2.task, '777', '接收方挂单时必须改标接收方 task');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('持货新 task 规则一：旧货无下游订阅且上游无新 task 货 → 复用盖新 task 并通知下游', () => {
   const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
   try {

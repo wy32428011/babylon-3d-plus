@@ -1066,7 +1066,8 @@ export class ConveyorTelemetryDriver {
    * RGV 列放货交付（订阅仲裁）：货物落地本机并自驱，等价的 taken/available 波接入链路广播，
    * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
    * preserveAxialPosition=true（承接方消息滞后、交接插值已推进）时按货物当前轴向位置落地，不回进入端。
-   * requireTaskMatch=false 供 lift 送料层使用：lift task 号不参与仲裁，货物改标接收方正在等待的 task（无等待则匿名）接入链路。
+   * requireTaskMatch=false 供 lift 送料层使用：优先改标接收方正在等待的 task；接收方未挂单时保留货物自身 task
+   * （提升机 task_num_fin_* 标注），否则匿名货无法沿 task 链路继续交付，只能等下一份 task 到来自救。
    */
   acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false, requireTaskMatch = true): boolean {
     if (!this.canAcceptRgvColumnPlacedCargo(model, task, requireTaskMatch)) return false;
@@ -1074,7 +1075,7 @@ export class ConveyorTelemetryDriver {
     const direction = this.resolveFlowDirection(model);
     const effectiveTask = requireTaskMatch
       ? task
-      : model.conveyorTelemetry.pendingTask ?? model.conveyorTelemetry.waitingTask ?? '';
+      : model.conveyorTelemetry.pendingTask ?? model.conveyorTelemetry.waitingTask ?? cargo.task ?? '';
     this.settleCargoTransfer(cargo, model, effectiveTask, 1, direction, preserveAxialPosition);
     // 以接收方为波起点、原持货方记 RGV：沿下行链清除 upstreamLinks 中 holder=RGV 的残留登记
     this.sendTakenWave(model, holderAssetCode, effectiveTask, model.assetCode, direction);
