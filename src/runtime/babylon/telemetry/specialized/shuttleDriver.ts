@@ -32,7 +32,9 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
+  HCLIFT_DECK_OCCUPANCY_STALE_MS,
   type GeneratedCargoRuntimeEntry,
+  type HcliftPlatformSurfaceState,
   normalizeCargoTask,
   resolveCargoHandoffPose,
   type RgvTravelConstraint,
@@ -59,6 +61,10 @@ type ShuttleTargetCell = {
   storageDepth: LocatorRuntimeEntry['storageDepth'];
   /** 换层站台货格（x 负值语义）：站台不支持装卸货，Status=1/3 伸叉被抑制。 */
   isLayerChangePlatform?: boolean;
+  /** 匹配到的 hclift 载货台键（共享占位表）；x=-1/-2 时用于占位上报。 */
+  hcliftKey?: string;
+  /** x=-2 时 hclift 载货台水平中心：存在时以其为上台走行目标（而非站台货格中心）。 */
+  deckCenter?: Vector3;
 };
 
 /**
@@ -156,6 +162,7 @@ export class ShuttleTelemetryDriver {
       const travel = this.applyShuttleTravelMotion(model, snapshot, status, target.cell, deltaSeconds);
       this.applyShuttleStatusPhase(model, snapshot, status, task, containerCode, target, travel, deltaSeconds);
     }
+    this.syncHcliftDeckOccupancy(model, snapshot, status, target.cell);
     this.applyShuttleNodeMotionOffsets(model, yFlashOffset);
     this.updateShuttleCargoPose(model, snapshot, deltaSeconds);
     this.writeShuttleTelemetryMetadata(model, snapshot, status, target.cell?.locator ?? null);
@@ -283,11 +290,13 @@ export class ShuttleTelemetryDriver {
 
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, locator.startColumn, y);
     if (!supportPosition) return { cell: null, key: null, mismatch: true };
-    // x=-2（换层中）且存在同巷道/同站台绑定的小车提升机：支撑位跟随提升机载货台实时台面高度（整车被托举升降）；
-    // x=-1（驶入站台等待）或无匹配提升机时维持按层闪现
-    if (x === -2) {
-      const platformSupportY = this.resolveHcliftPlatformSupportY(locator);
-      if (platformSupportY !== null) supportPosition.y = platformSupportY;
+    // x=-2（进入/在提升机中）且存在同巷道/同站台绑定的小车提升机：水平目标改为载货台中心（真正驶入载台），
+    // 支撑位 Y 跟随载货台实时台面高度（整车被托举升降）；x=-1（驶入站台等待）或无匹配提升机时维持原行为。
+    const hclift = this.resolveHcliftPlatformSurface(locator);
+    if (x === -2 && hclift) {
+      supportPosition.x = hclift.surface.deckCenter.x;
+      supportPosition.z = hclift.surface.deckCenter.z;
+      supportPosition.y = hclift.surface.supportY;
     }
     const cell: ShuttleTargetCell = {
       locator,
@@ -297,27 +306,89 @@ export class ShuttleTelemetryDriver {
       row: locator.rowNumber,
       storageDepth: locator.storageDepth,
       isLayerChangePlatform: true,
+      ...(hclift ? { hcliftKey: hclift.key } : {}),
+      ...(x === -2 && hclift ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
     };
     return { cell, key: JSON.stringify(['platform', y]), mismatch: false };
   }
 
   /**
-   * 匹配本站台对应的小车提升机（hclift）载货台实时台面世界 Y：巷道号相等优先，其次提升机 assetCode 命中站台
-   * deviceAssetCode；失联（停止驱动超过阈值）的滞留值丢弃。无匹配返回 null（维持按层闪现）。
+   * 匹配本站台对应的小车提升机（hclift）载货台发布状态：巷道号相等优先，其次提升机 assetCode 命中站台
+   * deviceAssetCode；失联（停止驱动超过阈值）的滞留值丢弃。无匹配返回 null（维持按层闪现/站台原位）。
    */
-  private resolveHcliftPlatformSupportY(locator: LocatorRuntimeEntry): number | null {
+  private resolveHcliftPlatformSurface(
+    locator: LocatorRuntimeEntry,
+  ): { key: string; surface: HcliftPlatformSurfaceState } | null {
     const nowMs = Date.now();
-    let byAssetCode: number | null = null;
-    for (const surface of this.state.hcliftPlatformSurfaces.values()) {
+    let byAssetCode: { key: string; surface: HcliftPlatformSurfaceState } | null = null;
+    for (const [key, surface] of this.state.hcliftPlatformSurfaces) {
       if (nowMs - surface.updatedAtMs > HCLIFT_PLATFORM_SURFACE_STALE_MS) continue;
       if (surface.aisleCode && locator.aisleCode && surface.aisleCode === locator.aisleCode) {
-        return surface.supportY;
+        return { key, surface };
       }
       if (byAssetCode === null && locator.deviceAssetCode && surface.assetCode === locator.deviceAssetCode) {
-        byAssetCode = surface.supportY;
+        byAssetCode = { key, surface };
       }
     }
     return byAssetCode;
+  }
+
+  /**
+   * 同步本车在 hclift 载货台上的占位：x=-1/-2 且匹配到提升机时每帧刷新；
+   * x=-2 且已抵达载货台中心 → loaded，否则 entering；离开平台/目标失配时清除自己的占位。
+   * 占位时间戳取报文时间，断流后不再刷新，hclift 侧按过期阈值保持原地。
+   */
+  private syncHcliftDeckOccupancy(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    status: number | null,
+    cell: ShuttleTargetCell | null,
+  ): void {
+    const state = model.shuttleTelemetry;
+    const x = readIntegerField(snapshot.fields, 'x');
+    const hcliftKey = cell?.hcliftKey ?? null;
+    if (!cell || !hcliftKey || (x !== -1 && x !== -2)) {
+      this.releaseShuttleDeckOccupancy(model);
+      return;
+    }
+    if (state.hcliftOccupancyKey !== null && state.hcliftOccupancyKey !== hcliftKey) {
+      this.releaseShuttleDeckOccupancy(model);
+    }
+
+    const existing = this.state.hcliftDeckOccupancies.get(hcliftKey);
+    if (existing && existing.shuttleAssetCode !== model.assetCode
+      && Date.now() - existing.updatedAtMs <= HCLIFT_DECK_OCCUPANCY_STALE_MS) {
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:deck-busy:${hcliftKey}`;
+      if (!this.state.reportedMissingTargets.has(reportKey)) {
+        this.state.reportedMissingTargets.add(reportKey);
+        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} 请求驶入提升机载货台，但该载货台已被小车 ${existing.shuttleAssetCode} 占用，已保持原位。`);
+      }
+      this.releaseShuttleDeckOccupancy(model);
+      return;
+    }
+
+    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+    const loaded = x === -2 && cell.deckCenter !== undefined
+      && this.isShuttleTravelArrived(model, cell, travelAxis);
+    this.state.hcliftDeckOccupancies.set(hcliftKey, {
+      shuttleAssetCode: model.assetCode,
+      aisleCode: this.resolveShuttleAisleCode(model),
+      phase: loaded ? 'loaded' : 'entering',
+      shuttleStatus: status,
+      shuttleFaulted: snapshot.faulted,
+      updatedAtMs: snapshot.receivedAt,
+    });
+    state.hcliftOccupancyKey = hcliftKey;
+  }
+
+  /** 清除本车占用的 hclift 载货台占位（只删除属于本车的记录）。 */
+  private releaseShuttleDeckOccupancy(model: ModelRuntimeEntry): void {
+    const state = model.shuttleTelemetry;
+    const key = state.hcliftOccupancyKey;
+    if (!key) return;
+    const entry = this.state.hcliftDeckOccupancies.get(key);
+    if (entry?.shuttleAssetCode === model.assetCode) this.state.hcliftDeckOccupancies.delete(key);
+    state.hcliftOccupancyKey = null;
   }
 
   /** 目标位匹配失败的一次性报错：绑定设备与巷道均无货格 / 目标位（排+排深+列层）超出货格范围。 */
@@ -486,8 +557,9 @@ export class ShuttleTelemetryDriver {
   // ===== 走行（仅 Status=5，Z 轴） =====
 
   /**
-   * Status=5 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1 时不等 Status=5 即触发走行
-   * （x=-2 换层中水平冻结），其余状态车体停驻；返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
+   * Status=5 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1（驶入站台）或
+   * x=-2（驶入提升机载货台，存在 deckCenter 时）不等 Status=5 即触发走行；其余状态车体停驻。
+   * 返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
    */
   private applyShuttleTravelMotion(
     model: ModelRuntimeEntry,
@@ -501,7 +573,12 @@ export class ShuttleTelemetryDriver {
     state.rootPosition ??= state.rootBasePosition.clone();
 
     const x = readIntegerField(snapshot.fields, 'x');
-    const platformTravelTrigger = cell?.isLayerChangePlatform === true && x === -1;
+    // 提升机失联/未发布载货台时保持在原位，避免退回站台目标
+    if (cell?.isLayerChangePlatform && x === -2 && !cell.deckCenter) {
+      return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
+    }
+    const platformTravelTrigger = cell?.isLayerChangePlatform === true
+      && (x === -1 || (x === -2 && cell.deckCenter !== undefined));
     if (snapshot.faulted || !cell || (status !== SHUTTLE_STATUS.moving && !platformTravelTrigger)) {
       return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
@@ -517,7 +594,10 @@ export class ShuttleTelemetryDriver {
       rootTargetPosition,
       targetSpeed * deltaSeconds,
     );
-    state.rootPosition = this.constrainShuttleTravelPosition(model, state.rootPosition, travelAxis);
+    // 驶入提升机载货台时不受站台轨道约束（载货台在站台/轨道尽头之外），仅投影到走行轴
+    state.rootPosition = cell.deckCenter
+      ? projectPointOntoAxis(state.rootBasePosition, travelAxis, state.rootPosition)
+      : this.constrainShuttleTravelPosition(model, state.rootPosition, travelAxis);
     const moving = Vector3.DistanceSquared(previous, state.rootPosition) > 1e-12;
     return { moving, arrived: !moving };
   }
@@ -532,7 +612,8 @@ export class ShuttleTelemetryDriver {
 
   /**
    * 目标格支撑位换算出的走行虚拟目标位置：普通货格对齐叉收回位中心（受轨道约束钳制）；
-   * 换层站台对齐车体包围盒底部中点，且朝轨道尽头一侧的车体端面不得越过站台轨道边界（尽力对齐、越界钳回）。
+   * 换层站台对齐车体包围盒底部中点，且朝轨道尽头一侧的车体端面不得越过站台轨道边界（尽力对齐、越界钳回）；
+   * x=-2 驶入提升机载货台时以 deckCenter 为车体中心目标，跳过站台轨道尽头/固定轨道约束。
    */
   private resolveShuttleTravelTargetPosition(model: ModelRuntimeEntry, cell: ShuttleTargetCell, travelAxis: Vector3): Vector3 {
     const state = model.shuttleTelemetry;
@@ -540,6 +621,14 @@ export class ShuttleTelemetryDriver {
       const home = this.getShuttleTravelBodyHome(model, travelAxis, getModelAxis(model.root, 'y'));
       if (home) {
         const bodyAxisCenter = (home.axisMin + home.axisMax) / 2;
+        if (cell.deckCenter) {
+          const deckCoordinate = Vector3.Dot(cell.deckCenter, travelAxis);
+          return projectPointOntoAxis(
+            state.rootBasePosition,
+            travelAxis,
+            state.rootBasePosition.add(travelAxis.scale(deckCoordinate - bodyAxisCenter)),
+          );
+        }
         const cellCenterCoordinate = Vector3.Dot(cell.supportPosition, travelAxis);
         let targetCoordinate = cellCenterCoordinate;
         const trackEnd = cell.locator.platformTrackEndWorld;
@@ -1338,6 +1427,10 @@ export class ShuttleTelemetryDriver {
       forkOffset: model.shuttleTelemetry.forkOffset,
       forkTargetOffset: model.shuttleTelemetry.forkTargetOffset,
       forkPhase: model.shuttleTelemetry.forkPhase,
+      hcliftOccupancyKey: model.shuttleTelemetry.hcliftOccupancyKey,
+      hcliftDeckPhase: model.shuttleTelemetry.hcliftOccupancyKey
+        ? this.state.hcliftDeckOccupancies.get(model.shuttleTelemetry.hcliftOccupancyKey)?.phase ?? null
+        : null,
     };
 
     model.root.metadata = {

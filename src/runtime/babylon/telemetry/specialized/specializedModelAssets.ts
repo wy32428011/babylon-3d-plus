@@ -217,6 +217,7 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     lastTargetCellKey: null,
     lastTargetCellChangedAtMs: null,
     targetCellChangeIntervalMs: null,
+    hcliftOccupancyKey: null,
   };
 }
 
@@ -245,6 +246,7 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.lastTargetCellKey = null;
   model.shuttleTelemetry.lastTargetCellChangedAtMs = null;
   model.shuttleTelemetry.targetCellChangeIntervalMs = null;
+  model.shuttleTelemetry.hcliftOccupancyKey = null;
 }
 
 /** 判断当前模型是否具备 RGV 驱动能力：资产识别命中，或脚本声明 devType=rgv。 */

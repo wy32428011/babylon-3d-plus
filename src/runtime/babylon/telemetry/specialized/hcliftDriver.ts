@@ -15,8 +15,10 @@ import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import { readIntegerField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import { resolveLocatorBoxIndex, resolveLocatorCellSupportWorldPosition } from '../stackerStorageLocation';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
+import { isShuttleRuntimeModel } from './specializedModelAssets';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
+  HCLIFT_DECK_OCCUPANCY_STALE_MS,
   LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
@@ -88,11 +90,40 @@ export class HcliftTelemetryDriver {
       }
     }
 
-    if (!frozen && state.liftTargetOffset !== null) {
+    if (this.isHcliftLiftAllowed(model, snapshot) && state.liftTargetOffset !== null) {
       state.liftOffset = moveNumberTowards(state.liftOffset, state.liftTargetOffset, this.readHcliftSpeed(model) * deltaSeconds);
     }
 
     state.liftOffset = this.clampLiftOffset(model, state.liftOffset);
+  }
+
+  /**
+   * 升降门控：同巷道存在多穿小车时，必须等小车上台并停稳（fresh loaded 占位）、且不在取小车中（ws=1）才允许升降；
+   * 无关联小车时保持旧行为（允许空载升降）。急停/faulted 始终冻结。
+   */
+  private isHcliftLiftAllowed(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): boolean {
+    if (this.isHcliftFrozen(model, snapshot)) return false;
+    if (!this.hasAssociatedShuttle(model)) return true;
+    if (model.hcliftTelemetry.workState === 1) return false;
+
+    const key = model.entitySnapshot?.id ?? snapshot.assetCode;
+    const occupancy = this.state.hcliftDeckOccupancies.get(key);
+    if (!occupancy) return false;
+    if (Date.now() - occupancy.updatedAtMs > HCLIFT_DECK_OCCUPANCY_STALE_MS) return false;
+    if (occupancy.phase !== 'loaded') return false;
+    return !occupancy.shuttleFaulted && occupancy.shuttleStatus !== 10;
+  }
+
+  /** 本 hclift 是否有关联的多穿小车：巷道号一致，或任一方未配置巷道时视为可能关联。 */
+  private hasAssociatedShuttle(model: ModelRuntimeEntry): boolean {
+    const aisleCode = this.resolveHcliftAisleCode(model);
+    for (const { model: candidate } of this.host.collectModels()) {
+      if (candidate === model || !isShuttleRuntimeModel(candidate)) continue;
+      const rawAisle = candidate.entitySnapshot?.components.modelAsset?.parameterValues?.['aisleCode'];
+      const shuttleAisle = typeof rawAisle === 'string' ? rawAisle.trim() : '';
+      if (!aisleCode || !shuttleAisle || shuttleAisle === aisleCode) return true;
+    }
+    return false;
   }
 
   /** 目标层 → 载货台 Y 偏移：站台格下表面中心世界 Y − 载货台上表面基线世界 Y；层越界一次性告警并返回 null。 */
@@ -216,6 +247,7 @@ export class HcliftTelemetryDriver {
       assetCode: snapshot.assetCode,
       aisleCode: this.resolveHcliftAisleCode(model),
       supportY,
+      deckCenter: bounds.minimum.add(bounds.maximum).scale(0.5),
       updatedAtMs: Date.now(),
     });
   }

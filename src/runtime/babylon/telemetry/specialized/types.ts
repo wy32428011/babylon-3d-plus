@@ -552,6 +552,8 @@ export type ShuttleModelTelemetryState = {
   lastTargetCellChangedAtMs: number | null;
   /** 最近两次目标货格变化的间隔（毫秒），用于估算自适应追赶窗口；null 表示尚未观察到变化。 */
   targetCellChangeIntervalMs: number | null;
+  /** 当前占用的 hclift 载货台键（共享占位表 key）；null 表示未在提升机上。离开时用于清除自己的占位。 */
+  hcliftOccupancyKey: string | null;
 };
 
 export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -572,6 +574,33 @@ export type SpecializedTelemetryRuntimeEntry = {
   binding: ResolvedSpecializedTelemetryBinding;
 };
 
+/** 小车上台占位超过该时长视为失联，hclift 不再放行升降（保持原地，安全侧）。 */
+export const HCLIFT_DECK_OCCUPANCY_STALE_MS = 2000;
+
+/** hclift 载货台每帧发布的状态：台面高度与水平中心供多穿小车 x=-2 上台/跟随。 */
+export type HcliftPlatformSurfaceState = {
+  assetCode: string;
+  aisleCode: string;
+  supportY: number;
+  /** 载货台 cargo.nodes 包围盒中心世界坐标（XZ 固定，Y 随升降变化）。 */
+  deckCenter: Vector3;
+  updatedAtMs: number;
+};
+
+/** 多穿小车在 hclift 载货台上的占位阶段：entering=驶入中，loaded=已停稳在载货台上。 */
+export type HcliftDeckOccupancyPhase = 'entering' | 'loaded';
+
+/** hclift 载货台占位：由 shuttle 每帧刷新，hclift 用于升降门控。 */
+export type HcliftDeckOccupancyState = {
+  shuttleAssetCode: string;
+  aisleCode: string;
+  phase: HcliftDeckOccupancyPhase;
+  shuttleStatus: number | null;
+  shuttleFaulted: boolean;
+  /** 报文时间（snapshot.receivedAt）：断流后不再刷新，hclift 侧按过期阈值丢弃。 */
+  updatedAtMs: number;
+};
+
 /** 门面与两个 driver 共享的可变状态；由 SpecializedTelemetryRuntime 构造时创建一份。 */
 export type SpecializedTelemetrySharedState = {
   stackerCargoMeshes: Map<string, StackerCargoRuntimeEntry>;
@@ -579,8 +608,10 @@ export type SpecializedTelemetrySharedState = {
   rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
   shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
   liftCargoMeshes: Map<string, LiftCargoRuntimeEntry>;
-  /** hclift 载货台上表面实时世界 Y（key=entityId）：每帧发布供多穿小车 x=-2 换层跟随（巷道号匹配优先，其次 assetCode 命中站台 deviceAssetCode）；updatedAtMs 供跟随方丢弃失联设备的滞留值。 */
-  hcliftPlatformSurfaces: Map<string, { assetCode: string; aisleCode: string; supportY: number; updatedAtMs: number }>;
+  /** hclift 载货台状态（key=hclift entityId）：每帧发布供多穿小车 x=-2 上台/换层跟随（巷道号匹配优先，其次 assetCode 命中站台 deviceAssetCode）；updatedAtMs 供跟随方丢弃失联设备的滞留值。 */
+  hcliftPlatformSurfaces: Map<string, HcliftPlatformSurfaceState>;
+  /** hclift 载货台占位（key=hclift entityId）：shuttle 驶入/停稳时刷新，hclift 升降门控读取。 */
+  hcliftDeckOccupancies: Map<string, HcliftDeckOccupancyState>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -598,6 +629,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     shuttleCargoMeshes: new Map(),
     liftCargoMeshes: new Map(),
     hcliftPlatformSurfaces: new Map(),
+    hcliftDeckOccupancies: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),

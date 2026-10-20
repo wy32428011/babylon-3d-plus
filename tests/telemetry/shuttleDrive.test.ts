@@ -746,6 +746,78 @@ test('to_Depth=0 同排浅/深两库位同时命中：唯一匹配失败并冻�
   }
 });
 
+test('x=-2 驶入 hclift 载货台：以 deckCenter 为目标并发布 entering/loaded 占位', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+      platformTrackEndWorld: new Vector3(0, 2, 10.5),
+    });
+    h.state.hcliftPlatformSurfaces.set('hclift1', {
+      assetCode: '1701',
+      aisleCode: 'A1',
+      supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673),
+      updatedAtMs: Date.now(),
+    });
+    const platformFrame = { x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+
+    // x=-1：站台货格中心停靠，占位为 entering
+    h.apply(platformFrame, 0.1, 1);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, `x=-1 必须停站台中心 z=11，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'entering', 'x=-1 占位必须为 entering');
+
+    // x=-2：继续驶入载货台中心（约 1.327m），入场中保持 entering
+    const deckFrame = { ...platformFrame, x: -2 };
+    h.apply(deckFrame, 0.1, 5);
+    const midZ = h.model.shuttleTelemetry.rootPosition!.z;
+    assert.ok(midZ < 11 && midZ > 9.673, `入场中必须朝载货台中心移动，实际 z=${midZ}`);
+    assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'entering', '未到位前占位必须为 entering');
+
+    // 到位：rootPosition 对齐 deckCenter，占位切换 loaded
+    h.apply(deckFrame, 0.1, 40);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6, `必须驶入载货台中心 z=9.673，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'loaded', '停稳后占位必须为 loaded');
+    assert.equal(h.model.shuttleTelemetry.hcliftOccupancyKey, 'hclift1');
+
+    // 离开平台：占位清除
+    h.apply({ ...platformFrame, x: 0, Status: 0, to_x: 0, to_y: 0, to_z: 0, to_Depth: 0 }, 0.1, 1);
+    assert.equal(h.state.hcliftDeckOccupancies.size, 0, '离开后必须清除占位');
+    assert.equal(h.model.shuttleTelemetry.hcliftOccupancyKey, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('x=-2 载货台已被其他小车占用：不覆盖占位并保持原位', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    h.state.hcliftPlatformSurfaces.set('hclift1', {
+      assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673), updatedAtMs: Date.now(),
+    });
+    h.state.hcliftDeckOccupancies.set('hclift1', {
+      shuttleAssetCode: 'OTHER', aisleCode: 'A1', phase: 'loaded',
+      shuttleStatus: 0, shuttleFaulted: false, updatedAtMs: Date.now(),
+    });
+
+    h.apply({ x: -2, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 5);
+    const occupancy = h.state.hcliftDeckOccupancies.get('hclift1');
+    assert.equal(occupancy?.shuttleAssetCode, 'OTHER', '已有占位不得被覆盖');
+    assert.ok(h.logs.some((message) => message.includes('已被小车 OTHER 占用')), '占用冲突必须提示');
+    assert.equal(h.model.shuttleTelemetry.hcliftOccupancyKey, null, '冲突车不得登记占位');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('x=-2 换层中 y 上报 0：回退 to_y 解析站台层，不冻结', () => {
   const h = makeHarness();
   try {

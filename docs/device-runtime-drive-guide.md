@@ -55,7 +55,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 共享状态与交接门面
 
-- `SpecializedTelemetrySharedState`（types.ts）：五张全局货物表 `stacker/conveyor/rgv/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。
+- `SpecializedTelemetrySharedState`（types.ts）：五张全局货物表 `stacker/conveyor/rgv/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。另有 hclift 交接状态：`hcliftPlatformSurfaces`（key=hclift entityId，发布 `supportY` 与载货台水平中心 `deckCenter`）与 `hcliftDeckOccupancies`（小车上台占位：entering/loaded + 报文时间，供提升机升降门控）。
 - 交接插值统一 `resolveCargoHandoffPose`（types.ts），时长 `CARGO_HANDOFF_SECONDS=1.0`。
 
 ### 点击事件高亮与固定轨道
@@ -237,7 +237,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 换层站台是绑定在货架上的特殊 locator（`builtInBinding.kind='layerChangePlatform'`），由货架模型包声明 `layerChangePlatformBinding`（开关参数 `enableLayerChangePlatform`）自动生成，实体名「换层站台」，固定 1 列、排固定 1，置于暂存台头部、进深居中在两侧货架之间的过道正中；起始列缺省 -1（Inspector 可改，允许负值），巷道/设备绑定与普通货格同规则（`aisleCode` 或 `deviceAssetCode`）。尺寸全部跟随模型参数（参数变更即重派生）：长度 = `layerChangePlatformLength`（远端始终锚定轨道尽头轨道003.maxX，向货架方向延伸）、宽度 = `aisleWidth`、层高 = `slotHeight`、层数 = `slotCountHeight`。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
-- `x=-2`：换层中——水平冻结在站台列不走行，**Y 随 `y` 字段逐层闪现**（复用 Y 层对齐机制，cell 支撑位随 y 解析层变化）；`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），此时回退取 `to_y` 目标层。
+- `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（无 hclift 数据时回退按层闪现）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），此时回退取 `to_y` 目标层。x=-1/-2 期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
 - 站台目标下 `Status=1/3`（取/卸）被抑制：不伸叉，一次性告警「换层站台不支持装卸货」。
@@ -351,6 +351,8 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **5 卸货完成**：同为卸货门控（允许交付，不等 doing 才撒手）；放货无台上插值，无需补齐。
 - **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；但 3/5 期间已启动的出站交接（`outgoingHandoffActive`）会继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
 - **10 急停**：并入 faulted 冻结（不动、不交接、一次性告警）。
+
+另：hclift 升降增加**小车上台门控**——本机同巷道存在 shuttle 时，必须收到该 hclift 的新鲜 `hcliftDeckOccupancies`（`phase='loaded'`、shuttle 未急停/faulted），且 `work_state !== 1`（取小车中）才执行升降；占位缺失、入场中（entering）、过期（2000ms）时保持当前高度。无关联 shuttle 时保持旧行为。`hcliftPlatformSurfaces` 同步发布载货台 `deckCenter`，供 shuttle x=-2 驶入载台。
 
 ### 状态机（LiftModelTelemetryState, types.ts）
 `liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetKey` / `arrivedTargetKey`（到位锁，防重复触发）/ `workState`（null=未提供，走兼容路径）/ `stations[2]`（index0=step1 前、index1=step2 后；每项 cargoKey/cargoOnBoard/transferProgress/transferActive/cargoHoldPosition/Rotation，cargoKey=`JSON.stringify([assetCode, stationIndex])`）/ `outgoingHandoffCooldown`（出站承接冷却，离台瞬间置 `CARGO_HANDOFF_SECONDS`，期内阻塞 step1→step2 排队平移）/ `outgoingHandoffActive`（出站交接已启动：work_state 回落后仍继续完成队列平移与交付，目标侧切换或无货时复位）/ `travelAxis` 缓存（axis/锚点偏移/绑定签名）/ `nodeBaselines`（载货台节点基线）。faulted 冻结；断流停摆（无 applyWhenStale）。
