@@ -749,16 +749,21 @@ export class EditorAutoPatrolRuntime {
     if (!entry.visible || entry.root.isDisposed()) return;
     const camera = this.scene.cameraToUseForPointers ?? this.scene.activeCamera;
     if (!camera) return;
-    entry.visualRoot.scaling.setAll(this.calculateWorldScale(camera, entry.root.getAbsolutePosition(), ROUTE_TARGET_PIXELS));
-    entry.visualRoot.computeWorldMatrix(true);
+    this.updateVisualRootScale(entry.visualRoot, this.calculateWorldScale(camera, entry.root.getAbsolutePosition(), ROUTE_TARGET_PIXELS));
     for (const waypoint of entry.waypoints.values()) {
-      waypoint.visualRoot.scaling.setAll(this.calculateWorldScale(
+      this.updateVisualRootScale(waypoint.visualRoot, this.calculateWorldScale(
         camera,
         waypoint.root.getAbsolutePosition(),
         WAYPOINT_TARGET_PIXELS,
       ));
-      waypoint.visualRoot.computeWorldMatrix(true);
     }
+  }
+
+  private updateVisualRootScale(visualRoot: TransformNode, scale: number): void {
+    // 相同缩放不标脏；仍让 Babylon 检查父级和外部变换，保证辅助标记在本帧更新。
+    if (!visualRoot.scaling.equalsToFloats(scale, scale, scale)) visualRoot.scaling.setAll(scale);
+    // 同帧再次同步时，默认计算会按 renderId 快退；仅真正失同步时强制刷新。
+    visualRoot.computeWorldMatrix(!visualRoot.isSynchronized());
   }
 
   private calculateWorldScale(camera: Camera, worldPosition: Vector3, targetPixels: number): number {
