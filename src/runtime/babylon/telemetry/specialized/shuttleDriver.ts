@@ -32,6 +32,8 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
+  createRetainedSlotCargoKey,
+  takeRetainedSlotCargo,
   HCLIFT_DECK_OCCUPANCY_STALE_MS,
   type GeneratedCargoRuntimeEntry,
   type HcliftPlatformSurfaceState,
@@ -45,6 +47,7 @@ import {
   SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND,
   SHUTTLE_FORK_CATCH_UP_SPEED_MULTIPLIER,
   SHUTTLE_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
+  type SlotPlaceTarget,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetrySharedState,
@@ -993,16 +996,24 @@ export class ShuttleTelemetryDriver {
     this.clearShuttleCargoState(model);
 
     this.getOrCreateShuttleCargo(model.assetCode);
-    // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
-    // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
-    const platformAdopted = this.context.adoptConveyorPlatformCargo(cell.locator.entityId, model.assetCode);
-    if (platformAdopted) {
-      this.finalizeAdoptedShuttleCargo(model, task, containerCode, platformAdopted);
+    // 内置货格留存货物优先：按格口接管留在货架上的同一货物实例。
+    const retained = takeRetainedSlotCargo(this.state, cell.locator.entityId, cell.toX, cell.toY);
+    if (retained) {
+      this.finalizeAdoptedShuttleCargo(model, task, containerCode, retained);
     } else {
-      this.adoptOrCreateShuttleCargo(model, task, containerCode);
+      // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
+      // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
+      const platformAdopted = this.context.adoptConveyorPlatformCargo(cell.locator.entityId, model.assetCode);
+      if (platformAdopted) {
+        this.finalizeAdoptedShuttleCargo(model, task, containerCode, platformAdopted);
+      } else {
+        this.adoptOrCreateShuttleCargo(model, task, containerCode);
+      }
     }
     // 抑制源格口 fetch 渲染（货物改由 shuttle 渲染）；装货不留存排号，fetch 单排同步不由装货完成触发
     this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY);
+    // 接管留存货物后解除该格的持久抑制：瞬态抑制已就位，不会闪出旧 fetch 记录
+    if (retained) this.host.releaseRetainedFetchCellForLocator?.(cell.locator, cell.toX, cell.toY);
     const holdPose = getNodeWorldPosePreservingMirror(cell.locator.root);
     // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货物模板自身朝向（世界恒等），不继承货格/机体旋转
     const holdRotation = this.state.shuttleCargoMeshes.get(this.getShuttleCargoKey(model.assetCode))?.lockedWorldRotation
@@ -1022,6 +1033,14 @@ export class ShuttleTelemetryDriver {
   ): void {
     const state = model.shuttleTelemetry;
     if (!state.cargoKey) this.beginShuttlePlaceWithCargo(model, task, containerCode);
+    // 入场即锁定目标格：放货完成或相位退出时目标字段可能已变化，留存归属必须用这里的格口。
+    state.cargoPlaceTarget = {
+      locator: cell.locator,
+      column: cell.toX,
+      layer: cell.toY,
+      supportPosition: cell.supportPosition,
+      retainCargo: cell.locator.retainCargo === true,
+    };
     if (state.cargoFetchRow === null) {
       state.cargoFetchRow = this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY)
         ?? this.host.resolveFetchDriveRowForLocator(cell.locator);
@@ -1073,7 +1092,16 @@ export class ShuttleTelemetryDriver {
     state.cargoHoldRotation = state.cargoHoldRotation ?? currentRotation ?? holdPose.rotation;
     state.cargoHoldScaling = null;
 
-    if (state.cargoFetchRow === null) {
+    const retainAtSlot = state.cargoPlaceTarget?.retainCargo === true;
+    if (retainAtSlot) {
+      // 留存格口：只落到目标支撑位，不再尝试 conveyor 站台交接（留存优先于平台接手）。
+      const cargo = this.state.shuttleCargoMeshes.get(cargoKey);
+      if (cargo) {
+        const rotation = state.cargoHoldRotation ?? currentRotation ?? holdPose.rotation;
+        this.host.setGeneratedCargoRootPose(cargo, holdPosition, rotation, null);
+        cargo.handoff = null;
+      }
+    } else if (state.cargoFetchRow === null) {
       // 货物网格位姿落后叉状态一帧：交接前对齐到持货位，
       // 否则 conveyor 交接插值以滞后位姿起步，卸货后多出一段本不存在的滑行动画
       const cargo = this.state.shuttleCargoMeshes.get(cargoKey);
@@ -1091,7 +1119,10 @@ export class ShuttleTelemetryDriver {
     this.bindShuttleCargo(model);
   }
 
-  /** 卸货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接在落货时已完成。 */
+  /**
+   * 卸货完成：开启「留存货物」的内置货格把货物移入共享留存表，等待再次取货；
+   * 其余 fetch 库位保留至单排同步响应后销毁，非 fetch 库位立即销毁；conveyor 站台交接在落货时已完成。
+   */
   private completeShuttlePlace(
     model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry | null,
@@ -1102,12 +1133,48 @@ export class ShuttleTelemetryDriver {
     if (!cargoKey) return;
     this.unbindShuttleCargo(model, targetLocator, targetPosition);
 
-    if (this.host.keepCargoForFetchRowSync(state.cargoFetchRow, model.assetCode, cargoKey)) {
+    const placeTarget = state.cargoPlaceTarget;
+    if (placeTarget?.retainCargo === true) {
+      this.retainShuttleCargoAtSlot(model, cargoKey, placeTarget, targetPosition);
+    } else if (this.host.keepCargoForFetchRowSync(state.cargoFetchRow, model.assetCode, cargoKey)) {
       this.host.handleFetchRowSync(state.cargoFetchRow as number);
     } else if (state.cargoFetchRow === null) {
       this.disposeShuttleCargoByKey(cargoKey);
     }
     this.clearShuttleCargoState(model);
+  }
+
+  /** 把货物留在目标格口：强制落到支撑位、移出本机货物表、登记共享留存表并持久抑制该格 fetch 渲染。 */
+  private retainShuttleCargoAtSlot(
+    model: ModelRuntimeEntry,
+    cargoKey: string,
+    placeTarget: SlotPlaceTarget,
+    targetPosition: Vector3 | null,
+  ): void {
+    const state = model.shuttleTelemetry;
+    const cargo = this.state.shuttleCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+    const position = targetPosition ?? state.cargoHoldPosition ?? placeTarget.supportPosition;
+    const rotation = state.cargoHoldRotation ?? cargo.root.rotationQuaternion ?? createCargoSpawnWorldRotation();
+    if (position) this.host.setGeneratedCargoRootPose(cargo, position, rotation, state.cargoHoldScaling);
+    // 留存货物保持静止，不保留跨设备交接插值，避免停止更新后冻结在半途。
+    cargo.handoff = null;
+
+    this.state.shuttleCargoMeshes.delete(cargoKey);
+    const key = createRetainedSlotCargoKey(placeTarget.locator.entityId, placeTarget.column, placeTarget.layer);
+    const existing = this.state.slotRetainedCargoMeshes.get(key);
+    if (existing && existing.cargo !== cargo) this.context.disposeShuttleCargo(existing.cargo);
+    this.state.slotRetainedCargoMeshes.set(key, {
+      locatorEntityId: placeTarget.locator.entityId,
+      column: placeTarget.column,
+      layer: placeTarget.layer,
+      rowNumber: state.cargoFetchRow,
+      cargo,
+    });
+    if (state.cargoFetchRow !== null) {
+      this.host.retainFetchCellForLocator?.(placeTarget.locator, placeTarget.column, placeTarget.layer);
+      this.host.handleFetchRowSync(state.cargoFetchRow);
+    }
   }
 
   /** 每帧刷新货物外观与位姿：绑定跟随二段叉尖，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，未锁定（fresh 刷出）取货物模板自身朝向。 */
@@ -1255,6 +1322,7 @@ export class ShuttleTelemetryDriver {
     state.cargoHoldRotation = null;
     state.cargoHoldScaling = null;
     state.cargoFetchRow = null;
+    state.cargoPlaceTarget = null;
   }
 
   // ===== 节点偏移写回 =====

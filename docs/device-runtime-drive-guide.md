@@ -193,6 +193,8 @@ go_column/列号边沿锁行走目标(:135-146) → 滑向目标列 → movement
 ### fetch 响应（唯二消费 fetch 的设备之一）
 放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排 POST(SceneRuntime.ts:1367-1393) → 响应应用后 `clearSuppressedCells` 并销毁保留货(:1386-1388)，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:790)。
 
+**内置货格留存**：目标 locator 勾选 `retainCargo` 时，放货完成不再走保留货清算/销毁，而是把货物移入共享留存表 `slotRetainedCargoMeshes`（key=货格实体+列+层），强制停在格口支撑位；fetch 格口额外调用 `retainFetchCellForLocator` 建立**持久抑制**并照常单排同步刷新同排其它格口。堆垛机再次取同格时 `beginStackerFetch` 按 `front_x/front_y` 先查留存表，命中则接管同一货物实例并释放持久抑制（瞬态抑制仍由取货流程建立）。前后叉各自用入场锁定的 `front/backCargoPlaceTarget` 归属，目标字段变化或相位退出不影响留存格口。
+
 ### 动画
 每帧 `applyToModel`(:80)。行走/升降/叉伸缩均为**速度插值**（非直接定位）：`moveVectorTowards`(:449)、`moveNumberTowards`(:543)；例外：首帧吸附 `snapStackerToTargetOffsets`(:295)、catch-up 强制收尾。货叉总偏移 50/50 拆一/二段(`splitForkOffset` :636)。货物绑定叉尖时每帧锚定二段叉顶面中心（:1007）；`stackerCargoGapY` 只计入升降瞄准基点（:420），叉顶面定位到支撑位+间隙（插入货物底部货槽），货格落位保持支撑位（:1033，与货架/站台自身渲染同源）。取货绑定时锁存「持货位 − 叉面锚点」偏移、放货携带固定挂槽偏移 −gapY（`bindStackerCargo`/`beginStackerPlaceWithCargo`）：货叉插入货槽不推动货物，绑定/落货全程零跳变。**本体移动与伸叉互斥**(:493-522)。世界偏移经 `offsetNodesFromBaselineByWorldOffsets` 转父级本地(:1601)。
 
@@ -252,6 +254,8 @@ Status 单字段状态机，无 command/movement/mode 体系。
 ### fetch 响应
 与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取目标货格的 fetch 排号（`suppressFetchCellForLocator` / `resolveFetchDriveRowForLocator`）。
 
+**内置货格留存**：目标 locator 勾选 `retainCargo` 时，放货完成把货物移入 `slotRetainedCargoMeshes` 并停在格口支撑位（fetch 格口同时建立持久抑制 + 单排刷新，不进入 `keepCargoForFetchRowSync` 清算）。再次取同格时 `beginShuttleFetch` 在 conveyor 站台/task 全局接管之前按格口查留存表，命中即接管同一货物实例并释放持久抑制；随后照常建立瞬态抑制，避免重放闪出旧 fetch 记录。落货格口用入场锁定的 `cargoPlaceTarget`，状态退出或目标字段变化仍按该格留存。
+
 ### 动画
 每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=5 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=5 期间叉强制收回原点；Status=1/3 若尚未对准目标格（典型：出梯后 PLC 立即报取货中，虚拟车还停在站台）会先补走行到目标格（到位余量 2cm）再伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
 
@@ -285,7 +289,7 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 | `slotColumnRatio` | :61 | 1（1..8），1 个实物货格列向分裂的逻辑列数：逻辑列数 = columnCount × ratio、逻辑格宽 = cellWidth / ratio，物理结构不变；`to_x` 按连续逻辑列号寻址 |
 | `bodyColor` / `beamColor` | — | 本体/横梁颜色 |
 
-货格 LocatorComponent（components.ts:62-84）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:141-156，`dimensionMapping` 派生维度，`columnSplitParam` 声明列向分裂比例参数）。
+货格 LocatorComponent（components.ts:62-84）：`length/width/height`、`columns/layers`、`startColumn/startLayer`、`columnReversed`、`columnGap/layerGap`、`deviceAssetCode`（绑堆垛机）、`rowNumber`（排号）、`storageDepth:'near'|'far'`、`fetchDrive:{enabled, cargoGeneratorId}`、`retainCargo`（内置货格留存开关，仅 builtInBinding 普通货格生效）。内置绑定声明 `builtInSlotBinding`（shelf.model.ts:141-156，`dimensionMapping` 派生维度，`columnSplitParam` 声明列向分裂比例参数）。
 
 **共享实例策略**：带脚本的 shelf 走 **owned-container 独占**（`resolveModelAssetSharedInstancingPolicy`，SharedModelAssetCache.ts:275-284）；仅无脚本纯静态模型才 shared-instance。
 
@@ -302,7 +306,7 @@ Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管�
 货架本体无动画（脚本 onUpdate 仅参数变化时重应用）。fetch 货物显隐为**瞬时**更新 thinInstance buffer，无过渡；数据未变时按 `targetSignature` 命中已有批次只重写矩阵，不重建 mesh、不闪烁。时序 = 预览开始一次全量 + stacker 放货单排同步 + 按 `syncIntervalSeconds` 的定时全量（秒，默认 60、最小 10，`0` 关闭）。
 
 ### 状态机
-格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts:78，stacker 取放期间抑制） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts:893）。无"锁定"态。
+格口态 = fetch 渲染（record 有/无） ∪ `suppressedCellKeys`（LocatorFetchRuntime.ts，stacker 取放期间瞬态抑制） ∪ `retainedCellKeys`（内置货格留存货物的持久抑制，取货前不渲染、同步后不解除） ∪ `fetchKeptCargoByRow` 保留货（SceneRuntime.ts）。无"锁定"态。
 
 ### 交接（与 stacker 联动）
 取货：command 1 + movement 1/3 伸叉瞬间 `beginStackerFetch`（stackerDriver.ts:763）刷货并 `suppressFetchCellForLocator`(:790)。放货：command 3/4 锁 `frontCargoFetchRow`(:702-709) → 解绑落箱位 → `completeStackerPlace` → 保留货 → 单排 fetch 拉回 → 解除抑制 → 销毁保留货。

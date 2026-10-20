@@ -35,9 +35,12 @@ import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
 import {
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
+  createRetainedSlotCargoKey,
+  takeRetainedSlotCargo,
   type GeneratedCargoRuntimeEntry,
   normalizeCargoTask,
   resolveCargoHandoffPose,
+  type SlotPlaceTarget,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
   type SpecializedTelemetrySharedState,
@@ -699,10 +702,22 @@ export class StackerTelemetryDriver {
         if (!this.getStackerForkCargoKey(model, side) && !placeExtendSeen) {
           this.beginStackerPlaceWithCargo(model, snapshot, side);
         }
+        const frontX = readIntegerField(snapshot.fields, 'front_x');
+        const frontY = readIntegerField(snapshot.fields, 'front_y');
+        // 入场即锁定目标格：放货完成或相位退出时当前位字段可能已变化，留存归属必须用这里的格口。
+        const placeTarget: SlotPlaceTarget | null = frontX !== null && frontY !== null
+          ? {
+              locator: targetLocator,
+              column: frontX,
+              layer: frontY,
+              supportPosition: targetPosition,
+              retainCargo: targetLocator.retainCargo === true,
+            }
+          : null;
+        if (side === 'front') state.frontCargoPlaceTarget = placeTarget;
+        else state.backCargoPlaceTarget = placeTarget;
         const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
         if (lockedRow === null) {
-          const frontX = readIntegerField(snapshot.fields, 'front_x');
-          const frontY = readIntegerField(snapshot.fields, 'front_y');
           const fetchRow = frontX !== null && frontY !== null
             ? this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY)
             : this.host.resolveFetchDriveRowForLocator(targetLocator);
@@ -776,18 +791,30 @@ export class StackerTelemetryDriver {
     if (!targetLocator) return;
 
     this.getOrCreateStackerCargo(model.assetCode, side);
-    // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
-    // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
-    const platformAdopted = this.context.adoptConveyorPlatformCargo(targetLocator.entityId, model.assetCode);
-    if (platformAdopted) {
-      this.finalizeAdoptedStackerCargo(model, snapshot, side, platformAdopted);
-    } else {
-      this.adoptOrCreateStackerCargo(model, snapshot, side);
-    }
-    // 抑制源格口 fetch 渲染（货物改由 stacker 渲染）；取货不留存排号，fetch 单排同步不由取货完成触发
     const frontX = readIntegerField(snapshot.fields, 'front_x');
     const frontY = readIntegerField(snapshot.fields, 'front_y');
-    if (frontX !== null && frontY !== null) this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
+    // 内置货格留存货物优先：按当前格口接管留在货架上的同一货物实例。
+    const retained = frontX !== null && frontY !== null
+      ? takeRetainedSlotCargo(this.state, targetLocator.entityId, frontX, frontY)
+      : null;
+    if (retained) {
+      this.finalizeAdoptedStackerCargo(model, snapshot, side, retained);
+    } else {
+      // 目标是 conveyor 站台（内置 1×1 货格）：无视 task 直接接管该 conveyor 的滞留持货；
+      // 未命中（普通库位/对方无货）回退按 task 全局接管或自建。
+      const platformAdopted = this.context.adoptConveyorPlatformCargo(targetLocator.entityId, model.assetCode);
+      if (platformAdopted) {
+        this.finalizeAdoptedStackerCargo(model, snapshot, side, platformAdopted);
+      } else {
+        this.adoptOrCreateStackerCargo(model, snapshot, side);
+      }
+    }
+    // 抑制源格口 fetch 渲染（货物改由 stacker 渲染）；取货不留存排号，fetch 单排同步不由取货完成触发
+    if (frontX !== null && frontY !== null) {
+      this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY);
+      // 接管留存货物后解除该格的持久抑制：瞬态抑制已就位，不会闪出旧 fetch 记录
+      if (retained) this.host.releaseRetainedFetchCellForLocator?.(targetLocator, frontX, frontY);
+    }
     const holdPosition = this.resolveCellCargoHoldPosition(targetLocator, targetPosition);
     const holdPose = getNodeWorldPosePreservingMirror(targetLocator.root);
     // 接管货保持来货世界朝向（交接只平移）；fresh 刷出取货物模板自身朝向（世界恒等），不继承货格/机体旋转
@@ -893,7 +920,17 @@ export class StackerTelemetryDriver {
     }
 
     const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
-    if (fetchRow === null) {
+    const placeTarget = side === 'front' ? state.frontCargoPlaceTarget : state.backCargoPlaceTarget;
+    if (placeTarget?.retainCargo === true) {
+      // 留存格口：只落到目标支撑位，不再尝试 conveyor 站台交接（留存优先于平台接手）。
+      const cargo = this.state.stackerCargoMeshes.get(cargoKey);
+      if (cargo) {
+        const rotation = (side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation)
+          ?? currentRotation ?? holdPose.rotation;
+        this.host.setGeneratedCargoRootPose(cargo, holdPosition, rotation, null);
+        cargo.handoff = null;
+      }
+    } else if (fetchRow === null) {
       // 货物网格位姿落后叉状态一帧：交接前对齐到持货位，
       // 否则 conveyor 交接插值以滞后位姿起步，放货后多出一段本不存在的滑行动画
       const cargo = this.state.stackerCargoMeshes.get(cargoKey);
@@ -946,7 +983,10 @@ export class StackerTelemetryDriver {
     this.bindStackerCargo(model, side);
   }
 
-  /** 放货完成：fetch 库位保留货物至单排同步响应后销毁，其余立即销毁；conveyor 站台交接在落货时（mode==4 延后到收叉完毕）完成。 */
+  /**
+   * 放货完成：开启「留存货物」的内置货格把货物移入共享留存表，等待再次取货；
+   * 其余 fetch 库位保留至单排同步响应后销毁，非 fetch 库位立即销毁；conveyor 站台交接在落货时（mode==4 延后到收叉完毕）完成。
+   */
   private completeStackerPlace(
     model: ModelRuntimeEntry,
     targetLocator: LocatorRuntimeEntry | null,
@@ -959,7 +999,10 @@ export class StackerTelemetryDriver {
 
     const state = model.stackerTelemetry;
     const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
-    if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, side)) {
+    const placeTarget = side === 'front' ? state.frontCargoPlaceTarget : state.backCargoPlaceTarget;
+    if (placeTarget?.retainCargo === true) {
+      this.retainStackerCargoAtSlot(model, cargoKey, placeTarget, targetPosition, side);
+    } else if (this.host.keepCargoForFetchRowSync(fetchRow, model.assetCode, side)) {
       this.host.handleFetchRowSync(fetchRow as number);
     } else if (fetchRow === null) {
       // mode==4 延后交接兜底：收叉动画完结（锁存清除）即相位退出，当场补交付站台滞留货；
@@ -972,6 +1015,44 @@ export class StackerTelemetryDriver {
       this.disposeStackerCargoByKey(cargoKey);
     }
     this.clearStackerForkCargoState(model, side);
+  }
+
+  /** 把货物留在目标格口：强制落到支撑位、移出本机货物表、登记共享留存表并持久抑制该格 fetch 渲染。 */
+  private retainStackerCargoAtSlot(
+    model: ModelRuntimeEntry,
+    cargoKey: string,
+    placeTarget: SlotPlaceTarget,
+    targetPosition: Vector3 | null,
+    side: StackerForkSide,
+  ): void {
+    const state = model.stackerTelemetry;
+    const cargo = this.state.stackerCargoMeshes.get(cargoKey);
+    if (!cargo) return;
+    const holdPosition = side === 'front' ? state.frontCargoHoldPosition : state.backCargoHoldPosition;
+    const holdRotation = side === 'front' ? state.frontCargoHoldRotation : state.backCargoHoldRotation;
+    const holdScaling = side === 'front' ? state.frontCargoHoldScaling : state.backCargoHoldScaling;
+    const position = targetPosition ?? holdPosition ?? placeTarget.supportPosition;
+    const rotation = holdRotation ?? cargo.root.rotationQuaternion ?? createCargoSpawnWorldRotation();
+    if (position) this.host.setGeneratedCargoRootPose(cargo, position, rotation, holdScaling);
+    // 留存货物保持静止，不保留跨设备交接插值，避免停止更新后冻结在半途。
+    cargo.handoff = null;
+
+    this.state.stackerCargoMeshes.delete(cargoKey);
+    const key = createRetainedSlotCargoKey(placeTarget.locator.entityId, placeTarget.column, placeTarget.layer);
+    const existing = this.state.slotRetainedCargoMeshes.get(key);
+    if (existing && existing.cargo !== cargo) this.disposeStackerCargo(existing.cargo);
+    const fetchRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
+    this.state.slotRetainedCargoMeshes.set(key, {
+      locatorEntityId: placeTarget.locator.entityId,
+      column: placeTarget.column,
+      layer: placeTarget.layer,
+      rowNumber: fetchRow,
+      cargo,
+    });
+    if (fetchRow !== null) {
+      this.host.retainFetchCellForLocator?.(placeTarget.locator, placeTarget.column, placeTarget.layer);
+      this.host.handleFetchRowSync(fetchRow);
+    }
   }
 
   /** 每帧刷新货物外观与位姿：绑定跟随叉尖 + 绑定锁存偏移，未绑定静止于箱位支撑位；朝向取锁定的世界朝向，未锁定（fresh 刷出）取货物模板自身朝向。 */
@@ -1054,6 +1135,7 @@ export class StackerTelemetryDriver {
       state.frontCargoHoldRotation = null;
       state.frontCargoHoldScaling = null;
       state.frontCargoFetchRow = null;
+      state.frontCargoPlaceTarget = null;
       state.frontCargoPendingPlatformLocatorId = null;
       return;
     }
@@ -1065,6 +1147,7 @@ export class StackerTelemetryDriver {
     state.backCargoHoldRotation = null;
     state.backCargoHoldScaling = null;
     state.backCargoFetchRow = null;
+    state.backCargoPlaceTarget = null;
     state.backCargoPendingPlatformLocatorId = null;
   }
 

@@ -49,6 +49,7 @@ function makeLocator(
     rootRotationY?: number;
     kind?: 'slot' | 'layerChangePlatform';
     platformTrackEndWorld?: Vector3 | null;
+    retainCargo?: boolean;
   },
 ): LocatorRuntimeEntry {
   const root = new TransformNode('locator_root', scene);
@@ -76,6 +77,7 @@ function makeLocator(
     storageDepth: options.storageDepth ?? 'near',
     kind: options.kind ?? 'slot',
     platformTrackEndWorld: options.platformTrackEndWorld ?? null,
+    retainCargo: options.retainCargo === true,
   } as unknown as LocatorRuntimeEntry;
 }
 
@@ -98,7 +100,16 @@ function makeHarness() {
     },
   } as unknown as ModelRuntimeEntry;
 
-  const ref: { locator: LocatorRuntimeEntry | null; extraLocators: LocatorRuntimeEntry[] } = { locator: null, extraLocators: [] };
+  const ref: {
+    locator: LocatorRuntimeEntry | null;
+    extraLocators: LocatorRuntimeEntry[];
+    /** 非 null 时模拟 fetch 驱动货格：抑制/留存方法返回该排号。 */
+    fetchRow?: number | null;
+    retainedCells: Array<[number, number]>;
+    releasedCells: Array<[number, number]>;
+    rowSyncs: number[];
+    disposedShuttleCargos: unknown[];
+  } = { locator: null, extraLocators: [], retainedCells: [], releasedCells: [], rowSyncs: [], disposedShuttleCargos: [] };
   const logs: string[] = [];
   const activeLocators = (): LocatorRuntimeEntry[] => (ref.locator ? [ref.locator, ...ref.extraLocators] : [...ref.extraLocators]);
   // 与 SceneRuntime.findLocatorByDevice/findLocatorByAisle 同规则：绑定一致 + 排号一致 + 排深一致（传值时）+ 列/层落在范围内，且唯一命中（多个命中返回 null）
@@ -146,9 +157,16 @@ function makeHarness() {
     resolveBuiltInSlotHost: () => null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
-    resolveFetchDriveRowForLocator: () => null,
-    suppressFetchCellForLocator: () => null,
-    handleFetchRowSync: () => undefined,
+    resolveFetchDriveRowForLocator: () => ref.fetchRow ?? null,
+    suppressFetchCellForLocator: () => ref.fetchRow ?? null,
+    retainFetchCellForLocator: (_locator: LocatorRuntimeEntry, column: number, layer: number) => {
+      ref.retainedCells.push([column, layer]);
+      return ref.fetchRow ?? null;
+    },
+    releaseRetainedFetchCellForLocator: (_locator: LocatorRuntimeEntry, column: number, layer: number) => {
+      ref.releasedCells.push([column, layer]);
+    },
+    handleFetchRowSync: (row: number) => { ref.rowSyncs.push(row); },
     keepCargoForFetchRowSync: () => false,
     updateExternalScriptContext: () => true,
     refreshModelArrayRepresentation: () => undefined,
@@ -169,7 +187,7 @@ function makeHarness() {
     scene,
     state,
     host,
-    disposeShuttleCargo: () => undefined,
+    disposeShuttleCargo: (cargo: unknown) => { ref.disposedShuttleCargos.push(cargo); },
     getOrCreateShuttleCargo: () => { throw new Error('not used'); },
     adoptGlobalCargoByTask: () => null,
     adoptConveyorPlatformCargo: () => null,
@@ -608,6 +626,82 @@ test('卸货（Status=3）：补建绑定、伸满解绑落格、收回完结销
     // 同相位持续上报：不得重复补建
     h.apply(PLACE, 0.1, 10);
     assert.equal(h.state.shuttleCargoMeshes.size, 0, '同相位不得重复补建货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('卸货到留存内置货格：货物留在格口不销毁，再次取货接管同一实例', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 10,
+      layers: 1,
+      startColumn: 1,
+      retainCargo: true,
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7003 });
+    h.apply(PLACE, 0.1, 1);
+    h.apply(PLACE, 0.1, 20);
+    h.apply(PLACE, 0.1, 30);
+
+    assert.equal(h.state.shuttleCargoMeshes.size, 0, '放货完成后货物必须移出本机货物表');
+    assert.equal(h.model.shuttleTelemetry.cargoKey, null);
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 1, '货物必须进入格口留存表');
+    const entry = [...h.state.slotRetainedCargoMeshes.values()][0];
+    assert.equal(entry.locatorEntityId, h.ref.locator.entityId);
+    assert.equal(entry.column, 10);
+    assert.equal(entry.layer, 1);
+    assert.equal(entry.rowNumber, null, '非 fetch 货格不留存排号');
+    assert.ok(
+      Vector3.Distance(entry.cargo.root.position, new Vector3(0, 2, 20)) < 1e-6,
+      `留存货物必须停在格口支撑位 (0,2,20)，实际 ${entry.cargo.root.position}`,
+    );
+    assert.equal(h.ref.disposedShuttleCargos.length, 0, '留存货物不得被销毁');
+    assert.equal(h.ref.retainedCells.length, 0, '非 fetch 货格不建立持久抑制');
+
+    // 再次取同格：接管留在货架上的同一货物实例
+    const retainedCargo = entry.cargo;
+    const FETCH = targetFrame(1, 10, 1, 2, 2, { task: 7004 });
+    h.apply(FETCH, 0.1, 1);
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 0, '取货后留存表必须清空');
+    assert.equal(h.state.shuttleCargoMeshes.size, 1, '留存货物必须被本机接管');
+    const taken = [...h.state.shuttleCargoMeshes.values()][0];
+    assert.equal(taken, retainedCargo, '必须复用留在货架上的同一货物实例');
+    assert.equal(h.model.shuttleTelemetry.cargoKey, h.driver.getShuttleCargoKey('SH1'));
+  } finally {
+    h.dispose();
+  }
+});
+
+test('留存格口接单排同步：放货建立持久抑制并刷新同排，取货后释放抑制', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.fetchRow = 2;
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 10,
+      layers: 1,
+      startColumn: 1,
+      retainCargo: true,
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7003 });
+    h.apply(PLACE, 0.1, 1);
+    h.apply(PLACE, 0.1, 20);
+    h.apply(PLACE, 0.1, 30);
+
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 1);
+    const entry = [...h.state.slotRetainedCargoMeshes.values()][0];
+    assert.equal(entry.rowNumber, 2, '留存条目记录锁定排号');
+    assert.deepEqual(h.ref.retainedCells, [[10, 1]], '放货完成必须建立持久抑制');
+    assert.deepEqual(h.ref.rowSyncs, [2], '放货完成必须触发同排同步');
+
+    h.apply(targetFrame(1, 10, 1, 2, 2, { task: 7004 }), 0.1, 1);
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 0);
+    assert.deepEqual(h.ref.releasedCells, [[10, 1]], '取货后必须释放持久抑制');
   } finally {
     h.dispose();
   }

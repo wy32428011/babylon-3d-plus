@@ -262,6 +262,7 @@ applyRecords(records, locatorEntry, locatorComponent, generatorComponent | null,
 - **格口抑制的解除**（抑制集合只在运行预览期有效，无 TTL）：
   1. 放货完成的单排同步响应应用后 `clearSuppressedCells()` 整批解除；
   2. 任何 fetch 响应应用时，本排最新 records 中无记录的抑制格口逐格自动解除（`LocatorFetchRuntime.applyRecords` 的 `releaseAbsentSuppressedCells`）——覆盖取货路径，以及"外部往该格入库"的可见性；该排仍有待清算保留货箱（`fetchKeptCargoByRow` 非空）时禁用，此刻服务端尚未确认放货结果，"本排无该格记录"不可信。抑制集合变化触发的重放恒不解除。
+  3. **留存格口持久抑制**（内置货格 `retainCargo`）：放货完成调用 `retainCell` 加入独立的 `retainedCellKeys`，与瞬态 `suppressedCellKeys` 分离；`clearSuppressedCells`、逐格解除和重复 `applyRecords` 都不解除，只有设备取走留存货（`releaseRetainedCell`）或退出预览（`clearAllBatches`）才清除。fetch 数据即使仍返回该格货物也不渲染，视觉由留在格口中的设备货物承担，避免双显。
 - **未启用 fetchDrive 的定位线框**：现有 MQTT 落位/交接语义完全不变。
 
 ### 6.4 生成器组件查找

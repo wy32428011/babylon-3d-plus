@@ -27,6 +27,7 @@ import {
   type ConveyorCargoRuntimeEntry,
   createSpecializedTelemetrySharedState,
   type GeneratedCargoRuntimeEntry,
+  type RetainedSlotCargoEntry,
   type ShuttleCargoRuntimeEntry,
   type SpecializedTelemetryDriverContext,
   type SpecializedTelemetryHost,
@@ -272,6 +273,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
     }
     this.state.liftCargoMeshes.clear();
+    for (const entry of this.state.slotRetainedCargoMeshes.values()) {
+      this.host.disposeGeneratedCargo(entry.cargo);
+    }
+    this.state.slotRetainedCargoMeshes.clear();
   }
 
   /** 删除指定资产编号下的全部专用运行时货物。 */
@@ -281,6 +286,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.rgvDriver.disposeRgvCargoForAssetCode(assetCode);
     this.shuttleDriver.disposeShuttleCargoForAssetCode(assetCode);
     this.liftDriver.disposeLiftCargoForAssetCode(assetCode);
+    this.disposeRetainedSlotCargo((entry) => entry.cargo.assetCode === assetCode);
   }
 
   /** 释放指定生成器提供模板的全部运行时货箱。 */
@@ -310,6 +316,21 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
       this.state.liftCargoMeshes.delete(key);
     }
+    this.disposeRetainedSlotCargo((entry) => entry.cargo.generatorEntityId === generatorEntityId);
+  }
+
+  /** 按条件销毁内置货格留存货物（预览退出 / 资产或生成器变更）。 */
+  private disposeRetainedSlotCargo(predicate: (entry: RetainedSlotCargoEntry) => boolean): void {
+    for (const [key, entry] of [...this.state.slotRetainedCargoMeshes.entries()]) {
+      if (!predicate(entry)) continue;
+      this.host.disposeGeneratedCargo(entry.cargo);
+      this.state.slotRetainedCargoMeshes.delete(key);
+    }
+  }
+
+  /** 货格实体被删除时销毁其格口上的全部留存货物。 */
+  disposeRetainedSlotCargoForLocator(locatorEntityId: string): void {
+    this.disposeRetainedSlotCargo((entry) => entry.locatorEntityId === locatorEntityId);
   }
 
   /** 按 key 释放单个堆垛机保留货箱（如 fetch 单排同步后的清理）。 */

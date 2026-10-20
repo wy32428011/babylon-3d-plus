@@ -81,6 +81,8 @@ export type LocatorComponent = {
   fetchDrive?: LocatorFetchDriveConfig;
   /** 内置货格绑定标记；存在且 parentId 指向声明了绑定的模型实体时，维度与位置由宿主模型驱动。 */
   builtInBinding?: LocatorBuiltInBinding;
+  /** 内置货格留存：设备放货后货物保留在格口，直到设备再次取货；缺省 false（按 fetch/即时销毁）。 */
+  retainCargo?: boolean;
 };
 
 export type CadReferenceOriginMode = 'center';

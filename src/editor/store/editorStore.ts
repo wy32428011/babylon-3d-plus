@@ -1006,6 +1006,7 @@ function cloneLocator(locator: LocatorComponent): LocatorComponent {
     ...(locator.builtInBinding
       ? { builtInBinding: { ...locator.builtInBinding, originOffset: { ...locator.builtInBinding.originOffset } } }
       : {}),
+    ...(locator.retainCargo ? { retainCargo: true } : {}),
   };
 }
 
@@ -1176,7 +1177,8 @@ function areLocatorsEqual(left: LocatorComponent, right: LocatorComponent): bool
     left.aisleCode === right.aisleCode &&
     left.rowNumber === right.rowNumber &&
     areLocatorFetchDrivesEqual(left.fetchDrive, right.fetchDrive) &&
-    areLocatorBuiltInBindingsEqual(left.builtInBinding, right.builtInBinding)
+    areLocatorBuiltInBindingsEqual(left.builtInBinding, right.builtInBinding) &&
+    Boolean(left.retainCargo) === Boolean(right.retainCargo)
   );
 }
 
@@ -5456,6 +5458,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const before = cloneLocator(locator);
       // 换层站台位于货架头部（列 0 之前），起始列允许负值；普通货格仍从 0 起。
       const startColumnMin = before.builtInBinding?.kind === 'layerChangePlatform' ? -99 : 0;
+      const retainCargo = patch.retainCargo === undefined ? before.retainCargo : patch.retainCargo === true;
       const after: LocatorComponent = {
         // 内置货格资产编号始终跟随宿主货架，忽略外部 patch
         assetId: before.builtInBinding ? before.assetId : sanitizeLocatorAssetId(patch.assetId, before.assetId),
@@ -5475,6 +5478,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         rowNumber: sanitizeLocatorInt(patch.rowNumber, before.rowNumber, 0, 999),
         fetchDrive: sanitizeLocatorFetchDrivePatch(patch.fetchDrive, before.fetchDrive),
         builtInBinding: sanitizeLocatorBuiltInBindingPatch(patch.builtInBinding, before.builtInBinding),
+        ...(retainCargo ? { retainCargo: true } : {}),
       };
 
       if (areLocatorsEqual(before, after)) return state;

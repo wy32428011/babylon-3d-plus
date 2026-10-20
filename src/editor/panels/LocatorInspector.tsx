@@ -224,6 +224,18 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
             />
           </label>
         ))}
+        {!isLayerChangePlatform ? (
+          <label className="inspector-row">
+            <span>留存货物</span>
+            <input
+              type="checkbox"
+              disabled={disabled}
+              checked={component.retainCargo === true}
+              onChange={(event) => updateSelectedLocator({ retainCargo: event.target.checked })}
+              title="设备放货后货物保留在格口，直到设备再次取货；不再按 Fetch 单排同步销毁"
+            />
+          </label>
+        ) : null}
       </fieldset>
     ) : null}
     {!isLayerChangePlatform ? (

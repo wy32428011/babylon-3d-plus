@@ -134,7 +134,8 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
 ### 5. Inspector
 
 - `InspectorPanel.tsx`：Transform fieldset 对绑定货格禁用（`disabled={isLocked || isBuiltInBound}`）+ 提示"位置由货架驱动"
-- `LocatorInspector.tsx`：绑定期间维度字段（长/宽/高/列数/层数/列间隔/层间隔）disabled + 标注"由货架驱动"；新增「内置货格」区：originOffset XYZ 三个 number 输入（经 `updateSelectedLocator` 提交）；业务字段（assetId/deviceAssetCode/rowNumber/storageDepth/startColumn/fetchDrive）保持可编辑
+- `LocatorInspector.tsx`：绑定期间维度字段（长/宽/高/列数/层数/列间隔/层间隔）disabled + 标注"由货架驱动"；新增「内置货格」区：originOffset XYZ 三个 number 输入（经 `updateSelectedLocator` 提交）、「留存货物」复选框（仅普通内置货格，换层站台不显示）；业务字段（assetId/deviceAssetCode/rowNumber/storageDepth/startColumn/fetchDrive）保持可编辑
+- 「留存货物」写入 `locator.retainCargo`：设备（小车/堆垛机）放货后货物留在格口支撑位，进入共享留存表 `slotRetainedCargoMeshes`，直到设备再次取同格时按格口接管同一货物实例。启用 fetch 的格口同时建立持久抑制，fetch 同步不会删除或重复渲染该格货物。旧场景缺省 false，保持原行为；场景格式仍为 v5
 - 映射声明不出现在任何最终用户 UI
 
 ### 已知限制（初版范围外）

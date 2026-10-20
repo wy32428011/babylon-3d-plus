@@ -233,6 +233,9 @@ export type StackerModelTelemetryState = {
   /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步；取货不留存排号。 */
   frontCargoFetchRow: number | null;
   backCargoFetchRow: number | null;
+  /** 放货入场锁定的目标格（列/层/留存开关）：相位退出或目标字段变化仍按该格留存。 */
+  frontCargoPlaceTarget: SlotPlaceTarget | null;
+  backCargoPlaceTarget: SlotPlaceTarget | null;
   /** mode==4 放货到 conveyor 站台的延后交接：解绑落货时登记站台货格 entityId，收叉完毕才真正交付。 */
   frontCargoPendingPlatformLocatorId: string | null;
   backCargoPendingPlatformLocatorId: string | null;
@@ -554,6 +557,8 @@ export type ShuttleModelTelemetryState = {
   cargoHoldScaling: Vector3 | null;
   /** 放货时锁定的目标排号，放货完成（command 5）用于 fetch 保留与单排同步。 */
   cargoFetchRow: number | null;
+  /** 放货入场锁定的目标格（列/层/留存开关）：相位退出或目标字段变化仍按该格留存。 */
+  cargoPlaceTarget: SlotPlaceTarget | null;
   /** 上一帧原始 Status；相位退出边沿兜底收尾用。 */
   lastStatus: number | null;
   /** 货叉相位：idle 收回位 / extending 伸出中 / retracting 收回中。 */
@@ -620,6 +625,44 @@ export type HcliftDeckOccupancyState = {
   updatedAtMs: number;
 };
 
+/** 放货目标格锁定：入场时记录货格/列/层，后续目标字段变化或相位退出仍按该格留存。 */
+export type SlotPlaceTarget = {
+  locator: LocatorRuntimeEntry;
+  column: number;
+  layer: number;
+  supportPosition: Vector3 | null;
+  /** 目标内置货格开启「留存货物」。 */
+  retainCargo: boolean;
+};
+
+/** 留存于内置货格、等待设备再次取走的货物。 */
+export type RetainedSlotCargoEntry = {
+  locatorEntityId: string;
+  column: number;
+  layer: number;
+  rowNumber: number | null;
+  cargo: GeneratedCargoRuntimeEntry;
+};
+
+/** 留存货物键：货格实体 + 列/层唯一定位一个格口。 */
+export function createRetainedSlotCargoKey(locatorEntityId: string, column: number, layer: number): string {
+  return JSON.stringify([locatorEntityId, column, layer]);
+}
+
+/** 按格口从留存表取出货物（不销毁）；未命中返回 null，调用方回退既有接管/新建逻辑。 */
+export function takeRetainedSlotCargo(
+  state: SpecializedTelemetrySharedState,
+  locatorEntityId: string,
+  column: number,
+  layer: number,
+): GeneratedCargoRuntimeEntry | null {
+  const key = createRetainedSlotCargoKey(locatorEntityId, column, layer);
+  const entry = state.slotRetainedCargoMeshes.get(key);
+  if (!entry) return null;
+  state.slotRetainedCargoMeshes.delete(key);
+  return entry.cargo;
+}
+
 /** 门面与两个 driver 共享的可变状态；由 SpecializedTelemetryRuntime 构造时创建一份。 */
 export type SpecializedTelemetrySharedState = {
   stackerCargoMeshes: Map<string, StackerCargoRuntimeEntry>;
@@ -631,6 +674,8 @@ export type SpecializedTelemetrySharedState = {
   hcliftPlatformSurfaces: Map<string, HcliftPlatformSurfaceState>;
   /** hclift 载货台占位（key=hclift entityId）：shuttle 驶入/停稳时刷新，hclift 升降门控读取。 */
   hcliftDeckOccupancies: Map<string, HcliftDeckOccupancyState>;
+  /** 内置货格留存货物的运行时货物（key=货格实体+列+层）：放货后不再随设备销毁，等待下次取货按格口接管。 */
+  slotRetainedCargoMeshes: Map<string, RetainedSlotCargoEntry>;
   reportedMissingTargets: Set<string>;
   reportedFaults: Map<string, string>;
   reportedStatuses: Map<string, string>;
@@ -649,6 +694,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     liftCargoMeshes: new Map(),
     hcliftPlatformSurfaces: new Map(),
     hcliftDeckOccupancies: new Map(),
+    slotRetainedCargoMeshes: new Map(),
     reportedMissingTargets: new Set(),
     reportedFaults: new Map(),
     reportedStatuses: new Map(),
@@ -682,6 +728,10 @@ export interface SpecializedTelemetryHost {
   resolveFetchDriveRowForLocator(locator: LocatorRuntimeEntry): number | null;
   /** 抑制 locator 某格口的 fetch 渲染（货物改由设备侧渲染）；返回排号，未启用 fetch 返回 null。 */
   suppressFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): number | null;
+  /** 持久抑制某格口（内置货格留存货物）：同步后仍生效，直到取货时释放；返回排号。 */
+  retainFetchCellForLocator?(locator: LocatorRuntimeEntry, column: number, layer: number): number | null;
+  /** 取走留存货物后解除持久抑制，渲染权交还 fetch。 */
+  releaseRetainedFetchCellForLocator?(locator: LocatorRuntimeEntry, column: number, layer: number): void;
   handleFetchRowSync(rowNumber: number): void;
   keepCargoForFetchRowSync(rowNumber: number | null, assetCode: string, cargoKey: string): boolean;
   /** 返回 preparedArrayHost；defer 刷新由调用方决定。对应 updateModelExternalScriptRuntimeContext(model, 'runtime', telemetry, true)。 */

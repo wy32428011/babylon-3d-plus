@@ -79,6 +79,8 @@ export class LocatorFetchRuntime {
   private batches = new Map<string, ThinInstanceBatch>();
   /** 设备取货/放货期间接管渲染的格口；对应 thinInstance 暂时跳过。 */
   private suppressedCellKeys = new Set<string>();
+  /** 内置货格留存货物的格口：设备放货后由设备侧长期渲染，fetch 不渲染也不在同步后解除。 */
+  private retainedCellKeys = new Set<string>();
   private lastApplyContext: ApplyRecordsContext | null = null;
   private disposed = false;
   private missingGeneratorReported = false;
@@ -144,7 +146,8 @@ export class LocatorFetchRuntime {
     }
     const ownRecords = rowRecords.filter(
       (record) => !record.isEmpty
-        && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer)),
+        && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer))
+        && !this.retainedCellKeys.has(createFetchCellKey(record.column, record.layer)),
     );
 
     if (!generatorComponent) this.reportMissingGeneratorOnce(locatorComponent);
@@ -515,6 +518,7 @@ export class LocatorFetchRuntime {
     for (const { node } of this.effectPoseNodes.values()) node.dispose();
     this.effectPoseNodes.clear();
     this.suppressedCellKeys.clear();
+    this.retainedCellKeys.clear();
     this.lastApplyContext = null;
     for (const signature of [...this.batches.keys()]) {
       this.disposeBatch(signature);
@@ -534,6 +538,21 @@ export class LocatorFetchRuntime {
   clearSuppressedCells(): void {
     if (this.suppressedCellKeys.size === 0) return;
     this.suppressedCellKeys.clear();
+    this.replayLastRecords();
+  }
+
+  /** 持久抑制某格口：内置货格留存货物期间由设备侧渲染，fetch 同步（含全量）不得渲染或解除。 */
+  retainCell(column: number, layer: number): void {
+    const key = createFetchCellKey(column, layer);
+    if (this.retainedCellKeys.has(key)) return;
+    this.retainedCellKeys.add(key);
+    this.replayLastRecords();
+  }
+
+  /** 设备取走留存货物后解除持久抑制，渲染权交还 fetch。 */
+  releaseRetainedCell(column: number, layer: number): void {
+    const key = createFetchCellKey(column, layer);
+    if (!this.retainedCellKeys.delete(key)) return;
     this.replayLastRecords();
   }
 

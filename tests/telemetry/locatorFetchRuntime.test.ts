@@ -88,6 +88,43 @@ test('isEmpty 空货位不渲染货物', async () => {
   }
 });
 
+test('留存格口持久抑制：普通同步与 clearSuppressedCells 都不渲染，释放后恢复', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    const apply = () => runtime.applyRecords(
+      [createRecord(1, 1)],
+      locatorEntry,
+      locatorComponent,
+      null,
+      () => Matrix.Identity(),
+      () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+
+    await apply();
+    assert.equal(findBatchMeshes(scene).length, 1, '前置：未抑制时正常渲染');
+
+    runtime.retainCell(1, 1);
+    await apply();
+    assert.equal(findBatchMeshes(scene).length, 0, '留存格口不得被 fetch 渲染');
+
+    runtime.clearSuppressedCells();
+    await apply();
+    assert.equal(findBatchMeshes(scene).length, 0, '单排同步解除瞬态抑制时不得解除留存抑制');
+
+    runtime.releaseRetainedCell(1, 1);
+    await apply();
+    const batchMeshes = findBatchMeshes(scene);
+    assert.equal(batchMeshes.length, 1, '释放后渲染权交还 fetch');
+    assert.equal(batchMeshes[0].thinInstanceCount, 1);
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
 test('多材质模型目标：逐 mesh 建批不合并顶点，各自材质保留', async () => {
   const engine = new NullEngine();
   const scene = new Scene(engine);

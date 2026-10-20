@@ -210,6 +210,7 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     cargoHoldRotation: null,
     cargoHoldScaling: null,
     cargoFetchRow: null,
+    cargoPlaceTarget: null,
     lastStatus: null,
     forkPhase: 'idle',
     statusActionDone: false,
@@ -241,6 +242,7 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.cargoHoldRotation = null;
   model.shuttleTelemetry.cargoHoldScaling = null;
   model.shuttleTelemetry.cargoFetchRow = null;
+  model.shuttleTelemetry.cargoPlaceTarget = null;
   model.shuttleTelemetry.lastStatus = null;
   model.shuttleTelemetry.forkPhase = 'idle';
   model.shuttleTelemetry.statusActionDone = false;
@@ -492,6 +494,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoHoldScaling: null,
     frontCargoFetchRow: null,
     backCargoFetchRow: null,
+    frontCargoPlaceTarget: null,
+    backCargoPlaceTarget: null,
     frontCargoPendingPlatformLocatorId: null,
     backCargoPendingPlatformLocatorId: null,
     frontLastCommand: null,
@@ -543,6 +547,8 @@ export function resetStackerTelemetryState(model: ModelRuntimeEntry): void {
   model.stackerTelemetry.backCargoHoldScaling = null;
   model.stackerTelemetry.frontCargoFetchRow = null;
   model.stackerTelemetry.backCargoFetchRow = null;
+  model.stackerTelemetry.frontCargoPlaceTarget = null;
+  model.stackerTelemetry.backCargoPlaceTarget = null;
   model.stackerTelemetry.frontCargoPendingPlatformLocatorId = null;
   model.stackerTelemetry.backCargoPendingPlatformLocatorId = null;
   model.stackerTelemetry.frontLastCommand = null;

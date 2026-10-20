@@ -600,6 +600,8 @@ export type LocatorRuntimeEntry = {
   kind: 'slot' | 'layerChangePlatform';
   /** 换层站台的轨道尽头端面世界坐标（仅 kind='layerChangePlatform' 且 layout 声明 trackEndX 时存在）；小车走行钳制边界。 */
   platformTrackEndWorld: Vector3 | null;
+  /** 内置货格留存：设备放货后货物保留在格口直到再次取货（fetch 格口持久抑制）。 */
+  retainCargo: boolean;
 };
 
 /** 单格高亮状态：entityId 为货格（虚拟定位线框）实体，coordinate 为业务 排-列-层。 */
@@ -1209,6 +1211,8 @@ export class SceneRuntime {
       resolveColumnTargetPose: (entityId) => this.resolveColumnTargetPose(entityId),
       resolveFetchDriveRowForLocator: (locator) => this.resolveFetchDriveRowForLocator(locator),
       suppressFetchCellForLocator: (locator, column, layer) => this.suppressFetchCellForLocator(locator, column, layer),
+      retainFetchCellForLocator: (locator, column, layer) => this.retainFetchCellForLocator(locator, column, layer),
+      releaseRetainedFetchCellForLocator: (locator, column, layer) => this.releaseRetainedFetchCellForLocator(locator, column, layer),
       handleFetchRowSync: (row) => this.handleFetchRowSync(row),
       keepCargoForFetchRowSync: (row, assetCode, cargoKey) => this.keepCargoForFetchRowSync(row, assetCode, cargoKey),
       updateExternalScriptContext: (model, telemetry) => this.updateModelExternalScriptRuntimeContext(model, 'runtime', telemetry, true),
@@ -1629,6 +1633,22 @@ export class SceneRuntime {
     if (!fetchRuntime) return null;
     fetchRuntime.suppressCell(column, layer);
     return rowNumber;
+  }
+
+  /**
+   * 放货到启用「留存货物」的内置货格：持久抑制该格 fetch 渲染并返回排号。
+   * 与 suppressFetchCellForLocator 的瞬态抑制不同，持久抑制在单排同步/全量同步后仍保留，直到设备取货时显式释放。
+   */
+  private retainFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): number | null {
+    const rowNumber = this.resolveFetchDriveRowForLocator(locator);
+    if (rowNumber === null) return null;
+    this.locatorFetchRuntimes.get(locator.entityId)?.retainCell(column, layer);
+    return rowNumber;
+  }
+
+  /** 处置取货完成：解除该格持久抑制，渲染权交还 fetch。 */
+  private releaseRetainedFetchCellForLocator(locator: LocatorRuntimeEntry, column: number, layer: number): void {
+    this.locatorFetchRuntimes.get(locator.entityId)?.releaseRetainedCell(column, layer);
   }
 
   /** 放货到 fetch 驱动定位线框后保留 MQTT 货箱，等待单排同步响应时销毁，避免网络延迟造成视觉空窗；返回是否为首次登记。 */
@@ -5146,6 +5166,7 @@ export class SceneRuntime {
     runtimeLocator.columnReversed = locator.columnReversed;
     runtimeLocator.storageDepth = locator.storageDepth;
     runtimeLocator.kind = locator.builtInBinding?.kind === 'layerChangePlatform' ? 'layerChangePlatform' : 'slot';
+    runtimeLocator.retainCargo = locator.retainCargo === true;
     runtimeLocator.cellSize = { length: effectiveLocator.length, height: effectiveLocator.height, width: effectiveLocator.width };
 
     const locatorMetadata = { assetId: locator.assetId };
@@ -6775,7 +6796,7 @@ export class SceneRuntime {
     columnLabelsRoot.setEnabled(false);
     const columnLabels = this.buildLocatorColumnLabels(entityId, locator, cellSteps, columnLabelsRoot);
 
-    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, aisleCode: locator.aisleCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth, kind: locator.builtInBinding?.kind === 'layerChangePlatform' ? 'layerChangePlatform' : 'slot', platformTrackEndWorld: null };
+    return { entityId, root, fillMesh, edgeLines, columnLabelsRoot, columnLabels, cellSteps, cellSize: { length: locator.length, height: locator.height, width: locator.width }, material, assetId: '', signature: '', columns: locator.columns, layers: locator.layers, startColumn: locator.startColumn, startLayer: locator.startLayer, columnReversed: locator.columnReversed, deviceAssetCode: locator.deviceAssetCode, aisleCode: locator.aisleCode, rowNumber: locator.rowNumber, storageDepth: locator.storageDepth, kind: locator.builtInBinding?.kind === 'layerChangePlatform' ? 'layerChangePlatform' : 'slot', platformTrackEndWorld: null, retainCargo: locator.retainCargo === true };
   }
 
   /**
@@ -7325,6 +7346,7 @@ export class SceneRuntime {
   /** 释放虚拟定位线框的根节点、填充/边线网格和材质。 */
   private disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
     this.clearEntityArrayPreviewIfSource(entityId);
+    this.specializedTelemetryRuntime.disposeRetainedSlotCargoForLocator(entityId);
     this.disposeLocatorFetchRuntime(entityId);
     if (this.localSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('local');
     if (this.externalSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('external');

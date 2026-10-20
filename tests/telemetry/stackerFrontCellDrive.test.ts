@@ -43,6 +43,7 @@ function makeLocator(
     cellSteps?: { columnStepX: number; layerStepY: number };
     rootPosition?: Vector3;
     rootRotationY?: number;
+    retainCargo?: boolean;
   },
 ): LocatorRuntimeEntry {
   const root = new TransformNode('locator_root', scene);
@@ -68,6 +69,7 @@ function makeLocator(
     aisleCode: '',
     rowNumber: 2,
     storageDepth: 'near',
+    retainCargo: options.retainCargo === true,
   } as unknown as LocatorRuntimeEntry;
 }
 
@@ -516,6 +518,51 @@ test('放货叉未达行程时收叉边沿即解绑落货：货物不随叉带�
       Vector3.Distance(cargo.root.position, new Vector3(0, 2, 20)) < 1e-6,
       `货物必须静止于目标箱位支撑位 (0,2,20)，实际 ${cargo.root.position}`,
     );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('放货到留存内置货格：相位退出后货物留在格口，再次取货接管同一实例', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 10,
+      layers: 1,
+      startColumn: 1,
+      rootPosition: new Vector3(0, 2, 11),
+      retainCargo: true,
+    });
+    const PLACE = { ...POSITION_FRAME, front_command: 3, front_task: 7002 };
+
+    // 放货相位补建并绑定货物，伸叉后收叉落位
+    h.apply(PLACE, 0.1, 1);
+    h.apply({ ...PLACE, front_movement_z: 1 }, 0.1, 2);
+    h.apply({ ...PLACE, front_movement_z: 2 }, 0.1, 1);
+    h.apply({ ...PLACE, front_movement_z: 2 }, 0.1, 60);
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '相位退出前货物仍在 stacker 侧');
+
+    // 相位退出（command 3 → 5）：完成放货，货物进入格口留存表
+    h.apply({ ...POSITION_FRAME, front_command: 5, front_movement_z: 0 }, 0.1, 1);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '留存后必须移出 stacker 货物表');
+    assert.equal(h.model.stackerTelemetry.frontCargoKey, null);
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 1, '货物必须进入格口留存表');
+    const entry = [...h.state.slotRetainedCargoMeshes.values()][0];
+    assert.equal(entry.column, 10);
+    assert.equal(entry.layer, 1);
+    assert.ok(
+      Vector3.Distance(entry.cargo.root.position, new Vector3(0, 2, 20)) < 1e-6,
+      `留存货物必须停在格口支撑位 (0,2,20)，实际 ${entry.cargo.root.position}`,
+    );
+
+    // 再次取同格：接管同一货物实例
+    const retainedCargo = entry.cargo;
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_task: 7003, front_movement_z: 1 }, 0.1, 1);
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 0, '取货后留存表必须清空');
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '留存货物必须被本机接管');
+    const taken = [...h.state.stackerCargoMeshes.values()][0];
+    assert.equal(taken, retainedCargo, '必须复用留在货架上的同一货物实例');
   } finally {
     h.dispose();
   }

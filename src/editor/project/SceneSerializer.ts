@@ -976,6 +976,8 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
   const builtInBinding = normalizeLocatorBuiltInBinding(locator.builtInBinding);
   // 换层站台位于货架头部，起始列允许负值；普通货格仍从 0 起。
   const isLayerChangePlatform = builtInBinding?.kind === 'layerChangePlatform';
+  // 留存只对普通内置货格生效：没有绑定的散置 locator 与换层站台不保留该开关。
+  const retainCargo = Boolean(builtInBinding) && !isLayerChangePlatform && locator.retainCargo === true;
   return {
     assetId: assertString(locator.assetId).trim().slice(0, LOCATOR_ASSET_ID_MAX_LENGTH),
     storageDepth: normalizeLocatorStorageDepth(locator.storageDepth),
@@ -994,6 +996,7 @@ function normalizeLocator(value: unknown): EntityComponents['locator'] {
     rowNumber: normalizeLocatorInt(locator.rowNumber, 1, 0, 999),
     ...(fetchDrive ? { fetchDrive } : {}),
     ...(builtInBinding ? { builtInBinding } : {}),
+    ...(retainCargo ? { retainCargo: true } : {}),
   };
 }
 
