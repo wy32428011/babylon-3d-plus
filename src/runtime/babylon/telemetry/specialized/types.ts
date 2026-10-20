@@ -556,6 +556,8 @@ export type ShuttleModelTelemetryState = {
   hcliftOccupancyKey: string | null;
   /** 最近一次换层站台有效层号：x=-2 且提升机台面数据尚未发布时用它保持进梯前高度，避免闪到目标层。 */
   lastHcliftLayer: number | null;
+  /** 最近一帧生效的 Y 闪现偏移：目标字段清零（无目标）时沿用，避免整车弹回模型初始高度。 */
+  lastYFlashOffset: Vector3 | null;
 };
 
 export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;

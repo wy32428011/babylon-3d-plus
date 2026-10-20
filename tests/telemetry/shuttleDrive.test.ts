@@ -830,6 +830,28 @@ test('换层结束后出梯：Status=1 未到位时先走到取货站台再伸�
   }
 });
 
+test('目标字段清零（Status=4 完结帧）：保持上一帧高度，不弹回初始位置', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: 0, rowNumber: 1, storageDepth: 'near',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    const fork = h.scene.getMeshByName('huocha1')!;
+
+    // 目标层 3：支撑 y=4，叉面中心 = 4 − 0.30 + 0.25 = 3.95
+    h.apply({ x: 0, y: 3, to_x: 0, to_y: 3, to_z: 1, to_Depth: 2, Status: 3, errorCode: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 3.95) < 1e-6, `目标层 3 叉面应为 3.95，实际 ${fork.position.y}`);
+
+    // 实测数据 line 313：Status=4，to_* 全 0
+    h.apply({ x: 0, y: 3, to_x: 0, to_y: 0, to_z: 0, to_Depth: 0, Status: 4, errorCode: 0 }, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 3.95) < 1e-6, `无目标帧必须保持上一帧高度，实际 ${fork.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('进梯途中 x=-1 的 y=0 瞬时帧：保持最近有效层，不闪到 to_y 目标层', () => {
   const h = makeHarness();
   try {

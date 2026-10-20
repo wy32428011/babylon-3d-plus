@@ -155,7 +155,11 @@ export class ShuttleTelemetryDriver {
       this.trackShuttleTargetCellChange(model, target.key, target.cell, status);
     }
 
-    const yFlashOffset = this.resolveShuttleYFlashOffset(model, target.cell);
+    // 无目标（to_* 全 0 / 字段缺失，典型为 Status=2/4 完结帧）时保持上一帧 Y 姿态，不弹回模型初始高度
+    const yFlashOffset = target.cell
+      ? this.resolveShuttleYFlashOffset(model, target.cell)
+      : state.lastYFlashOffset ?? Vector3.Zero();
+    if (target.cell) state.lastYFlashOffset = yFlashOffset.clone();
 
     if (status === SHUTTLE_STATUS.emergencyStop) {
       // 急停：冻结走行与货叉，保持当前姿态等待状态恢复
