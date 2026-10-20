@@ -21,6 +21,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [领域专题：参数化模型 / MQTT / POI](docs/domain-guides.md)
 - [最近完成与变更记录](docs/changelog.md)
 - [极致性能实施说明](docs/extreme-performance-implementation.md)
+- [性能指南检测与无损优化](docs/babylon-perf-guide-audit.md)
 - [测试入口、平台与隔离要求清单](docs/test-inventory.md)
 - [S1 工程治理实施与验收记录](docs/optimization-s1-validation.md)
 

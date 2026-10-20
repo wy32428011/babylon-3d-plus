@@ -5,7 +5,7 @@ import { getChartMarkerCorners } from './ChartMarkerPresentation';
 import { createChartMarkerContent, type ChartMarkerTextureFrame } from './chartMarkerContent';
 import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
-import { Frustum, Matrix, Scene, Vector3, type Mesh } from '@babylonjs/core';
+import { Frustum, Matrix, Scene, Vector3, type Mesh, type Viewport } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
 import { createChartMarkerVideo } from './chartMarkerVideo';
 import { ChartMarkerDepthSurface, type ScreenPolygon } from './ChartMarkerDepthSurface';
@@ -107,35 +107,67 @@ function solveLinearSystem(input: number[][], rightHandSide: number[]): number[]
   return matrix.map((row) => row[8] ?? Number.NaN);
 }
 
-function projectScreenCorners(
+type ScreenProjectionFrame = {
+  renderWidth: number;
+  renderHeight: number;
+  viewport: Viewport;
+  transform: Matrix;
+  canvasRect: DOMRect;
+  rootRect: DOMRect;
+};
+
+type ScreenProjectionScratch = {
+  top: Vector3;
+  bottom: Vector3;
+  local: Vector3;
+  world: Vector3;
+  projected: Vector3;
+};
+
+/** 同次相机绘制共享投影环境；下一次回调重新读取，保留相机、布局与尺寸的逐帧变化。 */
+function createScreenProjectionFrame(
   scene: Scene,
   canvas: HTMLCanvasElement,
   root: HTMLElement,
-  mesh: Mesh,
-  readableBothSides = false,
-  insetX = 0,
-  insetY = 0,
-): [ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint] | null {
+): ScreenProjectionFrame | null {
   const camera = scene.activeCamera;
   const engine = scene.getEngine();
   if (!camera) return null;
   const renderWidth = engine.getRenderWidth();
   const renderHeight = engine.getRenderHeight();
   if (renderWidth <= 0 || renderHeight <= 0) return null;
+  return {
+    renderWidth,
+    renderHeight,
+    viewport: camera.viewport.toGlobal(renderWidth, renderHeight),
+    transform: scene.getTransformMatrix(),
+    canvasRect: canvas.getBoundingClientRect(),
+    rootRect: root.getBoundingClientRect(),
+  };
+}
+
+function projectScreenCorners(
+  frame: ScreenProjectionFrame | null,
+  scratch: ScreenProjectionScratch,
+  mesh: Mesh,
+  readableBothSides = false,
+  insetX = 0,
+  insetY = 0,
+): [ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint, ProjectedScreenPoint] | null {
+  if (!frame) return null;
+  const { renderWidth, renderHeight, viewport, transform, canvasRect, rootRect } = frame;
 
   mesh.computeWorldMatrix(true);
   const worldMatrix = mesh.getWorldMatrix();
-  const viewport = camera.viewport.toGlobal(renderWidth, renderHeight);
-  const transform = scene.getTransformMatrix();
-  const canvasRect = canvas.getBoundingClientRect();
-  const rootRect = root.getBoundingClientRect();
   const localCorners = readableBothSides ? getChartMarkerCorners(mesh) : SCREEN_LOCAL_CORNERS;
   const points = SCREEN_LOCAL_CORNERS.map((corner) => {
     const u = corner.x < 0 ? insetX : 1 - insetX;
     const v = corner.z < 0 ? insetY : 1 - insetY;
-    const localPoint = Vector3.Lerp(Vector3.Lerp(localCorners[0], localCorners[1], u), Vector3.Lerp(localCorners[3], localCorners[2], u), v);
-    const worldPoint = Vector3.TransformCoordinates(localPoint, worldMatrix);
-    const projected = Vector3.Project(worldPoint, Matrix.Identity(), transform, viewport);
+    Vector3.LerpToRef(localCorners[0], localCorners[1], u, scratch.top);
+    Vector3.LerpToRef(localCorners[3], localCorners[2], u, scratch.bottom);
+    Vector3.LerpToRef(scratch.top, scratch.bottom, v, scratch.local);
+    Vector3.TransformCoordinatesToRef(scratch.local, worldMatrix, scratch.world);
+    const projected = Vector3.ProjectToRef(scratch.world, Matrix.IdentityReadOnly, transform, viewport, scratch.projected);
     if (!Number.isFinite(projected.x) || !Number.isFinite(projected.y) || projected.z < 0 || projected.z > 1) return null;
     return {
       x: canvasRect.left - rootRect.left + projected.x / renderWidth * canvasRect.width,
@@ -151,6 +183,29 @@ function projectScreenCorners(
   return readableBothSides && winding < 0
     ? [corners[1], corners[0], corners[3], corners[2]]
     : corners;
+}
+
+type OverlayStyleProperty = 'width' | 'height' | 'backgroundColor' | 'boxShadow' | 'pointerEvents' | 'display' | 'transform' | 'clipPath';
+
+/** 同时记录输入值与浏览器规范化结果，避免颜色格式转换和外部样式修改造成误判。 */
+function createOverlayStyleWriter() {
+  const values = new WeakMap<CSSStyleDeclaration, Map<OverlayStyleProperty, { requested: string; applied: string }>>();
+  return (style: CSSStyleDeclaration, property: OverlayStyleProperty, value: string): void => {
+    let previous = values.get(style);
+    const cached = previous?.get(property);
+    if (cached?.requested === value && cached.applied === style[property]) return;
+    if (!previous) {
+      previous = new Map();
+      values.set(style, previous);
+    }
+    if (style[property] !== value) style[property] = value;
+    if (cached) {
+      cached.requested = value;
+      cached.applied = style[property];
+    } else {
+      previous.set(property, { requested: value, applied: style[property] });
+    }
+  };
 }
 
 type OverlayEntry = {
@@ -347,6 +402,11 @@ export function DataPlatformScreenOverlay({
     let visibleMarkerMeshes: Mesh[] = [];
     const transparentContents = new Map<Mesh, ChartMarkerTextureFrame>();
     let markerPolygons: ScreenPolygon[] = [];
+    const frustumPlanes = Frustum.GetPlanes(Matrix.IdentityReadOnly);
+    const projectionScratch: ScreenProjectionScratch = {
+      top: new Vector3(), bottom: new Vector3(), local: new Vector3(), world: new Vector3(), projected: new Vector3(),
+    };
+    const writeStyle = createOverlayStyleWriter();
 
     const handleMessage = (event: MessageEvent<unknown>): void => {
       if (!interactiveRef.current) return;
@@ -388,7 +448,8 @@ export function DataPlatformScreenOverlay({
 
     const update = (): void => {
       const items = runtime.getDataPlatformScreenOverlayItems();
-      const frustumPlanes = Frustum.GetPlanes(scene.getTransformMatrix());
+      Frustum.GetPlanesToRef(scene.getTransformMatrix(), frustumPlanes);
+      let projectionFrame: ScreenProjectionFrame | null | undefined;
       const itemIds = new Set(items.map((item) => item.entityId));
       for (const [entityId, entry] of entries.entries()) {
         if (!itemIds.has(entityId)) {
@@ -430,18 +491,19 @@ export function DataPlatformScreenOverlay({
           const factor = style.contentType === 'builtin' || entry.videoContent ? 1 : 6;
           entry.width = style.width * factor;
           entry.height = style.height * factor;
-          entry.host.style.width = entry.width + 'px';
-          entry.host.style.height = entry.height + 'px';
-          entry.host.style.backgroundColor = style.contentType === 'builtin' && style.backgroundColor !== 'transparent' ? '#061b2b' : style.backgroundColor;
-          entry.host.style.boxShadow = style.contentType === 'builtin' ? 'none' : (`inset 0 0 0 ${entry.videoContent ? 2 : 12}px ` + style.appearanceColor);
+          writeStyle(entry.host.style, 'width', entry.width + 'px');
+          writeStyle(entry.host.style, 'height', entry.height + 'px');
+          writeStyle(entry.host.style, 'backgroundColor', style.contentType === 'builtin' && style.backgroundColor !== 'transparent' ? '#061b2b' : style.backgroundColor);
+          writeStyle(entry.host.style, 'boxShadow', style.contentType === 'builtin' ? 'none' : (`inset 0 0 0 ${entry.videoContent ? 2 : 12}px ` + style.appearanceColor));
           entry.builtin?.update(style, item.markerText ?? style.text);
           if (entry.videoContent && style.contentType === 'video') entry.videoContent.update({
             url: item.screenUrl ?? '', loop: style.videoLoop, controls: style.videoControls, fit: style.videoFit,
           });
         }
         if (entry.iframe) {
-          entry.iframe.style.pointerEvents = interactiveRef.current ? 'auto' : 'none';
-          entry.iframe.title = item.name || item.entityId;
+          writeStyle(entry.iframe.style, 'pointerEvents', interactiveRef.current ? 'auto' : 'none');
+          const title = item.name || item.entityId;
+          if (entry.iframe.title !== title) entry.iframe.title = title;
         }
         entry.videoContent?.setInteractive(interactiveRef.current);
         postSelectionToScreen(entry, selectedEntityIdsRef.current);
@@ -460,35 +522,36 @@ export function DataPlatformScreenOverlay({
           }
           continue;
         }
-        const corners = projectScreenCorners(scene, canvas, root, item.mesh, item.chartMarker);
+        if (projectionFrame === undefined) projectionFrame = createScreenProjectionFrame(scene, canvas, root);
+        const corners = projectScreenCorners(projectionFrame, projectionScratch, item.mesh, item.chartMarker);
         if (!corners) {
           entry.videoContent?.setPlayback(playbackActiveRef.current, false);
-          entry.host.style.display = 'none';
+          writeStyle(entry.host.style, 'display', 'none');
           continue;
         }
         const transform = createCssProjectiveMatrix(entry.width, entry.height, corners);
         if (entry.videoContent) {
-          const rect = canvas.getBoundingClientRect();
+          const rect = projectionFrame!.canvasRect;
           const inView = !!transform && Math.max(...corners.map(p => p.x)) > 0 && Math.min(...corners.map(p => p.x)) < rect.width
             && Math.max(...corners.map(p => p.y)) > 0 && Math.min(...corners.map(p => p.y)) < rect.height;
           entry.videoContent.setPlayback(playbackActiveRef.current, inView);
         }
-        entry.host.style.display = transform ? 'block' : 'none';
+        const transparentBuiltin = item.chartMarker && item.markerStyle?.backgroundColor === 'transparent' && entry.builtin;
+        writeStyle(entry.host.style, 'display', transform && !transparentBuiltin ? 'block' : 'none');
         if (transform) {
-          entry.host.style.transform = transform;
+          writeStyle(entry.host.style, 'transform', transform);
           if (item.chartMarker) {
             visibleMarkerMeshes.push(item.mesh);
             if (item.markerStyle?.backgroundColor === 'transparent' && entry.builtin) {
               const frame = entry.builtin.textureFrame();
               if (frame) transparentContents.set(item.mesh, frame);
               // 透明内置内容直接参与三维混合，避免 DOM 重叠及整块打孔丢失后方模型。
-              entry.host.style.display = 'none';
               continue;
             }
             projectedMarkers.push({ id: item.entityId, corners });
             // 仅放行网页、视频控件和播放/重试入口；空牌及边框仍交给场景操作。
             if (interactiveRef.current && (entry.iframe?.style.visibility === 'visible' || entry.videoContent?.hasInteractiveContent())) {
-              const contentCorners = projectScreenCorners(scene, canvas, root, item.mesh, true, entry.inset / entry.width, entry.inset / entry.height);
+              const contentCorners = projectScreenCorners(projectionFrame, projectionScratch, item.mesh, true, entry.inset / entry.width, entry.inset / entry.height);
               if (contentCorners) contentPolygons.set(item.entityId, contentCorners);
             }
           }
@@ -499,10 +562,10 @@ export function DataPlatformScreenOverlay({
       for (const [id, polygons] of visiblePolygons) {
         const entry = entries.get(id)!;
         const path = polygons.map(polygon => polygon.map((p, i) => `${i ? 'L' : 'M'}${p.x} ${p.y}`).join('') + 'Z').join('');
-        entry.clipHost.style.clipPath = path ? `path("${path}")` : 'inset(100%)';
+        writeStyle(entry.clipHost.style, 'clipPath', path ? `path("${path}")` : 'inset(100%)');
         const content = contentPolygons.get(id);
         if (content) {
-          const rootRect = root.getBoundingClientRect(), canvasRect = canvas.getBoundingClientRect();
+          const { rootRect, canvasRect } = projectionFrame!;
           for (const polygon of polygons) {
             const visibleContent = intersectScreenPolygons(polygon, content);
             if (visibleContent.length) markerPolygons.push(visibleContent.map(p => ({
