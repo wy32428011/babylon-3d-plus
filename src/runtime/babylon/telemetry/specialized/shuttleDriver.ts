@@ -61,8 +61,14 @@ type ShuttleTargetCell = {
   isLayerChangePlatform?: boolean;
 };
 
-/** to_Depth 值 → 库位排深：2→浅库位（near），8→深库位（far）。 */
-function decodeShuttleStorageDepth(toDepth: number | null): LocatorRuntimeEntry['storageDepth'] | null {
+/**
+ * to_Depth 值 → 库位排深：2→浅库位（near），8→深库位（far），0→无排深接驳位（输送线内置货格，不按排深过滤）。
+ * 其它值或字段缺失返回 null（非法）。
+ */
+function decodeShuttleStorageDepth(
+  toDepth: number | null,
+): LocatorRuntimeEntry['storageDepth'] | undefined | null {
+  if (toDepth === 0) return undefined;
   if (toDepth === 2) return 'near';
   if (toDepth === 8) return 'far';
   return null;
@@ -205,9 +211,11 @@ export class ShuttleTelemetryDriver {
     }
     const supportPosition = this.resolveLocatorBoxSupportPosition(locator, toX, toY);
     if (!supportPosition) return { cell: null, key: null, mismatch: true };
+    // D0（无排深接驳位）不按排深过滤，货格键与动作语义使用命中的实际排深
+    const resolvedDepth = storageDepth ?? locator.storageDepth;
     return {
-      cell: { locator, supportPosition, toX, toY, row: toZ, storageDepth },
-      key: JSON.stringify([toX, toY, toZ, storageDepth]),
+      cell: { locator, supportPosition, toX, toY, row: toZ, storageDepth: resolvedDepth },
+      key: JSON.stringify([toX, toY, toZ, resolvedDepth]),
       mismatch: false,
     };
   }
@@ -222,7 +230,7 @@ export class ShuttleTelemetryDriver {
     toY: number | null,
     toZ: number | null,
     toDepth: number | null,
-    storageDepth: LocatorRuntimeEntry['storageDepth'] | null,
+    storageDepth: LocatorRuntimeEntry['storageDepth'] | undefined | null,
   ): void {
     const reasons: string[] = [];
     const missing = ([['to_x', toX], ['to_y', toY], ['to_z', toZ]] as const)
@@ -231,8 +239,8 @@ export class ShuttleTelemetryDriver {
     if (missing.length > 0) reasons.push(`缺 ${missing.join('/')}`);
     if (storageDepth === null) {
       reasons.push(toDepth === null
-        ? 'to_Depth 缺失（仅支持 2=浅库位 / 8=深库位）'
-        : `to_Depth=${toDepth} 非法（仅支持 2=浅库位 / 8=深库位）`);
+        ? 'to_Depth 缺失（仅支持 0=无排深接驳位 / 2=浅库位 / 8=深库位）'
+        : `to_Depth=${toDepth} 非法（仅支持 0=无排深接驳位 / 2=浅库位 / 8=深库位）`);
     }
     const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:target-field:${reasons.join('|')}`;
     if (this.state.reportedMissingTargets.has(reportKey)) return;
@@ -242,20 +250,22 @@ export class ShuttleTelemetryDriver {
 
   /**
    * x=-1（驶入站台等待提升）/ x=-2（换层中，Y 随 y 闪现）的站台货格解析：
-   * 层取 y 字段（非 to_y），排固定站台排（rowNumber），列固定站台起始列（-1）。
-   * y 缺失/非法或未匹配到站台时一次性告警并冻结（mismatch）。
+   * 层优先取 y 字段；进出提升机过程中设备可能把 y 上报为 0（层未知），回退到 to_y 目标层。
+   * 排固定站台排（rowNumber），列固定站台起始列。层号仍非法或未匹配到站台时一次性告警并冻结（mismatch）。
    */
   private resolveLayerChangePlatformCell(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
     x: number,
   ): { cell: ShuttleTargetCell | null; key: string | null; mismatch: boolean } {
-    const y = readIntegerField(snapshot.fields, 'y');
+    const reportedY = readIntegerField(snapshot.fields, 'y');
+    const fallbackY = readIntegerField(snapshot.fields, 'to_y');
+    const y = reportedY !== null && reportedY >= 1 ? reportedY : fallbackY;
     if (y === null || y < 1) {
-      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-layer:${y ?? 'missing'}`;
+      const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:platform-layer:${reportedY ?? 'missing'}`;
       if (!this.state.reportedMissingTargets.has(reportKey)) {
         this.state.reportedMissingTargets.add(reportKey);
-        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} x=${x} 进入换层流程但 y=${y ?? '缺失'} 非法（层号需 ≥1），已冻结移动。`);
+        this.host.pushLog(`错误：多穿小车 ${snapshot.assetCode} x=${x} 进入换层流程但 y=${reportedY ?? '缺失'} 非法（层号需 ≥1），已冻结移动。`);
       }
       return { cell: null, key: null, mismatch: true };
     }
@@ -318,13 +328,14 @@ export class ShuttleTelemetryDriver {
     toX: number,
     toY: number,
     row: number,
-    storageDepth: LocatorRuntimeEntry['storageDepth'],
+    storageDepth: LocatorRuntimeEntry['storageDepth'] | undefined,
   ): void {
     const deviceLocators = this.host.findLocatorsByDevice(snapshot.assetCode);
     const aisleLocators = aisleCode ? this.host.findLocatorsByAisle(aisleCode) : [];
     const boundLocators = deviceLocators.length > 0 ? deviceLocators : aisleLocators;
     const kind = boundLocators.length > 0 ? 'target-range' : 'target-cell';
-    const target = `排${row} ${storageDepth === 'near' ? '浅' : '深'}库位 列${toX} 层${toY}`;
+    const depthLabel = storageDepth === undefined ? '无排深接驳位' : storageDepth === 'near' ? '浅库位' : '深库位';
+    const target = `排${row} ${depthLabel} 列${toX} 层${toY}`;
     const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:${kind}:${row}:${storageDepth}:${toX}:${toY}`;
     if (this.state.reportedMissingTargets.has(reportKey)) return;
     this.state.reportedMissingTargets.add(reportKey);

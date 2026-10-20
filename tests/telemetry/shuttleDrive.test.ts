@@ -47,6 +47,8 @@ function makeLocator(
     cellSteps?: { columnStepX: number; layerStepY: number };
     rootPosition?: Vector3;
     rootRotationY?: number;
+    kind?: 'slot' | 'layerChangePlatform';
+    platformTrackEndWorld?: Vector3 | null;
   },
 ): LocatorRuntimeEntry {
   const root = new TransformNode('locator_root', scene);
@@ -72,6 +74,8 @@ function makeLocator(
     aisleCode: options.aisleCode ?? 'A1',
     rowNumber: options.rowNumber ?? 2,
     storageDepth: options.storageDepth ?? 'near',
+    kind: options.kind ?? 'slot',
+    platformTrackEndWorld: options.platformTrackEndWorld ?? null,
   } as unknown as LocatorRuntimeEntry;
 }
 
@@ -130,6 +134,15 @@ function makeHarness() {
     findLocatorByAisle: (aisleCode: string, x: number, y: number, z: number, storageDepth?: 'near' | 'far') =>
       findOne((locator) => locator.aisleCode === aisleCode, x, y, z, storageDepth),
     findLocatorsByAisle: (aisleCode: string) => activeLocators().filter((locator) => locator.aisleCode === aisleCode),
+    findLayerChangePlatformLocator: (assetCode: string, aisleCode: string) => {
+      let aisleMatch: LocatorRuntimeEntry | null = null;
+      for (const entry of activeLocators()) {
+        if (entry.kind !== 'layerChangePlatform') continue;
+        if (assetCode && entry.deviceAssetCode === assetCode) return entry;
+        if (!aisleMatch && aisleCode && entry.aisleCode === aisleCode) aisleMatch = entry;
+      }
+      return aisleMatch;
+    },
     resolveBuiltInSlotHost: () => null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
@@ -682,6 +695,77 @@ test('Status=10 急停：冻结货叉与走行，状态恢复后从冻结位置�
     // 恢复取货：从冻结位置继续伸叉
     h.apply(FETCH, 0.1, 1);
     assert.ok(h.model.shuttleTelemetry.forkOffset > frozenOffset, '状态恢复后必须继续伸叉');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('to_Depth=0 无排深接驳位：不按排深过滤，唯一命中输送线内置货格', () => {
+  const h = makeHarness();
+  try {
+    // 接驳位：列 0、排 2、层 3，场景中该内置货格的实际排深为 near
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: 0, rowNumber: 2, storageDepth: 'near',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    h.apply(targetFrame(5, 0, 3, 2, 0), 0.1, 1);
+    assert.ok(
+      Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6,
+      `D0 目标必须解析并吸附到接驳位 z=11，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`,
+    );
+    assert.equal(h.logs.filter((message) => message.includes('to_Depth')).length, 0, 'D0 不得报 to_Depth 非法');
+    assert.equal(
+      h.logs.filter((message) => message.includes('未匹配') || message.includes('超出已绑定货格范围')).length,
+      0,
+      'D0 接驳位必须唯一命中',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('to_Depth=0 同排浅/深两库位同时命中：唯一匹配失败并冻结，不猜测排深', () => {
+  const h = makeHarness();
+  try {
+    h.ref.locator = makeLocator(h.scene, { columns: 1, layers: 4, startColumn: 0, rowNumber: 2, storageDepth: 'near' });
+    h.ref.extraLocators = [
+      makeLocator(h.scene, { columns: 1, layers: 4, startColumn: 0, rowNumber: 2, storageDepth: 'far' }),
+    ];
+    h.apply(targetFrame(5, 0, 3, 2, 0), 0.1, 1);
+    assert.ok(
+      Math.abs(h.model.shuttleTelemetry.rootPosition!.z) < 1e-9,
+      '无排深且多命中时必须冻结在原位，不得猜测',
+    );
+    assert.equal(
+      h.logs.filter((message) => message.includes('超出已绑定货格范围')).length,
+      1,
+      '多命中时必须一次性告警',
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test('x=-2 换层中 y 上报 0：回退 to_y 解析站台层，不冻结', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: 0, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+    });
+    const PLATFORM = { x: -2, y: 0, to_x: 0, to_y: 4, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+
+    h.apply(PLATFORM, 0.1, 1);
+    assert.equal(h.logs.filter((message) => message.includes('y=0')).length, 0, 'x=-2 且 y=0 必须回退 to_y，不得告警');
+    assert.equal(
+      (h.model.root.metadata as { shuttleTelemetry?: { targetFound?: boolean } }).shuttleTelemetry?.targetFound,
+      true,
+      '必须解析到换层站台货格',
+    );
+    // 回退到 to_y=4：层 4 支撑位 y=5，车体底部 0.20 对齐支撑位 → 叉面中心由 0.25 闪现到 5.05
+    const fork = h.scene.getMeshByName('huocha1')!;
+    assert.ok(Math.abs(fork.position.y - 5.05) < 1e-6, `必须按 to_y=4 闪现对齐，实际叉面中心 y=${fork.position.y}`);
   } finally {
     h.dispose();
   }

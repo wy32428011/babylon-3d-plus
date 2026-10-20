@@ -4501,10 +4501,13 @@ export class SceneRuntime {
       locator.assetId = assetId;
       const isBuiltInSlot = Boolean(locatorComponent?.builtInBinding);
       const assetIdTaken = this.locatorTargets.has(assetId);
+      // 换层站台不进入通用目标索引：站台起始列可被编辑为 0，与同排输送线接驳货格逻辑坐标重叠，
+      // 参与唯一匹配会互相抢占；站台由 findLayerChangePlatformLocator 单独解析。
+      const isLayerChangePlatform = locator.kind === 'layerChangePlatform';
 
       // 构建设备绑定索引：内置货格各排共用宿主资产编号，必须逐排登记，否则堆垛机 to_x/to_y/to_z 只能命中首排。
       const deviceCode = locatorComponent?.deviceAssetCode?.trim();
-      if (deviceCode && (isBuiltInSlot || !assetIdTaken)) {
+      if (deviceCode && !isLayerChangePlatform && (isBuiltInSlot || !assetIdTaken)) {
         const rowNumber = locatorComponent?.rowNumber ?? 1;
         let rowMap = this.locatorDeviceIndex.get(deviceCode);
         if (!rowMap) {
@@ -4518,7 +4521,7 @@ export class SceneRuntime {
 
       // 构建巷道索引：多穿小车按巷道编号+排+列层定位，与设备索引同规则逐排登记。
       const aisleCode = locatorComponent?.aisleCode?.trim();
-      if (aisleCode && (isBuiltInSlot || !assetIdTaken)) {
+      if (aisleCode && !isLayerChangePlatform && (isBuiltInSlot || !assetIdTaken)) {
         const rowNumber = locatorComponent?.rowNumber ?? 1;
         let rowMap = this.locatorAisleIndex.get(aisleCode);
         if (!rowMap) {

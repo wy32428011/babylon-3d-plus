@@ -228,7 +228,7 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:76
 Status 单字段状态机，无 command/movement/mode 体系。
 - `x/y` = 当前列/层。`x` 为负时进入**换层站台语义**（优先级高于 `to_x/to_y`，见下节）；`x>=0` 或缺失时 `x/y` 仅诊断日志。
 - `to_x/to_y/to_z` = **当前动作阶段的目标货格**列/层/排（装货时=取货格，卸货时=放货格）；三者全 0、或目标字段整体缺失 = 无目标。
-- `to_Depth` = 目标货格的**库位排深**：2→浅库位（Locator `storageDepth='near'`）、8→深库位（`'far'`），与排号联合定位（同排近/远两个货格靠深度区分）；非 2/8 的值、或 `to_z` 缺失时一次性告警并冻结本次目标。
+- `to_Depth` = 目标货格的**库位排深**：2→浅库位（Locator `storageDepth='near'`）、8→深库位（`'far'`），与排号联合定位（同排近/远两个货格靠深度区分）；**0→无排深接驳位**（输送线内置货格等，不按排深过滤，若同排浅/深同时命中则按唯一匹配失败冻结）；非 0/2/8 的值、或 `to_z` 缺失时一次性告警并冻结本次目标。
 - `Status`：0 空闲待机 / 1 取货中（货：货格→小车）/ 2 取货完成 / 3 卸货中（货：小车→货格）/ 4 卸货完成 / 5 移动中 / 6 移动完成 / 10 急停 / 11 未知。**2/4/6 的 _finish 事件不保证送达，不能作为门控**：动作完结由驱动自身的伸叉/收叉动画决定，Status 离开 1/3 的边沿只做无门控兜底；10 急停冻结走行与货叉并提示，恢复其他状态后继续原动作。
 - `task`、`containerCode`：货物身份（全局 task 接管用，缺失则匿名自建）。
 
@@ -237,11 +237,11 @@ Status 单字段状态机，无 command/movement/mode 体系。
 换层站台是绑定在货架上的特殊 locator（`builtInBinding.kind='layerChangePlatform'`），由货架模型包声明 `layerChangePlatformBinding`（开关参数 `enableLayerChangePlatform`）自动生成，实体名「换层站台」，固定 1 列、排固定 1，置于暂存台头部、进深居中在两侧货架之间的过道正中；起始列缺省 -1（Inspector 可改，允许负值），巷道/设备绑定与普通货格同规则（`aisleCode` 或 `deviceAssetCode`）。尺寸全部跟随模型参数（参数变更即重派生）：长度 = `layerChangePlatformLength`（远端始终锚定轨道尽头轨道003.maxX，向货架方向延伸）、宽度 = `aisleWidth`、层高 = `slotHeight`、层数 = `slotCountHeight`。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
-- `x=-2`：换层中——水平冻结在站台列不走行，**Y 随 `y` 字段逐层闪现**（复用 Y 层对齐机制，cell 支撑位随 y 解析层变化）。
+- `x=-2`：换层中——水平冻结在站台列不走行，**Y 随 `y` 字段逐层闪现**（复用 Y 层对齐机制，cell 支撑位随 y 解析层变化）；`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），此时回退取 `to_y` 目标层。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
 - 站台目标下 `Status=1/3`（取/卸）被抑制：不伸叉，一次性告警「换层站台不支持装卸货」。
-- 站台 locator 参与通用巷道/设备索引（`startColumn=-1, columns=1` 覆盖 [-1,0)，与货格 [1,N+1) 不重叠）；运行时不消费 `to_z/to_Depth`（排固定 1，无排深）。
+- 站台 locator **不进入通用巷道/设备目标索引**：起始列可被编辑为 0，与同排输送线接驳货格逻辑坐标重叠，参与唯一匹配会互相抢占；站台仅由 `findLayerChangePlatformLocator` 单独解析。运行时不消费 `to_z/to_Depth`（排固定 1，无排深）。
 
 ### fetch 响应
 与堆垛机一致：放货完成保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排同步 → 清抑制并销毁保留货；取/放期间 `suppressFetchCellForLocator` 抑制该格口 fetch 渲染。放货排号取目标货格的 fetch 排号（`suppressFetchCellForLocator` / `resolveFetchDriveRowForLocator`）。
