@@ -107,7 +107,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 无独立节拍器，帧级 deltaSeconds 积分。行程半径 = span/2 − 货箱实测半长，每帧按模板重钳(:1144-1152)。实测半长按生成器输出类型取世界包围盒在行走轴投影；**组合输出的阵列批次网格必须走 `getThinInstanceMeshWorldBounds` 逐实例矩阵测量**——批次几何保留成员原始坐标（单位换算烘在逐实例矩阵内、网格自身世界矩阵不含缩放），走 `getMeshWorldBounds` 的几何×网格世界矩阵路径会按原始单位放大长度（如厘米箱测出 18m），行程半径被压到下限、货物冻结在输送线中心。端点容差 1e-3（:55）。自驱续行在 movement 归 0 后接管(:335-343)。
 
 ### 状态机（ConveyorModelTelemetryState, types.ts:320-360）
-`cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/吸附/订阅(:232-315)；mode=2+双光电空→销毁(:210-226)；交付 settle(:729-809)。规则三（上游已持新 task 货→销毁在机货、订阅等传递）的上游探测**排除 lift**（`probeUpstreamHoldsTask`）：lift 推送制不参与 task 仲裁（放货无视 task、task_num_fin_* 仅标注），其持同 task 货多为刚推送给本机的上一托实物之下一托，销毁在机货会丢真实货箱，应走滞留箱复用盖戳。**相邻上游吸附**（`tryAdoptUpstreamInTransitCargo`，货到才报 task 的物理跟随）：无货新 task 边沿时若直接上游 conveyor 持有同 task 在途货，瞬时转移落本机进入端走行（跳过交接插值——PLC 上报即货已在本机的权威凭据），并以原持货方为波源发 taken 清下游悬空等待；不挂等待、不发 subscribe。快速逐台传递（0.x s/台、货到才报）场景下若走 subscribe 路径，各台误挂等待、subscribe 命中即交付不看走行位置，货被链尾隔空拽走、全程滞留交接插值（"飘走"）。仅 conveyor 持货参与吸附（lift 推送制排除；stacker/RGV/shuttle 在途货由其自身放货流程交付）；**直角相邻排除**（两机行走轴不共线时货物物理上停在中心线交叉拐角而非本机进入端，交回 subscribe 路径走 `perpendicularOffset` 拐角交付）；邻居无同 task 货时回落原 subscribe 等待。
+`cargoCode`（null=无货/等待）、`waitingTask`（等上游交付）、`pendingTask`（新 task 边沿）、`transitedTasks`（已过境）、`platformInboundCargo`（站台钳制）、`cargoDriveEngaged`、`selfDriveDirection`。迁移：task 边沿→刷出/吸附/订阅(:232-315)；mode=2+双光电空→销毁(:210-226)；交付 settle(:729-809)。规则三（上游已持新 task 货→销毁在机货、订阅等传递）的上游探测**排除 lift**（`probeUpstreamHoldsTask`）：lift 推送制不参与 task 仲裁（放货无视 task、task_num_fin_* 仅标注），其持同 task 货多为刚推送给本机的上一托实物之下一托，销毁在机货会丢真实货箱，应走滞留箱复用盖戳。**相邻上游吸附**（`tryAdoptUpstreamInTransitCargo`，货到才报 task 的物理跟随）：无货新 task 边沿时若直接上游 conveyor 持有同 task 在途货，转移货物身份并把落点定在本机进入端，用短交接插值从货物当前位姿滑入（**不瞬移**——PLC 边沿快于孪生实际走行时硬跳会表现为走一下跳一下；插值中被下一台再吸附时从当前插值位姿接续成连续滑行），并以原持货方为波源发 taken 清下游悬空等待；不挂等待、不发 subscribe。快速逐台传递（0.x s/台、货到才报）场景下若走 subscribe 路径，各台误挂等待、subscribe 命中即交付不看走行位置，货被链尾隔空拽走、全程滞留交接插值（"飘走"）。仅 conveyor 持货参与吸附（lift 推送制排除；stacker/RGV/shuttle 在途货由其自身放货流程交付）；**直角相邻排除**（两机行走轴不共线时货物物理上停在中心线交叉拐角而非本机进入端，交回 subscribe 路径走 `perpendicularOffset` 拐角交付）；邻居无同 task 货时回落原 subscribe 等待。吸附落货后以本机为持货方补发 `available`：下游探测点够不到本机（单向探测，如 1006→1007）时，下游只能靠 available 注册上位链路并订阅，否则货会停在本机不再向下交付。
 
 ### 交接
 - **conveyor→conveyor**：探测邻居(:951-1010) + `available/taken` 下行泛洪、`subscribe/unsubscribe` 上行传递（`dispatchLinkMessage` :459）；越级直达 `runCargoDeliveryRelay`(:687-722)，K 跳仅终点发一次 taken+available，`visited` 防环。
@@ -347,7 +347,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），双用途：给对应工位货物标注 `cargo.task`（值变化才写）；兼作 **PLC 侧「工位有货」真值对账**——工位有货且曾见过非零标注、当前标注归零（PLC 已卸出）时触发强制补交付（见时序节）。字段缺失跳过对账，不清除标注。
 - `reference_upper_step/level_upper` 两字段经 `normalizeLiftCompatibleFields`（deviceTelemetry.ts）原地 `Math.trunc` 归一为整数。
 - **`movement_y` 不存在于协议**：载货台运动完全由目标层驱动，脚本 `motion.lift` 仅保留 speed/nodes/travelAxis 供驱动读取。
-- **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`）；接收方正在等待的 task（`pendingTask/waitingTask`）不挡交付，交付瞬间优先改标接收方等待的 task；接收方未挂单时保留 lift 货物自身 task（`task_num_fin_*` 标注），避免匿名货无法沿 task 链路继续交付、只能等下一份 task 到来自救。
+- **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`），等待中的 `pendingTask/waitingTask` 不挡交付。**兑现等待仅限：货物自带同 task，或货物匿名且接收方当前报文仍在上报该等待 task**（`ConveyorModelTelemetryState.snapshotTask`，证明 PLC 仍持有它）；货物自带异 task、或匿名但 PLC 已不再上报该等待 task（启动晚残留的旧等待）时**不得给新货改号补位**——否则新货会被旧 task 订阅链劫走并越级拽走（与站台放入异 task 货物同一规则）。此时保留货物自身 task（`task_num_fin_*` 标注，可能为空）落机、退订并清除残留等待，后续本机上报该 task 时形成新 task 边沿，走滞留箱复用盖号驶离；接收方未挂单时同样保留自身 task，避免匿名货无法沿 task 链路继续交付。
 
 **不消费 fetch**。
 
@@ -358,7 +358,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 `reference_upper_step/level_upper` 组合键 `${side}:${layer}` 决定去向并播放移动动画；交接由 `work_state` 门控：
 - **1 取货中**（来料层目标）：载物台未到位先 ×4 赶位；到位且对应工位有空（先 step2 后 step1，双满拒取）→ 每帧幂等从绑定 conveyor 拉货上台。
 - **2 取货完成**：同为取货门控（允许取货）；取货插值未播完则补齐到完成态（货物上台）。doing/done 都是「允许执行/赶着到位」的门控，不死锁货箱。
-- **3 卸货中**（送料层目标）：未到位先 ×4 赶位；到位后按序卸货——step2 有货先出；step2 空且 step1 有货时，step1 货先沿轨迹轴插值平移到 step2 锚点再出；**上一货离台后平移延迟一个承接时长（`CARGO_HANDOFF_SECONDS`，`outgoingHandoffCooldown`）再启动**——离台货在接收方侧还有承接平滑，两货动画须先后而非并发（否则视觉上 step1 先动）。交付无视 task 匹配、目标 conveyor 无货即可（接收方等待中的 task 由交付瞬间标注接管）；**接收方被占用时货留 step2 锚点原位等待、每帧重试，不预播送出动画**（否则滑入输送线撞上在机货），接收方一空闲当帧交付，离台动画由接收方侧承接平滑承担；有人接立即给，**不销毁**。
+- **3 卸货中**（送料层目标）：未到位先 ×4 赶位；到位后按序卸货——step2 有货先出；step2 空且 step1 有货时，step1 货先沿轨迹轴插值平移到 step2 锚点再出；**上一货离台后平移延迟一个承接时长（`CARGO_HANDOFF_SECONDS`，`outgoingHandoffCooldown`）再启动**——离台货在接收方侧还有承接平滑，两货动画须先后而非并发（否则视觉上 step1 先动）。交付无视 task 匹配、目标 conveyor 无货即可（接收方等待中的 task 仅在货物同 task，或匿名且接收方当前报文仍上报该 task 时由交付瞬间接管；否则保留货物身份并清残留等待）；**接收方被占用时货留 step2 锚点原位等待、每帧重试，不预播送出动画**（否则滑入输送线撞上在机货），接收方一空闲当帧交付，离台动画由接收方侧承接平滑承担；有人接立即给，**不销毁**。
 - **5 卸货完成**：同为卸货门控（允许交付，不等 doing 才撒手）；放货无台上插值，无需补齐。
 - **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；但 3/5 期间已启动的出站交接（`outgoingHandoffActive`）会继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
 - **标注对账强制补交付（滞留自救）**：工位有货且 `task_num_fin_*` 曾非零、当前归零（PLC 已卸出），且该货曾随台到位过送料层 → 无视 work_state/latch/到位门控，向该工位记录的送料接收方（`outgoingEntityId`，到位送料层时逐工位登记，排队平移 step1→step2 时随货继承）强制补交付；此路径下 latch 已死、ws 非 3/5，排队平移推进改由对账状态驱动，否则第二箱卡死在平移起点。接收方仍占用则每帧重试并一次性告警。解决双货连续送时第二箱常错过短卸货窗口（实测 1.7–2.2s < 冷却 1s + 平移 1.5s）、latch 随新目标（ws=6）失效后 PLC 已卸而孪生永久滞留的问题。字段缺失不参与对账；急停/faulted 冻结期不补交付。
@@ -371,7 +371,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 
 ### 交接
 - **conveyor→lift（来料层取货）**：到位后 liftDriver 经门面 `adoptConveyorCargoForLift(entityId, liftAssetCode)` → 复用 conveyorDriver `adoptPlatformCargoForStacker`（无视 task 接管、发 taken 波），交接插值上台到分配工位。取货锚点 = **货物在来料输送线上的实际位置**（通常停在紧靠提升机的末端），不取输送线台面中心——否则插值起点落在货物后方半个机身，先向后滑再上台（后摇）。
-- **lift→conveyor（送料层放货）**：到位后 `deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)` → conveyor 预检仅查无货（`requireTaskMatch=false`：等待中的 `pendingTask/waitingTask` 不挡交付，交付时改标该 task 接入仲裁链）+ settle 入链。交付只在货于 step2 锚点原位（onBoard）时发起，lift 侧恒 `preserveAxialPosition=false` 进入端落地（放货无台上插值，无滞后承接投影；该参数保留给 RGV 列路径）。交付早于接收方 task 边沿时保留货物自身 task 落机（不再匿名），后续 task 边沿仍走滞留箱复用盖戳（规则三销毁对 lift 豁免，见 §1 状态机）。
+- **lift→conveyor（送料层放货）**：到位后 `deliverLiftCargoToConveyorLayer(entityId, cargoKey, preserveAxialPosition)` → conveyor 预检仅查无货（`requireTaskMatch=false`：等待中的 `pendingTask/waitingTask` 不挡交付）+ settle 入链。等待 task 仅在货物同 task，或匿名且接收方当前报文仍上报该 task 时被接管；否则保留货物身份，退订并清除残留等待（`acceptRgvColumnPlacedCargo`，防止残留等待劫走新货后被旧 task 订阅链越级拽走）。交付只在货于 step2 锚点原位（onBoard）时发起，lift 侧恒 `preserveAxialPosition=false` 进入端落地（放货无台上插值，无滞后承接投影；该参数保留给 RGV 列路径）。交付早于接收方 task 边沿时保留货物自身 task 落机（不再匿名），后续 task 边沿仍走滞留箱复用盖戳（规则三销毁对 lift 豁免，见 §1 状态机）。
 - **externalPulls 兜底**：conveyor 订阅波触达 lift 持货时帧尾拉取，门控 `isLiftCargoReadyForExternalPull` = 到位锁 + 对应工位 onBoard + 非交接中 + **排队顺序**（step1 货在 step2 占用时不可拉，保证 step2 先出）。探测邻居过滤含 lift（`findProbeNeighborAssetCode`），订阅波才能触达。
 - 支撑面口径：`resolveConveyorDeckSurfacePoint` = deck center + upAxis × surfaceLift（surfaceLift 优先脚本 metadata 链面顶 conveyorSurfaceY），与 conveyor 自家货物落点同口径。用途限定：层对齐的目标支撑面 Y；**不**作取货插值锚点（取货锚货物实际位置，见上）。
 

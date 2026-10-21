@@ -335,6 +335,8 @@ export type ConveyorModelTelemetryState = {
   lastTask: string | null;
   /** 正在等待上游交付的 task（归一化字符串）；非 null 时本机不刷出、不走行。 */
   waitingTask: string | null;
+  /** 最近一条报文上报的 task（归一化字符串，缺失/0 为空串）：推货兑现等待时判定 PLC 当前是否仍持有该 task。 */
+  snapshotTask: string | null;
   /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
   probeNeighbors: { forward: string | null; reverse: string | null } | null;
   /** 行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */

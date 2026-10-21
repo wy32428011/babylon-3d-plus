@@ -54,6 +54,9 @@ const CONVEYOR_CARGO_IDENTITY = 'cargo';
 /** 行程终点判定容差（米）：自驱续行登记时认为货箱已抵端点的剩余距离。 */
 const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
 
+/** 临时链路诊断开关（排查残留订阅/越级拽货时置 true，输出到浏览器 console；平时关闭）。 */
+const CONVEYOR_LINK_TRACE = false;
+
 /**
  * 链路消息：available/taken 下行泛洪，subscribe/unsubscribe 上行传递；visited 防环，hops 逐跳递增。
  * 消息处理为同步方法调用，与设备各自 MQTT 快照到达无关（断流设备也能收到链路事件）。
@@ -78,6 +81,12 @@ export class ConveyorTelemetryDriver {
   private modelIndex: Map<string, ModelRuntimeEntry> | null = null;
 
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
+
+  /** 临时链路诊断：仅在 CONVEYOR_LINK_TRACE 打开时输出到浏览器 console，带相对毫秒便于对齐消息记录。 */
+  private trace(message: string): void {
+    if (!CONVEYOR_LINK_TRACE || typeof window === 'undefined') return;
+    console.log(`[CVTRACE] +${Math.round(performance.now())}ms ${message}`);
+  }
 
   private get scene(): Scene {
     return this.context.scene;
@@ -173,7 +182,9 @@ export class ConveyorTelemetryDriver {
     const taskValue = readIntegerField(snapshot.fields, 'task');
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
+    state.snapshotTask = taskMode ? task : null;
     if (taskMode && task !== '' && task !== state.lastTask) {
+      this.trace(`${model.assetCode} 任务边沿 task=${task} 上一=${state.lastTask || '-'} dir=${movementDirection} mode=${mode ?? '-'} 持货=${state.cargoCode ?? '-'} 等待=${state.waitingTask ?? '-'} 过境=${state.transitedTasks.has(task) ? 'Y' : 'N'}`);
       const previousWaitingTask = state.waitingTask;
       state.lastTask = task;
       if (!state.transitedTasks.has(task)) {
@@ -239,6 +250,7 @@ export class ConveyorTelemetryDriver {
         : null;
       if (heldCargo && this.hasDownstreamSubscriberForTask(state, heldCargo.task)) {
         // 旧货已有下游订阅：先正常交付，本机按无货流程处理新 task
+        this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 已有下游订阅，先交付再处理新 task=${state.pendingTask}`);
         this.tryDeliverHeldCargo(model);
         heldCargo = state.cargoCode !== null
           ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
@@ -251,6 +263,7 @@ export class ConveyorTelemetryDriver {
         if (upstreamHoldsNewTask) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
           const oldTask = heldCargo.task;
+          this.trace(`${model.assetCode} 上游已有新 task=${state.pendingTask} 货，销毁在机货 task=${oldTask} 并订阅`);
           this.disposeConveyorCargoForAssetCode(model.assetCode);
           state.cargoCode = null;
           state.handoffEntryOffset = null;
@@ -261,6 +274,7 @@ export class ConveyorTelemetryDriver {
         } else {
           // 滞留箱复用：保持位置，盖上新 task；旧 task 货物视为消失，新 task 货物通知下游
           const oldTask = heldCargo.task;
+          this.trace(`${model.assetCode} 滞留箱复用 task ${oldTask || '-'} -> ${state.pendingTask}`);
           heldCargo.task = state.pendingTask;
           // 复用后货物可驶离（含从站台出发），不再按上游来货钳制终点
           state.platformInboundCargo = false;
@@ -279,6 +293,7 @@ export class ConveyorTelemetryDriver {
         if (!hasUpstream && this.resolvePlatformLocator(model)) {
           // 线首站台机：货物只能由 stacker 放入站台（acceptPlatformPlacedCargo 事件满足），
           // 不自建货箱也不发订阅；无需勾选起点设备/货物自动销毁。
+          this.trace(`${model.assetCode} 线首站台挂起 task=${state.pendingTask}（等 stacker 放入）`);
           state.waitingTask = state.pendingTask;
         } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true && !this.hasExternalHolderForTask(state.pendingTask)) {
           // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱。
@@ -287,6 +302,7 @@ export class ConveyorTelemetryDriver {
           // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
           // 刷出瞬间货箱模板尚未加载，按内置长度计算行程；模板就绪后下一帧 clamp 自动收敛到实测端点。
           const plan = this.resolveConveyorTravelPlan(model);
+          this.trace(`${model.assetCode} 起点刷出 task=${state.pendingTask} dir=${probeDirection}`);
           state.pendingTask = null;
           state.waitingTask = null;
           state.cargoTravelOffset = -probeDirection * plan.forwardSign * this.resolveTravelHalfRangeMeters(null, plan);
@@ -307,6 +323,7 @@ export class ConveyorTelemetryDriver {
             state.pendingTask = null;
           } else {
             // 等待上游传递：传递式订阅（沿入口探测邻居 + 注册上游上行，持货方命中即交付）
+            this.trace(`${model.assetCode} 进入等待 task=${state.pendingTask} probeDir=${probeDirection} 上游=${this.resolveProbeNeighbor(model, probeDirection)?.assetCode ?? '-'}`);
             state.waitingTask = state.pendingTask;
             this.sendSubscribe(model, state.pendingTask, probeDirection);
           }
@@ -442,6 +459,7 @@ export class ConveyorTelemetryDriver {
         // stacker mode==4 延后交接门控：落货站台后待收叉完毕的滞留货由推送路径交付，pull 不得提前摘走
         if (this.context.isStackerCargoPendingPlatformHandoff(cargo)) continue;
         state.externalPulls.delete(subscriberCode);
+        this.trace(`外部拉取 ${pull.holderAssetCode} task=${pull.task} -> ${subscriberCode} hops=${pull.hops}`);
         const detached = this.context.detachClaimedCargoByReference(cargo);
         if (!detached) continue;
         // 代外部持有方交付并参与接力合并：本机为 taken 波起点，持货方记为外部设备
@@ -484,6 +502,7 @@ export class ConveyorTelemetryDriver {
     // 直角相邻设备的探测点跨不过拐角，原订阅可能从未到达该上游。
     if (state.pendingTask === msg.task && state.cargoCode === null
       && (state.waitingTask !== msg.task || newUpstreamPath)) {
+      this.trace(`${model.assetCode} <-available ${msg.originAssetCode} task=${msg.task} 触发订阅 hops=${msg.hops}`);
       state.waitingTask = msg.task;
       this.sendSubscribe(model, msg.task, msg.direction);
     }
@@ -499,6 +518,7 @@ export class ConveyorTelemetryDriver {
       }
     }
     if (state.pendingTask === msg.task && msg.recipientAssetCode !== model.assetCode) {
+      this.trace(`${model.assetCode} <-taken ${msg.originAssetCode} task=${msg.task} recipient=${msg.recipientAssetCode ?? 'null'} 清除挂单/等待`);
       state.transitedTasks.add(msg.task);
       state.pendingTask = null;
       // 过境即退订：沿链清除本机的下位链路/外部拉取登记，不再挂单
@@ -519,6 +539,7 @@ export class ConveyorTelemetryDriver {
       ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
       : null;
     if (heldCargo && heldCargo.task === msg.task) {
+      this.trace(`${model.assetCode} <-subscribe ${msg.originAssetCode} task=${msg.task} 持货命中立即交付 hops=${msg.hops}`);
       this.tryDeliverHeldCargo(model);
       return;
     }
@@ -577,6 +598,7 @@ export class ConveyorTelemetryDriver {
   /** 持货事件下行通知：本机持有 task 货物（交付到达/起点自建/复用盖 task 后调用）。 */
   private notifyAvailable(model: ModelRuntimeEntry, task: string, direction: number): void {
     if (!task) return;
+    this.trace(`${model.assetCode} 发available task=${task} dir=${direction} 出口=${this.resolveProbeNeighbor(model, -direction)?.assetCode ?? '-'}`);
     this.floodDownstream(model, {
       kind: 'available',
       task,
@@ -631,6 +653,7 @@ export class ConveyorTelemetryDriver {
   /** 退订：收到货/变更 task/mode=0/流向翻转时发出，沿链清除 downstreamLinks/externalPulls 登记。 */
   private sendUnsubscribe(model: ModelRuntimeEntry, task: string, direction: number): void {
     if (!task) return;
+    this.trace(`${model.assetCode} 退订 task=${task} dir=${direction}`);
     this.propagateUpstream(model, {
       kind: 'unsubscribe',
       task,
@@ -710,6 +733,7 @@ export class ConveyorTelemetryDriver {
       const next = this.findDeliveryTarget(target.subscriber, cargo);
       if (!next) {
         // 接力终点：唯一一次 taken + available
+        this.trace(`接力终点 task=${task} 持货方=${originHolderAssetCode} -> ${target.subscriber.assetCode}`);
         this.sendTakenWave(waveOrigin, originHolderAssetCode, task, target.subscriber.assetCode, direction);
         this.notifyAvailable(target.subscriber, task, direction);
         return;
@@ -736,6 +760,7 @@ export class ConveyorTelemetryDriver {
     upstream: ModelRuntimeEntry | null = null,
   ): void {
     const subscriberState = subscriber.conveyorTelemetry;
+    this.trace(`交付 task=${task} from=${cargo.assetCode || '-'}${upstream ? `/${upstream.assetCode}` : ''} -> ${subscriber.assetCode} hops=${hops} preserve=${preserveAxialPosition}`);
     cargo.assetCode = subscriber.assetCode;
     cargo.task = task;
 
@@ -840,9 +865,12 @@ export class ConveyorTelemetryDriver {
 
   /**
    * 相邻上游同 task 在途货吸附（货到才报 task 的物理跟随）：直接上游 conveyor 持有该 task 在途货时，
-   * 把货瞬时转移到本机进入端落位走行——跳过交接插值（PLC 上报即货已在本机的权威凭据；
-   * 逐台传递快于插值时长时，插值中再被下游吸附会退回"连续飘"），并以原持货方为波源发 taken
-   * 清理更下游的悬空等待。仅 conveyor 持货参与：stacker/RGV/shuttle 在途货由其自身放货流程交付，
+   * 转移货物身份并把落点定在本机进入端，以短交接插值从货物当前位姿滑入——不瞬移（PLC 边沿比孪生
+   * 实际走行更快时，硬跳会表现为"走一下、跳一下"）；插值中被下一台再次吸附时从当前插值位姿接续，
+   * 形成连续滑行。并以原持货方为波源发 taken 清理更下游的悬空等待，同时以本机为持货方发 available：
+   * 下游探测点够不到本机（单向探测，如 1006→1007）时只能靠 available 注册上位链路，否则货会停在本机
+   * 不再向下交付。
+   * 仅 conveyor 持货参与：stacker/RGV/shuttle 在途货由其自身放货流程交付，
    * lift 推送制不参与 task 仲裁（探测排除，同规则三）。返回 true 表示已吸附接管。
    */
   private tryAdoptUpstreamInTransitCargo(model: ModelRuntimeEntry, direction: number, task: string): boolean {
@@ -861,11 +889,12 @@ export class ConveyorTelemetryDriver {
     const cargoKey = this.getConveyorCargoKey(neighbor.assetCode, neighborCargoCode);
     const cargo = this.state.conveyorCargoMeshes.get(cargoKey) ?? null;
     if (!cargo || cargo.task !== task) return false;
+    this.trace(`${model.assetCode} 吸附上游 ${neighbor.assetCode} task=${task}`);
     const detached = this.detachClaimedCargoByKey(cargoKey);
     if (!detached) return false;
     this.notifyTaken(neighbor, task, model.assetCode, direction);
     this.settleCargoTransfer(detached, model, task, 1, direction, false, neighbor);
-    detached.handoff = null;
+    this.notifyAvailable(model, task, direction);
     return true;
   }
 
@@ -1207,16 +1236,31 @@ export class ConveyorTelemetryDriver {
    * RGV 列放货交付（订阅仲裁）：货物落地本机并自驱，等价的 taken/available 波接入链路广播，
    * 本机下游若已有订阅者则继续接力。预检由 canAcceptRgvColumnPlacedCargo 承担（调用方先预检再拆原引用）。
    * preserveAxialPosition=true（承接方消息滞后、交接插值已推进）时按货物当前轴向位置落地，不回进入端。
-   * requireTaskMatch=false 供 lift 送料层使用：优先改标接收方正在等待的 task；接收方未挂单时保留货物自身 task
-   * （提升机 task_num_fin_* 标注），否则匿名货无法沿 task 链路继续交付，只能等下一份 task 到来自救。
+   * requireTaskMatch=false 供 lift 送料层使用：接收方等待的 task 仅在以下情形兑现——货物带了同 task；
+   * 或货物匿名且接收方**当前报文仍在上报该等待 task**（PLC 仍持有，推来的正是它）。货物自带异 task、
+   * 或货物匿名但 PLC 已不再上报该等待 task（启动晚残留的旧等待）时保留货物身份、退订清除残留等待，
+   * 防止新货被旧 task 订阅链改号后越级拽走（同站台放入异 task 货物规则）。清等待后不预写
+   * currentTask/lastTask，本机上报该 task 时形成新 task 边沿走滞留箱复用驶离；未挂单时保留货物自身 task
+   * （提升机 task_num_fin_* 标注），否则匿名货无法沿 task 链路继续交付。
    */
   acceptRgvColumnPlacedCargo(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry, task: string, preserveAxialPosition = false, requireTaskMatch = true): boolean {
     if (!this.canAcceptRgvColumnPlacedCargo(model, task, requireTaskMatch)) return false;
     const holderAssetCode = cargo.assetCode;
     const direction = this.resolveFlowDirection(model);
+    const state = model.conveyorTelemetry;
+    const waitedTask = state.pendingTask ?? state.waitingTask;
+    const cargoTask = cargo.task ?? '';
+    const adoptsWaitedTask = requireTaskMatch || (waitedTask !== null
+      && (cargoTask ? cargoTask === waitedTask : state.snapshotTask === waitedTask));
+    if (!requireTaskMatch && !adoptsWaitedTask && waitedTask !== null) {
+      this.sendUnsubscribe(model, waitedTask, direction);
+      state.pendingTask = null;
+      state.waitingTask = null;
+    }
     const effectiveTask = requireTaskMatch
       ? task
-      : model.conveyorTelemetry.pendingTask ?? model.conveyorTelemetry.waitingTask ?? cargo.task ?? '';
+      : adoptsWaitedTask ? waitedTask ?? cargoTask : cargoTask;
+    this.trace(`推送落机 -> ${model.assetCode} 货task=${cargoTask || '-'} 等待=${waitedTask ?? '-'} 当前task=${state.snapshotTask || '-'} 生效=${effectiveTask || '-'} requireMatch=${requireTaskMatch} 方向=${direction}`);
     this.settleCargoTransfer(cargo, model, effectiveTask, 1, direction, preserveAxialPosition);
     // 以接收方为波起点、原持货方记 RGV：沿下行链清除 upstreamLinks 中 holder=RGV 的残留登记
     this.sendTakenWave(model, holderAssetCode, effectiveTask, model.assetCode, direction);

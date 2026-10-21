@@ -307,7 +307,7 @@ test('直接邻居无货：传递式订阅仍向上注册下位链路，本机�
 });
 
 test('相邻上游持同 task 在途货：本机报 task 边沿时吸附瞬时转移，不挂等待不订阅（货到才报跟随）', () => {
-  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 }, CV3: { centerX: 4 } });
   try {
     // CV1 起点刷出并自驱在途（货到才报场景：物理货已流向 CV2，但 CV2 的 task 上报滞后于到货）
     h.apply('CV1', { task: 7, movement_x: 1 });
@@ -319,7 +319,7 @@ test('相邻上游持同 task 在途货：本机报 task 边沿时吸附瞬时�
     const cargo = onlyCargo(h.state);
     assert.equal(cargo.assetCode, 'CV2', '货物必须瞬时转移到本机');
     assert.equal(cargo.task, '7');
-    assert.equal(cargo.handoff, null, '吸附必须跳过交接插值（PLC 上报即货已在本机）');
+    assert.ok(cargo.handoff, '吸附必须用短交接插值从当前位姿滑入，避免瞬移卡顿');
     assert.equal(cv2.cargoCode, 'cargo');
     assert.equal(cv2.waitingTask, null, '吸附不得挂起等待');
     assert.equal(cv2.pendingTask, null, '吸附后 pendingTask 必须清掉');
@@ -330,6 +330,9 @@ test('相邻上游持同 task 在途货：本机报 task 边沿时吸附瞬时�
     assert.equal(cv2.handoffEntryOffset, null, '共线吸附不得记录拐角进入偏移');
     assert.equal(h.models.CV1.conveyorTelemetry.downstreamLinks.size, 0, '吸附不得产生订阅登记');
     assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null, '原持货方必须摘除货物引用');
+    // 吸附落货必须向下游发 available：下游探测点够不到本机（单向探测）时靠它注册上位链路
+    assert.equal(h.models.CV3.conveyorTelemetry.upstreamLinks.get('CV2')?.task, '7',
+      '吸附后必须以本机为持货方通知下游，供单向探测的下游注册上位链路');
 
     // 吸附后货物沿本机自驱走行
     h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 10);
@@ -631,14 +634,37 @@ test('lift 放货接收方未挂单：保留货物自身 task，不得改成匿�
     // requireTaskMatch=false（lift 送料层交付），task 参数为空
     assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, cargo as ConveyorCargoRuntimeEntry, '', false, false), true);
     assert.equal(cargo.task, '7001', '接收方未挂单时必须保留货物自身 task，避免匿名货无法继续交付');
+  } finally {
+    h.dispose();
+  }
+});
 
-    // 接收方有挂单时仍优先改标接收方 task
-    const cargo2 = h.insertRgvCargo('RGV1', '7002');
+test('lift 放货接收方挂异 task 等待：保留货物身份并清残留等待，不得给新货改号补位', () => {
+  const h = makeHarness({ CV1: { centerX: -8 }, CV2: { centerX: -4 }, CV3: { centerX: 0 }, CV4: { centerX: 4 } });
+  try {
+    // CV4 先报 task=100（无货）：订阅沿链上行，CV2 登记下位链路
+    h.apply('CV4', { task: 100, movement_x: 1 });
+    assert.ok(h.models.CV2.conveyorTelemetry.downstreamLinks.has('CV4'), '前置：订阅必须已注册到 CV2');
+    // CV2 也报 task=100（无货）：形成残留等待
+    h.apply('CV2', { task: 100, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.waitingTask, '100', '前置：CV2 必须挂着残留等待');
+
+    // 提升机把一件全新 task=200 的货推进 CV2（requireTaskMatch=false，task 参数为空）
+    const lifted = h.insertRgvCargo('RGV1', '200');
     h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
-    model.conveyorTelemetry.cargoCode = null;
-    model.conveyorTelemetry.pendingTask = '777';
-    assert.equal(h.driver.acceptRgvColumnPlacedCargo(model, cargo2 as ConveyorCargoRuntimeEntry, '', false, false), true);
-    assert.equal(cargo2.task, '777', '接收方挂单时必须改标接收方 task');
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(h.models.CV2, lifted as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(lifted.task, '200', '新货不得被残留等待改号');
+    assert.equal(lifted.assetCode, 'CV2', '新货必须留在接收方');
+    assert.equal(cv2.cargoCode, 'cargo', '接收方必须持有新货');
+    assert.equal(cv2.pendingTask, null, '残留 pendingTask 必须清除');
+    assert.equal(cv2.waitingTask, null, '残留等待必须清除，不得被新货兑现');
+    assert.ok(cv2.downstreamLinks.has('CV4'), '旧 task 订阅登记不得被新货触发交付');
+
+    // 下游报出自己的 task 边沿（货到才报）：旧等待清除，按新 task 正常接走
+    h.apply('CV4', { task: 200, movement_x: 1 });
+    assert.equal(lifted.assetCode, 'CV4', '下游 task 边沿到达后必须按 task=200 正常交付');
+    assert.equal(lifted.task, '200');
   } finally {
     h.dispose();
   }
@@ -1324,6 +1350,52 @@ test('滞留箱复用登记自驱后 movement 脉冲清零再静默：必须续�
     h.apply('CV1', { task: 371, mode: 2, movement_x: 0 }, 0.1, 150, 3000);
     assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
       `货物必须续行到行程终点 ${HALF_RANGE}，实际 ${h.models.CV1.conveyorTelemetry.cargoTravelOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('lift 推来匿名货：PLC 已不再上报残留等待 task 时保留匿名落机并清等待，不越级拽走', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 }, CV3: { centerX: 4 } });
+  try {
+    // 下游先订阅 task=100，CV2 登记下位链路
+    h.apply('CV3', { task: 100, movement_x: 1 });
+    assert.ok(h.models.CV2.conveyorTelemetry.downstreamLinks.has('CV3'));
+    // CV2 报 task=100 后 PLC 很快归零（启动晚残留的旧等待）
+    h.apply('CV2', { task: 100, movement_x: 1 });
+    h.apply('CV2', { task: 0, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.waitingTask, '100');
+    assert.equal(cv2.snapshotTask, '', 'PLC 当前已不再上报 100');
+
+    // 提升机推来一件匿名货（task 为空）
+    const lifted = h.insertRgvCargo('RGV1', '');
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(h.models.CV2, lifted as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(lifted.task, '', 'PLC 已不持有等待 task 时，匿名货不得被改号');
+    assert.equal(lifted.assetCode, 'CV2', '匿名货必须留在接收方');
+    assert.equal(cv2.waitingTask, null, '残留等待必须清除');
+    assert.equal(cv2.pendingTask, null, '残留挂单必须清除');
+    assert.ok(cv2.downstreamLinks.has('CV3'), '旧 task 订阅登记不得触发匿名货交付');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('lift 推来匿名货：PLC 当前仍上报等待 task 时由推货兑现该 task', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
+  try {
+    h.apply('CV2', { task: 100, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.waitingTask, '100');
+    assert.equal(cv2.snapshotTask, '100', 'PLC 当前仍上报 100');
+
+    const lifted = h.insertRgvCargo('RGV1', '');
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(h.models.CV2, lifted as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(lifted.task, '100', 'PLC 仍持有时匿名货由等待 task 兑现');
+    assert.equal(lifted.assetCode, 'CV2');
+    assert.equal(cv2.waitingTask, null);
   } finally {
     h.dispose();
   }

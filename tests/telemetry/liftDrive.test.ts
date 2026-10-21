@@ -184,7 +184,8 @@ function makeHarness(options: HarnessOptions = {}) {
       model.conveyorTelemetry.cargoCode = null;
       return cargo;
     },
-    // 镜像 facade deliverLiftCargoToConveyorLayer：仅查无货（等待中的 task 不挡交付），交付瞬间改标接收方 task；
+    // 镜像 facade deliverLiftCargoToConveyorLayer：仅查无货（等待中的 task 不挡交付）；接收方等待的 task
+    // 仅在货物匿名或 task 一致时兑现，货物自带异 task 时保留身份并清等待（防残留等待劫走新货）。
     // 同时镜像 settleCargoTransfer 的入表与走行初始化（进入端落地 + 自驱登记），保证交付后 conveyor 可真实走行。
     deliverLiftCargoToConveyorLayer: (entityId: string, cargoKey: string, _preserveAxialPosition = false) => {
       const model = conveyorByEntity(entityId);
@@ -193,7 +194,10 @@ function makeHarness(options: HarnessOptions = {}) {
       if (conveyorState.cargoCode !== null) return false;
       const cargo = liftDriver.detachClaimedCargoByKey(cargoKey);
       if (!cargo) return false;
-      cargo.task = conveyorState.pendingTask ?? conveyorState.waitingTask ?? cargo.task ?? '';
+      const waitedTask = conveyorState.pendingTask ?? conveyorState.waitingTask;
+      const adoptsWaitedTask = waitedTask !== null
+        && (cargo.task ? cargo.task === waitedTask : conveyorState.snapshotTask === waitedTask);
+      if (adoptsWaitedTask) cargo.task = waitedTask;
       cargo.assetCode = model.assetCode;
       conveyorState.pendingTask = null;
       conveyorState.waitingTask = null;
@@ -585,22 +589,39 @@ test('work_state=2（取货完成）同为取货门控：到位即取货并补�
   }
 });
 
-test('work_state=5（卸货完成）同为卸货门控：到位即交付，不等 doing；接收方等待 task 时改标接收方 task', () => {
+test('work_state=5（卸货完成）同为卸货门控：到位即交付，不等 doing；同 task 等待由交付兑现', () => {
   const h = makeHarness();
   try {
     const { a } = adoptTwoCargos(h);
 
-    // 接收方先到 task 开始等待：不得挡交付
-    h.models.COUT.conveyorTelemetry.pendingTask = '777';
-    h.models.COUT.conveyorTelemetry.waitingTask = '777';
+    // 接收方等待的 task 与货物一致：不得挡交付，由交付兑现
+    h.models.COUT.conveyorTelemetry.pendingTask = a.task;
+    h.models.COUT.conveyorTelemetry.waitingTask = a.task;
 
     // 从未 doing：全程 work_state=5，到位帧即交付 step2 的 A
     const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
     runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
     assert.deepEqual(h.delivered, [a], 'work_state=5 到位必须立即交付');
-    assert.equal(a.task, '777', '交付必须改标接收方等待的 task 接入仲裁链');
+    assert.equal(a.task, '901', '同 task 等待交付后保持货物身份');
     assert.equal(h.models.COUT.conveyorTelemetry.pendingTask, null, '交付后清接收方挂单');
     assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('接收方挂异 task 等待：交付保留货物自身 task 并清残留等待，不改号补位', () => {
+  const h = makeHarness();
+  try {
+    const { a } = adoptTwoCargos(h);
+    h.models.COUT.conveyorTelemetry.pendingTask = '777';
+    h.models.COUT.conveyorTelemetry.waitingTask = '777';
+
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 5 };
+    runUntil(h, outgoing, () => h.delivered.length === 1);
+    assert.equal(a.task, '901', '异 task 等待不得劫走新货改号');
+    assert.equal(h.models.COUT.conveyorTelemetry.pendingTask, null, '残留 pendingTask 必须清除');
+    assert.equal(h.models.COUT.conveyorTelemetry.waitingTask, null, '残留等待必须清除');
   } finally {
     h.dispose();
   }
