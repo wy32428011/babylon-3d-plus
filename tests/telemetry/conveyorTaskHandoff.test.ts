@@ -306,6 +306,58 @@ test('直接邻居无货：传递式订阅仍向上注册下位链路，本机�
   }
 });
 
+test('相邻上游持同 task 在途货：本机报 task 边沿时吸附瞬时转移，不挂等待不订阅（货到才报跟随）', () => {
+  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
+  try {
+    // CV1 起点刷出并自驱在途（货到才报场景：物理货已流向 CV2，但 CV2 的 task 上报滞后于到货）
+    h.apply('CV1', { task: 7, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', 'CV1 必须持有在途货');
+
+    // CV2 报同 task 边沿：吸附上游在途货瞬时落到本机进入端，不走 subscribe 等待
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    const cargo = onlyCargo(h.state);
+    assert.equal(cargo.assetCode, 'CV2', '货物必须瞬时转移到本机');
+    assert.equal(cargo.task, '7');
+    assert.equal(cargo.handoff, null, '吸附必须跳过交接插值（PLC 上报即货已在本机）');
+    assert.equal(cv2.cargoCode, 'cargo');
+    assert.equal(cv2.waitingTask, null, '吸附不得挂起等待');
+    assert.equal(cv2.pendingTask, null, '吸附后 pendingTask 必须清掉');
+    // 落位即进入端（同帧自驱再推进一帧行程，故允许 +0.03m 容差）
+    assert.ok(cv2.cargoTravelOffset >= -HALF_RANGE - 1e-6
+      && cv2.cargoTravelOffset <= -HALF_RANGE + CARGO_SPEED * 0.1 + 1e-6,
+      `吸附必须落本机进入端（偏移约 ${-HALF_RANGE}），实际 ${cv2.cargoTravelOffset}`);
+    assert.equal(cv2.handoffEntryOffset, null, '共线吸附不得记录拐角进入偏移');
+    assert.equal(h.models.CV1.conveyorTelemetry.downstreamLinks.size, 0, '吸附不得产生订阅登记');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null, '原持货方必须摘除货物引用');
+
+    // 吸附后货物沿本机自驱走行
+    h.apply('CV2', { task: 7, movement_x: 1 }, 0.1, 10);
+    assert.ok(cv2.cargoTravelOffset > -HALF_RANGE, `吸附后货物必须自驱走行，实际 ${cv2.cargoTravelOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('相邻上游持异 task 货：吸附不命中，回落 subscribe 挂起等待', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
+  try {
+    h.insertConveyorCargo('CV1', '6');
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(cv2.waitingTask, '7', '吸附不命中必须回落 subscribe 等待');
+    assert.equal(cv2.cargoCode, null, '异 task 货物不得被转移');
+    const link = h.models.CV1.conveyorTelemetry.downstreamLinks.get('CV2');
+    assert.ok(link, '订阅必须注册到上游下位链路');
+    assert.equal(link.task, '7');
+    const cargo = onlyCargo(h.state);
+    assert.equal(cargo.assetCode, 'CV1', '异 task 货物必须留在原持货方');
+    assert.equal(cargo.task, '6');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('上游持货后事件驱动交付：available 通知触发订阅，当帧直达交付（下游无需再收消息）', () => {
   const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 } });
   try {

@@ -300,9 +300,16 @@ export class ConveyorTelemetryDriver {
           this.notifyAvailable(model, state.currentTask ?? '', probeDirection);
           this.tryDeliverHeldCargo(model);
         } else {
-          // 等待上游传递：传递式订阅（沿入口探测邻居 + 注册上游上行，持货方命中即交付）
-          state.waitingTask = state.pendingTask;
-          this.sendSubscribe(model, state.pendingTask, probeDirection);
+          // 相邻上游吸附优先：货到才报 task（物理货已在本机），直接上游 conveyor 持有同 task 在途货时
+          // 瞬时转移落本机走行——否则本机误挂等待、subscribe 命中即交付不看走行位置，
+          // 快速逐台传递时货被链尾订阅隔空拽走、全程滞留交接插值（"飘走"）。
+          if (this.tryAdoptUpstreamInTransitCargo(model, probeDirection, state.pendingTask)) {
+            state.pendingTask = null;
+          } else {
+            // 等待上游传递：传递式订阅（沿入口探测邻居 + 注册上游上行，持货方命中即交付）
+            state.waitingTask = state.pendingTask;
+            this.sendSubscribe(model, state.pendingTask, probeDirection);
+          }
         }
       }
     }
@@ -829,6 +836,37 @@ export class ConveyorTelemetryDriver {
     const neighbor = this.resolveProbeNeighbor(model, direction);
     if (neighbor === null || isLiftRuntimeModel(neighbor)) return false;
     return this.findHeldCargoByTask(neighbor.assetCode, task) !== null;
+  }
+
+  /**
+   * 相邻上游同 task 在途货吸附（货到才报 task 的物理跟随）：直接上游 conveyor 持有该 task 在途货时，
+   * 把货瞬时转移到本机进入端落位走行——跳过交接插值（PLC 上报即货已在本机的权威凭据；
+   * 逐台传递快于插值时长时，插值中再被下游吸附会退回"连续飘"），并以原持货方为波源发 taken
+   * 清理更下游的悬空等待。仅 conveyor 持货参与：stacker/RGV/shuttle 在途货由其自身放货流程交付，
+   * lift 推送制不参与 task 仲裁（探测排除，同规则三）。返回 true 表示已吸附接管。
+   */
+  private tryAdoptUpstreamInTransitCargo(model: ModelRuntimeEntry, direction: number, task: string): boolean {
+    if (!task) return false;
+    const neighbor = this.resolveProbeNeighbor(model, direction);
+    if (neighbor === null || isLiftRuntimeModel(neighbor)) return false;
+    // 直角相邻不吸附：货物物理上停在两条中心线的交叉拐角而非本机进入端，
+    // 交回 subscribe 路径由 settleCargoTransfer 的 perpendicularOffset 拐角交付处理。
+    const selfPlan = this.resolveConveyorTravelPlan(model);
+    const neighborPlan = this.resolveConveyorTravelPlan(neighbor);
+    if (Math.abs(Vector3.Dot(selfPlan.travelContext.travelAxis, neighborPlan.travelContext.travelAxis)) < 0.999) {
+      return false;
+    }
+    const neighborCargoCode = neighbor.conveyorTelemetry?.cargoCode ?? null;
+    if (neighborCargoCode === null) return false;
+    const cargoKey = this.getConveyorCargoKey(neighbor.assetCode, neighborCargoCode);
+    const cargo = this.state.conveyorCargoMeshes.get(cargoKey) ?? null;
+    if (!cargo || cargo.task !== task) return false;
+    const detached = this.detachClaimedCargoByKey(cargoKey);
+    if (!detached) return false;
+    this.notifyTaken(neighbor, task, model.assetCode, direction);
+    this.settleCargoTransfer(detached, model, task, 1, direction, false, neighbor);
+    detached.handoff = null;
+    return true;
   }
 
   /** stacker/RGV/shuttle/lift（无链路能力、可能被静态探测缓存漏掉的行车中设备）是否正持有该 task 的货物在途。 */
