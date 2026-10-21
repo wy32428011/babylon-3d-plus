@@ -220,6 +220,8 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     targetCellChangeIntervalMs: null,
     hcliftOccupancyKey: null,
     lastHcliftLayer: null,
+    hcliftExitDoneKey: null,
+    hcliftLoadedSawMoving: false,
     lastYFlashOffset: null,
   };
 }
@@ -252,6 +254,8 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.targetCellChangeIntervalMs = null;
   model.shuttleTelemetry.hcliftOccupancyKey = null;
   model.shuttleTelemetry.lastHcliftLayer = null;
+  model.shuttleTelemetry.hcliftExitDoneKey = null;
+  model.shuttleTelemetry.hcliftLoadedSawMoving = false;
   model.shuttleTelemetry.lastYFlashOffset = null;
 }
 

@@ -68,6 +68,8 @@ type ShuttleTargetCell = {
   hcliftKey?: string;
   /** x=-2 时 hclift 载货台水平中心：存在时以其为上台走行目标（而非站台货格中心）。 */
   deckCenter?: Vector3;
+  /** 到层自动出梯（中/完成）：目标为目标层站台格而非载货台中心，Status=0 也走行。 */
+  exitToPlatform?: boolean;
 };
 
 /**
@@ -215,6 +217,8 @@ export class ShuttleTelemetryDriver {
     const toY = readIntegerField(snapshot.fields, 'to_y');
     const toZ = readIntegerField(snapshot.fields, 'to_z');
     const toDepth = readIntegerField(snapshot.fields, 'to_Depth');
+    // 回到正常任务语义：出梯闩锁复位，下次进梯重新判定
+    model.shuttleTelemetry.hcliftExitDoneKey = null;
     // 目标字段整体缺失：设备本帧未报目标（心跳/诊断帧），不告警
     if (toX === null && toY === null && toZ === null && toDepth === null) {
       return { cell: null, key: null, mismatch: false };
@@ -226,6 +230,12 @@ export class ShuttleTelemetryDriver {
     if (toX === null || toY === null || toZ === null || storageDepth === null) {
       this.reportShuttleTargetFieldError(snapshot, toX, toY, toZ, toDepth, storageDepth);
       return { cell: null, key: null, mismatch: true };
+    }
+
+    // 目标层 ≠ 当前上报层（y）：任务需先换层，PLC 随后会走 x=-1/-2 流程，本帧按无目标处理，避免先闪到目标层再闪回
+    const currentLayer = readIntegerField(snapshot.fields, 'y');
+    if (currentLayer !== null && currentLayer >= 1 && toY >= 1 && currentLayer !== toY) {
+      return { cell: null, key: null, mismatch: false };
     }
 
     const aisleCode = this.resolveShuttleAisleCode(model);
@@ -317,23 +327,53 @@ export class ShuttleTelemetryDriver {
     // x=-2（进入/在提升机中）且存在同巷道/同站台绑定的小车提升机：水平目标改为载货台中心（真正驶入载台），
     // 支撑位 Y 跟随载货台实时台面高度（整车被托举升降）；x=-1（驶入站台等待）或无匹配提升机时维持原行为。
     const hclift = this.resolveHcliftPlatformSurface(locator);
+    // 到层自动出梯：协议无出梯信号（x 直接由 -2 翻 -1）。占位 loaded 期间观察到提升机「未到位→到位」
+    // （载车移动过的证据，排除驶入静止提升机误触发）后，目标切到目标层站台格，由驱动侧合成驶出动画。
+    let exitToPlatform = false;
+    let exitLevel: number | null = null;
     if (x === -2 && hclift) {
-      supportPosition.x = hclift.surface.deckCenter.x;
-      supportPosition.z = hclift.surface.deckCenter.z;
-      supportPosition.y = hclift.surface.supportY;
+      const surface = hclift.surface;
+      const shuttleState = model.shuttleTelemetry;
+      exitLevel = surface.targetLevel !== null && surface.targetLevel >= 1 ? surface.targetLevel : null;
+      const exitKey = exitLevel !== null ? `${hclift.key}:${exitLevel}` : null;
+      const deckLoaded = this.isShuttleLoadedOnHcliftDeck(model, hclift.key);
+      if (deckLoaded && !surface.arrived) shuttleState.hcliftLoadedSawMoving = true;
+      if (exitKey !== null && shuttleState.hcliftExitDoneKey !== exitKey
+        && surface.arrived && deckLoaded && shuttleState.hcliftLoadedSawMoving) {
+        // 出梯触发：闩锁同轮不重复；层号立即切到目标层，后续 x=-1/-2 的 y=0 帧按目标层解析站台格
+        shuttleState.hcliftExitDoneKey = exitKey;
+        shuttleState.lastHcliftLayer = exitLevel;
+      }
+      if (exitKey !== null && shuttleState.hcliftExitDoneKey === exitKey && exitLevel !== null) {
+        const exitSupport = this.resolveLocatorBoxSupportPosition(locator, locator.startColumn, exitLevel);
+        if (exitSupport) {
+          // 出梯（中/完成）：水平目标 = 目标层站台格中心，Y 仍贴台面实时高度（到层时与站台面同高）
+          supportPosition.x = exitSupport.x;
+          supportPosition.z = exitSupport.z;
+          supportPosition.y = surface.supportY;
+          exitToPlatform = true;
+        }
+      }
+      if (!exitToPlatform) {
+        supportPosition.x = surface.deckCenter.x;
+        supportPosition.z = surface.deckCenter.z;
+        supportPosition.y = surface.supportY;
+      }
     }
+    const cellY = exitToPlatform && exitLevel !== null ? exitLevel : y;
     const cell: ShuttleTargetCell = {
       locator,
       supportPosition,
       toX: locator.startColumn,
-      toY: y,
+      toY: cellY,
       row: locator.rowNumber,
       storageDepth: locator.storageDepth,
       isLayerChangePlatform: true,
+      ...(exitToPlatform ? { exitToPlatform: true } : {}),
       ...(hclift ? { hcliftKey: hclift.key } : {}),
-      ...(x === -2 && hclift ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
+      ...(x === -2 && hclift && !exitToPlatform ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
     };
-    return { cell, key: JSON.stringify(['platform', y]), mismatch: false };
+    return { cell, key: JSON.stringify(['platform', cellY]), mismatch: false };
   }
 
   /**
@@ -357,9 +397,18 @@ export class ShuttleTelemetryDriver {
     return byAssetCode;
   }
 
+  /** 本车是否已停稳在指定 hclift 载货台上（占位 phase=loaded 且未失联）。 */
+  private isShuttleLoadedOnHcliftDeck(model: ModelRuntimeEntry, hcliftKey: string): boolean {
+    const occupancy = this.state.hcliftDeckOccupancies.get(hcliftKey);
+    if (!occupancy || occupancy.shuttleAssetCode !== model.assetCode) return false;
+    if (Date.now() - occupancy.updatedAtMs > HCLIFT_DECK_OCCUPANCY_STALE_MS) return false;
+    return occupancy.phase === 'loaded';
+  }
+
   /**
    * 同步本车在 hclift 载货台上的占位：x=-1/-2 且匹配到提升机时每帧刷新；
    * x=-2 且已抵达载货台中心 → loaded，否则 entering；离开平台/目标失配时清除自己的占位。
+   * 出梯（exitToPlatform，触发即释放）：车已驶离/正驶离载货台，不再占位，提升机保持冻结。
    * 占位时间戳取报文时间，断流后不再刷新，hclift 侧按过期阈值保持原地。
    */
   private syncHcliftDeckOccupancy(
@@ -373,7 +422,7 @@ export class ShuttleTelemetryDriver {
     const hcliftKey = cell?.hcliftKey ?? null;
     const onPlatform = x === -1 || x === -2
       || (x === SHUTTLE_COLUMN_UNKNOWN && hcliftKey !== null && cell?.isLayerChangePlatform === true);
-    if (!cell || !hcliftKey || !onPlatform) {
+    if (!cell || !hcliftKey || !onPlatform || cell.exitToPlatform === true) {
       this.releaseShuttleDeckOccupancy(model);
       return;
     }
@@ -392,6 +441,9 @@ export class ShuttleTelemetryDriver {
       this.releaseShuttleDeckOccupancy(model);
       return;
     }
+
+    // 新一轮上台：复位载车移动观察，出梯只对「上台后提升机确实动过」触发
+    if (state.hcliftOccupancyKey !== hcliftKey) state.hcliftLoadedSawMoving = false;
 
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
     const loaded = x === -2 && cell.deckCenter !== undefined
@@ -583,8 +635,8 @@ export class ShuttleTelemetryDriver {
   // ===== 走行（仅 Status=5，Z 轴） =====
 
   /**
-   * Status=5 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1（驶入站台）或
-   * x=-2（驶入提升机载货台，存在 deckCenter 时）不等 Status=5 即触发走行；其余状态车体停驻。
+   * Status=5 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1（驶入站台）、
+   * x=-2（驶入提升机载货台，存在 deckCenter 时）或到层出梯（exitToPlatform）不等 Status=5 即触发走行；其余状态车体停驻。
    * 返回本帧是否在移动及是否已对准目标格（伸叉前置条件）。
    */
   private applyShuttleTravelMotion(
@@ -599,12 +651,13 @@ export class ShuttleTelemetryDriver {
     state.rootPosition ??= state.rootBasePosition.clone();
 
     const x = readIntegerField(snapshot.fields, 'x');
-    // 提升机失联/未发布载货台时保持在原位，避免退回站台目标
-    if (cell?.isLayerChangePlatform && x === -2 && !cell.deckCenter) {
+    // 提升机失联/未发布载货台时保持在原位，避免退回站台目标（出梯中除外：目标已是站台格，继续驶出）
+    if (cell?.isLayerChangePlatform && x === -2 && !cell.deckCenter && !cell.exitToPlatform) {
       return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
     }
     const platformTravelTrigger = cell?.isLayerChangePlatform === true
-      && (x === -1 || ((x === -2 || x === SHUTTLE_COLUMN_UNKNOWN) && cell.deckCenter !== undefined));
+      && (x === -1 || cell.exitToPlatform === true
+        || ((x === -2 || x === SHUTTLE_COLUMN_UNKNOWN) && cell.deckCenter !== undefined));
     // 取/卸状态但尚未到位（典型：出梯后 PLC 立即报 Status=1 而车还在站台）时先补走行，到位后再伸叉
     const actionTravelTrigger = cell !== null && !cell.isLayerChangePlatform
       && (status === SHUTTLE_STATUS.taking || status === SHUTTLE_STATUS.unloading);

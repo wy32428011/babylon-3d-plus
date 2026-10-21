@@ -576,6 +576,10 @@ export type ShuttleModelTelemetryState = {
   hcliftOccupancyKey: string | null;
   /** 最近一次换层站台有效层号：x=-2 且提升机台面数据尚未发布时用它保持进梯前高度，避免闪到目标层。 */
   lastHcliftLayer: number | null;
+  /** 到层自动出梯闩锁（hclift 键 + 目标层）：触发即置位，同轮换层不重复出梯；x 回正常列时复位。 */
+  hcliftExitDoneKey: string | null;
+  /** 占位 loaded 期间观察到提升机未到位（arrived=false）：载车移动过的证据，之后的 arrived 边沿才触发出梯。 */
+  hcliftLoadedSawMoving: boolean;
   /** 最近一帧生效的 Y 闪现偏移：目标字段清零（无目标）时沿用，避免整车弹回模型初始高度。 */
   lastYFlashOffset: Vector3 | null;
 };
@@ -601,13 +605,17 @@ export type SpecializedTelemetryRuntimeEntry = {
 /** 小车上台占位超过该时长视为失联，hclift 不再放行升降（保持原地，安全侧）。 */
 export const HCLIFT_DECK_OCCUPANCY_STALE_MS = 2000;
 
-/** hclift 载货台每帧发布的状态：台面高度与水平中心供多穿小车 x=-2 上台/跟随。 */
+/** hclift 载货台每帧发布的状态：台面高度与水平中心供多穿小车 x=-2 上台/跟随；层信息供到层自动出梯。 */
 export type HcliftPlatformSurfaceState = {
   assetCode: string;
   aisleCode: string;
   supportY: number;
   /** 载货台 cargo.nodes 包围盒中心世界坐标（XZ 固定，Y 随升降变化）。 */
   deckCenter: Vector3;
+  /** 当前 task_target_level；null 表示无有效目标层。 */
+  targetLevel: number | null;
+  /** 载货台动画已到目标层停稳（liftOffset 逼近 liftTargetOffset）：shuttle 到层出梯触发条件。 */
+  arrived: boolean;
   updatedAtMs: number;
 };
 

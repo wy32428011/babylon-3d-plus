@@ -254,16 +254,19 @@ export class HcliftTelemetryDriver {
     }
   }
 
-  /** 发布载货台上表面实时世界 Y：多穿小车 x=-2 换层时按巷道/assetCode 匹配跟随。 */
+  /** 发布载货台上表面实时世界 Y 与层状态：多穿小车 x=-2 换层时按巷道/assetCode 匹配跟随，到层（arrived）触发自动出梯。 */
   private publishPlatformSurface(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
     const bounds = getNodesWorldBounds(this.findHcliftCargoDeckNodes(model));
     if (!bounds) return;
+    const state = model.hcliftTelemetry;
     const supportY = projectWorldBoundsOntoAxis(bounds, getModelAxis(model.root, 'y')).max;
     this.state.hcliftPlatformSurfaces.set(model.entitySnapshot?.id ?? snapshot.assetCode, {
       assetCode: snapshot.assetCode,
       aisleCode: this.resolveHcliftAisleCode(model),
       supportY,
       deckCenter: bounds.minimum.add(bounds.maximum).scale(0.5),
+      targetLevel: state.targetLevel,
+      arrived: state.liftTargetOffset !== null && Math.abs(state.liftOffset - state.liftTargetOffset) <= 1e-3,
       updatedAtMs: Date.now(),
     });
   }

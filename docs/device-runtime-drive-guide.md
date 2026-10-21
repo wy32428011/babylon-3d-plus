@@ -234,7 +234,7 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:76
 
 ### MQTT 消费
 Status 单字段状态机，无 command/movement/mode 体系。
-- `x/y` = 当前列/层。`x` 为负时进入**换层站台语义**（优先级高于 `to_x/to_y`，见下节）；`x>=0` 或缺失时 `x/y` 仅诊断日志。
+- `x/y` = 当前列/层。`x` 为负时进入**换层站台语义**（优先级高于 `to_x/to_y`，见下节）；`x>=0` 或缺失时 `x` 仅诊断日志，`y` 额外参与**跨层门控**：`y≥1` 且 `to_y≥1` 且两者不等时说明任务需先换层（PLC 随后会走 x=-1/-2 流程），本帧按无目标处理（保持当前位置），避免先闪到目标层再闪回；出梯后 `y == to_y` 自然恢复执行。
 - `to_x/to_y/to_z` = **当前动作阶段的目标货格**列/层/排（装货时=取货格，卸货时=放货格）；三者全 0、或目标字段整体缺失 = 无目标：保持上一帧走行/高度姿态，不把 Y 偏移回零弹回模型初始位置（典型 Status=2/4 完结帧）。
 - `to_Depth` = 目标货格的**库位排深**：2→浅库位（Locator `storageDepth='near'`）、8→深库位（`'far'`），与排号联合定位（同排近/远两个货格靠深度区分）；**0→无排深接驳位**（输送线内置货格等，不按排深过滤，若同排浅/深同时命中则按唯一匹配失败冻结）；非 0/2/8 的值、或 `to_z` 缺失时一次性告警并冻结本次目标。
 - `Status`：0 空闲待机 / 1 取货中（货：货格→小车）/ 2 取货完成 / 3 卸货中（货：小车→货格）/ 4 卸货完成 / 5 移动中 / 6 移动完成 / 10 急停 / 11 未知。**2/4/6 的 _finish 事件不保证送达，不能作为门控**：动作完结由驱动自身的伸叉/收叉动画决定，Status 离开 1/3 的边沿只做无门控兜底；10 急停冻结走行与货叉并提示，恢复其他状态后继续原动作。
@@ -246,6 +246,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
 - `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（无 hclift 数据时保持进梯前层 `lastHcliftLayer`，不直接闪到 `to_y` 目标层）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），**统一优先保持最近有效层**，y 恢复有效后再切到新层；另有过渡帧 `x=255, y=0`（列未知）同样按载货台过渡处理，避免按 `to_y` 目标层闪现。x=-1/-2/过渡帧期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
+- **到层自动出梯（协议无出梯信号，驱动侧合成）**：本车占位 `loaded` 期间观察到提升机从「未到位」到「到位」（`arrived` false→true，证明载车移动过，排除驶入静止提升机误触发）后，不等遥测翻 `x=-1`，直接把走行目标从载货台中心切到**目标层站台格**（对齐/轨道尽头钳制同 x=-1，Y 继续贴台面——到层时台面与站台面同高，水平驶出无台阶），即使 Status=0 也走行。触发时置闩锁 `hcliftExitDoneKey`（hclift 键+目标层，同轮不重复出梯）、释放载货台占位（出梯中提升机保持冻结）、`lastHcliftLayer` 改写为目标层——随后真实 `x=-1, y=0` 帧按目标层解析站台格，与合成动画落点一致不跳变。`x` 回到正常列（≥0 新任务）时闩锁复位；hclift 目标层变化天然使闩锁失效。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
 - 站台目标下 `Status=1/3`（取/卸）被抑制：不伸叉，一次性告警「换层站台不支持装卸货」。
@@ -406,8 +407,8 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 ### 动画
 载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`，写回提升部件节点基线（同 lift `applyLiftNodeMotionOffsets`）。断流继续朝最后已知目标确定性插值（`applyWhenStale`，同 stacker/shuttle），保证平台高度发布不断更。
 
-### shuttle 跟随（托举换层）
-hclift 每帧向共享状态发布载货台上表面世界 Y（`hcliftPlatformSurfaces`，key=entityId，含 assetCode/aisleCode）。shuttle 目标为换层站台格且 **x=-2（换层中）** 时，`resolveLayerChangePlatformCell` 将格支撑位 Y 替换为匹配提升机（巷道号相等优先，否则 assetCode 命中站台 deviceAssetCode）的实时台面 Y——车体底面贴台面随升降（`resolveShuttleYFlashOffset` 站台分支原逻辑自动生效），X/Z 仍锁定站台格中心并受轨道尽头钳制。x=-1（驶入站台等待）或无匹配提升机时维持原按层闪现。司机注册顺序 hclift 在 shuttle 之前，保证同帧先发布后跟随。
+### shuttle 跟随（托举换层 + 到层出梯）
+hclift 每帧向共享状态发布载货台状态（`hcliftPlatformSurfaces`，key=entityId）：上表面世界 Y、水平中心 `deckCenter`、assetCode/aisleCode，以及 `targetLevel`/`arrived`（liftOffset 已逼近 liftTargetOffset，即动画到层停稳）。shuttle 目标为换层站台格且 **x=-2（换层中）** 时，`resolveLayerChangePlatformCell` 将格支撑位 Y 替换为匹配提升机（巷道号相等优先，否则 assetCode 命中站台 deviceAssetCode）的实时台面 Y——车体底面贴台面随升降（`resolveShuttleYFlashOffset` 站台分支原逻辑自动生效），X/Z 仍锁定站台格中心并受轨道尽头钳制。x=-1（驶入站台等待）或无匹配提升机时维持原按层闪现。**到层出梯**：占位 `loaded` + `arrived` 触发 shuttle 自动驶出到该层站台格（详见 shuttle 章「换层站台」节），无需协议出梯信号。司机注册顺序 hclift 在 shuttle 之前，保证同帧先发布后跟随。
 
 ### 状态机（HcliftModelTelemetryState, types.ts）
 `liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetLevel` / `hasInitialLevel`（首帧吸附锁）/ `workState` / `liftConstraint` / `nodeBaselines`。无到位锁与交接态（不交接货物）。

@@ -503,6 +503,37 @@ test('Y 层闪现：每帧对齐目标格层高，二段叉顶面与货格底面
   }
 });
 
+test('等待换层时 to_y 与当前层 y 不同：不闪到目标层，y 追平后恢复执行', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    // 层距 1m、底层 y=2：层 1 支撑位 y=2（叉面 1.95），层 3 支撑位 y=4（叉面 3.95）；列 5 → z=15，列 10 → z=20
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 4, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const fork = h.scene.getMeshByName('huocha1')!;
+
+    // 先就位层 1 列 5
+    h.apply(targetFrame(5, 5, 1, 2, 2, { y: 1 }), 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `层 1 叉面应为 1.95，实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.z - 15) < 1e-6, `列 5 应吸附 z=15，实际 ${fork.position.z}`);
+
+    // 实测数据 29_ line 560：等待换层期间 PLC 先报目标层（y=1, to_y=3）——不得闪到层 3/列 10，保持原位
+    const WAIT = targetFrame(4, 10, 3, 2, 2, { y: 1 });
+    h.apply(WAIT, 0.1, 3);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `跨层门控必须保持层 1（叉面 1.95），实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.z - 15) < 1e-6, `跨层门控必须保持列 5（z=15），实际 ${fork.position.z}`);
+    assert.equal(h.logs.filter((message) => message.includes('未匹配到任何已绑定货格')).length, 0, '跨层门控不得报目标失配');
+
+    // 换层完成出梯后 y 追平 to_y：恢复执行，先闪到层 3，再走行到列 10
+    const RESUME = targetFrame(5, 10, 3, 2, 2, { y: 3 });
+    h.apply(RESUME, 0.1, 1);
+    assert.ok(Math.abs(fork.position.y - 3.95) < 1e-6, `y 追平后必须闪现到层 3（叉面 3.95），实际 ${fork.position.y}`);
+    h.apply(RESUME, 0.1, 60);
+    assert.ok(Math.abs(fork.position.z - 20) < 1e-6, `y 追平后必须走行到列 10（z=20），实际 ${fork.position.z}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('环抱式载货：载货平面顶面（cargoDeckNodes）替代叉顶面作为竖直基准，货物底面贴载货平面', () => {
   const h = makeHarness();
   try {
@@ -854,6 +885,8 @@ test('x=-2 驶入 hclift 载货台：以 deckCenter 为目标并发布 entering/
       aisleCode: 'A1',
       supportY: 2.5,
       deckCenter: new Vector3(0, 2.5, 9.673),
+      targetLevel: 1,
+      arrived: true,
       updatedAtMs: Date.now(),
     });
     const platformFrame = { x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
@@ -902,7 +935,7 @@ test('换层结束后出梯：Status=1 未到位时先走到取货站台再伸�
     ];
     h.state.hcliftPlatformSurfaces.set('hclift1', {
       assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
-      deckCenter: new Vector3(0, 2.5, 9.673), updatedAtMs: Date.now(),
+      deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 3, arrived: false, updatedAtMs: Date.now(),
     });
 
     // 进梯 → 换层 → 出梯回站台
@@ -1007,7 +1040,7 @@ test('x=-2 载货台已被其他小车占用：不覆盖占位并保持原位', 
     });
     h.state.hcliftPlatformSurfaces.set('hclift1', {
       assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
-      deckCenter: new Vector3(0, 2.5, 9.673), updatedAtMs: Date.now(),
+      deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 3, arrived: false, updatedAtMs: Date.now(),
     });
     h.state.hcliftDeckOccupancies.set('hclift1', {
       shuttleAssetCode: 'OTHER', aisleCode: 'A1', phase: 'loaded',
