@@ -143,7 +143,7 @@ export class LiftTelemetryDriver {
     this.applyStationTaskAnnotation(model, snapshot, 1, 'task_num_fin_second_up');
   }
 
-  /** task_num_fin_first_up/second_up 仅标注对应工位货物的 cargo.task（值变化才写），不驱动状态机；字段缺失不清除。 */
+  /** task_num_fin_first_up/second_up 仅标注对应工位货物的 cargo.task（值变化才写），不驱动状态机；字段缺失不清除。非零标注同时登记「PLC 确认货在工位」见证，供归零对账。 */
   private applyStationTaskAnnotation(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, stationIndex: 0 | 1, field: string): void {
     const raw = readIntegerField(snapshot.fields, field);
     if (raw === null) return;
@@ -151,6 +151,7 @@ export class LiftTelemetryDriver {
     if (!cargoKey) return;
     const cargo = this.state.liftCargoMeshes.get(cargoKey);
     if (!cargo) return;
+    if (raw !== 0) model.liftTelemetry.stations[stationIndex].taskAnnotationSeen = true;
     const task = normalizeCargoTask(raw);
     if (cargo.task !== task) cargo.task = task;
   }
@@ -358,8 +359,24 @@ export class LiftTelemetryDriver {
     const outgoingHandoffInProgress = state.outgoingHandoffActive;
     const deliveryAllowed = arrived && state.targetSide === 1
       && (workState === null || workState === 3 || workState === 5 || outgoingHandoffInProgress);
+
+    // 到位送料层：在台货物登记「到过送料层」凭据与接收方，供标注归零对账强制补交付
+    if (arrived && state.targetSide === 1) {
+      for (const station of state.stations) {
+        if (station.cargoKey === null) continue;
+        station.reachedOutgoing = true;
+        station.outgoingEntityId = state.targetEntityId;
+      }
+    }
+    // 标注对账（先于平移推进计算：强制补交付路径下 latch 已死、ws 非 3/5，平移推进须由对账状态接管，
+    // 否则 step1→step2 排队平移启动后 progress 停摆，第二箱卡死在平移起点）
+    const forceBack = !frozen && this.isLiftStationForceReconcilable(snapshot, state, 1, 'task_num_fin_second_up');
+    const forceFront = !frozen && this.isLiftStationForceReconcilable(snapshot, state, 0, 'task_num_fin_first_up');
+    const forceReconciling = forceBack || forceFront;
+
     const transferAdvancing = !frozen
-      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5 || outgoingHandoffInProgress);
+      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5
+        || outgoingHandoffInProgress || forceReconciling);
 
     if (pickupAllowed) {
       const stationIndex = state.stations[1].cargoKey === null ? 1 : state.stations[0].cargoKey === null ? 0 : null;
@@ -388,9 +405,34 @@ export class LiftTelemetryDriver {
 
     if (deliveryAllowed) {
       this.processOutgoingDelivery(model, state.targetEntityId as string);
+    } else if (forceReconciling) {
+      // 标注对账强制补交付：工位有货、曾见非零标注且当前标注归零（PLC 已卸出）、货物曾到位送料层。
+      // 双货连续送时第二箱常错过短卸货窗口（冷却 1s + 平移 1.5s > 窗口 1.7–2.2s）、latch 随新目标失效，
+      // PLC 却已卸出——无此对账货物永久滞留台上。接收方仍占用时保持每帧重试。
+      const forceEntityId = (forceBack ? state.stations[1].outgoingEntityId : null)
+        ?? (forceFront ? state.stations[0].outgoingEntityId : null);
+      if (forceEntityId !== null) {
+        this.reportLiftIssueOnce(
+          `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:force-reconcile:${forceBack ? state.stations[1].cargoKey : state.stations[0].cargoKey}`,
+          `提升机 ${snapshot.assetCode} ${forceBack ? 'step2' : 'step1'} 工位货物 PLC 标注已卸出但孪生滞留，强制补交付（接收方占用时持续重试）。`,
+        );
+        this.processOutgoingDelivery(model, forceEntityId);
+      }
     }
 
     this.updateLiftCargoPoses(model, snapshot, deltaSeconds);
+  }
+
+  /** 工位滞留对账条件：有货 + 曾见非零标注 + 曾到位送料层 + 当前标注归零（字段缺失返回 null 不参与对账）。 */
+  private isLiftStationForceReconcilable(
+    snapshot: DeviceTelemetrySnapshot,
+    state: ModelRuntimeEntry['liftTelemetry'],
+    stationIndex: 0 | 1,
+    field: string,
+  ): boolean {
+    const station = state.stations[stationIndex];
+    if (station.cargoKey === null || !station.taskAnnotationSeen || !station.reachedOutgoing) return false;
+    return readIntegerField(snapshot.fields, field) === 0;
   }
 
   /** work_state 2（取货完成）补齐取货动画：取货方向直接推满上台。放货无台上插值（接收方忙时货留锚点等空闲），无需补齐。 */
@@ -419,6 +461,8 @@ export class LiftTelemetryDriver {
         const newKey = this.getLiftCargoKey(model.assetCode, 1);
         this.state.liftCargoMeshes.delete(front.cargoKey);
         this.state.liftCargoMeshes.set(newKey, cargo);
+        const frontOutgoingEntityId = front.outgoingEntityId;
+        const frontReconcileFlags = { taskAnnotationSeen: front.taskAnnotationSeen, reachedOutgoing: front.reachedOutgoing };
         this.clearLiftStationState(front);
         back.cargoKey = newKey;
         back.cargoOnBoard = false;
@@ -427,6 +471,10 @@ export class LiftTelemetryDriver {
         back.transferProgress = 0;
         back.transferDirection = 1;
         back.transferActive = true;
+        // 强制补交付路径下的平移：继承 step1 的对账凭据与接收方，平移完成后继续强制交付
+        back.outgoingEntityId = back.outgoingEntityId ?? frontOutgoingEntityId;
+        back.taskAnnotationSeen = back.taskAnnotationSeen || frontReconcileFlags.taskAnnotationSeen;
+        back.reachedOutgoing = back.reachedOutgoing || frontReconcileFlags.reachedOutgoing;
       }
     }
 
@@ -765,6 +813,9 @@ export class LiftTelemetryDriver {
     station.transferProgress = 0;
     station.transferDirection = 1;
     station.transferActive = false;
+    station.taskAnnotationSeen = false;
+    station.reachedOutgoing = false;
+    station.outgoingEntityId = null;
   }
 
   // ===== 诊断与配置读取 =====

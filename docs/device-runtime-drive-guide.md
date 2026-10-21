@@ -344,7 +344,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - `work_state`：工作状态（0 空闲待机；1 取货中；2 取货完成；3 卸货中；5 卸货完成；6 移动中；7 移动完成；10 急停；11 未知）。**字段缺失时整条状态机不启用**，回落旧「目标键边沿 + 到位自动交接」兼容路径。
 - `reference_upper_step`：1=来料侧（选 incomingLayerBindings），2=送料侧（选 outgoingLayerBindings）；其它值忽略。用于确定 `level_upper` 指来料端还是送料端。
 - `level_upper`：该侧目标层号（正整数），与绑定表键匹配；**不在绑定表内时不响应、不移动**，一次性 log 提示。
-- `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），仅用于给对应工位货物标注 `cargo.task`（值变化才写），不驱动状态机。
+- `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），双用途：给对应工位货物标注 `cargo.task`（值变化才写）；兼作 **PLC 侧「工位有货」真值对账**——工位有货且曾见过非零标注、当前标注归零（PLC 已卸出）时触发强制补交付（见时序节）。字段缺失跳过对账，不清除标注。
 - `reference_upper_step/level_upper` 两字段经 `normalizeLiftCompatibleFields`（deviceTelemetry.ts）原地 `Math.trunc` 归一为整数。
 - **`movement_y` 不存在于协议**：载货台运动完全由目标层驱动，脚本 `motion.lift` 仅保留 speed/nodes/travelAxis 供驱动读取。
 - **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`）；接收方正在等待的 task（`pendingTask/waitingTask`）不挡交付，交付瞬间优先改标接收方等待的 task；接收方未挂单时保留 lift 货物自身 task（`task_num_fin_*` 标注），避免匿名货无法沿 task 链路继续交付、只能等下一份 task 到来自救。
@@ -361,6 +361,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **3 卸货中**（送料层目标）：未到位先 ×4 赶位；到位后按序卸货——step2 有货先出；step2 空且 step1 有货时，step1 货先沿轨迹轴插值平移到 step2 锚点再出；**上一货离台后平移延迟一个承接时长（`CARGO_HANDOFF_SECONDS`，`outgoingHandoffCooldown`）再启动**——离台货在接收方侧还有承接平滑，两货动画须先后而非并发（否则视觉上 step1 先动）。交付无视 task 匹配、目标 conveyor 无货即可（接收方等待中的 task 由交付瞬间标注接管）；**接收方被占用时货留 step2 锚点原位等待、每帧重试，不预播送出动画**（否则滑入输送线撞上在机货），接收方一空闲当帧交付，离台动画由接收方侧承接平滑承担；有人接立即给，**不销毁**。
 - **5 卸货完成**：同为卸货门控（允许交付，不等 doing 才撒手）；放货无台上插值，无需补齐。
 - **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；但 3/5 期间已启动的出站交接（`outgoingHandoffActive`）会继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
+- **标注对账强制补交付（滞留自救）**：工位有货且 `task_num_fin_*` 曾非零、当前归零（PLC 已卸出），且该货曾随台到位过送料层 → 无视 work_state/latch/到位门控，向该工位记录的送料接收方（`outgoingEntityId`，到位送料层时逐工位登记，排队平移 step1→step2 时随货继承）强制补交付；此路径下 latch 已死、ws 非 3/5，排队平移推进改由对账状态驱动，否则第二箱卡死在平移起点。接收方仍占用则每帧重试并一次性告警。解决双货连续送时第二箱常错过短卸货窗口（实测 1.7–2.2s < 冷却 1s + 平移 1.5s）、latch 随新目标（ws=6）失效后 PLC 已卸而孪生永久滞留的问题。字段缺失不参与对账；急停/faulted 冻结期不补交付。
 - **10 急停**：并入 faulted 冻结（不动、不交接、一次性告警）。
 
 另：hclift 升降增加**小车上台门控**——本机同巷道存在 shuttle 时，必须收到该 hclift 的新鲜 `hcliftDeckOccupancies`（`phase='loaded'`、shuttle 未急停/faulted），且 `work_state !== 1`（取小车中）才执行升降；占位缺失、入场中（entering）、过期（2000ms）时保持当前高度。无关联 shuttle 时保持旧行为。`hcliftPlatformSurfaces` 同步发布载货台 `deckCenter`，供 shuttle x=-2 驶入载台。

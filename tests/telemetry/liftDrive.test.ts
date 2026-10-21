@@ -781,7 +781,6 @@ test('pull 排队门控：step2 占用时 step1 货不可被外部拉取，step2
   }
 });
 
-
 test('提升机摘要首帧不亮，连续升降输出实际速度、到位与急停清零', () => {
   const h = makeHarness();
   try {
@@ -913,4 +912,50 @@ test('空载运动观察不缓存轨迹轴，绑定层晚就绪后业务仍正�
     assert.ok(Math.abs(cargo.root.position.x - STATION_OFFSET) < 1e-6, '后工位应保持独立锚点，不能退化至台面中心');
     assert.deepEqual(getLiftMotionFrame(h.liftModel)!.back.axis, { x: 1, y: 0, z: 0 });
   } finally { h.dispose(); }
+});
+
+test('双货连续送第二箱错过窗口：latch 失效后标注归零触发强制补交付，货物不再滞留', () => {
+  const h = makeHarness();
+  try {
+    const { a, b } = adoptTwoCargos(h);
+
+    // ws=6 升送料层（只移动不交接）：到位帧两工位登记「到过送料层」凭据与接收方 e_COUT
+    const lifting = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    runUntil(h, lifting, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+    h.applyLift({ ...lifting, task_num_fin_second_up: 12, task_num_fin_first_up: 13 });
+    assert.equal(a.task, '12');
+    assert.equal(b.task, '13');
+
+    // 短卸货窗口：ws=3 一帧交付 step2 的 A（承接冷却开始倒计时），窗口随即关闭
+    h.applyLift({ ...lifting, work_state: 3, task_num_fin_second_up: 12, task_num_fin_first_up: 13 });
+    assert.deepEqual(h.delivered, [a], '窗口内 step2 的 A 必须先交付');
+
+    // 新目标（来料侧 ws=6）杀掉出站 latch：第二箱 B 滞留 step1，正常路径不再交付
+    const retargeting = { reference_upper_step: 1, level_upper: 1, work_state: 6, task_num_fin_first_up: 13 };
+    runFrames(h, retargeting, 5);
+    assert.deepEqual(h.delivered, [a], 'latch 失效后 B 不得走正常路径交付');
+    assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, JSON.stringify(['LIFT1', 0]), 'B 必须滞留 step1');
+
+    // PLC 侧两箱均已卸出：标注归零 → 强制补交付接管（承接冷却消退后启动 step1→step2 排队平移；
+    // latch 已死、ws=0，平移推进由对账状态驱动，否则 B 卡死在平移起点）
+    const drained = { reference_upper_step: 0, level_upper: 0, work_state: 0, task_num_fin_first_up: 0, task_num_fin_second_up: 0 };
+    runUntil(h, drained, () => h.liftModel.liftTelemetry.stations[1].cargoKey === JSON.stringify(['LIFT1', 1]), 30);
+    assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, null, 'B 必须 rekey 平移到 step2');
+
+    // 平移完成但 COUT 仍被 A 占用：B 留 step2 锚点每帧重试，不丢不毁
+    runUntil(h, drained, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard, 30);
+    runFrames(h, drained, 3);
+    assert.deepEqual(h.delivered, [a], '接收方占用期间 B 不得交付');
+    assert.equal(h.state.liftCargoMeshes.size, 1, 'B 滞留期间不得销毁');
+    assert.ok(Math.abs(b.root.position.x - STATION_OFFSET) < 1e-6, 'B 必须停在 step2 锚点原位');
+
+    // 接收方腾空：当帧强制补交付成功，货物不再滞留
+    ejectConveyorCargo(h);
+    h.applyLift(drained);
+    assert.deepEqual(h.delivered, [a, b], '接收方空闲后 B 必须强制补交付');
+    assert.equal(h.state.liftCargoMeshes.size, 0, '两箱都必须离台');
+    assert.ok(h.logs.some((message) => message.includes('强制补交付')), '必须产生强制补交付告警');
+  } finally {
+    h.dispose();
+  }
 });
