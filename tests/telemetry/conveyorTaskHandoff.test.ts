@@ -1174,6 +1174,40 @@ test('线首站台：无等待 task 时放货成为滞留货物，后续新 task
   }
 });
 
+test('线首站台：放入货物自带 task 与等待 task 不同时不盖号，保留身份等本机 task 边沿复用驶离', () => {
+  // A 在 0，站台在 −1.5，无上游；启动晚错过 task 9 的源事件，A 滞留等待 9；shuttle 放入自带 task 10 的新货
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, '9', '线首站台机必须挂起等待');
+
+    const cargoRoot = new TransformNode('sh_cargo_root', h.scene);
+    const cargo = {
+      assetCode: 'SH1', containerCode: '', task: '10', root: cargoRoot,
+      outputOwner: null, fallback: null, generatorEntityId: null, handoff: null, axialLengthCache: null, lockedWorldRotation: null,
+    } as unknown as ConveyorCargoRuntimeEntry;
+    const platform = h.platformOf('A');
+    assert.ok(platform, '站台货格必须存在');
+    assert.ok(h.driver.acceptPlatformPlacedCargo(h.models.A, platform!, cargo), '站台放货必须被接收');
+    assert.equal(cargo.task, '10', '不得把新货盖号成滞留等待的旧 task 9（防补位）');
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, null, '站台被实物占用必须退出等待');
+    assert.equal(h.models.A.conveyorTelemetry.lastTask, '9', '不得预写 lastTask，否则本机 task 10 边沿被吞');
+    assert.equal(h.models.A.conveyorTelemetry.selfDriveDirection, 0, '落座后不得自动驶离');
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - (-1.5)) < 1e-6,
+      `货物必须落座站台偏移 −1.5，实际 ${h.models.A.conveyorTelemetry.cargoTravelOffset}`);
+
+    // 本机上报 task 10：新 task 边沿 → 滞留箱复用（task 不变）驶离
+    h.apply('A', { task: 10, movement_x: 1 }, 0.1, 200);
+    assert.equal(cargo.task, '10', '复用不得改变货物 task');
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, null, '有滞留货物不得转入等待');
+    const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(Math.abs(offset - HALF_RANGE) < 1e-6,
+      `本机 task 边沿后货物必须走向出口端（${HALF_RANGE}），实际 ${offset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('RGV 起转交付后 movement 脉冲清零自驱再静默：字段接管结束必须自动续行到行程终点（中鼎 1004 回归）', () => {
   // 现场序列：RGV 起转当场交付（pendingTask 命中，投影落地）→ conveyor 续报 movement_x=1 清零自驱
   // → 字段静默（快速回放下字段窗口推进量≈0）→ 自驱必须重新登记，把货物续行到行程终点。

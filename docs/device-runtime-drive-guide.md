@@ -118,7 +118,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 - **交接时长按速度折算**：交接插值时长 = 货箱到落点距离 / 本机货物输送速度，上限仍为 `1s/hops`、下限 0.1s。调高实例 `cargoTravelSpeed` 时设备间移动同步加快；否则频繁逐台交付时视觉速度被固定 1s 插值主导，速度参数看不出效果。
 - **直角链路的订阅补发**：直角相邻时下游探测点可能够不到上游，链路靠 available 泛洪建立；`handleAvailableMessage` 在已处于 `waitingTask` 时，若发现的上一跳（`holderAssetCode`）与已登记链路不同（新上游路径），仍补发一次 subscribe，否则货物已在路上却永远收不到交付。
 - **外部持货（rgv/stacker）**：无链路能力，经 `externalPulls` 帧尾 `pullExternalHolderCargo` 代交付(:370-405)，门控 `isRgvCargoReadyForExternalPull` / `isStackerCargoPendingPlatformHandoff`(:386-390)。
-- **stacker↔conveyor 站台**：locator 事件驱动不经链路 — `adoptPlatformCargoForStacker`(:978)、`acceptPlatformPlacedCargo`(:1011)。
+- **stacker↔conveyor 站台**：locator 事件驱动不经链路 — `adoptPlatformCargoForStacker`(:978)、`acceptPlatformPlacedCargo`(:1011)。放货落座时本机挂起的等待 task 仅由**匿名货或 task 一致的货物**兑现（盖 waitingTask）；放入货物自带**不同** task 时保留货物身份不盖号——启动晚错过旧 task 源事件的滞留等待若劫走新货改号，货物会被旧 task 订阅链直接接走补位，孪生永远慢一拍。异 task 落座仍退订并清除等待（站台已实物占用），且不预写 `currentTask/lastTask`，本机上报该 task 时形成新 task 边沿走滞留箱复用驶离。
 - **rgv 列放货**：`acceptRgvColumnPlacedCargo`(:1058)，由 rgvDriver.ts:586-600 发起。
 
 ### 扩展点

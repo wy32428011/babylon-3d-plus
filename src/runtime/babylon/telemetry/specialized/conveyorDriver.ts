@@ -135,7 +135,9 @@ export class ConveyorTelemetryDriver {
    * - 站台（模型脚本声明的内置 1×1 货格）：conveyor↔stacker 双向交接缓冲，locator 事件驱动、不经链路。
    *   上游来货恒以站台为终点（按交付流向钳制收敛到站台支撑位，与站台在 A/B 端无关）；stacker 对站台
    *   货格取货时无视 task 直接接管本机持货（发 taken 波）；放货完成后货物落座站台成为本机滞留货物
-   *   （不销毁、不自动驶离），已挂起的等待 task 立即由其兑现，后续到达的 task 走滞留箱复用驶离；
+   *   （不销毁、不自动驶离），已挂起的等待 task 由匿名货或 task 一致的货物立即兑现；放入货物自带
+   *   不同 task 时不盖号（防启动晚滞留等待劫走新货补位），退订清除等待且不预写 lastTask，
+   *   本机上报该 task 时形成新 task 边沿走滞留箱复用驶离；
    *   线首（无上游）站台机新 task 到达时不自建也不订阅，等待 stacker 放入。
    * - 防环：消息携带 visited 设备链，命中即丢弃；hops 逐跳 +1。
    * 轨迹方向（telemetryBinding.trajectoryDirection）定义为 movement_x 正转时货物的运动方向，
@@ -1104,7 +1106,9 @@ export class ConveyorTelemetryDriver {
 
   /**
    * stacker 向本机站台放货完成：货物落座站台成为本机滞留货物（不销毁、不自动驶离），由本机继续维护；
-   * 本机正等待的 task 立即由该货物兑现，未等待则保留货物随附 task，后续新 task 边沿走滞留箱复用驶离。
+   * 本机正等待的 task 由匿名货或 task 一致的货物立即兑现；放入货物自带不同 task 时保留货物身份不盖号
+   * （启动晚错过旧 task 源事件的滞留等待不得劫走新货补位），退订清除等待且不预写 currentTask/lastTask，
+   * 本机上报该 task 时形成新 task 边沿走滞留箱复用驶离。
    * 本机已有货或站台偏移不可解析时返回 false（调用方走原销毁路径）。
    */
   acceptPlatformPlacedCargo(
@@ -1128,11 +1132,20 @@ export class ConveyorTelemetryDriver {
     state.platformInboundCargo = false;
     // 站台落座为滞留停泊：未驱动前不允许字段静默续行，等待 task 复用才驶离。
     state.cargoDriveEngaged = false;
-    // 等待中的 task 由放入货物立即兑现（线首站台未发订阅，退订为无害空操作）
+    // 等待中的 task 由放入货物兑现：仅限匿名货或 task 本就一致（线首站台未发订阅，退订为无害空操作）。
+    // 放入货物自带不同 task：启动晚错过旧 task 源事件的滞留等待不得劫走新货盖号补位（货物会被旧 task
+    // 订阅链直接接走，孪生永远慢一拍）；站台已被实物占用，退订清除等待，且不预写 currentTask/lastTask——
+    // 本机上报该 task 时仍形成新 task 边沿，走滞留箱复用驶离。
     if (state.waitingTask !== null) {
-      cargo.task = state.waitingTask;
+      const claimedByWaitingTask = !cargo.task || cargo.task === state.waitingTask;
+      if (claimedByWaitingTask) cargo.task = state.waitingTask;
       this.sendUnsubscribe(model, state.waitingTask, this.resolveFlowDirection(model));
       state.waitingTask = null;
+      if (!claimedByWaitingTask) {
+        state.pendingTask = null;
+        this.notifyAvailable(model, cargo.task, this.resolveFlowDirection(model));
+        return true;
+      }
     }
     state.pendingTask = null;
     if (cargo.task) {
