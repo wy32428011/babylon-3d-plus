@@ -530,7 +530,7 @@ export type HcliftModelTelemetryState = {
   targetLevel: number | null;
   /** 首个有效 lift_current_level 已吸附定位（吸附前不响应 task_target_level 动画）。 */
   hasInitialLevel: boolean;
-  /** work_state 原始值（0 待机/1 取小车中/2 取完/3 卸小车中/4 卸完/5 换层中/6 到位/7/10 急停/11 未知）；3/5 作为动作凭据放行升降，1 禁止升降，10 冻结。 */
+  /** work_state 原始值（0 待机/1 取小车中/2 取完/3 卸小车中/4 卸完/5 移动中/6 移动完/10 急停/11 未知）；仅 5 放行升降，其余锁高度，10 冻结；缺失时走原占位门控。 */
   workState: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
 };
@@ -631,6 +631,8 @@ export type HcliftPlatformSurfaceState = {
   targetLevel: number | null;
   /** 载货台动画已到目标层停稳（liftOffset 逼近 liftTargetOffset）：shuttle 到层出梯触发条件。 */
   arrived: boolean;
+  /** hclift 当前 work_state（0 待机/1 取小车中/2 取完/3 卸小车中/4 卸完/5 移动中/6 移动完）：小车进出载台门控；旧测试/旧数据可缺省。 */
+  workState?: number | null;
   updatedAtMs: number;
 };
 

@@ -59,6 +59,8 @@ type HarnessDeviceConfig = {
   origin?: boolean;
   /** stacker 能力模型：仅作为探测点邻居/货物持有方存在，不应用输送线驱动。 */
   stacker?: boolean;
+  /** lift 能力模型：作为提升机来料口的“下游”邻居，仅参与探测，不应用输送线驱动。 */
+  lift?: boolean;
   /** 世界包围盒 x 方向半径（缺省 2m，span 4m）。 */
   halfSpanX?: number;
   /** 模型本地绕 Y 轴旋转（弧度）：验证 trajectoryDirection 的模型本地坐标语义。 */
@@ -95,8 +97,9 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       root,
       contentRoot: root,
       meshes: [],
-      conveyorCapable: !config.stacker,
+      conveyorCapable: !config.stacker && !config.lift,
       stackerCapable: !!config.stacker,
+      liftCapable: !!config.lift,
       conveyorTelemetry: createConveyorTelemetryState(),
       telemetryBinding: Object.keys(binding).length > 0 ? binding : null,
       externalScriptRuntime: null,
@@ -1438,6 +1441,47 @@ test('提升机双货连续下料：在机货先等下游接走，不被下一�
     assert.equal(second.task, '2', '第二件货必须保留自身 task');
     assert.equal(cv2.cargoCode, 'cargo');
     assert.equal(cv2.pendingTask, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('提升机来料口：下一件 task 边沿先于提升机取货到达时，保留在机货等提升机取走', () => {
+  const h = makeHarness({ CV1: { centerX: 0 }, LIFT1: { centerX: 4, lift: true } });
+  try {
+    const held = h.insertConveyorCargo('CV1', '100');
+    h.apply('CV1', { task: 100, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo', '前置：在机货 task=100');
+
+    // 提升机还没回来取货，下一件 task=101 的边沿已经到了
+    h.apply('CV1', { task: 101, movement_x: 1 });
+    assert.equal(held.task, '100', '提升机来料口在机货不得被下一件 task 改号');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '101', '新 task 必须保持挂起等提升机取走');
+
+    // 提升机取走当前持货（adopt 无视 task 接管）
+    h.driver.detachClaimedCargoByKey(h.driver.getConveyorCargoKey('CV1', 'cargo'));
+    h.apply('CV1', { task: 101, movement_x: 1 });
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, null, '提升机取走后本机必须腾空');
+    assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, '101', '腾空后按新 task 进入等待/订阅');
+    assert.equal(held.task, '100', '被提升机取走的货物身份不得被改写');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('下游 conveyor 仍持货（排队进提升机）：上游在机货不得被下一件 task 改号', () => {
+  const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });
+  try {
+    // CV2 被前一件货占着（排队），CV1 持有 task=100
+    h.insertConveyorCargo('CV2', '200');
+    const held = h.insertConveyorCargo('CV1', '100');
+    h.apply('CV1', { task: 100, movement_x: 1 });
+
+    // 下一件 task=101 边沿到达：下游仍占用，超过普通 3s 宽限也不得改号
+    h.apply('CV1', { task: 101, movement_x: 1 }, 1, 5);
+    assert.equal(held.task, '100', '下游排队期间在机货不得改号');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '101', '新 task 必须保持挂起等队列排空');
+    assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
   } finally {
     h.dispose();
   }

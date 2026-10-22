@@ -62,6 +62,20 @@ const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
  */
 const CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS = 3;
 
+/**
+ * 下游 conveyor 仍被占用（排队）时的复用宽限（秒）。
+ * 进提升机方向常出现多台连排：下游来料口被前一件货占着等提升机取走，
+ * 上游此时收到下一件 task 边沿不得改号，否则队列里的前一件会在等待期间被改姓丢失。
+ */
+const CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS = 30;
+
+/**
+ * 进提升机来料口 conveyor 的在机货复用宽限（秒）。
+ * 提升机往返多层下料再回到来料层常需 4–6s；这段时间内来料口可能已报出下一件 task，
+ * 但在机货必须保留到提升机把它取走，否则改号后提升机取走的是下一件的箱子，前一件 task 丢失。
+ */
+const CONVEYOR_LIFT_INFEED_REUSE_GRACE_SECONDS = 10;
+
 /** 临时链路诊断开关（排查残留订阅/越级拽货时置 true，输出到浏览器 console；平时关闭）。 */
 const CONVEYOR_LINK_TRACE = false;
 
@@ -156,9 +170,11 @@ export class ConveyorTelemetryDriver {
    *   此后收到同 task 仅更新 lastTask，不再挂单（替代旧 bypassedTasks 语义）。
    * - 新 task 到达且本机持货：旧货有下游订阅 → 先交付再按无货流程处理；无订阅且上游链路有新 task 持货
    *   → 销毁当前货物等传递；否则复用滞留箱盖新 task。**复用宽限**：在机货的 task 正是本机上一条上报
-   *   的 task（pendingPreviousTask）且下游探测邻居是可接货 conveyor 时，先给 3s 等下游订阅把在机货接走——
-   *   提升机双货连续下料时，前一件货还没被下游接走、同机就报出下一件 task，立即复用会把前一件改号丢失，
-   *   接收方被占用还会把后一件货卡在提升机上；宽限到期仍无订阅才复用。
+   *   的 task（pendingPreviousTask）且下游探测邻居是可接货 conveyor / 提升机来料口时，先等下游把在机货
+   *   接走——提升机双货连续下料时，前一件货还没被下游接走、同机就报出下一件 task，立即复用会把前一件
+   *   改号丢失，接收方被占用还会把后一件货卡在提升机上。空 conveyor 下游宽限 3s；下游 conveyor 仍持货
+   *   （排队）时宽限 30s，必须等队列排空；提升机来料口宽限 10s（往返多层下料再回收常需 4–6s）。
+   *   到期仍未被接走才复用。
    * - 外部持货（stacker/RGV）：无链路能力，订阅传播触达时由相邻 conveyor 登记 externalPulls，
    *   facade 帧尾扫描其持货，命中即代交付（同样直达最终订阅者）。
    * - 站台（模型脚本声明的内置 1×1 货格）：conveyor↔stacker 双向交接缓冲，locator 事件驱动、不经链路。
@@ -289,12 +305,22 @@ export class ConveyorTelemetryDriver {
         // 还会把后一件货卡在提升机上。外部放入（lastTask 未上报）或末端无下游的滞留箱仍按即时复用处理；
         // 上游已持新 task 货时也立即销毁让位。
         const exitNeighbor = this.resolveProbeNeighbor(model, -flowDirection);
-        const canHandDownstream = exitNeighbor !== null && isConveyorRuntimeModel(exitNeighbor);
+        // 提升机来料口的“下游”是 lift：同样要把在机货留到提升机取走，否则会丢掉前一件 task。
+        const liftExit = exitNeighbor !== null && isLiftRuntimeModel(exitNeighbor);
+        const canHandDownstream = exitNeighbor !== null && (isConveyorRuntimeModel(exitNeighbor) || liftExit);
+        // 下游 conveyor 仍持货 = 本机货在排队，必须保留到队列排空；空下游只给短宽限等它的订阅。
+        const downstreamQueued = exitNeighbor !== null && isConveyorRuntimeModel(exitNeighbor)
+          && (exitNeighbor.conveyorTelemetry?.cargoCode ?? null) !== null;
+        const reuseGraceSeconds = liftExit
+          ? CONVEYOR_LIFT_INFEED_REUSE_GRACE_SECONDS
+          : downstreamQueued
+            ? CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS
+            : CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
         const deferReuse = !upstreamHoldsNewTask
           && canHandDownstream
           && heldCargo.task === state.pendingPreviousTask
           && heldCargo.task !== state.pendingTask
-          && state.pendingTaskAgeSeconds < CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
+          && state.pendingTaskAgeSeconds < reuseGraceSeconds;
         if (deferReuse) {
           // 宽限期内先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
           this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);

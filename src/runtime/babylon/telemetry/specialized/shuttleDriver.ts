@@ -53,6 +53,12 @@ import {
   type SpecializedTelemetrySharedState,
 } from './types';
 
+/**
+ * 小车驶入/驶出换层站台与提升机载货台的速度上限（m/s）。
+ * 普通走线 2 m/s 直接上台对位过冲明显，进出载货台统一降到该速度；机内普通走行不受影响。
+ */
+const SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND = 0.5;
+
 /** 遥测解析出的目标货格：to_x/to_y 列层 + to_z 排号 + to_Depth 解码出的排深与支撑位世界坐标。 */
 type ShuttleTargetCell = {
   locator: LocatorRuntimeEntry;
@@ -66,6 +72,10 @@ type ShuttleTargetCell = {
   isLayerChangePlatform?: boolean;
   /** 匹配到的 hclift 载货台键（共享占位表）；x=-1/-2 时用于占位上报。 */
   hcliftKey?: string;
+  /** 匹配到的 hclift 当前 work_state：1（取小车中）允许进梯，3（卸小车中）允许出梯，其余锁住进出。 */
+  hcliftWorkState?: number | null;
+  /** 匹配到的 hclift 载货台水平中心（仅门控用，不参与走行目标）。 */
+  hcliftDeckCenter?: Vector3;
   /** x=-2 时 hclift 载货台水平中心：存在时以其为上台走行目标（而非站台货格中心）。 */
   deckCenter?: Vector3;
   /** 到层自动出梯（中/完成）：目标为目标层站台格而非载货台中心，Status=0 也走行。 */
@@ -370,7 +380,13 @@ export class ShuttleTelemetryDriver {
       storageDepth: locator.storageDepth,
       isLayerChangePlatform: true,
       ...(exitToPlatform ? { exitToPlatform: true } : {}),
-      ...(hclift ? { hcliftKey: hclift.key } : {}),
+      ...(hclift
+        ? {
+            hcliftKey: hclift.key,
+            hcliftWorkState: hclift.surface.workState,
+            hcliftDeckCenter: hclift.surface.deckCenter.clone(),
+          }
+        : {}),
       ...(x === -2 && hclift && !exitToPlatform ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
     };
     return { cell, key: JSON.stringify(['platform', cellY]), mismatch: false };
@@ -667,15 +683,37 @@ export class ShuttleTelemetryDriver {
     }
 
     const rootTargetPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
+    // 小车进出提升机由 hclift 工作状态门控：1（取小车中）才允许驶入载货台，3（卸小车中）才允许驶出。
+    const workState = cell.hcliftWorkState;
+    if (cell.isLayerChangePlatform && workState !== null && workState !== undefined) {
+      const entryToDeck = cell.deckCenter !== undefined;
+      if (entryToDeck && workState !== 1) {
+        return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
+      }
+      if (!entryToDeck && cell.hcliftDeckCenter) {
+        const current = state.rootPosition ?? state.rootBasePosition;
+        // 只在水平面上比较“车在载台侧还是站台侧”，Y 由台面跟随单独处理，避免层高差翻转判定。
+        const deckDistance = Math.hypot(current.x - cell.hcliftDeckCenter.x, current.z - cell.hcliftDeckCenter.z);
+        const stationDistance = Math.hypot(current.x - rootTargetPosition.x, current.z - rootTargetPosition.z);
+        const onDeckSide = deckDistance < stationDistance;
+        if (onDeckSide && workState !== 3) {
+          return { moving: false, arrived: this.isShuttleTravelArrived(model, cell, travelAxis) };
+        }
+      }
+    }
     const defaultSpeed = this.readShuttleInspectorSpeed(model, 'travelSpeed')
       ?? this.readShuttleDataDrivenNumber(model, ['motion', 'travel', 'speed'])
       ?? SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
     const targetSpeed = this.resolveShuttleCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
+    // 进出换层站台/提升机载货台限速，避免 2m/s 直接上台造成对位过冲与视觉过快。
+    const motionSpeed = cell.isLayerChangePlatform
+      ? Math.min(targetSpeed, SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND)
+      : targetSpeed;
     const previous = state.rootPosition;
     state.rootPosition = moveVectorTowards(
       state.rootPosition,
       rootTargetPosition,
-      targetSpeed * deltaSeconds,
+      motionSpeed * deltaSeconds,
     );
     // 驶入提升机载货台时不受站台轨道约束（载货台在站台/轨道尽头之外），仅投影到走行轴
     state.rootPosition = cell.deckCenter
@@ -1629,3 +1667,4 @@ export class ShuttleTelemetryDriver {
     return label ? `Status=${status}（${label}）` : `Status=${status}`;
   }
 }
+

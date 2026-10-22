@@ -138,49 +138,53 @@ test('hclift 发布载货台水平中心与台面高度', () => {
   }
 });
 
-test('有关联小车时：无占位/入场中/过期/ws=1 不升降，loaded 且 ws=2 才升降', () => {
+test('有 work_state 时仅 ws=5 放行升降：ws=2 即使占位 loaded 也不升降', () => {
   const h = makeHarness({ withShuttle: true });
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
+    h.setOccupancy({ phase: 'loaded' });
     const target = { lift_current_level: 1, task_target_level: 3, work_state: 2 };
 
-    h.apply(target, 10);
-    assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '无占位时不得升降');
-
-    h.setOccupancy({ phase: 'entering' });
-    h.apply(target, 10);
-    assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '入场中不得升降');
-
-    h.setOccupancy({ phase: 'loaded', updatedAtMs: Date.now() - 5000 });
-    h.apply(target, 10);
-    assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '占位过期不得升降');
-
-    h.setOccupancy({ phase: 'loaded' });
-    h.apply({ ...target, work_state: 1 }, 10);
-    assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '取小车中（ws=1）不得升降');
-
     h.apply(target, 30);
+    assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '取小车完成（ws=2）也不得升降，只有 ws=5 放行');
+
+    h.apply({ ...target, work_state: 5 }, 30);
     assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6,
-      `小车上台且 ws=2 后必须升到层 3 偏移 1.45，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+      `ws=5 移动中必须升到层 3 偏移 1.45，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
   } finally {
     h.dispose();
   }
 });
 
-test('换层中(ws=5)/卸小车中(ws=3) 依赖工作状态执行升降动画，不被占位缺失/未 loaded 冻结', () => {
+test('hclift 门控：1 取小车中/3 卸小车中锁高度，5 移动中放行换层动画，急停仍否决', () => {
   const h = makeHarness({ withShuttle: true });
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
 
-    // 无占位，但协议报换层中：允许升到层 3
+    // 取小车中（ws=1）：无占位也不得升降
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 1 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset) < 1e-6,
+      `取小车中必须锁高度，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+
+    // 卸小车中（ws=3）：同样锁高度
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 3 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset) < 1e-6,
+      `卸小车中必须锁高度，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+
+    // 移动中（ws=5）：无占位也以工作状态放行换层动画
     h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 5 }, 30);
     assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6,
-      `换层中必须执行升降动画到层 3，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+      `移动中必须执行升降动画到层 3，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
 
-    // 无占位，但协议报卸小车中：允许降到层 1
+    // 卸小车中（ws=3）：目标回层 1 也锁高度
     h.apply({ lift_current_level: 3, task_target_level: 1, work_state: 3 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6,
+      `卸小车中不得移动，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+
+    // 移动中（ws=5）：允许回层 1
+    h.apply({ lift_current_level: 3, task_target_level: 1, work_state: 5 }, 30);
     assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset) < 1e-6,
-      `卸小车中必须执行升降动画回层 1，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+      `移动中必须回层 1，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
 
     // 仍能读到新鲜占位时，小车急停/故障继续否决
     h.setOccupancy({ phase: 'loaded', shuttleFaulted: true });
@@ -191,11 +195,11 @@ test('换层中(ws=5)/卸小车中(ws=3) 依赖工作状态执行升降动画，
   }
 });
 
-test('无关联小车（或小车在其它巷道）：保持旧行为，目标层变化即升降', () => {
+test('无 work_state 字段的旧模型：保持原占位门控（无关联小车/其它巷道不阻塞）', () => {
   const h = makeHarness({ withShuttle: false });
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
-    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 2 }, 30);
+    h.apply({ lift_current_level: 1, task_target_level: 3 }, 30);
     assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6, '无关联小车时不得被门控阻塞');
   } finally {
     h.dispose();
@@ -204,7 +208,7 @@ test('无关联小车（或小车在其它巷道）：保持旧行为，目标�
   const other = makeHarness({ withShuttle: true, shuttleAisle: 'A2' });
   try {
     other.apply({ lift_current_level: 1, task_target_level: 1 });
-    other.apply({ lift_current_level: 1, task_target_level: 3, work_state: 2 }, 30);
+    other.apply({ lift_current_level: 1, task_target_level: 3 }, 30);
     assert.ok(Math.abs(other.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6, '其它巷道小车不得阻塞本提升机');
   } finally {
     other.dispose();
@@ -216,7 +220,7 @@ test('急停（work_state=10）冻结升降', () => {
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
     h.setOccupancy({ phase: 'loaded' });
-    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 2 }, 5);
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 5 }, 5);
     const before = h.hcliftModel.hcliftTelemetry.liftOffset;
     assert.ok(before > 0, '前置：已经开始升降');
     h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 10 }, 10);
@@ -231,7 +235,7 @@ test('小车占用载货台但急停：hclift 不得升降', () => {
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
     h.setOccupancy({ phase: 'loaded', shuttleStatus: 10 });
-    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 2 }, 10);
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 5 }, 10);
     assert.equal(h.hcliftModel.hcliftTelemetry.liftOffset, 0, '车上急停时提升机不得升降');
   } finally {
     h.dispose();
@@ -262,14 +266,14 @@ test('换层提升机门控未满足与约束纠偏不产生箭头', () => {
   const h = makeHarness({ withShuttle: true });
   try {
     h.apply({ lift_current_level: 1, task_target_level: 1 });
-    const fields = { lift_current_level: 1, task_target_level: 3, work_state: 2 };
-    h.apply(fields);
-    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0);
-    h.setOccupancy({ phase: 'loaded' });
-    h.apply(fields);
+    const waiting = { lift_current_level: 1, task_target_level: 3, work_state: 2 };
+    h.apply(waiting);
+    assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0, 'ws=2 门控未满足不得产生箭头');
+    const moving = { ...waiting, work_state: 5 };
+    h.apply(moving);
     assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 1);
     h.hcliftModel.hcliftTelemetry.liftOffset = -100;
-    h.apply(fields);
+    h.apply(moving);
     assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0, '范围纠偏不能解释为运行');
   } finally { h.dispose(); }
 });
