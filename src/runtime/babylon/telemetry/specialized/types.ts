@@ -337,6 +337,10 @@ export type ConveyorModelTelemetryState = {
   waitingTask: string | null;
   /** 最近一条报文上报的 task（归一化字符串，缺失/0 为空串）：推货兑现等待时判定 PLC 当前是否仍持有该 task。 */
   snapshotTask: string | null;
+  /** 当前 pendingTask 已持续的时间（秒，帧级积分）：在机异 task 货物的复用宽限判定。 */
+  pendingTaskAgeSeconds: number;
+  /** 建立当前 pendingTask 之前本机最近的 task：判断在机货是否是本机刚上报过的那一件。 */
+  pendingPreviousTask: string | null;
   /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
   probeNeighbors: { forward: string | null; reverse: string | null } | null;
   /** 行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */
@@ -526,7 +530,7 @@ export type HcliftModelTelemetryState = {
   targetLevel: number | null;
   /** 首个有效 lift_current_level 已吸附定位（吸附前不响应 task_target_level 动画）。 */
   hasInitialLevel: boolean;
-  /** work_state 原始值（0 待机/1 取小车中/2 取完/3 卸小车中/5 卸完/6 移动中/7 移动完/10 急停/11 未知）；仅 10 参与驱动。 */
+  /** work_state 原始值（0 待机/1 取小车中/2 取完/3 卸小车中/4 卸完/5 换层中/6 到位/7/10 急停/11 未知）；3/5 作为动作凭据放行升降，1 禁止升降，10 冻结。 */
   workState: number | null;
   nodeBaselines: Map<TransformNode, Vector3>;
 };

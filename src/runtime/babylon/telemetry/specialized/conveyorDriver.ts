@@ -54,6 +54,14 @@ const CONVEYOR_CARGO_IDENTITY = 'cargo';
 /** 行程终点判定容差（米）：自驱续行登记时认为货箱已抵端点的剩余距离。 */
 const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
 
+/**
+ * 新 task 边沿到达时，在机异 task 货物的复用宽限（秒）。
+ * 提升机双货连续下料时，先到的货还没被下游订阅接走，同机就报出下一件货的 task 边沿；
+ * 立即按滞留箱复用改号会把前一件货改姓丢失，同时接收方被占用导致后一件货滞留在提升机上。
+ * 宽限期内只等下游接走在机货，到期仍无下游订阅才按滞留箱复用盖号。
+ */
+const CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS = 3;
+
 /** 临时链路诊断开关（排查残留订阅/越级拽货时置 true，输出到浏览器 console；平时关闭）。 */
 const CONVEYOR_LINK_TRACE = false;
 
@@ -147,7 +155,10 @@ export class ConveyorTelemetryDriver {
    * - 过境标记 transitedTasks：taken 波经过时 pendingTask 匹配且交付对象非本机 → 货已越过，
    *   此后收到同 task 仅更新 lastTask，不再挂单（替代旧 bypassedTasks 语义）。
    * - 新 task 到达且本机持货：旧货有下游订阅 → 先交付再按无货流程处理；无订阅且上游链路有新 task 持货
-   *   → 销毁当前货物等传递；否则复用滞留箱盖新 task。
+   *   → 销毁当前货物等传递；否则复用滞留箱盖新 task。**复用宽限**：在机货的 task 正是本机上一条上报
+   *   的 task（pendingPreviousTask）且下游探测邻居是可接货 conveyor 时，先给 3s 等下游订阅把在机货接走——
+   *   提升机双货连续下料时，前一件货还没被下游接走、同机就报出下一件 task，立即复用会把前一件改号丢失，
+   *   接收方被占用还会把后一件货卡在提升机上；宽限到期仍无订阅才复用。
    * - 外部持货（stacker/RGV）：无链路能力，订阅传播触达时由相邻 conveyor 登记 externalPulls，
    *   facade 帧尾扫描其持货，命中即代交付（同样直达最终订阅者）。
    * - 站台（模型脚本声明的内置 1×1 货格）：conveyor↔stacker 双向交接缓冲，locator 事件驱动、不经链路。
@@ -195,6 +206,7 @@ export class ConveyorTelemetryDriver {
     if (taskMode && task !== '' && task !== state.lastTask) {
       this.trace(`${model.assetCode} 任务边沿 task=${task} 上一=${state.lastTask || '-'} dir=${movementDirection} mode=${mode ?? '-'} 持货=${state.cargoCode ?? '-'} 等待=${state.waitingTask ?? '-'} 过境=${state.transitedTasks.has(task) ? 'Y' : 'N'}`);
       const previousWaitingTask = state.waitingTask;
+      const previousLastTask = state.lastTask;
       state.lastTask = task;
       if (!state.transitedTasks.has(task)) {
         // 新 task 取代旧等待：先沿链退订旧 task，再走新 task 的刷出/订阅判定
@@ -203,6 +215,8 @@ export class ConveyorTelemetryDriver {
         }
         state.currentTask = task;
         state.pendingTask = task;
+        state.pendingTaskAgeSeconds = 0;
+        state.pendingPreviousTask = previousLastTask;
         state.waitingTask = null;
       }
     }
@@ -252,6 +266,7 @@ export class ConveyorTelemetryDriver {
     // task 模式：新 task 边沿（pendingTask 登记）即刷出/订阅判定，不再等线体运行；movement_x 为 0 时按正转处理。
     // 事件驱动：订阅只在首次进入等待（或 available 通知到达）时发出，等待期间（waitingTask 非空）本块幂等不重发。
     // 行程规划按需懒计算并缓存：等待中的设备不触及全场景几何扫描。
+    if (state.pendingTask !== null) state.pendingTaskAgeSeconds += deltaSeconds;
     if (taskMode && state.pendingTask) {
       const probeDirection = movementDirection !== 0 ? movementDirection : 1;
       let heldCargo = state.cargoCode !== null
@@ -269,7 +284,21 @@ export class ConveyorTelemetryDriver {
         const flowDirection = movementDirection !== 0 ? movementDirection : this.resolveFlowDirection(model);
         const upstreamHoldsNewTask = this.hasUpstreamLinkForTask(state, state.pendingTask)
           || this.probeUpstreamHoldsTask(model, probeDirection, state.pendingTask);
-        if (upstreamHoldsNewTask) {
+        // 复用宽限只针对「本机自己上报过该 task、且下游还有 conveyor 可接走」的在机货：提升机双货
+        // 连续下料时先到的货刚落地、下游 task 边沿还没到，立即改号会把前一件货改姓丢失，接收方被占用
+        // 还会把后一件货卡在提升机上。外部放入（lastTask 未上报）或末端无下游的滞留箱仍按即时复用处理；
+        // 上游已持新 task 货时也立即销毁让位。
+        const exitNeighbor = this.resolveProbeNeighbor(model, -flowDirection);
+        const canHandDownstream = exitNeighbor !== null && isConveyorRuntimeModel(exitNeighbor);
+        const deferReuse = !upstreamHoldsNewTask
+          && canHandDownstream
+          && heldCargo.task === state.pendingPreviousTask
+          && heldCargo.task !== state.pendingTask
+          && state.pendingTaskAgeSeconds < CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
+        if (deferReuse) {
+          // 宽限期内先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
+          this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);
+        } else if (upstreamHoldsNewTask) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
           const oldTask = heldCargo.task;
           this.trace(`${model.assetCode} 上游已有新 task=${state.pendingTask} 货，销毁在机货 task=${oldTask} 并订阅`);

@@ -167,6 +167,30 @@ test('有关联小车时：无占位/入场中/过期/ws=1 不升降，loaded �
   }
 });
 
+test('换层中(ws=5)/卸小车中(ws=3) 依赖工作状态执行升降动画，不被占位缺失/未 loaded 冻结', () => {
+  const h = makeHarness({ withShuttle: true });
+  try {
+    h.apply({ lift_current_level: 1, task_target_level: 1 });
+
+    // 无占位，但协议报换层中：允许升到层 3
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 5 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset - 1.45) < 1e-6,
+      `换层中必须执行升降动画到层 3，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+
+    // 无占位，但协议报卸小车中：允许降到层 1
+    h.apply({ lift_current_level: 3, task_target_level: 1, work_state: 3 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset) < 1e-6,
+      `卸小车中必须执行升降动画回层 1，实际 ${h.hcliftModel.hcliftTelemetry.liftOffset}`);
+
+    // 仍能读到新鲜占位时，小车急停/故障继续否决
+    h.setOccupancy({ phase: 'loaded', shuttleFaulted: true });
+    h.apply({ lift_current_level: 1, task_target_level: 3, work_state: 5 }, 30);
+    assert.ok(Math.abs(h.hcliftModel.hcliftTelemetry.liftOffset) < 1e-6, '小车急停时工作状态不得放行升降');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('无关联小车（或小车在其它巷道）：保持旧行为，目标层变化即升降', () => {
   const h = makeHarness({ withShuttle: false });
   try {

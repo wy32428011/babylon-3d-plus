@@ -431,6 +431,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     lastTask: null,
     waitingTask: null,
     snapshotTask: null,
+    pendingTaskAgeSeconds: 0,
+    pendingPreviousTask: null,
     probeNeighbors: null,
     travelPlan: null,
     upstreamLinks: new Map(),
@@ -457,6 +459,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.lastTask = null;
   model.conveyorTelemetry.waitingTask = null;
   model.conveyorTelemetry.snapshotTask = null;
+  model.conveyorTelemetry.pendingTaskAgeSeconds = 0;
+  model.conveyorTelemetry.pendingPreviousTask = null;
   model.conveyorTelemetry.probeNeighbors = null;
   model.conveyorTelemetry.travelPlan = null;
   model.conveyorTelemetry.upstreamLinks.clear();

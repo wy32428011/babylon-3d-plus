@@ -31,7 +31,8 @@ import {
  * 小车提升机（hclift）遥测驱动：多穿库的真实换层设备，竖版 RGV——载货台沿模型 Y 轴升降，
  * 按巷道对应多穿库换层站台货格（findLayerChangePlatformLocator：deviceAssetCode 命中优先，其次 aisleCode）。
  * lift_current_level 仅首个有效值吸附定位；task_target_level 直接驱动升降动画，不作 finish 完结门控
- * （2/5/7 均可能缺失）；work_state 仅 10（急停）参与驱动（冻结，恢复后续行），其余值只上报。
+ * （2/5/7 均可能缺失）；work_state：10（急停）冻结，3（卸小车中）/5（换层中）作为设备动作凭据放行升降，
+ * 1（取小车中）禁止升降，其余值只上报。
  * 层高度口径：站台货格下表面中心世界 Y = 载货台（cargo.nodes，Box050/Box051）上表面中心。
  * 只托举多穿小车（hcliftPlatformSurfaces 发布台面实时高度供 shuttle x=-2 跟随），不交接货箱。
  */
@@ -115,15 +116,22 @@ export class HcliftTelemetryDriver {
 
   /**
    * 升降门控：同巷道存在多穿小车时，必须等小车上台并停稳（fresh loaded 占位）、且不在取小车中（ws=1）才允许升降；
+   * **换层中（ws=5）/卸小车中（ws=3）以工作状态为设备动作凭据直接放行**——这两个状态本身就说明小车已在台上、
+   * 提升机正在执行换层/卸车，不能因占位短暂缺失或未判 loaded 而冻结换层动画（仍保留占位可见的急停/故障否决）。
    * 无关联小车时保持旧行为（允许空载升降）。急停/faulted 始终冻结。
    */
   private isHcliftLiftAllowed(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): boolean {
     if (this.isHcliftFrozen(model, snapshot)) return false;
-    if (!this.hasAssociatedShuttle(model)) return true;
-    if (model.hcliftTelemetry.workState === 1) return false;
-
     const key = model.entitySnapshot?.id ?? snapshot.assetCode;
     const occupancy = this.state.hcliftDeckOccupancies.get(key);
+    const workState = model.hcliftTelemetry.workState;
+    if (workState === 3 || workState === 5) {
+      if (!occupancy || Date.now() - occupancy.updatedAtMs > HCLIFT_DECK_OCCUPANCY_STALE_MS) return true;
+      return !occupancy.shuttleFaulted && occupancy.shuttleStatus !== 10;
+    }
+    if (!this.hasAssociatedShuttle(model)) return true;
+    if (workState === 1) return false;
+
     if (!occupancy) return false;
     if (Date.now() - occupancy.updatedAtMs > HCLIFT_DECK_OCCUPANCY_STALE_MS) return false;
     if (occupancy.phase !== 'loaded') return false;

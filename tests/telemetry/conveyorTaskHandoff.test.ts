@@ -684,14 +684,18 @@ test('持货新 task 规则一：旧货无下游订阅且上游无新 task 货 �
     assert.equal(h.models.CV2.conveyorTelemetry.upstreamLinks.get('CV1')?.task, '3');
 
     h.apply('CV1', { task: 5, movement_x: 0 });
+    assert.equal(onlyCargo(h.state).task, '3', '复用宽限期内不得立即给在机货改号');
+    assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '5', '宽限期内新 task 必须保持挂起');
+    // 宽限期内下游始终没有订阅：到期后按滞留箱复用盖号
+    h.apply('CV1', { task: 5, movement_x: 0 }, 1, 3);
     const reused = onlyCargo(h.state);
     assert.equal(reused.root, heldRoot, '必须复用同一货物实例');
-    assert.equal(reused.task, '5', '必须盖上新 task');
+    assert.equal(reused.task, '5', '宽限期到期后必须盖上新 task');
     assert.equal(h.models.CV1.conveyorTelemetry.waitingTask, null, '持有滞留箱不得进入等待');
     assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, null);
     assert.equal(h.models.CV1.conveyorTelemetry.selfDriveDirection, 1, 'movement_x=0 复用必须登记正转自驱');
-    assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - (strandedOffset + CARGO_SPEED * 0.1)) < 1e-6,
-      `复用必须从滞留位置继续走行，期望 ${strandedOffset + CARGO_SPEED * 0.1}，实际 ${h.models.CV1.conveyorTelemetry.cargoTravelOffset}`);
+    assert.ok(Math.abs(h.models.CV1.conveyorTelemetry.cargoTravelOffset - (strandedOffset + CARGO_SPEED * (0.1 + 3))) < 1e-6,
+      `复用必须从滞留位置继续走行，期望 ${strandedOffset + CARGO_SPEED * (0.1 + 3)}，实际 ${h.models.CV1.conveyorTelemetry.cargoTravelOffset}`);
     // taken(3)+available(5) 波：下游上位链路更新为新 task
     assert.equal(h.models.CV2.conveyorTelemetry.upstreamLinks.get('CV1')?.task, '5',
       '复用后必须通知下游新 task 持货');
@@ -1397,6 +1401,43 @@ test('lift 推来匿名货：PLC 当前仍上报等待 task 时由推货兑现�
     assert.equal(lifted.task, '100', 'PLC 仍持有时匿名货由等待 task 兑现');
     assert.equal(lifted.assetCode, 'CV2');
     assert.equal(cv2.waitingTask, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('提升机双货连续下料：在机货先等下游接走，不被下一件 task 边沿改号，接收方腾空后第二件正常落地', () => {
+  const h = makeHarness({ CV1: { centerX: -4, origin: true }, CV2: { centerX: 0 }, CV3: { centerX: 4 } });
+  try {
+    // CV1 刷出 task=1，CV2 报 edge 后订阅交付到 CV2（对应 1023 先接第一件货）
+    h.apply('CV1', { task: 1, movement_x: 1 });
+    h.apply('CV2', { task: 1, movement_x: 1 });
+    const first = onlyCargo(h.state);
+    assert.equal(first.assetCode, 'CV2');
+    assert.equal(first.task, '1');
+
+    // 第二件货的 task 边沿紧随其后到达，但下游 CV3 还没报 task=1：不得立即复用改号
+    h.apply('CV2', { task: 2, movement_x: 1 });
+    const cv2 = h.models.CV2.conveyorTelemetry;
+    assert.equal(first.task, '1', '宽限期内第一件货不得被改号');
+    assert.equal(cv2.cargoCode, 'cargo', '第一件货必须仍在机');
+    assert.equal(cv2.pendingTask, '2', '第二件 task 必须保持挂起');
+
+    // 下游 CV3 报 task=1：CV2 把在机货正常交付，接收方腾空
+    h.apply('CV3', { task: 1, movement_x: 1 });
+    assert.equal(first.assetCode, 'CV3', '第一件货必须被下游接走');
+    assert.equal(first.task, '1', '第一件货身份不得丢失');
+    assert.equal(cv2.cargoCode, null, '交付后接收方必须腾空');
+    assert.equal(cv2.pendingTask, '2', '第二件 task 仍在等待落地');
+
+    // 提升机把第二件 task=2 推进已腾空的 CV2：正常接收
+    const second = h.insertRgvCargo('RGV1', '2');
+    h.state.rgvCargoMeshes.delete(JSON.stringify(['RGV1', 'front']));
+    assert.equal(h.driver.acceptRgvColumnPlacedCargo(h.models.CV2, second as ConveyorCargoRuntimeEntry, '', false, false), true);
+    assert.equal(second.assetCode, 'CV2');
+    assert.equal(second.task, '2', '第二件货必须保留自身 task');
+    assert.equal(cv2.cargoCode, 'cargo');
+    assert.equal(cv2.pendingTask, null);
   } finally {
     h.dispose();
   }
