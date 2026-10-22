@@ -58,6 +58,15 @@ const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
 const CONVEYOR_LINK_TRACE = false;
 
 /**
+ * 相邻上游吸附开关：
+ * - false（默认）：无货新 task 边沿一律走订阅驱动交付——下游报 task 即向上订阅，持有方按
+ *   1s/hops 插值交付。动作连贯，代价是可能跨多台越级交付（被提前拽走）；
+ * - true：启用 1 跳吸附跟随，交付限制在相邻上游，慢节点会停在机尾等下游 task 边沿。
+ * 两种模式都保留提升机匿名货不匹配残留等待的保护。
+ */
+const CONVEYOR_UPSTREAM_ADOPT_ENABLED = false;
+
+/**
  * 链路消息：available/taken 下行泛洪，subscribe/unsubscribe 上行传递；visited 防环，hops 逐跳递增。
  * 消息处理为同步方法调用，与设备各自 MQTT 快照到达无关（断流设备也能收到链路事件）。
  */
@@ -319,7 +328,7 @@ export class ConveyorTelemetryDriver {
           // 相邻上游吸附优先：货到才报 task（物理货已在本机），直接上游 conveyor 持有同 task 在途货时
           // 瞬时转移落本机走行——否则本机误挂等待、subscribe 命中即交付不看走行位置，
           // 快速逐台传递时货被链尾订阅隔空拽走、全程滞留交接插值（"飘走"）。
-          if (this.tryAdoptUpstreamInTransitCargo(model, probeDirection, state.pendingTask)) {
+          if (CONVEYOR_UPSTREAM_ADOPT_ENABLED && this.tryAdoptUpstreamInTransitCargo(model, probeDirection, state.pendingTask)) {
             state.pendingTask = null;
           } else {
             // 等待上游传递：传递式订阅（沿入口探测邻居 + 注册上游上行，持货方命中即交付）
@@ -804,21 +813,9 @@ export class ConveyorTelemetryDriver {
           travelHalfRange,
         )
       : perpendicularOffset ?? -direction * plan.forwardSign * travelHalfRange;
-    // 交接插值时长按本机货物输送速度折算（上限仍为 1s/hops）：调高实例速度时设备间移动同步加快，
-    // 否则频繁逐台交付时视觉速度被固定 1s 插值主导，速度参数看不出效果。
-    const handoffTarget = this.getConveyorCargoPosition(subscriber, plan.travelContext, subscriberState.cargoTravelOffset);
-    const handoffSpeed = this.resolveConveyorCargoTravelSpeed(
-      subscriber,
-      readConveyorCargoTravelConfig(subscriber).speed,
-    );
-    cargo.handoff = createCargoHandoffState(
-      cargo,
-      clampNumber(
-        Vector3.Distance(cargo.root.position, handoffTarget) / Math.max(handoffSpeed, 0.01),
-        0.1,
-        CARGO_HANDOFF_SECONDS / Math.max(hops, 1),
-      ),
-    );
+    // 交接插值时长固定 1s/hops：距离/速度折算在短距离交付时可短到 0.1s，逐台传递会表现为瞬跳；
+    // 固定时长更贴合 task 边沿驱动的链路节奏。cargoTravelSpeed 仍影响机内走行，设备间过渡保持该时长。
+    cargo.handoff = createCargoHandoffState(cargo, CARGO_HANDOFF_SECONDS / Math.max(hops, 1));
     subscriberState.pendingTask = null;
     subscriberState.waitingTask = null;
     // 承接即走行：登记自驱方向，快照断流或 movement=0 期间由帧调度继续驱动，movement 非 0 的新消息才接管字段驱动。
