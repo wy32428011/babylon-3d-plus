@@ -246,7 +246,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 换层站台是绑定在货架上的特殊 locator（`builtInBinding.kind='layerChangePlatform'`），由货架模型包声明 `layerChangePlatformBinding`（开关参数 `enableLayerChangePlatform`）自动生成，实体名「换层站台」，固定 1 列、排固定 1，置于暂存台头部、进深居中在两侧货架之间的过道正中；起始列缺省 -1（Inspector 可改，允许负值），巷道/设备绑定与普通货格同规则（`aisleCode` 或 `deviceAssetCode`）。尺寸全部跟随模型参数（参数变更即重派生）：长度 = `layerChangePlatformLength`（远端始终锚定轨道尽头轨道003.maxX，向货架方向延伸）、宽度 = `aisleWidth`、层高 = `slotHeight`、层数 = `slotCountHeight`。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
-- `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（无 hclift 数据时保持进梯前层 `lastHcliftLayer`，不直接闪到 `to_y` 目标层）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），**统一优先保持最近有效层**，y 恢复有效后再切到新层；另有过渡帧 `x=255, y=0`（列未知）同样按载货台过渡处理，避免按 `to_y` 目标层闪现。x=-1/-2/过渡帧期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
+- `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（小车载货台面 = 提升机台面 + 1cm，见动画节；无 hclift 数据时保持进梯前层 `lastHcliftLayer`，不直接闪到 `to_y` 目标层）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），**统一优先保持最近有效层**，y 恢复有效后再切到新层；另有过渡帧 `x=255, y=0`（列未知）同样按载货台过渡处理，避免按 `to_y` 目标层闪现。x=-1/-2/过渡帧期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
 - **到层自动出梯（协议无出梯信号，驱动侧合成）**：本车占位 `loaded` 期间观察到提升机从「未到位」到「到位」（`arrived` false→true，证明载车移动过，排除驶入静止提升机误触发）后，不等遥测翻 `x=-1`，直接把走行目标从载货台中心切到**目标层站台格**（对齐/轨道尽头钳制同 x=-1，Y 继续贴台面——到层时台面与站台面同高，水平驶出无台阶），即使 Status=0 也走行。触发时置闩锁 `hcliftExitDoneKey`（hclift 键+目标层，同轮不重复出梯）、释放载货台占位（出梯中提升机保持冻结）、`lastHcliftLayer` 改写为目标层——随后真实 `x=-1, y=0` 帧按目标层解析站台格，与合成动画落点一致不跳变。`x` 回到正常列（≥0 新任务）时闩锁复位；hclift 目标层变化天然使闩锁失效。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
@@ -259,7 +259,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 **内置货格留存**：目标 locator 勾选 `retainCargo` 时，放货完成把货物移入 `slotRetainedCargoMeshes` 并停在格口支撑位（fetch 格口同时建立持久抑制 + 单排刷新，不进入 `keepCargoForFetchRowSync` 清算）。再次取同格时 `beginShuttleFetch` 在 conveyor 站台/task 全局接管之前按格口查留存表，命中即接管同一货物实例并释放持久抑制；随后照常建立瞬态抑制，避免重放闪出旧 fetch 记录。落货格口用入场锁定的 `cargoPlaceTarget`，状态退出或目标字段变化仍按该格留存。
 
 ### 动画
-每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=5 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位（载货平面顶面与货格底面持平，未声明 `cargoDeckNodes` 时回退货叉顶面）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=5 期间叉强制收回原点；Status=1/3 若尚未对准目标格（典型：出梯后 PLC 立即报取货中，虚拟车还停在站台）会先补走行到目标格（到位余量 2cm）再伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
+每帧 `applyToModel`（shuttleDriver）。走行为**速度插值**（`moveVectorTowards`），**Status=5 期间**（或换层站台目标且 x=-1）向目标格支撑位推进，首帧吸附；Y 不走动画，有目标格时每帧直接闪现对齐目标格层高位——**统一以载货基准面定位**（`cargoDeckNodes` 包围盒顶面，未声明时回退二段叉顶面）；普通货格载货台面与货格底面持平，**换层站台/提升机载货台再抬高 `SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS`=1cm**（提升机台面比小车载货台面低 1cm，托举有间隙；车体包围盒底面相应沉到台面以下，不再作为对齐基准）。**无轨道约束**（整车行走，除非 dataDriven.fixedNodes 声明轨道）。货叉目标行程 = 叉心对准货格支撑位（方向由货格几何相对叉心的 X 投影符号决定），不按叉长钳位、允许悬空，无货格几何时回退叉节点实测全行程（测不出则不伸叉）。**走行与伸叉互斥**：Status=5 期间叉强制收回原点；Status=1/3 若尚未对准目标格（典型：出梯后 PLC 立即报取货中，虚拟车还停在站台）会先补走行到目标格（到位余量 2cm）再伸叉；目标位失配/非法 to_Depth 冻结走行与伸叉。库位跳变触发 catch-up（4 倍速收叉，收完前冻结走行）。
 
 ### 时序（取/放节拍）
 Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管）→ 两段叉同步伸出 → 伸满绑定（货水平锚定二段叉几何中心、底面贴载货平面顶面，随叉收回）→ 自动收叉完结。Status=5：运载（层变化闪现）。Status=3：无货先补建并绑定 → 两段叉伸出 → 伸满解绑落目标格支撑位（conveyor 站台当场交接）→ 收叉完结。动作完结只依赖驱动自身的动画归零，不等待 2/4/6 的 _finish 帧；Status 离开 1/3 的边沿做不计 finish 的兜底收尾（防报文丢帧），故障或 Status=10 急停冻结。
@@ -393,7 +393,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 | `dataDriven.device.devType = 'hclift'` | 模型包脚本 | 专用驱动识别（shuttle 策略：仅 devType 判定，不维护 capable 标志） |
 | `dataDriven.motion.lift.nodes` | 模型包脚本 | 提升部件全集（小车提升机：Box026~Box043、Box049~Box059、Cylinder014~Cylinder035） |
 | `dataDriven.motion.lift.speed` | 模型包脚本 | 速度缺省值，最终回退 `LIFT_DEFAULT_LIFT_SPEED_METERS_PER_SECOND` |
-| `dataDriven.cargo.nodes` | 模型包脚本 | 载货台节点（Box050/Box051）：**层对齐口径 = 载货台上表面中心对站台货格下表面中心** |
+| `dataDriven.cargo.nodes` | 模型包脚本 | 载货台节点（Box050/Box051）：**层对齐口径 = 载货台上表面中心对站台货格下表面中心**；小车上台后**小车载货台面 = 本机台面 + 1cm**（shuttleDriver 按载货基准面定位，提升机台面略低于小车载货台面） |
 
 行程不配 limits：整机静态框架 × 提升部件基线投影交集（同 lift `getLiftConstraint`）。
 

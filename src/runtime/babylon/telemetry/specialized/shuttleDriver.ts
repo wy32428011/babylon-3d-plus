@@ -61,6 +61,12 @@ import {
  */
 const SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND = 0.5;
 
+/**
+ * 换层站台/提升机载货台上的竖直基准间隙（m）：小车以载货台面（cargoDeckNodes 顶面）对齐支撑位并再抬高该值，
+ * 使提升机台面比小车载货台面低 1cm（托举有间隙、不共面闪烁）。普通货格仍让载货台面直接贴格底面。
+ */
+const SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS = 0.01;
+
 /** 遥测解析出的目标货格：to_x/to_y 列层 + to_z 排号 + to_Depth 解码出的排深与支撑位世界坐标。 */
 type ShuttleTargetCell = {
   locator: LocatorRuntimeEntry;
@@ -750,7 +756,7 @@ export class ShuttleTelemetryDriver {
   private resolveShuttleTravelTargetPosition(model: ModelRuntimeEntry, cell: ShuttleTargetCell, travelAxis: Vector3): Vector3 {
     const state = model.shuttleTelemetry;
     if (cell.isLayerChangePlatform) {
-      const home = this.getShuttleTravelBodyHome(model, travelAxis, getModelAxis(model.root, 'y'));
+      const home = this.getShuttleTravelBodyHome(model, travelAxis);
       if (home) {
         const bodyAxisCenter = (home.axisMin + home.axisMax) / 2;
         if (cell.deckCenter) {
@@ -851,19 +857,19 @@ export class ShuttleTelemetryDriver {
   // ===== Y 层闪现 =====
 
   /**
-   * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移。普通货格使载货基准面（载货平面包围盒顶面，
-   * 环抱式机构中货物底面所在高度）与货格底面（支撑位）持平；换层站台使车体包围盒底面与站台底面持平
-   * （整车被提升机托举）；无目标格回零（回待机层高位）。
+   * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移。载货基准面（载货平面包围盒顶面，
+   * 环抱式机构中货物底面所在高度）对齐目标格支撑位；换层站台/提升机载货台再抬高
+   * `SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS`（提升机台面比小车载货台面低 1cm）。
+   * 不再按车体包围盒底面定位——车体相应沉到台面以下。无目标格回零（回待机层高位）。
    */
   private resolveShuttleYFlashOffset(model: ModelRuntimeEntry, cell: ShuttleTargetCell | null): Vector3 {
     if (!cell) return Vector3.Zero();
     const upAxis = getModelAxis(model.root, 'y');
     const cargoBaseHomeY = this.getShuttleCargoBaseHomeY(model, upAxis);
     if (cargoBaseHomeY === null) return Vector3.Zero();
-    const homeY = cell.isLayerChangePlatform
-      ? this.getShuttleTravelBodyHome(model, getHorizontalModelAxis(model.root, 'z'), upAxis)?.bottomY ?? cargoBaseHomeY
-      : cargoBaseHomeY;
-    return upAxis.scale(Vector3.Dot(cell.supportPosition, upAxis) - homeY);
+    const supportY = Vector3.Dot(cell.supportPosition, upAxis)
+      + (cell.isLayerChangePlatform ? SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS : 0);
+    return upAxis.scale(supportY - cargoBaseHomeY);
   }
 
   /** 载货基准面在无 Y 偏移时的世界高度：首个目标格帧缓存（此时节点尚未施加 Y 偏移，避免自污染）。 */
@@ -874,16 +880,15 @@ export class ShuttleTelemetryDriver {
     if (topY === null) return null;
     state.cargoBaseHomeY = topY;
     // 车体原位量必须同帧缓存：之后再测会叠上已施加的 Y 闪现/走行偏移
-    this.getShuttleTravelBodyHome(model, getHorizontalModelAxis(model.root, 'z'), upAxis);
+    this.getShuttleTravelBodyHome(model, getHorizontalModelAxis(model.root, 'z'));
     return topY;
   }
 
-  /** 行走车体贴（travelNodes）包围盒的无偏移原位量：中心、底面高度与走行轴投影区间；换层站台对齐与轨道尽头钳制用。 */
+  /** 行走车体贴（travelNodes）包围盒的无偏移原位量：中心与走行轴投影区间；换层站台水平对齐与轨道尽头钳制用。 */
   private getShuttleTravelBodyHome(
     model: ModelRuntimeEntry,
     travelAxis: Vector3,
-    upAxis: Vector3,
-  ): { center: Vector3; bottomY: number; axisMin: number; axisMax: number } | null {
+  ): { center: Vector3; axisMin: number; axisMax: number } | null {
     const state = model.shuttleTelemetry;
     if (state.travelBodyHome) return state.travelBodyHome;
     const bounds = getNodesWorldBounds(this.findShuttleTravelNodes(model));
@@ -891,7 +896,6 @@ export class ShuttleTelemetryDriver {
     const projected = projectWorldBoundsOntoAxis(bounds, travelAxis);
     state.travelBodyHome = {
       center: bounds.minimum.add(bounds.maximum).scale(0.5),
-      bottomY: projectWorldBoundsOntoAxis(bounds, upAxis).min,
       axisMin: projected.min,
       axisMax: projected.max,
     };

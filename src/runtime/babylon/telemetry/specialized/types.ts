@@ -560,8 +560,8 @@ export type ShuttleModelTelemetryState = {
   forkStroke: number | null;
   /** 载货基准面（cargoDeckNodes 包围盒顶面，缺失时回退二段叉顶面）在无 Y 闪现偏移时的世界高度（首个目标格帧缓存，此时节点尚未施加 Y 偏移）；null 表示尚未测量。 */
   cargoBaseHomeY: number | null;
-  /** 行走车体（travelNodes）包围盒无偏移时的原位量：center=世界中心、bottomY=底面高度、axisMin/Max=走行轴投影区间；换层站台目标的车体对齐与轨道尽头钳制用，与 cargoBaseHomeY 同帧缓存防污染。 */
-  travelBodyHome: { center: Vector3; bottomY: number; axisMin: number; axisMax: number } | null;
+  /** 行走车体（travelNodes）包围盒无偏移时的原位量：center=世界中心、axisMin/Max=走行轴投影区间；换层站台目标的水平对齐与轨道尽头钳制用，与 cargoBaseHomeY 同帧缓存防污染。 */
+  travelBodyHome: { center: Vector3; axisMin: number; axisMax: number } | null;
   /** true 表示库位跳变收尾中：货叉加速收回，收回前冻结走行。 */
   forkCatchUp: boolean;
   /** 货物键（JSON.stringify([assetCode])，单车单货）；非 null 表示叉上/滞留货格有货。 */
