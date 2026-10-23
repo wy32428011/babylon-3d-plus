@@ -1198,3 +1198,77 @@ test('换层站台/提升机以载货台面为竖直基准：与提升机台面�
     h.dispose();
   }
 });
+
+test('进梯途中提升机提前升降：立即闪烁进入载货台中心并随台升降', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+      platformTrackEndWorld: new Vector3(0, 2, 10.5),
+    });
+    const surface = {
+      assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 1, arrived: true, updatedAtMs: Date.now(),
+    };
+    h.state.hcliftPlatformSurfaces.set('hclift1', surface);
+    (h.model.entitySnapshot as { components: { modelAsset: { parameterValues: Record<string, number> } } })
+      .components.modelAsset.parameterValues.travelSpeed = 2;
+
+    const platformFrame = { x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+    h.apply(platformFrame, 0.1, 1);
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 1);
+    const midZ = h.model.shuttleTelemetry.rootPosition!.z;
+    assert.ok(midZ > 9.673 && midZ < 11, `前置：进梯必须进行中，实际 z=${midZ}`);
+
+    // 台面提前升降（arrived=false）：小车立即闪入载货台中心并随台面新高度
+    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, supportY: 3.0, arrived: false, updatedAtMs: Date.now() });
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 1);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6,
+      `提前升降时必须闪入载货台中心 z=9.673，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    const fork = h.scene.getMeshByName('huocha1')!;
+    assert.ok(Math.abs(fork.position.y - 2.95) < 1e-6, `闪入后须随新台面 y=3.0 升降（叉面 2.95），实际 ${fork.position.y}`);
+    assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'loaded', '闪入后占位必须为 loaded');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('出梯途中提升机提前升降：立即闪烁到站台并锁定出梯层高', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+      platformTrackEndWorld: new Vector3(0, 2, 10.5),
+    });
+    const surface = {
+      assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 1, arrived: false, updatedAtMs: Date.now(),
+    };
+    h.state.hcliftPlatformSurfaces.set('hclift1', surface);
+    const platformFrame = { x: -2, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+    // 进梯途中台面在动（arrived=false）：闪入 + 记录「载车移动过」
+    h.apply(platformFrame, 0.1, 2);
+    assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'loaded', '前置：必须已停在载货台');
+
+    // 提升机到层（层 3，台面 4.0）→ 触发出梯；驶出途中台面再次提前升降
+    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, supportY: 4.0, targetLevel: 3, arrived: true, updatedAtMs: Date.now() });
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 2);
+    const exitZ = h.model.shuttleTelemetry.rootPosition!.z;
+    assert.ok(exitZ > 9.673 && exitZ < 11, `前置：出梯必须进行中，实际 z=${exitZ}`);
+
+    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, supportY: 4.3, targetLevel: 3, arrived: false, updatedAtMs: Date.now() });
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 1);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6,
+      `提前升降时必须闪出到站台中心 z=11，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+    const fork = h.scene.getMeshByName('huocha1')!;
+    assert.ok(Math.abs(fork.position.y - 3.95) < 1e-6,
+      `闪出后必须锁定出梯层高（层 3 支撑位 4.0 → 叉面 3.95），实际 ${fork.position.y}`);
+    assert.equal(h.state.hcliftDeckOccupancies.size, 0, '闪出后必须释放载货台占位');
+  } finally {
+    h.dispose();
+  }
+});

@@ -247,6 +247,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 
 - `x=-1`：目标格 = 换层站台（层取 `y` 字段，非 `to_y`）。**x=-1 即触发走行**（不要求 Status=5），到位后停车等待换层提升机取车。走行对齐：**车体包围盒底部中点 ↔ 站台底部中点**（普通货格是叉收回位中心对货格支撑位），且朝轨道尽头一侧的车体端面不得越过站台轨道边界（layout `trackEndX`），车长于站台时向货架侧让位。
 - `x=-2`：驶入/在换层提升机载货台上——目标水平位置改为该 hclift 的载货台中心 `deckCenter`（车体中心对齐，跳过站台轨道尽头钳制），到位后停稳；**Y 随载货台实时台面高度**（小车载货台面与提升机台面齐平，见动画节；无 hclift 数据时保持进梯前层 `lastHcliftLayer`，不直接闪到 `to_y` 目标层）。`x=-1/-2` 进出提升机过程中设备可能把 `y` 上报为 0（层未知），**统一优先保持最近有效层**，y 恢复有效后再切到新层；另有过渡帧 `x=255, y=0`（列未知）同样按载货台过渡处理，避免按 `to_y` 目标层闪现。x=-1/-2/过渡帧期间每帧向共享状态发布上台占位（进入中 entering / 停稳 loaded），离开时清除，供 hclift 升降门控。
+- **提前升降闪烁兜底**：进梯（x=-2 驶向载货台）或出梯途中，提升机台面一旦提前离开目标层（发布 `arrived=false`），小车立即闪烁到目标端——进梯闪到载货台中心并随台升降；出梯闪到目标层站台并锁定该层站台高度（`hcliftExitFlashOutY`），不再跟随移动中的台面被拖走。进梯闪烁仅在车已真正驶离站台后生效（`hcliftEntryStartPosition` 判定），work_state 门控未放行时不抢跑；出梯锁定保持到目标不再是出梯格。
 - **到层自动出梯（协议无出梯信号，驱动侧合成）**：本车占位 `loaded` 期间观察到提升机从「未到位」到「到位」（`arrived` false→true，证明载车移动过，排除驶入静止提升机误触发）后，不等遥测翻 `x=-1`，直接把走行目标从载货台中心切到**目标层站台格**（对齐/轨道尽头钳制同 x=-1，Y 继续贴台面——到层时台面与站台面同高，水平驶出无台阶），即使 Status=0 也走行。触发时置闩锁 `hcliftExitDoneKey`（hclift 键+目标层，同轮不重复出梯）、释放载货台占位（出梯中提升机保持冻结）、`lastHcliftLayer` 改写为目标层——随后真实 `x=-1, y=0` 帧按目标层解析站台格，与合成动画落点一致不跳变。`x` 回到正常列（≥0 新任务）时闩锁复位；hclift 目标层变化天然使闩锁失效。
 - `x>=0` 或 `x` 缺失：走正常 `to_x/to_y/to_z/to_Depth` 任务目标解析。
 - `y` 缺失/非法或货架未生成换层站台：一次性告警并冻结（同目标位失配语义）。
@@ -265,7 +266,7 @@ Status 单字段状态机，无 command/movement/mode 体系。
 Status=1：车体停驻 → 目标格刷货/接管（含 conveyor 站台接管）→ 两段叉同步伸出 → 伸满绑定（货水平锚定二段叉几何中心、底面贴载货平面顶面，随叉收回）→ 自动收叉完结。Status=5：运载（层变化闪现）。Status=3：无货先补建并绑定 → 两段叉伸出 → 伸满解绑落目标格支撑位（conveyor 站台当场交接）→ 收叉完结。动作完结只依赖驱动自身的动画归零，不等待 2/4/6 的 _finish 帧；Status 离开 1/3 的边沿做不计 finish 的兜底收尾（防报文丢帧），故障或 Status=10 急停冻结。
 
 ### 状态机（ShuttleModelTelemetryState, types.ts）
-单叉单货：`cargoKey`(无货) → 刷货滞留格 → `cargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`lastStatus`（相位边沿）、`forkPhase`（idle/extending/retracting 内部节拍，替代旧 movement 字段）、`statusActionDone`（相位完结闩锁：同相位不重复刷货/伸叉，Status 变化复位）、`forkCatchUp`、`cargoFetchRow`（放货排号锁定）、`cargoBaseHomeY`（Y 闪现基准：载货平面顶面无偏移世界高度，未声明 cargoDeckNodes 时为二段叉顶面）。`forkOffset` 为二段总行程偏移，一段偏移 = forkOffset/2 派生，不单列状态。
+单叉单货：`cargoKey`(无货) → 刷货滞留格 → `cargoBoundToFork=true`(随叉) → 解绑 `holdPosition`(箱位)。辅助态：`lastStatus`（相位边沿）、`forkPhase`（idle/extending/retracting 内部节拍，替代旧 movement 字段）、`statusActionDone`（相位完结闩锁：同相位不重复刷货/伸叉，Status 变化复位）、`forkCatchUp`、`cargoFetchRow`（放货排号锁定）、`cargoBaseHomeY`（Y 闪现基准：载货平面顶面无偏移世界高度，未声明 cargoDeckNodes 时为二段叉顶面）、`hcliftExitFlashOutY`（出梯提前升降时锁定的站台层高）、`hcliftEntryStartPosition`（进梯相位起点，判定是否已真正驶离站台）。`forkOffset` 为二段总行程偏移，一段偏移 = forkOffset/2 派生，不单列状态。
 
 ### 交接
 - **conveyor→shuttle**：取货格为 conveyor 内置站台货格时 `adoptConveyorPlatformCargo`（门面共用，assetCode 参数通用）。
@@ -353,7 +354,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 **不消费 fetch**。
 
 ### 动画
-载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`（= 目标层 conveyor 支撑面世界 Y − 载货面顶面基线世界 Y，同投影到模型 Y 轴），写回载货台节点基线（`worldDeltaToParentLocalDelta` 转父级本地）。`work_state` 为 1（取货中）/3（卸货中）且载物台未到目标层时速度 ×4 赶位，到位恢复正常。货物锚定所属工位锚点（四分位），台升货自升（不 parent）。交接插值时长复用 `RGV_CARGO_TRANSFER_SECONDS`，`resolveCargoHandoffPose` 统一姿态；货箱全程 `lockedWorldRotation` 只平移不旋转。**插值两端随台面走**：交接/排队平移的起点（输送线货物实际位置/上一工位锚点）与承接平滑起点每帧按载货台锚点位移一起搬走，货物以台面为参照系插值——提升机在取货未播完时提前升降，货箱整体随台上升，不会被甩在下方追赶。**已开始的交接/排队平移不因 work_state 回落（0/6/7/11）冻结**，仅急停/faulted 暂停，保证提前升降时上台插值仍能收敛到工位锚点。
+载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`（= 目标层 conveyor 支撑面世界 Y − 载货面顶面基线世界 Y，同投影到模型 Y 轴），写回载货台节点基线（`worldDeltaToParentLocalDelta` 转父级本地）。`work_state` 为 1（取货中）/3（卸货中）且载物台未到目标层时速度 ×4 赶位，到位恢复正常。货物锚定所属工位锚点（四分位），台升货自升（不 parent）。交接插值时长复用 `RGV_CARGO_TRANSFER_SECONDS`，`resolveCargoHandoffPose` 统一姿态；货箱全程 `lockedWorldRotation` 只平移不旋转。**插值两端随台面走 + 提前升降立即闪上台**：交接/排队平移的起点（输送线货物实际位置/上一工位锚点）与承接平滑起点每帧按载货台锚点位移一起搬走，货物以台面为参照系插值。**台面一开始升降（锚点竖直位移 >0.1mm）时，未完成的交接/排队平移立即落到工位锚点、承接平滑同步清除**——货箱直接闪到台上随台升降，不再一边滑向台面一边被带着走（视觉上斜着追提升机）。台面静止时交接按 1.5s 正常滑动，且不因 work_state 回落（0/6/7/11）冻结，仅急停/faulted 暂停。
 
 ### 时序（work_state 存在时）
 `reference_upper_step/level_upper` 组合键 `${side}:${layer}` 决定去向并播放移动动画；交接由 `work_state` 门控：

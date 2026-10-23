@@ -981,7 +981,7 @@ test('双货连续送第二箱错过窗口：latch 失效后标注归零触发�
   }
 });
 
-test('取货上台途中载货台提前升降：货箱以台面为参照系跟随，插值不因 work_state 回落停摆', () => {
+test('取货上台途中载货台提前升降：货箱立即闪到工位锚点并随台升降，不再斜着追台', () => {
   const h = makeHarness();
   try {
     h.insertConveyorCargo('CIN', '901');
@@ -991,8 +991,15 @@ test('取货上台途中载货台提前升降：货箱以台面为参照系跟�
     assert.ok(back.transferActive && !back.cargoOnBoard, '前置：取货上台插值必须进行中');
     const cargo = h.state.liftCargoMeshes.get(JSON.stringify(['LIFT1', 1]))!;
 
-    // 取货未播完即切送料层（work_state=6 移动中）：载货台上升，货箱必须每帧与台面同高
+    // 取货未播完即切送料层（work_state=6 移动中）：台面一动，未完成交接立即落到工位锚点
     const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    h.applyLift(outgoing);
+    assert.equal(back.transferActive, false, '台面提前升降时取货插值必须立即完结');
+    assert.equal(back.cargoOnBoard, true, '货箱必须立即闪到台上');
+    assert.ok(Math.abs(cargo.root.position.x - STATION_OFFSET) < 1e-6,
+      `闪上台后 x 必须为 step2 锚点 +${STATION_OFFSET}，实际 ${cargo.root.position.x}`);
+
+    // 后续升降：货箱每帧与台面同高，不再有滑动追台
     for (let frame = 1; frame <= 5; frame += 1) {
       h.applyLift(outgoing);
       const deckTopY = DECK_TOP_BASE_Y + h.liftModel.liftTelemetry.liftOffset;
@@ -1001,11 +1008,8 @@ test('取货上台途中载货台提前升降：货箱以台面为参照系跟�
         `第 ${frame} 帧货箱必须随台面同高（台面 ${deckTopY}，货物 ${cargo.root.position.y}）`,
       );
     }
-    assert.ok(back.transferProgress > 0.3, `已开始的交接不得因 work_state=6 冻结，实际进度 ${back.transferProgress}`);
 
-    // 上台插值继续收敛：落到 step2 锚点；载货台到位后货箱仍在台面上
-    runUntil(h, outgoing, () => back.cargoOnBoard, 30);
-    assert.ok(Math.abs(cargo.root.position.x - STATION_OFFSET) < 1e-6, `上台后 x 必须为 step2 锚点 +${STATION_OFFSET}，实际 ${cargo.root.position.x}`);
+    // 载货台到位后货箱仍在台面上
     runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2', 30);
     assert.ok(Math.abs(cargo.root.position.y - 2.05) < 1e-6, `载货台到位后 y 必须为送料层台面 2.05，实际 ${cargo.root.position.y}`);
   } finally {

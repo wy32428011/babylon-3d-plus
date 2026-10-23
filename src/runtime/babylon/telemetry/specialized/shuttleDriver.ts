@@ -82,6 +82,10 @@ type ShuttleTargetCell = {
   deckCenter?: Vector3;
   /** 到层自动出梯（中/完成）：目标为目标层站台格而非载货台中心，Status=0 也走行。 */
   exitToPlatform?: boolean;
+  /** 匹配到的 hclift 台面是否已在目标层停稳：false 表示台面正在升降，进出梯须立即闪烁到目标端。 */
+  hcliftSettled?: boolean;
+  /** 出梯目标层的站台支撑 Y：台面提前升降时闪出并锁定该高度，不再跟随移动中的台面。 */
+  exitSupportY?: number;
 };
 
 /**
@@ -171,6 +175,8 @@ export class ShuttleTelemetryDriver {
     writeDeviceTelemetryMetadata(model, snapshot);
 
     const target = this.resolveShuttleTargetCell(model, snapshot);
+    // 提升机提前升降兜底须先于 Y 闪现：出梯闪出时把支撑位 Y 切换为锁定的站台层高
+    this.applyHcliftDeckEarlyMotionFlash(model, snapshot, target.cell);
     if (status !== null) {
       // Status 相位退出边沿收尾须在目标格跳变跟踪之前：同帧「Status 跳变 + 目标格跳变」时先清滞留状态，避免 catch-up 误判
       this.completeShuttleCargoOnStatusExit(model, status, target.cell);
@@ -348,6 +354,7 @@ export class ShuttleTelemetryDriver {
     // （载车移动过的证据，排除驶入静止提升机误触发）后，目标切到目标层站台格，由驱动侧合成驶出动画。
     let exitToPlatform = false;
     let exitLevel: number | null = null;
+    let exitSupportY: number | null = null;
     if (x === -2 && hclift) {
       const surface = hclift.surface;
       const shuttleState = model.shuttleTelemetry;
@@ -368,6 +375,7 @@ export class ShuttleTelemetryDriver {
           supportPosition.x = exitSupport.x;
           supportPosition.z = exitSupport.z;
           supportPosition.y = surface.supportY;
+          exitSupportY = exitSupport.y;
           exitToPlatform = true;
         }
       }
@@ -386,12 +394,15 @@ export class ShuttleTelemetryDriver {
       row: locator.rowNumber,
       storageDepth: locator.storageDepth,
       isLayerChangePlatform: true,
-      ...(exitToPlatform ? { exitToPlatform: true } : {}),
+      ...(exitToPlatform
+        ? { exitToPlatform: true, ...(exitSupportY !== null ? { exitSupportY } : {}) }
+        : {}),
       ...(hclift
         ? {
             hcliftKey: hclift.key,
             hcliftWorkState: hclift.surface.workState,
             hcliftDeckCenter: hclift.surface.deckCenter.clone(),
+            hcliftSettled: hclift.surface.arrived,
           }
         : {}),
       ...(x === -2 && hclift && !exitToPlatform ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
@@ -656,6 +667,54 @@ export class ShuttleTelemetryDriver {
   }
 
   // ===== 走行（仅 Status=5，Z 轴） =====
+
+  /**
+   * 提升机提前升降兜底：进出梯途中台面一旦离开目标层（arrived=false），立即把小车闪到目标端——
+   * 进梯闪到载货台中心并随台升降；出梯闪到目标层站台并锁定该层站台高度，不再跟随移动中的台面被拖走。
+   * 出梯锁定保持到目标不再是出梯格（x 翻回 -1/正常列），避免台面到新层后把站台上的车垂直拽走。
+   */
+  private applyHcliftDeckEarlyMotionFlash(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    cell: ShuttleTargetCell | null,
+  ): void {
+    if (snapshot.faulted) return;
+    const state = model.shuttleTelemetry;
+    if (!cell || !cell.isLayerChangePlatform || !cell.hcliftKey) {
+      if (cell) {
+        state.hcliftExitFlashOutY = null;
+        state.hcliftEntryStartPosition = null;
+      }
+      return;
+    }
+    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+
+    if (cell.exitToPlatform !== true) {
+      state.hcliftExitFlashOutY = null;
+      if (cell.deckCenter === undefined) {
+        state.hcliftEntryStartPosition = null;
+        return;
+      }
+      state.hcliftEntryStartPosition ??= (state.rootPosition ?? state.rootBasePosition).clone();
+      // 尚未真正开始进梯（被 work_state 门控在原地）时仍按原门控，不抢跑
+      const entered = Vector3.Distance(state.rootPosition ?? state.rootBasePosition, state.hcliftEntryStartPosition)
+        > SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
+      if (!entered || cell.hcliftSettled !== false) return;
+      // 进梯途中台面提前移动：闪入载货台中心，随后 Y 随台面升降
+      state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
+      return;
+    }
+    state.hcliftEntryStartPosition = null;
+
+    if (state.hcliftExitFlashOutY === null) {
+      if (cell.hcliftSettled !== false) return;
+      state.hcliftExitFlashOutY = cell.exitSupportY
+        ?? Vector3.Dot(cell.supportPosition, getModelAxis(model.root, 'y'));
+    }
+    // 出梯途中台面提前移动：闪出到站台并锁定出梯层高
+    cell.supportPosition.y = state.hcliftExitFlashOutY;
+    state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
+  }
 
   /**
    * Status=5 且有目标格支撑位时沿走行轴向目标推进；换层站台目标在 x=-1（驶入站台）、

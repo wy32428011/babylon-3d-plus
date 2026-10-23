@@ -598,6 +598,10 @@ export type ShuttleModelTelemetryState = {
   hcliftExitDoneKey: string | null;
   /** 占位 loaded 期间观察到提升机未到位（arrived=false）：载车移动过的证据，之后的 arrived 边沿才触发出梯。 */
   hcliftLoadedSawMoving: boolean;
+  /** 出梯途中提升机提前升降（arrived=false）时闪出并锁定的站台层高；null 表示未锁定（正常速度出梯）。 */
+  hcliftExitFlashOutY: number | null;
+  /** 进梯相位开始时的车体水平位置：仅当车已真正驶离该位置后才允许「提前升降闪入」，门控未放行时不抢跑。 */
+  hcliftEntryStartPosition: Vector3 | null;
   /** 最近一帧生效的 Y 闪现偏移：目标字段清零（无目标）时沿用，避免整车弹回模型初始高度。 */
   lastYFlashOffset: Vector3 | null;
 };

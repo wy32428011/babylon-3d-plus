@@ -554,6 +554,20 @@ export class LiftTelemetryDriver {
         if (station.cargoHoldPosition) station.cargoHoldPosition.addInPlace(anchorDelta);
         if (cargo.handoff) cargo.handoff.fromPosition.addInPlace(anchorDelta);
       }
+      // 台面已开始升降而货箱还没滑完上台：立即把未完成的交接落到工位锚点（闪烁上台），
+      // 否则货箱会一边滑向台面一边被带着升降，视觉上斜着追提升机。
+      const deckLifting = anchorDelta !== null
+        && Math.abs(Vector3.Dot(anchorDelta, getModelAxis(model.root, 'y'))) > 1e-4;
+      if (deckLifting) {
+        if (station.transferActive) {
+          station.transferProgress = 1;
+          station.cargoOnBoard = true;
+          station.transferActive = false;
+          station.cargoHoldPosition = null;
+          station.cargoHoldRotation = null;
+        }
+        if (cargo.handoff) cargo.handoff = null;
+      }
       let targetPosition = anchor.position;
       if (!station.cargoOnBoard && station.cargoHoldPosition) {
         targetPosition = Vector3.Lerp(station.cargoHoldPosition, anchor.position, station.transferProgress);
