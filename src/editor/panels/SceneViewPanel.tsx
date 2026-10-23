@@ -158,7 +158,6 @@ import {
   subscribeScenePreparation,
 } from '../loading/scenePreparationProgress';
 import '../../styles/scene-performance.css';
-import { waitForSceneRenderReady } from '../../runtime/babylon/sceneRenderReadiness';
 
 type EntityArrayDialogState = {
   sourceEntityId: string;
@@ -1703,7 +1702,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       const batchedEntities = Math.min(expectedBatchedEntities, runtimeMetrics.modelArrayBatchEntityCount);
       const readyNow = settledModels >= totalSceneModels
         && batchedEntities >= expectedBatchedEntities
-        && skyboxReadiness.phase !== 'loading';
+        && skyboxReadiness.phase !== 'loading'
+        && runtimeMetrics.loading.cargoPreload.pendingCount === 0;
       const signature = [
         settledModels,
         batchedEntities,
@@ -1712,6 +1712,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         environmentSnapshot.sourceUrl ?? '',
         skyboxReadiness.phase,
         skyboxReadiness.sourceUrl ?? '',
+        runtimeMetrics.loading.cargoPreload.pendingCount,
       ].join(':');
       sceneRuntimeReadinessStableSamplesRef.current = readyNow && signature === lastSignature
         ? sceneRuntimeReadinessStableSamplesRef.current + 1
@@ -1725,7 +1726,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         const controller = new AbortController();
         renderWait = { signature, controller };
         // 最终脚本/批次稳定后再等材质就绪及完整首帧，不能用采样间隔推测已经显示。
-        void waitForSceneRenderReady(currentScene, controller.signal).then(() => {
+        void runtime.waitForInitialRenderReady(controller.signal).then(() => {
           if (!active || controller.signal.aborted || lastSignature !== signature) return;
           renderedSignature = signature;
           renderWait = null;
@@ -1753,9 +1754,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         stable,
         waitingResource: skyboxReadiness.phase === 'loading'
           ? '正在读取、解码或预过滤天空盒，完成后验证场景首帧…'
-          : !environmentReady
-            ? `正在准备环境模型：${sceneDocument.sceneSettings.environment?.displayName || '场景环境'}`
-            : null,
+          : runtimeMetrics.loading.cargoPreload.pendingCount > 0
+            ? '正在预取并解码货物模板，完成后验证场景首帧…'
+            : !environmentReady
+              ? `正在准备环境模型：${sceneDocument.sceneSettings.environment?.displayName || '场景环境'}`
+              : null,
       });
       if (stable && preparationState.runtime.forcedSettled) stopReadinessPolling();
 

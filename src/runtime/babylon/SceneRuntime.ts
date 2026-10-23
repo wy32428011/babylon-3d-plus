@@ -598,6 +598,7 @@ export class SceneRuntime {
   dispose(): void {
     if (this.document.disposed) return;
     this.document.disposed = true;
+    this.outputs.generatorAssetPreloader.dispose();
     this.readiness.modelStatisticsNotificationPending = false;
     this.readiness.onModelStatisticsChanged = undefined;
     this.readiness.modelStatisticsFallbackMeshes.clear();

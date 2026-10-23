@@ -36,7 +36,7 @@ type Dependencies = {
   readonly assets: Pick<ModelAssetRuntimeController, 'models' | 'sharedModelAssetCache' | 'disposeModel' | 'modelPresentationRefreshPending'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants' | 'modelArrayParameterVariantByEntityId' | 'disposeModelArrayParameterVariant'>;
   readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayInstanceEntities' | 'createModelArrayRenderSignature' | 'modelArrayIdentityMode'>;
-  readonly outputs: Pick<GeneratedModelOutputController, 'spawnedDeviceModels' | 'generatedOutputOwners' | 'disposeModelGeneratorOutput' | 'syncModelGeneratorResolvedTarget'>;
+  readonly outputs: Pick<GeneratedModelOutputController, 'generatorAssetPreloader' | 'spawnedDeviceModels' | 'generatedOutputOwners' | 'disposeModelGeneratorOutput' | 'syncModelGeneratorResolvedTarget'>;
   readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes'>;
   readonly environment: Pick<EnvironmentAndSkyboxController, 'environmentRuntime' | 'skyboxRuntime' | 'environmentAssetCache' | 'lightingRuntime'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'selectionSyncCount' | 'lastSelectionSyncDurationMs' | 'maxSelectionSyncDurationMs' | 'lastSelectionChangedEntityCount' | 'rebuildModelSelectionOutline'>;
@@ -78,8 +78,13 @@ export class SceneTriangleAndReadinessController {
   }>();
 
   /** 入场准备完成后仍需验证材质就绪与实际渲染；两个阶段独立计量。 */
-  waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
-    return this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal));
+  async waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
+    do {
+      await this.dependencies.outputs.generatorAssetPreloader.waitForReady(signal);
+      if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
+      await this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal));
+      // 等首帧期间配置仍可变化；新目标也必须完成预取才能结算当前准备。
+    } while (this.dependencies.outputs.generatorAssetPreloader.getMetrics().pendingCount > 0);
   }
 
   /** 返回当前场景的完整模型三角面数，不依赖相机裁剪后的渲染批次。 */
@@ -252,6 +257,7 @@ export class SceneTriangleAndReadinessController {
         pendingModelCount: [...this.dependencies.assets.models.values()].filter((model) => !model.measurementReady).length,
         failedModelAcquisitions: this.failedModelAcquisitions,
         modelCache: this.dependencies.assets.sharedModelAssetCache.getMetrics(),
+        cargoPreload: this.dependencies.outputs.generatorAssetPreloader.getMetrics(),
         environmentCache: this.dependencies.environment.environmentAssetCache.getMetrics(),
         entrance: this.dependencies.effects.getModelEntranceSnapshot(), resources: this.context.getResourceLoadDiagnostics?.call(this.context.callbackReceiver) ?? null },
       modelArrayInstanceEntityCount: this.dependencies.arrays.modelArrayInstanceEntities.size,
@@ -305,7 +311,7 @@ export class SceneTriangleAndReadinessController {
     if (!this.context.onModelLoadProgress || this.dependencies.document.disposed) return;
     if (this.activeModelLoadProgress.size === 0) {
       this.progressNotificationPending = false;
-      this.loadDiagnostics.measure('progressNotify', () => this.context.onModelLoadProgress?.call(this.context.callbackReceiver, this.computeModelLoadProgress()));
+      this.loadDiagnostics.measure('progressNotify', () => this.emitModelLoadProgress());
       return;
     }
     if (this.progressNotificationPending) return;
@@ -313,8 +319,17 @@ export class SceneTriangleAndReadinessController {
     queueMicrotask(() => {
       if (!this.progressNotificationPending || this.dependencies.document.disposed) return;
       this.progressNotificationPending = false;
-      this.loadDiagnostics.measure('progressNotify', () => this.context.onModelLoadProgress?.call(this.context.callbackReceiver, this.computeModelLoadProgress()));
+      this.loadDiagnostics.measure('progressNotify', () => this.emitModelLoadProgress());
     });
+  }
+
+  /** 进度订阅是观察者，异常不得覆盖成功返回的模板句柄或阻断加载单元结算。 */
+  private emitModelLoadProgress(): void {
+    try {
+      this.context.onModelLoadProgress?.call(this.context.callbackReceiver, this.computeModelLoadProgress());
+    } catch (error) {
+      console.warn('[Scene load] 模型加载进度观察者失败。', error);
+    }
   }
 
   /** 加载门控只查询源实体状态，不为每次轮询重复计算全模型包围盒；失败或已删除的模型不会被计为就绪。 */
@@ -461,6 +476,7 @@ export class SceneTriangleAndReadinessController {
   public computeModelLoadProgress(): SceneRuntimeModelLoadProgress {
     const skyboxPhase = this.dependencies.environment.skyboxRuntime.getReadiness().phase;
     const skyboxLoading = skyboxPhase === 'loading';
+    const cargoPreloadPending = this.dependencies.outputs.generatorAssetPreloader.getMetrics().pendingCount > 0;
     const totalCount = this.modelLoadProgressStartedCount + (skyboxPhase === 'idle' ? 0 : 1);
     const settledCount = this.modelLoadProgressSettledCount + (skyboxPhase === 'ready' || skyboxPhase === 'error' ? 1 : 0);
     let weightedSettled = settledCount;
@@ -479,12 +495,13 @@ export class SceneTriangleAndReadinessController {
       }
     }
     if (skyboxLoading && !currentFile) currentFile = '天空盒纹理';
+    if (cargoPreloadPending && !currentFile) currentFile = '货物模板预解码';
     const percent = totalCount > 0
       ? Math.min(1, Math.max(0, weightedSettled / totalCount))
       : 1;
     return {
-      loading: skyboxLoading || this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
-      percent,
+      loading: cargoPreloadPending || skyboxLoading || this.activeModelLoadProgress.size > 0 || settledCount < totalCount,
+      percent: cargoPreloadPending ? Math.min(percent, totalCount > 0 ? 0.99 : 0) : percent,
       completedCount: settledCount,
       totalCount,
       currentFile,

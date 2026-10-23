@@ -12,7 +12,7 @@ import { isMeasurableModelMesh } from '../modelMeasurement';
 import { getMeshesWorldBottomCenter } from '../runtimeNodeGeometry';
 import { resolveRuntimeAssetUrl } from '../../assets/editorAssetUrl';
 import { AssetLoadScheduler } from '../AssetLoadScheduler';
-import { resolveModelAssetSharedInstancingPolicy, SharedModelAssetCache, createModelAssetTemplateKey } from '../SharedModelAssetCache';
+import { resolveModelAssetSharedInstancingPolicy, SharedModelAssetCache, createModelAssetTemplateKey, type SharedModelTemplateLease } from '../SharedModelAssetCache';
 import { repairInstancedMeshBufferContainers } from '../instancedSelectionBuffers';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset, resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
@@ -217,12 +217,32 @@ export class ModelAssetRuntimeController {
       });
   }
 
-  /** 按模型资产能力选择独占容器或安全共享实例加载路径。 */
+  /** 仅预取并解码模板，不创建业务实例或执行脚本；句柄随生成器配置归还。 */
+  public async preloadModelRuntimeAsset(modelAsset: ModelAssetComponent, signal?: AbortSignal): Promise<SharedModelTemplateLease> {
+    const { rootUrl, fileName } = this.splitAssetUrl(
+      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+    );
+    const sequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
+    try {
+      return await this.sharedModelAssetCache.preload(
+        createModelAssetTemplateKey(modelAsset),
+        sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
+          this.dependencies.readiness.updateModelLoadProgressUnit(sequence, event);
+        }),
+        signal,
+      );
+    } finally {
+      this.dependencies.readiness.settleModelLoadProgressUnit(sequence);
+    }
+  }
+
+  /** 按模型资产能力选择独占容器或安全共享实例加载路径；组合阵列源始终独占。 */
   public async loadModelRuntimeAssets(
     modelAsset: ModelAssetComponent,
     _assetSignature: string,
     loadSignal?: AbortSignal,
     entityId?: string,
+    forceOwnedContainer = false,
   ): Promise<LoadedModelRuntimeAssets> {
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
@@ -231,7 +251,7 @@ export class ModelAssetRuntimeController {
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     try {
       const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
-      if (instancingPolicy.mode === 'shared-instance') {
+      if (!forceOwnedContainer && instancingPolicy.mode === 'shared-instance') {
         const sharedInstance = await this.sharedModelAssetCache.instantiate(
           createModelAssetTemplateKey(modelAsset),
           (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {

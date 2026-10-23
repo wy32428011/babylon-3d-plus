@@ -27,6 +27,7 @@ import { SceneLoadDiagnostics } from '../SceneLoadDiagnostics';
 import type { PublishedAssetCache } from '../../assets/publishedAssetCache';
 import { EnvironmentAssetContainerCache } from '../environmentAssetContainerCache';
 import { SharedModelAssetCache } from '../SharedModelAssetCache';
+import type { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import type { ConveyorModelTelemetryState, HcliftModelTelemetryState, LiftModelTelemetryState, RgvModelTelemetryState, ShuttleModelTelemetryState, StackerModelTelemetryState } from '../telemetry/specialized/types';
 
@@ -433,6 +434,7 @@ export type SceneRuntimePerformanceMetrics = {
     pendingModelCount: number;
     failedModelAcquisitions: number;
     modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
+    cargoPreload: ReturnType<ModelGeneratorAssetPreloader['getMetrics']>;
     environmentCache: ReturnType<EnvironmentAssetContainerCache['getMetrics']>;
     entrance: ReturnType<ModelEntranceRuntime['getSnapshot']>;
     resources: ReturnType<PublishedAssetCache['getLoadDiagnostics']> | null;

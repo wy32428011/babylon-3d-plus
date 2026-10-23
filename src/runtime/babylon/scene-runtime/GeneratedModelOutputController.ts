@@ -18,6 +18,8 @@ import { clearCompositionCache, getCompositionLibraryEntry } from '../compositio
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { type DeviceTelemetrySnapshot } from '../../mqtt/deviceTelemetry';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
+import { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
+import { createModelAssetTemplateKey } from '../SharedModelAssetCache';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceKey, type DeviceSpawnerConfig, type SpawnedDeviceKey } from '../telemetry/spawner/DeviceSpawnerRuntime';
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
@@ -36,9 +38,9 @@ import { MODEL_GENERATOR_MARKER_COLOR, MODEL_GENERATOR_MARKER_ALPHA, DEVICE_SPAW
 type Dependencies = {
   readonly telemetry: Pick<SceneTelemetryController, 'specializedTelemetryRuntime' | 'telemetryPreviewActive' | 'createExternalScriptTelemetrySnapshot' | 'updateModelExternalScriptRuntimeContext'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'readColor'>;
-  readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics' | 'modelStatisticsFallbackMeshes'>;
+  readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics' | 'modelStatisticsFallbackMeshes' | 'notifyModelLoadProgressChanged'>;
   readonly parameters: Pick<ModelParameterBindingController, 'applyModelUnitScale' | 'applyModelAssetParameters'>;
-  readonly assets: Pick<ModelAssetRuntimeController, 'createModelAssetSignature' | 'modelLoadSequence' | 'loadModelRuntimeAssets' | 'parentTopLevelModelNodes' | 'refreshModelGeneratorModelMeshes' | 'normalizeModelContentOrigin' | 'syncModelGeneratorExternalScripts' | 'splitAssetUrl' | 'resolveVersionedRuntimeAssetUrl' | 'loadAssetContainer' | 'refreshModelMeshes' | 'models' | 'syncModelAssetExternalScripts'>;
+  readonly assets: Pick<ModelAssetRuntimeController, 'createModelAssetSignature' | 'modelLoadSequence' | 'loadModelRuntimeAssets' | 'preloadModelRuntimeAsset' | 'parentTopLevelModelNodes' | 'refreshModelGeneratorModelMeshes' | 'normalizeModelContentOrigin' | 'syncModelGeneratorExternalScripts' | 'splitAssetUrl' | 'resolveVersionedRuntimeAssetUrl' | 'loadAssetContainer' | 'refreshModelMeshes' | 'models' | 'syncModelAssetExternalScripts'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'applyModelSelection'>;
   readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable' | 'shadowDocument'>;
 };
@@ -46,7 +48,29 @@ type Dependencies = {
 
 /** GeneratedModelOutputController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class GeneratedModelOutputController {
-  constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
+  constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {
+    this.generatorAssetPreloader = new ModelGeneratorAssetPreloader({
+      preload: (asset, signal) => this.dependencies.assets.preloadModelRuntimeAsset(asset, signal),
+      getAssetKey: createModelAssetTemplateKey,
+      loadCompositionModels: async target => {
+        const entry = await getCompositionLibraryEntry(target.libraryId, target.revision);
+        return entry.definition.nodes.flatMap(node => {
+          if (node.visible === false || readCompositionNodeArraySourceId(node) || readCompositionNodeMeshRenderer(node)) return [];
+          const template = sanitizeModelAssetTemplate(node.components.modelAsset);
+          return template ? [{ assetCode: '', ...template }] : [];
+        });
+      },
+      onError: (error, target) => {
+        Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [
+          '货物模板预取失败，生成时将按原规则重试：' + target.displayName + '；'
+          + (error instanceof Error ? error.message : String(error)),
+        ]);
+      },
+      onChange: () => this.dependencies.readiness.notifyModelLoadProgressChanged(),
+    });
+  }
+
+  public readonly generatorAssetPreloader: ModelGeneratorAssetPreloader;
 
   public readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   /** 设备产生器标记（编辑态可视），按实体 ID 组织。 */
@@ -106,6 +130,7 @@ export class GeneratedModelOutputController {
     runtimeEntry.entityName = entity.name;
     runtimeEntry.component = component;
     runtimeEntry.runtimeConfigSignature = runtimeConfigSignature;
+    this.generatorAssetPreloader.sync(entity.id, component, runtimeConfigSignature);
     runtimeEntry.selected = selected;
     this.dependencies.presentation.applyTransform(runtimeEntry.markerRoot, entity.components.transform);
     this.applyModelGeneratorPresentation(runtimeEntry);
@@ -114,6 +139,7 @@ export class GeneratedModelOutputController {
   /** 在编辑态与运行态切换时允许全部生成输出重新尝试失败目标。 */
   public clearModelGeneratorLoadFailureCache(): void {
     clearCompositionCache();
+    this.generatorAssetPreloader.retryFailed();
     for (const owner of this.generatedOutputOwners.values()) {
       owner.failedTargetSignatures.clear();
       owner.readinessError = undefined;
@@ -438,35 +464,17 @@ export class GeneratedModelOutputController {
     tree: CompositionNodeTree,
     cargoRoot: TransformNode,
   ): Promise<void> {
-    if (arrayInstanceNodeIds.length > 0) {
-      const { rootUrl, fileName } = this.dependencies.assets.splitAssetUrl(
-        this.dependencies.assets.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
-      );
-      const container = await this.dependencies.assets.loadAssetContainer(rootUrl, fileName);
-      try {
-        container.addAllToScene();
-        model.assetHandle = {
-          kind: 'owned-container',
-          animationGroups: container.animationGroups,
-          dispose: () => container.dispose(),
-        };
-        model.meshes = container.meshes;
-        this.dependencies.assets.parentTopLevelModelNodes(model, container.transformNodes);
-      } catch (error) {
-        container.dispose();
-        throw error;
-      }
+    // 阵列源仍使用独占 Geometry；只将读取/解码接回同一模板缓存，不改变参数或脚本执行。
+    const loadedAssets = await this.dependencies.assets.loadModelRuntimeAssets(
+      modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name,
+      arrayInstanceNodeIds.length > 0,
+    );
+    model.assetHandle = loadedAssets.handle;
+    if (loadedAssets.kind === 'owned-container') {
+      model.meshes = loadedAssets.meshes;
+      this.dependencies.assets.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
     } else {
-      const loadedAssets = await this.dependencies.assets.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name);
-      model.assetHandle = loadedAssets.handle;
-      if (loadedAssets.kind === 'owned-container') {
-        model.meshes = loadedAssets.meshes;
-        this.dependencies.assets.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
-      } else {
-        for (const rootNode of loadedAssets.rootNodes) {
-          rootNode.parent = model.contentRoot;
-        }
-      }
+      for (const rootNode of loadedAssets.rootNodes) rootNode.parent = model.contentRoot;
     }
 
     this.dependencies.assets.refreshModelMeshes(model, {});
@@ -921,6 +929,7 @@ export class GeneratedModelOutputController {
 
   /** 释放模型生成器配置标记、独立输出根节点、以其为模板的货物和异步资源。 */
   public disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
+    this.generatorAssetPreloader.remove(entityId);
     runtimeEntry.loadToken += 1;
     this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForGenerator(entityId);
     this.disposeModelGeneratorOutput(runtimeEntry);
