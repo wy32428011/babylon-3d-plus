@@ -1,5 +1,4 @@
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig.ts';
-import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
 import { Light } from '@babylonjs/core/Lights/light.js';
@@ -20,6 +19,7 @@ import type { SceneDocument } from '../../editor/model/SceneDocument';
 import { classifyEntityMobility } from '../../editor/model/lightingMobility';
 import { createLightingTextureCapture, exportLightingMesh } from './lightingGeometry.ts';
 import type { LightingRuntimeSource } from './lightingClassificationRuntime.ts';
+import { lightingGeometrySignatureCache } from './lightingGeometrySignatureCache.ts';
 
 export function sourceGeometryMesh(mesh: AbstractMesh): Mesh {
   const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh;
@@ -45,13 +45,7 @@ export function getLightingGeometrySignature(sources: readonly LightingRuntimeSo
     if (!world) throw new Error(`对象「${source.entry.name}」的世界矩阵已失效。`);
     let geometry = cache.get(mesh);
     if (!geometry) {
-      const values = (kind: string) => { const data = mesh.getVerticesData(kind); return data ? Array.from(data) : null; };
-      geometry = lightingContentHash({
-        positions: values(VertexBuffer.PositionKind), normals: values(VertexBuffer.NormalKind),
-        indices: Array.from(mesh.getIndices() ?? []), uvs: values(VertexBuffer.UVKind), uvs2: values(VertexBuffer.UV2Kind),
-        colors: mesh.useVertexColors ? values(VertexBuffer.ColorKind) : null, tangents: values(VertexBuffer.TangentKind),
-        subMeshes: mesh.subMeshes.map(part => [part.materialIndex, part.indexStart, part.indexCount]),
-      });
+      geometry = lightingGeometrySignatureCache.getHash(mesh);
       cache.set(mesh, geometry);
     }
     return [source.entry.key, geometry, Array.from(world.m), source.entry.bakeIndirect, source.entry.castShadows, source.entry.receiveShadows];

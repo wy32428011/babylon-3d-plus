@@ -4,8 +4,8 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：789；测试/runner/smoke 候选：702；fixture/helper/治理工具：87。
-- npm 测试/smoke 入口：102；有静态入口的候选：562；无静态 npm 入口：140（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：791；测试/runner/smoke 候选：704；fixture/helper/治理工具：87。
+- npm 测试/smoke 入口：102；有静态入口的候选：563；无静态 npm 入口：141（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
 - CI 静态可达候选：158。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
@@ -22,6 +22,7 @@
 | scripts/smoke-alarm-custom-property.mjs | browser / WebGL 候选；browser-webgl | node --experimental-transform-types scripts/smoke-alarm-custom-property.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
 | scripts/smoke-alarm-manager.mjs | browser / WebGL 候选；browser-webgl | node --experimental-transform-types scripts/smoke-alarm-manager.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
 | scripts/smoke-alarm-reference.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-alarm-reference.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
+| scripts/smoke-animation-frame-cost.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node scripts/smoke-animation-frame-cost.mjs（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 含服务/端口；复核端口与关闭流程；固定基线81a78c1，输出构造场景等价证据，不作为附件现场FPS验收；安装 package-lock.json 对应依赖和本机 Playwright 兼容 Edge；必须为硬件WebGL，软件renderer失败；独立动态loopback Vite服务；结束关闭自有browser/server；不修改用户场景 | 否 / 未确认 |
 | scripts/smoke-asset-stream-throughput.mjs | browser / WebGL 候选；performance | node --experimental-transform-types scripts/smoke-asset-stream-throughput.mjs <资源文件> [报告路径]（已分类，需定向执行并核对条件） | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；独占采样；记录真实输入、机器/GPU和配置；CPU/IO 微基准与工厂 FPS 分开报告；不并发构建/测试 | 否 / 未确认 |
 | scripts/smoke-bound-screen-selection.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-bound-screen-selection.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；先执行 npm run build:viewer，保留 Viewer 模板能力校验；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-viewer-template；核对 build:viewer 前置；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
 | scripts/smoke-builtin-skybox.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-builtin-skybox.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：CHROME_PATH | 否 / 未确认 |
@@ -583,6 +584,7 @@
 | tests/runtime/lightingClassificationReview.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingClassificationRuntime.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingGeometry.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingGeometrySignatureCache.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | GC用例启动自有 --expose-gc 子进程，必须等待实际断言结束；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；包含模块hook与全局方法覆盖，禁止共享测试进程；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/lightingMaterialExport.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingNativeInstances.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingPolicyRuntime.test.ts | NullEngine | test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |

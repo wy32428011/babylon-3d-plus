@@ -756,7 +756,8 @@ export const createSceneDocumentSlice: EditorSlice<
         Math.max(1, Math.floor(Number.isFinite(copyCount) ? copyCount : 3)),
       );
       const normalizedDirection = ENTITY_ARRAY_DIRECTION_VECTORS[direction] ? direction : 'x';
-      const spacing = sanitizeNonNegativeNumber(spacingMeters, 1);
+      // 净间距保留符号，以支持重叠拼接及跨过零步长后的反向排列。
+      const spacing = Number.isFinite(spacingMeters) ? spacingMeters : 1;
 
       return {
         entityArrayRequest: {

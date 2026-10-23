@@ -161,6 +161,49 @@ try {
   reset();
   store.getState().requestEntityArray(2, 'x', 1, '');
   assert.deepEqual(store.getState().entityArrayRequest.sourceIds, [root.id]);
+
+  // 净间距保留符号：跨度 4 时分别形成正步长、零步长和反向步长。
+  for (const { spacing, offsets } of [
+    { spacing: -1, offsets: [3, 6] },
+    { spacing: -4, offsets: [0, 0] },
+    { spacing: -6, offsets: [-2, -4] },
+  ]) {
+    for (const sourceKind of ['ordinary', 'composition']) {
+      const ordinary = createModelEntity(host.components.modelAsset.sourcePath, host.components.modelAsset.sourceUrl, '普通01');
+      ordinary.components.transform.position.x = 10;
+      const sourceScene = sourceKind === 'composition' ? scene : {
+        ...createEmptySceneDocument('负间距普通模型'),
+        entityIds: [ordinary.id], entities: { [ordinary.id]: ordinary }, selectedEntityId: ordinary.id,
+      };
+      const sourceId = sourceKind === 'composition' ? root.id : ordinary.id;
+      store.setState({ scene: sourceScene, runtimeMode: 'edit', history: { undoStack: [], redoStack: [] }, hierarchySelectionIds: [sourceId], entityArrayRequest: null });
+      store.getState().requestEntityArray(2, 'x', spacing, '');
+      assert.equal(store.getState().entityArrayRequest?.spacingMeters, spacing, `${sourceKind}: 请求必须保留负净间距`);
+      const requestId = store.getState().entityArrayRequest.id;
+      store.getState().resolveEntityArrayRequest(requestId, 4);
+      const committed = store.getState();
+      assert.equal(committed.history.undoStack.length, 1, `${sourceKind}: 负净间距应原子提交`);
+      const createdIds = committed.scene.entityIds.filter(id => !sourceScene.entities[id]);
+      const copyRoots = createdIds.map(id => committed.scene.entities[id]).filter(node => sourceKind === 'composition' ? node.composition : node.components.modelArrayInstance);
+      assert.equal(copyRoots.length, 2);
+      assert.deepEqual(copyRoots.map(copy => copy.components.transform.position.x), offsets.map(offset => sourceScene.entities[sourceId].components.transform.position.x + offset));
+      const roundTripped = deserializeScene(serializeScene(committed.scene));
+      for (const id of createdIds) {
+        assert.deepEqual(roundTripped.entities[id].components.transform, committed.scene.entities[id].components.transform, `${sourceKind}: 保存重开保留有符号偏移`);
+      }
+      if (sourceKind === 'composition') {
+        for (const [index, copy] of copyRoots.entries()) {
+          const copiedNested = committed.scene.entities[copy.childrenIds[0]];
+          const copiedHost = committed.scene.entities[copiedNested.childrenIds[0]];
+          assert.equal(copiedHost.components.transform.position.x, host.components.transform.position.x + offsets[index]);
+        }
+      }
+      store.getState().undo();
+      assert.deepEqual(store.getState().scene.entityIds, sourceScene.entityIds, `${sourceKind}: 撤销清除全部副本`);
+      store.getState().redo();
+      for (const id of createdIds) assert.deepEqual(store.getState().scene.entities[id].components.transform, committed.scene.entities[id].components.transform);
+    }
+  }
   console.log('组合阵列数据验证通过：结构、绑定、隔离、历史、限制、保存重开及请求入口。');
 } finally {
   hooks.deregister();

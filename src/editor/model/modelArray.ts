@@ -88,8 +88,8 @@ export function getEntityArrayParameterError(copyCount: number, spacingMeters: n
   if (!Number.isInteger(copyCount) || copyCount < 1 || copyCount > MODEL_ARRAY_COPY_COUNT_MAX) {
     return `副本数量必须是 1-${MODEL_ARRAY_COPY_COUNT_MAX} 的整数。`;
   }
-  if (!Number.isFinite(spacingMeters) || spacingMeters < 0) {
-    return '阵列净间距必须是大于等于 0 的有限数值。';
+  if (!Number.isFinite(spacingMeters)) {
+    return '阵列净间距必须是有限数值。';
   }
   return null;
 }

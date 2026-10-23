@@ -99,7 +99,6 @@ export function EntityArrayDialog(props: EntityArrayDialogProps) {
         <label className="hierarchy-array-dialog-row">
           <span>阵列净间距(m)</span>
           <input
-            min={0}
             onChange={(event) => props.onChange({ ...props.value, spacingMeters: Number(event.target.value) })}
             disabled={props.readOnly}
             step={0.1}

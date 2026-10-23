@@ -641,7 +641,7 @@ export class SceneTransformPreviewController {
       return true;
     }
 
-    const normalizedSpacingMeters = Number.isFinite(spacingMeters) ? Math.max(0, spacingMeters) : 0;
+    const normalizedSpacingMeters = Number.isFinite(spacingMeters) ? spacingMeters : 0;
     if (
       this.entityArrayPreview
       && (
@@ -800,7 +800,7 @@ export class SceneTransformPreviewController {
     if (copyCount === 0) { this.clearEntityArrayPreview(); return true; }
     const sources = this.resolveCompositionArraySources(entityId, copyCount);
     const geometry = this.getEntityArrayGeometry(entityId, direction);
-    if (!sources || !geometry || !Number.isFinite(spacingMeters) || spacingMeters < 0) {
+    if (!sources || !geometry || !Number.isFinite(spacingMeters)) {
       this.clearEntityArrayPreview();
       return false;
     }

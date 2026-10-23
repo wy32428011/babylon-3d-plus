@@ -93,6 +93,33 @@ test('composition matrix preview places both members at whole-group offsets with
   } finally { f.dispose(); }
 });
 
+test('signed net spacing preserves positive, zero and reverse preview steps for ordinary and composition sources', () => {
+  const f = fixture();
+  try {
+    const cases = [
+      { sourceId: 'a', spacing: -1, expected: [1, 2] },
+      { sourceId: 'a', spacing: -2, expected: [0, 0] },
+      { sourceId: 'a', spacing: -3, expected: [-2, -1] },
+      { sourceId: 'group', spacing: -2, expected: [6, 11, 12, 17] },
+      { sourceId: 'group', spacing: -8, expected: [0, 0, 5, 5] },
+      { sourceId: 'group', spacing: -10, expected: [-4, -2, 1, 3] },
+    ];
+    for (const { sourceId, spacing, expected } of cases) {
+      assert.equal(f.runtime.updateEntityArrayPreview(sourceId, { x: 1, y: 0, z: 0 }, 2, spacing), true, `${sourceId}: ${spacing}`);
+      const placements = f.scene.meshes.filter(mesh => mesh !== f.a && mesh !== f.b)
+        .flatMap(mesh => mesh.thinInstanceCount > 0
+          ? mesh.thinInstanceGetWorldMatrices().map(matrix => matrix.getTranslation().x)
+          : [mesh.getAbsolutePosition().x])
+        .sort((a, b) => a - b);
+      assert.deepEqual(placements, expected, `${sourceId}: ${spacing}`);
+      assert.equal(f.a.position.x, 0);
+      assert.equal(f.b.position.x, 5);
+      f.runtime.clearEntityArrayPreview();
+      assert.equal(f.scene.meshes.length, 2);
+    }
+  } finally { f.dispose(); }
+});
+
 test('composition includes existing matrix model instance at its own world transform', () => {
   const f = fixture();
   try {

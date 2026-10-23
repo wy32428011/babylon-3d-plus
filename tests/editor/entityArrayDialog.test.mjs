@@ -26,6 +26,14 @@ test('组合阵列弹框显示完整实体数量和自动编号，普通阵列�
       compositionArray: { createdEntityCount: 10001 }, validationError: '单次新增实体不能超过 10000 个。' }));
     assert.match(blocked, /单次新增实体不能超过 10000 个/);
     assert.match(blocked, /class="primary" disabled/);
+    for (const compositionArray of [undefined, { createdEntityCount: 21 }]) {
+      const negative = renderToStaticMarkup(createElement(EntityArrayDialog, { ...props,
+        value: { ...props.value, spacingMeters: -0.5 }, compositionArray }));
+      assert.match(negative, /value="-0.5"/);
+      assert.doesNotMatch(negative, /min="0"/);
+      assert.doesNotMatch(negative, /class="primary" disabled/);
+      assert.doesNotMatch(negative, /hierarchy-array-dialog-error/);
+    }
   } finally {
     await server?.close();
     await rm(temporary, { recursive: true, force: true });
