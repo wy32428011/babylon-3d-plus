@@ -1265,12 +1265,19 @@ test('出梯途中提升机提前升降：立即闪烁到站台并锁定出梯�
     h.apply(platformFrame, 0.1, 40);
     assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'loaded', '前置：必须已停在载货台');
 
-    // 提升机到层（层 3，台面 4.0）→ 触发出梯；驶出途中台面再次提前升降
-    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, arrived: true, updatedAtMs: Date.now() });
+    // 提升机到层，但还在 ws=5：必须等 ws=3 放行才驶出，不得提前闪出
+    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, arrived: true, workState: 5, updatedAtMs: Date.now() });
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 3);
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6,
+      `ws=5 时必须等 ws=3，不得提前闪出，实际 z=${h.model.shuttleTelemetry.rootPosition!.z}`);
+
+    // ws=3 放行：正常驶出动画（不得直接闪到站台）
+    h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, arrived: true, workState: 3, updatedAtMs: Date.now() });
     h.apply({ ...platformFrame, x: -2 }, 0.1, 2);
     const exitZ = h.model.shuttleTelemetry.rootPosition!.z;
-    assert.ok(exitZ > 9.673 && exitZ < 11, `前置：出梯必须进行中，实际 z=${exitZ}`);
+    assert.ok(exitZ > 9.673 && exitZ < 11, `ws=3 后出梯必须走动画，实际 z=${exitZ}`);
 
+    // 驶出途中台面提前升降（ws=5）：立即闪出到站台
     h.state.hcliftPlatformSurfaces.set('hclift1', { ...surface, supportY: 4.3, arrived: false, workState: 5, updatedAtMs: Date.now() });
     h.apply({ ...platformFrame, x: -2 }, 0.1, 1);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6,

@@ -685,6 +685,7 @@ export class ShuttleTelemetryDriver {
       if (cell) {
         state.hcliftExitFlashOutY = null;
         state.hcliftEntryStartPosition = null;
+        state.hcliftExitStartPosition = null;
       }
       state.hcliftDeckSupportYKey = null;
       state.hcliftDeckSupportY = null;
@@ -703,6 +704,7 @@ export class ShuttleTelemetryDriver {
 
     if (cell.exitToPlatform !== true) {
       state.hcliftExitFlashOutY = null;
+      state.hcliftExitStartPosition = null;
       state.hcliftEntryStartPosition ??= (state.rootPosition ?? state.rootBasePosition).clone();
       // 尚未真正开始进梯（被 work_state 门控在原地）时仍按原门控，不抢跑
       const entered = Vector3.Distance(state.rootPosition ?? state.rootBasePosition, state.hcliftEntryStartPosition)
@@ -713,9 +715,12 @@ export class ShuttleTelemetryDriver {
       return;
     }
     state.hcliftEntryStartPosition = null;
-
+    state.hcliftExitStartPosition ??= (state.rootPosition ?? state.rootBasePosition).clone();
+    // 出梯必须先等 work_state=3 放行动画；台面在出梯动画开始后才升降才闪出，避免未起步就被掐断
+    const exitStarted = Vector3.Distance(state.rootPosition ?? state.rootBasePosition, state.hcliftExitStartPosition)
+      > SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
     if (state.hcliftExitFlashOutY === null) {
-      if (!deckLifting) return;
+      if (!exitStarted || !deckLifting) return;
       state.hcliftExitFlashOutY = cell.exitSupportY ?? supportY;
     }
     // 出梯途中台面开始升降：闪出到站台并锁定出梯层高

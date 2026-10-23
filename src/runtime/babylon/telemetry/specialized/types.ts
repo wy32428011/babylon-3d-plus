@@ -602,6 +602,8 @@ export type ShuttleModelTelemetryState = {
   hcliftExitFlashOutY: number | null;
   /** 进梯相位开始时的车体水平位置：仅当车已真正驶离该位置后才允许「提前升降闪入」，门控未放行时不抢跑。 */
   hcliftEntryStartPosition: Vector3 | null;
+  /** 出梯相位开始时的车体水平位置：出梯动画真正起步后，台面再升降才允许闪出（未等 ws=3 前不掐断）。 */
+  hcliftExitStartPosition: Vector3 | null;
   /** 上一个在载货台侧的 hclift 键与台面支撑高度：比较本帧高度变化判定台面是否真的开始升降（兼容无 work_state 的旧模型）。 */
   hcliftDeckSupportYKey: string | null;
   hcliftDeckSupportY: number | null;
