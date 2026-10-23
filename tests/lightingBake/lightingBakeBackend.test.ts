@@ -109,3 +109,12 @@ test('单源跨页必须完整覆盖切分树，禁止缺片、重叠或源身�
   assert.throws(() => matchLightingBakeSurfaceSources(input.meshes, []), /烘焙表面/);
   assert.throws(() => matchLightingBakeSurfaceSources(input.meshes, [{ ...surface('ground'), entityId: 'other' }]), /烘焙表面/);
 });
+
+test('IPC区域缺省enabled被不可变归一化，TS预检与Python使用同一区域', () => {
+  const raw=fixture(); Object.assign(raw.settings,{probeVolumes:[{id:'area',name:'区域',min:[0,0,0],max:[1,1,1]}]}); const before=structuredClone(raw);
+  const input=validateLightingBakeInput(raw); assert.notEqual(input,raw); assert.notEqual(input.settings,raw.settings); assert.equal(input.settings.probeVolumes?.[0].enabled,true); assert.deepEqual(raw,before);
+});
+
+test('未声明区域的旧v1输入保持既有返回对象identity', () => {
+  const input=fixture(); assert.equal(validateLightingBakeInput(input),input);
+});

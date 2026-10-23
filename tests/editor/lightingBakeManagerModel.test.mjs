@@ -15,7 +15,8 @@ await writeFile(entry, "export * from '../../src/editor/panels/lightingBakeManag
 await build({ configFile: false, publicDir: false, logLevel: 'silent',
   build: { ssr: entry, outDir: path.join(temporary, 'ssr'), rolldownOptions: { output: { entryFileNames: 'ui.mjs' } } } });
 const { createLightingManagerDraft, isLightingManagerDraftDirty, buildLightingManagerRows, getLightingManagerImpact,
-  stageLightingManagerExceptions, applyLightingManagerPreset, getLightingManagerPolicy, EMPTY_LIGHTING_BULK_VALUES } = await import(pathToFileURL(path.join(temporary, 'ssr/ui.mjs')).href);
+  stageLightingManagerExceptions, applyLightingManagerPreset, getLightingManagerPolicy, EMPTY_LIGHTING_BULK_VALUES,
+  getLightingManagerChangeSummary, buildLightingManagerDiagnostics, createLightingManagerRowsSelector } = await import(pathToFileURL(path.join(temporary, 'ssr/ui.mjs')).href);
 
 const lightingFixture = () => ({ version: 2, allowDayNightCycle: true, result: null,
   main: { source: 'managed', enabled: true, color: '#ffffff', azimuthDegrees: 225, elevationDegrees: 45, intensity: 1 },
@@ -266,4 +267,93 @@ test('真实逻辑阵列实例仍写自己的例外，不误写源模型或显�
   assert.equal(result.ok, true);
   assert.equal(result.entityLighting['array-item'].nodeOverrides['root/deck'].castShadows, false);
   assert.equal(result.entityLighting.machine, undefined);
+});
+
+
+test('变更摘要区分显示、物理照明和计算参数，并使用正式 GI 输入合同判断过期', () => {
+  const scene = sceneFixture();
+  const appearance = createLightingManagerDraft(scene, 'session'); appearance.appearance.exposure = 1.4;
+  assert.deepEqual(getLightingManagerChangeSummary(appearance).categories, ['显示效果']);
+  assert.equal(getLightingManagerChangeSummary(appearance).giInputChanged, false);
+  const physical = createLightingManagerDraft(scene, 'session'); physical.lighting.main.intensity = 2;
+  assert.deepEqual(getLightingManagerChangeSummary(physical).categories, ['物理照明']);
+  assert.equal(getLightingManagerChangeSummary(physical).giInputChanged, true);
+  const calculation = createLightingManagerDraft(scene, 'session'); calculation.lighting.bake.quality = 'high';
+  assert.deepEqual(getLightingManagerChangeSummary(calculation).categories, ['烘焙计算']);
+  assert.equal(getLightingManagerChangeSummary(calculation).giInputChanged, true);
+  const budget = createLightingManagerDraft(scene, 'session'); budget.lighting.bake.maxTextureMiB = 128;
+  assert.equal(getLightingManagerChangeSummary(budget).giInputChanged, false, '预算不是 GI 内容输入');
+  const shadows = createLightingManagerDraft(scene, 'session'); shadows.lighting.shadows.bias = 0.002;
+  assert.deepEqual(getLightingManagerChangeSummary(shadows).categories, ['实时阴影']);
+  assert.equal(getLightingManagerChangeSummary(shadows).giInputChanged, false);
+});
+
+test('配置摘要保留分类规则和例外类别，GI 启停与输入变化分别说明', () => {
+  const scene = sceneFixture(), rules = createLightingManagerDraft(scene, 'session');
+  rules.lighting.policy = { version: 1, defaults: { castShadows: false }, rules: [] };
+  assert.deepEqual(getLightingManagerChangeSummary(rules).categories, ['分类规则']);
+  assert.equal(getLightingManagerChangeSummary(rules).giInputChanged, true);
+  const disabled = createLightingManagerDraft(scene, 'session'); disabled.lighting.bake.enabled = false;
+  assert.equal(getLightingManagerChangeSummary(disabled).giApplicationChanged, true);
+  assert.equal(getLightingManagerChangeSummary(disabled).giInputChanged, false);
+  const unchanged = createLightingManagerDraft(scene, 'session');
+  assert.deepEqual(getLightingManagerChangeSummary(unchanged).categories, []);
+});
+
+test('结构化诊断保留同文不同对象及规则身份，不将可定位信息压成字符串', () => {
+  const scene = sceneFixture(), draft = createLightingManagerDraft(scene, 'session');
+  const rows = buildLightingManagerRows(scene, [entryFixture(scene)], draft);
+  const mismatch = { kind: 'resource-identity', ruleId: 'rule-one', nodeRuleId: 'part-rule', nodeKey: 'root/old',
+    expectedResourceIdentity: 'old', actualResourceIdentity: 'geometry-v1', message: '部件资源已修订' };
+  rows[0].effective.mismatches = [mismatch, mismatch];
+  const second = { ...rows[0], key: 'second/root', entityId: 'second', ownerEntityId: 'second' };
+  const diagnostics = buildLightingManagerDiagnostics([...rows, second]);
+  assert.equal(diagnostics.length, 2);
+  assert.equal(diagnostics[0].entityId, 'machine');
+  assert.equal(diagnostics[0].nodeKey, 'root/old');
+  assert.equal(diagnostics[0].ruleId, 'rule-one');
+  assert.equal(diagnostics[0].nodeRuleId, 'part-rule');
+  assert.equal(diagnostics[0].expectedResourceIdentity, 'old');
+  assert.equal(diagnostics[0].actualResourceIdentity, 'geometry-v1');
+  assert.equal(diagnostics[0].locatable, false, '旧资源身份不能把任意当前部件宣称为精确定位目标');
+  assert.equal(diagnostics[1].entityId, 'second');
+});
+
+test('分类行在显示或光照参数改变时复用，仅规则、例外或事实改变后重算', () => {
+  const scene = sceneFixture(), draft = createLightingManagerDraft(scene, 'session'), entries = [entryFixture(scene)];
+  const select = createLightingManagerRowsSelector(), first = select(draft, entries);
+  const appearance = { ...draft, appearance: { ...draft.appearance, exposure: 1.6 } };
+  assert.equal(select(appearance, entries), first);
+  const physical = { ...appearance, lighting: { ...draft.lighting, main: { ...draft.lighting.main, intensity: 2 } } };
+  assert.equal(select(physical, entries), first);
+  const rules = { ...physical, lighting: { ...physical.lighting, policy: { version: 1, defaults: { castShadows: false }, rules: [] } } };
+  const changed = select(rules, entries);
+  assert.notEqual(changed, first); assert.equal(changed[0].effective.settings.castShadows, false);
+  assert.notEqual(select(rules, [...entries]), changed);
+});
+
+
+test('设备选择与区域命名保持 GI 有效，区域实际范围改变才更新 GI 输入', () => {
+  const scene = sceneFixture();
+  scene.sceneSettings.lighting.bake.device = 'cpu';
+  scene.sceneSettings.lighting.bake.probeVolumes = [{ id: 'volume', name: '工作区', enabled: true, min: [-5, 0, -5], max: [5, 5, 5] }];
+  const device = createLightingManagerDraft(scene, 'session'); device.lighting.bake.device = 'auto';
+  assert.deepEqual(getLightingManagerChangeSummary(device).categories, ['烘焙计算']);
+  assert.equal(getLightingManagerChangeSummary(device).giInputChanged, false);
+  const renamed = createLightingManagerDraft(scene, 'session'); renamed.lighting.bake.probeVolumes[0].name = '新区域名称';
+  assert.deepEqual(getLightingManagerChangeSummary(renamed).categories, ['烘焙计算']);
+  assert.equal(getLightingManagerChangeSummary(renamed).giInputChanged, false);
+  const bounds = createLightingManagerDraft(scene, 'session'); bounds.lighting.bake.probeVolumes[0].max[0] = 10;
+  assert.equal(getLightingManagerChangeSummary(bounds).giInputChanged, true);
+});
+
+
+test('动态祖先冲突仍可精确定位其真实运行时节点', () => {
+  const scene = sceneFixture(), draft = createLightingManagerDraft(scene, 'session');
+  const rows = buildLightingManagerRows(scene, [entryFixture(scene)], draft);
+  rows[0].effective.conflicts = [{ field: 'mobility', requested: 'static', effective: 'dynamic', reason: '真实动态祖先约束', ruleId: 'rule' }];
+  const diagnostic = buildLightingManagerDiagnostics(rows)[0];
+  assert.equal(diagnostic.kind, 'policy-conflict');
+  assert.equal(diagnostic.locatable, true);
+  assert.equal(diagnostic.runtimeNodeKey, 'root/column');
 });

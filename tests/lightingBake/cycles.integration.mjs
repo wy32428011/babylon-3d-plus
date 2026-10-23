@@ -22,6 +22,25 @@ const input = { version: 1, jobId: 'real-cycles', signature: 'integration-v1', s
 };
 const engine = await findLightingBakeEngine(root);
 assert.equal(engine.available, true, engine.message);
+// 先检查实际交付的 Python，复现发布链路的共线面/细面失败后才运行耗时烘焙。
+const uvDirectory = path.join(root, 'publish-uv');
+const uvArguments = ['--background', '--factory-startup', '--disable-autoexec', '--python-exit-code', '1',
+  '--python', path.resolve('tests/lightingBake/cycles_degenerate_uv_checks.py'), '--', '--output', uvDirectory,
+  '--bake-script', path.resolve('dist-electron/lighting-bake/cycles_bake.py')];
+let uvOutput;
+try {
+  uvOutput = await promisify(execFile)(engine.path, uvArguments, { windowsHide: true, timeout: 180000,
+    maxBuffer: 4 * 1048576, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } });
+} catch (error) {
+  await fs.writeFile(path.join(root, 'publish-uv.log'), String(error.stdout ?? '') + String(error.stderr ?? ''));
+  throw error;
+}
+await fs.writeFile(path.join(root, 'publish-uv.log'), uvOutput.stdout + uvOutput.stderr);
+assert.match(uvOutput.stdout, /CYCLES_DEGENERATE_UV_CHECKS_PASS/);
+const uvReport = JSON.parse(await fs.readFile(path.join(uvDirectory, 'report.json'), 'utf8'));
+assert.equal(uvReport.success, true);
+assert.equal(uvReport.originalTriangleCount, uvReport.exportedTriangleCount);
+assert.equal(uvReport.positiveSliver.sourceTriangles, uvReport.positiveSliver.outputTriangles);
 const authorized = new Set();
 const options = { input, projectRoot: root, enginePath: engine.path, signal: new AbortController().signal,
   isProjectCurrent: () => true, isAuthorizedAssetFile: file => authorized.has(file),
@@ -67,7 +86,9 @@ await assert.rejects(runLightingBakeProcess({ ...options, timeoutMs: 100 }, time
 const outputBefore = (await fs.readdir(path.join(root, 'Assets', 'LightingBakes'))).sort();
 const cancelledCommit = new AbortController();
 await assert.rejects(runLightingBakeJob({ ...options, input: { ...input, jobId: 'cancel-at-commit' },
-  signal: cancelledCommit.signal, onProgress: event => { if (event.phase === 'applying') cancelledCommit.abort(); } }), /取消/);
+  signal: cancelledCommit.signal, onProgress: event => { if (event.phase === 'applying') cancelledCommit.abort(); } }),
+// 原生 fs.readFile 的 AbortSignal 会返回标准 AbortError；两种取消出口都须保留旧资源。
+error => /取消/.test(error.message) || (error.name === 'AbortError' && error.code === 'ABORT_ERR'));
 assert.deepEqual((await fs.readdir(path.join(root, 'Assets', 'LightingBakes'))).sort(), outputBefore, '取消不能提交新资源或覆盖旧资源');
 await assert.rejects(runLightingBakeJob({ ...options, input: { ...input, jobId: 'budget-failure',
   settings: { ...input.settings, texelsPerMeter: 256, atlasSize: 64, maxTextureMiB: 1 } }, onProgress: () => {} }), /纹理预算/);
@@ -93,4 +114,4 @@ for (const script of ['cycles_atlas_integrity_checks.py', 'cycles_partition_chec
   await fs.writeFile(log, output.stdout + output.stderr);
   assert.match(output.stdout, /CYCLES_(ATLAS_INTEGRITY_PASSED|PARTITION_CHECKS_PASS)/, `${script} 必须完成全部断言`);
 }
-console.log(JSON.stringify({ success: true, engine, evidenceDirectory: root, statistics: result.statistics }));
+console.log(JSON.stringify({ success: true, engine, evidenceDirectory: root, uvReport, statistics: result.statistics }));

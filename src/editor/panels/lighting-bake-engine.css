@@ -1,0 +1,43 @@
+.lighting-manager.lighting-engine-dialog {
+  width: min(660px, calc(100vw - 32px));
+  height: fit-content;
+  max-height: calc(100dvh - 32px);
+}
+.lighting-engine-dialog > form { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.lighting-engine-dialog .lighting-manager-header { align-items: flex-start; padding: 20px 22px 17px; border-bottom: 1px solid #4d555a; }
+.lighting-engine-dialog .lighting-manager-header > div { display: block; }
+.lighting-engine-dialog .lighting-manager-header p { margin-top: 5px; }
+.lighting-engine-body { min-height: 0; padding: 21px 22px; overflow-y: auto; }
+.lighting-engine-status { display: flex; align-items: flex-start; gap: 10px; padding: 15px; color: #f7d894; background: #302d23; border: 1px solid #75613b; border-radius: 4px; overflow-wrap: anywhere; }
+.lighting-engine-status > svg { flex: 0 0 21px; }
+.lighting-engine-status strong { font-weight: 500; }
+.lighting-engine-status p { margin-top: 4px; font-size: 12px; }
+.lighting-engine-status.is-success { color: #a1edcf; background: #22372f; border-color: #447c66; }
+.lighting-engine-path-label { display: block; margin: 20px 0 7px; font-weight: 500; }
+.lighting-engine-path-row { display: flex; align-items: center; gap: 8px; }
+.lighting-engine-path-row input { flex: 1; }
+.lighting-engine-path-row button { flex: 0 0 auto; }
+.lighting-engine-path-help { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 5px; color: #b5bec3; font-size: 12px; }
+.lighting-engine-path-help button { padding-inline: 0; }
+.lighting-engine-effective { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 7px 14px; margin: 19px 0 0; padding-top: 16px; border-top: 1px solid #4d555a; font-size: 12px; }
+.lighting-engine-effective dt { color: #b5bec3; }
+.lighting-engine-effective dd { margin: 0; overflow-wrap: anywhere; }
+.lighting-engine-advanced { margin-top: 17px; color: #b5bec3; font-size: 12px; }
+.lighting-engine-advanced p, .lighting-engine-environment { overflow-wrap: anywhere; }
+.lighting-engine-environment { margin-top: 13px !important; color: #f7d894; font-size: 12px; }
+.lighting-engine-environment span { display: block; margin: 3px 0; }
+.lighting-engine-notice { margin-top: 13px !important; color: #8de5ee; }
+.lighting-engine-error { margin-top: 13px !important; color: #ffb4a4; overflow-wrap: anywhere; }
+.lighting-engine-footer-note { max-width: 320px; color: #b5bec3; font-size: 12px; }
+.lighting-manager-engine-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; margin-bottom: 16px; border: 1px solid #63727a; border-radius: 4px; background: #1e2326; }
+.lighting-manager-engine-summary > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.lighting-manager-engine-summary strong { font-weight: 500; }
+.lighting-manager-engine-summary button { flex: 0 0 auto; }
+@media (max-width: 560px) {
+  .lighting-engine-dialog .lighting-manager-header, .lighting-engine-body { padding: 16px; }
+  .lighting-engine-path-row { flex-wrap: wrap; }
+  .lighting-engine-path-row input { flex-basis: 100%; }
+  .lighting-engine-dialog .lighting-manager-footer { flex-wrap: wrap; justify-content: flex-end; }
+  .lighting-engine-footer-note { width: 100%; max-width: none; }
+  .lighting-manager-engine-summary { flex-wrap: wrap; }
+}

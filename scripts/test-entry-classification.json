@@ -4372,7 +4372,7 @@
     },
     {
       "file": "scripts/test-entry-manifest.json",
-      "sha256": "3e63c80968732565f89f39bfbb7a4b95ab7885f4c134235c6c9850061129f97b",
+      "sha256": "ce713ba0b6d6a26d12cdc7dec44d93a0bd218d851de15aa6abfdf0ba90d6019c",
       "disposition": "metadata",
       "domain": null,
       "command": "npm run test:entries",
@@ -4389,14 +4389,6 @@
         {
           "line": 2,
           "text": "\"schemaVersion\": 1,"
-        },
-        {
-          "line": 3,
-          "text": "\"entries\": ["
-        },
-        {
-          "line": 4,
-          "text": "{"
         }
       ],
       "reviewNote": "保留既有入口对象，追加 GLB 标准预览合同及真实 Electron 离线验收入口。"
@@ -12560,6 +12552,699 @@
           "text": "import { createHash } from 'node:crypto';"
         }
       ]
+    },
+    {
+      "file": "scripts/smoke-lighting-bake-electron.mjs",
+      "disposition": "electron-integration",
+      "domain": null,
+      "command": "npm run smoke:lighting-optimization",
+      "purpose": "真实Electron/Cycles/独立Viewer光照与增强界面闭环",
+      "prerequisites": [
+        "由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window, requestAnimationFrame */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "0d1fabde1aae43b4a14d6c5525312f7637074404aa033cfc39b4552781de420d"
+    },
+    {
+      "file": "tests/digitalTwin/lightingOptimizationSettings.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "fdaebb55c0a8df2638cd32df0cb47993d6f3647fba9f5d2124c3053a7a43449b"
+    },
+    {
+      "file": "tests/editor/lightingBakeManagerModel.test.mjs",
+      "disposition": "node-contract",
+      "domain": "editor",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { after, test } from 'node:test';"
+        }
+      ],
+      "sha256": "3b56cf48015fee4fb598e1d2277d4f85afad307e90b184101430d80787a20d37"
+    },
+    {
+      "file": "tests/editor/lightingBakeManagerUi.test.mjs",
+      "disposition": "node-contract",
+      "domain": "editor",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { after, test } from 'node:test';"
+        }
+      ],
+      "sha256": "cd63f636ed532219db13368fd60a3dc7d22990642dec5393e075fdfb7192abd6"
+    },
+    {
+      "file": "tests/editor/lightingManagerOperations.integration.test.mjs",
+      "disposition": "node-contract",
+      "domain": "editor",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { after, beforeEach, test } from 'node:test';"
+        }
+      ],
+      "sha256": "125e3765665651cd94a063d5f6193a4d911f7645d2d3ee6faa53f3076a3c8620"
+    },
+    {
+      "file": "tests/helpers/lightingFactoryGiPerformance.mjs",
+      "disposition": "performance",
+      "domain": null,
+      "command": "LIGHTING_SMOKE_STAGE=factory-gi node scripts/smoke-lighting-bake-electron.mjs --optimization",
+      "purpose": "完整实际工厂GI开启的原算法与优化A/B/B/A证据工具",
+      "prerequisites": [
+        "由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window, document */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "bcd265fdf0621628ba04709a7876cc829c60e082b131f305687f0468f261c167"
+    },
+    {
+      "file": "tests/helpers/lightingFactoryPerformance.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/helpers/lightingFactoryPerformance.mjs",
+      "purpose": "真实光照界面或性能检查的导入辅助模块",
+      "prerequisites": [
+        "由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window, document, requestAnimationFrame */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "d2d0699decf570faf0b530dfe83636de2c9cf47bdd263e2849912f6525ae3810"
+    },
+    {
+      "file": "tests/helpers/lightingOptimizationUiSmoke.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/helpers/lightingOptimizationUiSmoke.mjs",
+      "purpose": "真实光照界面或性能检查的导入辅助模块",
+      "prerequisites": [
+        "由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window, requestAnimationFrame */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "851823e1074e85076a38899e96d5c0a78e894d1af61ec6a92eb7f1c018148f62"
+    },
+    {
+      "file": "tests/lightingBake/lightingArrayInstances.test.mjs",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { readFileSync, existsSync } from 'node:fs';"
+        }
+      ],
+      "sha256": "ac5834becd7cc5c4e3d537fb750adf0c45a79309d2dda797a2b65e0bfabdb0da"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeBackend.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "eae1483d2aab1ba0befecd4ff4254f4808e3f5b481dac41cf5deaddbc056fbf4"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeBinary.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict'; import { test } from 'node:test';"
+        },
+        {
+          "line": 2,
+          "text": "import { encodeLightingBakeTransport, decodeLightingBakeTransport } from '../../electron/shared/sceneLightingBakeBinary.ts';"
+        }
+      ],
+      "sha256": "b676c0c4329771f71848e317d3dca204ef5ad9bc343fe5c7a4db26baadc0d3d3"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakePreflight.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "536fcabfe51b14240385f00f5b10d49613f074b8952005b3bb273747099237f2"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeProbeBounds.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "e89351bd7975e6fee32203acf9a884642a034c92d755b3bfeb0fddd8b6bc2018"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeProbeVolumesPython.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict'; import { test } from 'node:test'; import { readFileSync } from 'node:fs'; import { spawnSync } from 'node:child_process';"
+        },
+        {
+          "line": 2,
+          "text": "import { planLightingProbeVolumes } from '../../electron/shared/sceneLightingProbeVolumes.ts';"
+        }
+      ],
+      "sha256": "a813a9cbaabc0a494364e896e38fe9fa1dcf53e073298625a372a242e91fceec"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakePythonContracts.test.mjs",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict'; import { test } from 'node:test'; import { readFileSync } from 'node:fs'; import { spawnSync } from 'node:child_process';"
+        },
+        {
+          "line": 2,
+          "text": "const source = readFileSync(new URL('../../electron/lighting-bake/cycles_bake.py',import.meta.url),'utf8');"
+        }
+      ],
+      "sha256": "68590f9c8f69f4781dd87126bc879d572bd016daf882239a0e58a13ef2f1fc01"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeServicePreflight.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict'; import { test } from 'node:test'; import { promises as fs } from 'node:fs'; import os from 'node:os'; import path from 'node:path';"
+        },
+        {
+          "line": 2,
+          "text": "import { inspectLightingBakeRequest, runLightingBakeJob, mapLightingBakeEngineProgress } from '../../electron/ipc/lightingBakeService.ts';"
+        }
+      ],
+      "sha256": "727ba078877d98fe1a1d45206197662cab07a6ab7a768fe9e2b6a6a34caaee91"
+    },
+    {
+      "file": "tests/lightingBake/lightingBakeTaskHistory.test.ts",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "f0532556d5cf3f398ba6d0a7ff21d82f1bba7785f4cc079ce5295e243603ad42"
+    },
+    {
+      "file": "tests/lightingBake/lightingOptimizationCycles.integration.mjs",
+      "disposition": "blender",
+      "domain": null,
+      "command": "npm run test:lighting-optimization:cycles",
+      "purpose": "真实Cycles验证设备回退、区域探针与二进制输入",
+      "prerequisites": [
+        "本机Blender/Cycles和完整Electron产物；仅独立执行，不加入默认core。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { createHash } from 'node:crypto';"
+        }
+      ],
+      "sha256": "aea0603b7a60ad42becfb1015626a4d154b2c386528cf40b6ca308c321609e7d"
+    },
+    {
+      "file": "tests/lightingBake/sceneLightingRuntime.test.mjs",
+      "disposition": "node-contract",
+      "domain": "resources",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { existsSync, readFileSync } from 'node:fs';"
+        }
+      ],
+      "sha256": "45d6359d8a61fcd0ec3ecf7c3aaa5365dfb575f6d7bd161d57a8bafe5dd7d4b7"
+    },
+    {
+      "file": "tests/runtime/hybridShadows.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import test from 'node:test';"
+        }
+      ],
+      "sha256": "8032ec53f270ad6750cc903c93c2da23376daef0461dc3575f1faa49c5cb0cf4"
+    },
+    {
+      "file": "tests/runtime/lightingDraftPreviewController.test.mjs",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { after, test } from 'node:test';"
+        }
+      ],
+      "sha256": "bbe4de3138bf033ffa4c4d3d9a3da869673bd03e098856c506731e47ab7930bb"
+    },
+    {
+      "file": "tests/runtime/lightingFactoryGiPerformance.test.mjs",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import test from 'node:test';"
+        }
+      ],
+      "sha256": "8d4cca461a6ac9a6fbd2a79fe3cb54d4678348f9e5d09559888d419e808ee9e7"
+    },
+    {
+      "file": "tests/runtime/lightingPolicyRuntime.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import { normalizeSceneLightingConfig } from '../../electron/shared/sceneLightingConfig.ts';"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "1f9971fc1df52b5984cbfc265e08c9f3f8e48cff574b957459eb4edb4ce5331e"
+    },
+    {
+      "file": "tests/runtime/lightingProbeOcclusion.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import test from 'node:test';"
+        }
+      ],
+      "sha256": "c5d60e4d317c159e01583c43555f8bb5ea1cd2770dc24383e44c8ecc8b037187"
+    },
+    {
+      "file": "tests/runtime/lightingProbes.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import test from 'node:test';"
+        }
+      ],
+      "sha256": "05691e062c5c12af6070c2dd866037bdd1bb634d41291c0390b174e7cfdc604e"
+    },
+    {
+      "file": "tests/runtime/lightingProbeVolumes.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "prerequisites": [
+        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import test from 'node:test';"
+        }
+      ],
+      "sha256": "42c341fd8fc2566b076ece24dc24e05fd17fea9dd760da3edb2f6f1238a4523f"
+    },
+    {
+      "file": "tests/helpers/lightingFactoryBakeReplay.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/helpers/lightingFactoryBakeReplay.mjs",
+      "purpose": "完整捕获输入的正式service重放工具，显式守护源文件与物理签名",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { createHash, randomUUID } from 'node:crypto';"
+        }
+      ],
+      "sha256": "7bc72b06ae2984d69e047a8fe9c199c6d625405a928d75193215766f9158880d"
+    },
+    {
+      "file": "tests/helpers/lightingOptimizationDiagnosticsSmoke.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/helpers/lightingOptimizationDiagnosticsSmoke.mjs",
+      "purpose": "真实管理器诊断事务、对象规则定位与一次撤销辅助模块",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window, requestAnimationFrame */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ],
+      "sha256": "5cab0b77abcaae8bc814b46aec5abbbf0ebcf25faac4f02487ad165ec670ce18"
+    },
+    {
+      "file": "tests/helpers/lightingOptimizationSourceRoundTrip.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/helpers/lightingOptimizationSourceRoundTrip.mjs",
+      "purpose": "真实SOURCE构建、提取、重定位准备工具；Editor重开单独验证",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { createHash } from 'node:crypto';"
+        }
+      ],
+      "sha256": "e603572cb9b4f4e6f054ab5bc728794de7b311841fb46e0c114f40a64fb325ad"
+    },
+    {
+      "file": "tests/lightingBake/cycles_degenerate_uv_checks.py",
+      "disposition": "blender",
+      "domain": null,
+      "command": "npm run test:lighting-optimization:cycles",
+      "purpose": "实际共线和细面UV回归，保留原属性并独立核对最终密度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"真实 Blender 回归：保留共线三角面，不能把矩阵舍入伪面积误当成缺失 UV。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ],
+      "sha256": "aa10946b4b7d446c9709b42f3061fd530685e89589e61f70aa12e36d3f3b3a88"
+    },
+    {
+      "file": "tests/runtime/lightingCaptureMetrics.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "视口导出计量、不可用状态和计量失败隔离",
+      "prerequisites": [
+        "安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { test } from 'node:test';"
+        }
+      ],
+      "sha256": "818fc69158719365baebbc997e9dbb652ea43ec2af15072b55ac4af103a80639"
+    },
+    {
+      "file": "tests/runtime/lightingPngArtifacts.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "后台与Viewer图集尺寸一致性及实际资源加载边界",
+      "prerequisites": [
+        "安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { existsSync, promises as fs } from 'node:fs';"
+        }
+      ],
+      "sha256": "f19b15b08ad0f3c0735ca5f59d6ae13cc131176517fdbe9222c61e1220b32ade"
+    },
+    {
+      "file": "tests/runtime/lightingTextureFailure.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "npm run test:lighting-optimization",
+      "purpose": "纹理构造同步失败时释放候选并保留错误身份",
+      "prerequisites": [
+        "安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { existsSync } from 'node:fs';"
+        }
+      ],
+      "sha256": "cdefc1a68acc707dd1772f995ae0af42a1083564ac70a2825fb16efcda453c75"
     }
   ]
 }

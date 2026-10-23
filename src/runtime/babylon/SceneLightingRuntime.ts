@@ -1,7 +1,6 @@
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig.ts';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
-import { Ray } from '@babylonjs/core/Culling/ray.js';
 import { Light } from '@babylonjs/core/Lights/light.js';
 import { Material } from '@babylonjs/core/Materials/material.js';
 import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
@@ -33,6 +32,8 @@ import { loadLightingResources, type LoadedLightingResources } from './lightingR
 import { lightingMaterialValueSignature, restoreLightingMaterialValues } from './lightingRuntimeMaterial.ts';
 import { copyLightingMaterialExportBaseline } from './lightingGeometry.ts';
 import { LightingShadowInstanceRuntime } from './LightingShadowInstanceRuntime.ts';
+import { LightingProbeOcclusionQuery } from './lightingProbeOcclusion.ts';
+import { getLightingRuntimeDiagnostic, type LightingRuntimeDiagnostic } from './lightingRuntimeDiagnostic.ts';
 
 type ShadowRole = { mobility: 'static' | 'dynamic'; castShadows: boolean; receiveShadows: boolean };
 type LightingInstanceBatch = NonNullable<LightingRuntimeSource['instance']>['batch'];
@@ -119,10 +120,13 @@ export class SceneLightingRuntime {
   private disposed = false;
   private creatingDerived = false;
   private beforeBake = false;
+  private temporaryLightingPreview = false;
+  private suppressPreviewIndirect = false;
   private debugVisible = false;
   private debugOverlays: DebugOverlay[] = [];
   private debugMaterials: Material[] = [];
   private error: string | null = null;
+  private diagnostic: LightingRuntimeDiagnostic | null = null;
   private operation = 0;
   private controller: AbortController | null = null;
   private ready: Promise<void> = Promise.resolve();
@@ -157,14 +161,14 @@ export class SceneLightingRuntime {
     this.dirty = true; this.bindingsDirty = true;
     const settings = getSceneLightingConfig(document).bake;
     if (!settings.enabled) {
-      this.cancelPending(); this.desiredSnapshotKey = null; this.clearState(); this.error = null;
+      this.cancelPending(); this.desiredSnapshotKey = null; this.clearState(); this.setError(null);
       this.refreshSources(); this.updateShadowRoles(); this.rebuildDebug(); return;
     }
     const raw = getSceneLightingConfig(document).result;
     const snapshot = raw ? validateSceneLightingBakeSnapshot(raw) : null;
     if (!snapshot || snapshot.signature !== getSceneLightingBakeSignature(document)) {
       this.cancelPending(); this.desiredSnapshotKey = null; this.clearState();
-      this.error = raw ? '静态对象、材质或灯光已变化，光照结果已过期，请重新烘焙。' : null;
+      this.setError(raw ? '静态对象、材质或灯光已变化，光照结果已过期，请重新烘焙。' : null);
       this.refreshSources(); this.updateShadowRoles(); this.rebuildDebug(); return;
     }
     const key = this.snapshotKey(snapshot);
@@ -186,6 +190,7 @@ export class SceneLightingRuntime {
   }
   getClassification(): LightingClassificationEntry[] { this.refreshSources(); return this.classification; }
   getError(): string | null { return this.error; }
+  getDiagnostic(): LightingRuntimeDiagnostic | null { return this.diagnostic ? { ...this.diagnostic } : null; }
   whenReady(): Promise<void> { return this.ready; }
 
   /** 不传 originals 时只返回当前逻辑实体的代理，阵列调用方可继续保留原 thin-instance mask 回退。 */
@@ -210,10 +215,19 @@ export class SceneLightingRuntime {
     if (this.disposed) return;
     const changed = this.debugVisible !== debugVisible;
     this.debugVisible = debugVisible; this.beforeBake = beforeBake;
-    if (this.state) for (const record of this.state.records) record.binding.enabled = !beforeBake;
+    if (this.state) for (const record of this.state.records) record.binding.enabled = !beforeBake && !this.suppressPreviewIndirect;
     this.updateProxyLightPolicies();
     if (changed || this.dirty) { this.refreshSources(); this.rebuildDebug(); }
     if (this.state) this.notifyBindingsChanged();
+  }
+
+  /** 临时草稿不更改持久化签名；物理输入变化时仅抑制GI绑定，保留原资源供取消恢复。 */
+  setTemporaryLightingPreview(active: boolean, suppressIndirect: boolean): void {
+    if (this.disposed) return;
+    this.temporaryLightingPreview = active;
+    this.suppressPreviewIndirect = active && suppressIndirect;
+    if (this.state) for (const record of this.state.records) record.binding.enabled = !this.beforeBake && !this.suppressPreviewIndirect;
+    this.updateProxyLightPolicies();
   }
 
   focusNode(entityId: string, nodeKey: string): void {
@@ -298,7 +312,7 @@ export class SceneLightingRuntime {
         if (this.pendingActivation !== activation || this.state !== candidate) throw new Error('候选光照已被其他操作替换，未提交。');
         activation.finished = true; this.pendingActivation = null;
         if (previous) this.releaseState(previous, previous.resources === candidate.resources, false);
-        candidate = null; resources = null; this.error = null; this.invalidatedSnapshotKey = null;
+        candidate = null; resources = null; this.setError(null); this.invalidatedSnapshotKey = null;
         this.capturedInput = null;
         this.desiredSnapshotKey = this.snapshotKey(snapshot);
         this.notifyBindingsChanged();
@@ -306,6 +320,7 @@ export class SceneLightingRuntime {
         if (activation) this.rollbackActivation(activation);
         else if (candidate) this.releaseState(candidate, false, false);
         else resources?.dispose();
+        if (!controller.signal.aborted && !this.disposed && operation === this.operation) this.reportError(error);
         throw error;
       } finally {
         signal?.removeEventListener('abort', abort);
@@ -380,7 +395,11 @@ export class SceneLightingRuntime {
   private reportError(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     if (message !== this.error) this.options.pushLog(`混合光照：${message}`);
+    this.setError(message, getLightingRuntimeDiagnostic(error));
+  }
+  private setError(message: string | null, diagnostic?: LightingRuntimeDiagnostic): void {
     this.error = message;
+    this.diagnostic = message === null ? null : diagnostic ?? { message, kind: 'runtime' };
   }
   private refreshSources(): void {
     if (!this.dirty || this.disposed) return;
@@ -478,7 +497,7 @@ export class SceneLightingRuntime {
         const original = this.sourceMaterial(source.mesh), sourceGeometry = sourceGeometryMesh(source.mesh);
         const materialIndex = sourceGeometry.subMeshes[identity.primitive]?.materialIndex ?? 0;
         proxy.material = material(original instanceof MultiMaterial ? original.subMaterials[materialIndex] : original);
-        const binding = { texture, rgbmRange: asset.rgbmRange ?? 1, enabled: !this.beforeBake };
+        const binding = { texture, rgbmRange: asset.rgbmRange ?? 1, enabled: !this.beforeBake && !this.suppressPreviewIndirect };
         state.bindings.set(proxy, binding); state.records.push({ source, mesh: proxy, binding, proxy: true, dynamic: false, lastProbePosition: null });
         covered.add(source.entry.key);
         coveredSurfaces.add(`${identity.key}/primitive:${identity.primitive}`);
@@ -487,7 +506,8 @@ export class SceneLightingRuntime {
         if (source.entry.mobility === 'static') {
           if (lightingSourceVisible(source) && source.entry.bakeIndirect) {
             const geometry = sourceGeometryMesh(source.mesh), groups = geometry.subMeshes;
-            const expected = groups.length ? groups.flatMap((group, index) => group.indexCount ? [`${source.entry.key}/primitive:${index}`] : []) : [`${source.entry.key}/primitive:0`];
+            const expected = groups.length ? groups.flatMap((group, index) => (geometry.isUnIndexed ? group.verticesCount : group.indexCount)
+              ? [`${source.entry.key}/primitive:${index}`] : []) : [`${source.entry.key}/primitive:0`];
             if (!expected.length || expected.some(key => !coveredSurfaces.has(key))) throw new Error(`静态表面「${source.entry.name}」没有完整的材质分组光照资源。`);
           }
           const matrix = source.getWorldMatrix();
@@ -515,7 +535,7 @@ export class SceneLightingRuntime {
           proxy.useVertexColors = original.useVertexColors; proxy.hasVertexAlpha = original.hasVertexAlpha;
           proxy.material = source.entry.mobility === 'static' ? this.sourceMaterial(source.mesh) : material(this.sourceMaterial(source.mesh)); mesh = proxy;
         } else state.originalMaterials.set(mesh, this.sourceMaterial(mesh));
-        const binding: BakedLightingBinding = { enabled: !this.beforeBake };
+        const binding: BakedLightingBinding = { enabled: !this.beforeBake && !this.suppressPreviewIndirect };
         state.bindings.set(mesh, binding);
         state.records.push({ source, mesh, binding, proxy: needsProxy, dynamic: source.entry.mobility === 'dynamic', lastProbePosition: null,
           ...(needsProxy ? { sourceMaterial: source.mesh.material, sourceMaterialSignature: lightingMaterialValueSignature(source.mesh.material) } : {}) });
@@ -634,7 +654,7 @@ export class SceneLightingRuntime {
       this.invalidate('静态对象集合或实际几何发生变化，请重新烘焙。'); return;
     }
     if (this.state.sourceLayoutKey !== this.sourceLayoutKey() || this.dynamicMaterialReplaced(this.state)) {
-      try { this.commitState(this.prepareState(this.state.snapshot, this.state.resources)); this.error = null; }
+      try { this.commitState(this.prepareState(this.state.snapshot, this.state.resources)); this.setError(null); }
       catch (error) { this.reportError(error); this.updateShadowRoles(); }
     } else { this.updateShadowRoles(); this.rebuildDebug(); }
   }
@@ -653,7 +673,7 @@ export class SceneLightingRuntime {
   }
   private invalidate(message: string): void {
     this.invalidatedSnapshotKey = this.state ? this.snapshotKey(this.state.snapshot) : this.desiredSnapshotKey;
-    this.clearState(); this.error = message; this.options.pushLog(`混合光照已恢复实时基线：${message}`);
+    this.clearState(); this.setError(message); this.options.pushLog(`混合光照已恢复实时基线：${message}`);
     this.updateShadowRoles(); this.rebuildDebug();
   }
 
@@ -692,7 +712,7 @@ export class SceneLightingRuntime {
           }
           watch.instanceRevision = revision;
         }
-        if (state.lightSignature !== lightingContentHash(captureLightingEnvironment(this.scene, this.document!))) {
+        if (!this.temporaryLightingPreview && state.lightSignature !== lightingContentHash(captureLightingEnvironment(this.scene, this.document!))) {
           this.invalidate('参与烘焙的灯光或环境照明发生变化，请重新烘焙。'); return;
         }
         this.refreshDynamicGeometry(state);
@@ -707,10 +727,11 @@ export class SceneLightingRuntime {
     if (!state) return;
     let coverageChanged = false;
     const materialSignatures = new Map<Material | null, string>(), synchronizedMaterials = new Set<Material>();
+    let occlusion: LightingProbeOcclusionQuery | undefined;
     for (const record of state.records) {
       if (record.proxy) record.mesh.isPickable = this.sourceLogicalPickable(record.source);
       if (!record.dynamic) continue;
-      record.binding.enabled = !this.beforeBake;
+      record.binding.enabled = !this.beforeBake && !this.suppressPreviewIndirect;
       const world = record.source.getWorldMatrix();
       if (!world) continue;
       if (record.proxy) {
@@ -734,7 +755,11 @@ export class SceneLightingRuntime {
       const position = Vector3.TransformCoordinates(bounds.center, world);
       if (!force && record.lastProbePosition && Vector3.DistanceSquared(position, record.lastProbePosition) < 0.0001) continue;
       record.lastProbePosition = position.clone();
-      const probes = state.resources.probes.sample([position.x, position.y, position.z], point => this.probeVisible(position, point, record.source));
+      // 仅在实际发生采样时构建，当前同步边界结束即释放，保留同帧业务修改的可见性。
+      occlusion ??= new LightingProbeOcclusionQuery(state.staticWatch.filter(watch => watch.visible).map(watch => ({
+        key: watch.source.entry.key, mesh: sourceGeometryMesh(watch.source.mesh), getWorldMatrix: () => watch.source.getWorldMatrix(),
+      })));
+      const probes = state.resources.probes.sample([position.x, position.y, position.z], point => occlusion!.visible(position, point, record.source.entry.key));
       if (Boolean(record.binding.probes) !== Boolean(probes)) coverageChanged = true;
       record.binding.probes = probes ?? undefined;
     }
@@ -761,22 +786,6 @@ export class SceneLightingRuntime {
       }
     }
     this.changedDynamicGeometry.clear();
-  }
-
-  private probeVisible(position: Vector3, point: readonly [number, number, number], receiver: LightingRuntimeSource): boolean {
-    const target = Vector3.FromArray(point), offset = target.subtract(position), distance = offset.length();
-    if (distance < 0.001) return true;
-    const direction = offset.scale(1 / distance), ray = new Ray(position.add(direction.scale(0.005)), direction, Math.max(0, distance - 0.01));
-    for (const watch of this.state?.staticWatch ?? []) {
-      if (watch.source.entry.key === receiver.entry.key || !watch.visible) continue;
-      const world = watch.source.getWorldMatrix();
-      if (!world) continue;
-      const localRay = Ray.Transform(ray, Matrix.Invert(world));
-      const mesh = sourceGeometryMesh(watch.source.mesh);
-      const hit = mesh.intersects(localRay, true, undefined, false, world);
-      if (hit.hit && hit.distance < distance - 0.01) return false;
-    }
-    return true;
   }
 
   private updateShadowRoles(): void {

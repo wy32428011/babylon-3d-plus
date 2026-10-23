@@ -6,6 +6,7 @@ import {
 } from '@babylonjs/core';
 import { SceneShadowRuntime } from '../../src/runtime/babylon/SceneShadowRuntime.ts';
 import { HybridShadowMeshState } from '../../src/runtime/babylon/HybridShadowCache.ts';
+import { BakedLightingMaterialPlugin, LIGHTING_UV_ATTRIBUTE } from '../../src/runtime/babylon/BakedLightingMaterialPlugin.ts';
 
 const settings = {
   enabled: true, mode: 'hybrid' as const, quality: 'balanced' as const,
@@ -217,4 +218,61 @@ test('hybrid 的静态/动态都投射及接收，楼板是投射物且所有灯
     assert.equal(f.material.maxSimultaneousLights, 4);
     assert.equal(runtime.getHybridMetrics().textureBytes, 0);
   } finally { runtime.dispose(); f.scene.dispose(); f.engine.dispose(); }
+});
+
+test('成本诊断按真实光源区分cube、cascade、阴影图与缓存，且可安全序列化', () => {
+  const f = fixture(), runtime = new SceneShadowRuntime(f.scene);
+  const sun = new DirectionalLight('sun', new Vector3(-1, -2, 1), f.scene);
+  const point = new PointLight('point', new Vector3(0, 6, 0), f.scene);
+  try {
+    runtime.setHybridMeshRoles(f.roles); runtime.applySettings({ ...settings, quality: 'quality' });
+    runtime.syncLight('sun-entity', sun); runtime.syncLight('point-entity', point);
+    const metrics = runtime.getHybridMetrics();
+    const pointCost = metrics.lights.find(light => light.entityId === 'point-entity')!;
+    const sunCost = metrics.lights.find(light => light.entityId === 'sun-entity')!;
+    assert.equal(pointCost.type, 'point'); assert.equal(pointCost.faces, 6); assert.equal(pointCost.cubeFaces, 6);
+    assert.equal(sunCost.type, 'directional'); assert.equal(sunCost.faces, 1); assert.equal(sunCost.cascades, 1, 'NullEngine不支持CSM时必须报告实际单面回退，不能报告配置级联数');
+    assert.ok(metrics.shadowMapBytes > 0); assert.ok(metrics.cacheBytes >= 0);
+    assert.equal(metrics.textureBytes, metrics.shadowMapBytes + metrics.cacheBytes);
+    assert.equal(metrics.shadowMapBytes, metrics.lights.reduce((sum, light) => sum + light.shadowMapBytes, 0));
+    assert.deepEqual(JSON.parse(JSON.stringify(metrics)), metrics);
+    runtime.applySettings({ ...settings, enabled: false });
+    assert.equal(runtime.getHybridMetrics().lights.length, 0);
+    assert.equal(runtime.getHybridMetrics().shadowMapBytes, 0);
+  } finally { runtime.dispose(); f.scene.dispose(); f.engine.dispose(); }
+});
+
+test('材质采样器接近上限时给出可定位诊断且不裁掉灯光', () => {
+  const f = fixture(), runtime = new SceneShadowRuntime(f.scene);
+  const point = new PointLight('point', new Vector3(0, 6, 0), f.scene);
+  const sun = new DirectionalLight('sun', new Vector3(-1, -2, 1), f.scene);
+  const caps = f.engine.getCaps(), originalLimit = caps.maxTexturesImageUnits;
+  try {
+    caps.maxTexturesImageUnits = 3;
+    runtime.setHybridMeshRoles(f.roles); runtime.applySettings(settings);
+    runtime.syncLight('sun', sun); runtime.syncLight('point', point);
+    const diag = runtime.getHybridMetrics().samplerDiagnostics.find(item => item.materialName === f.material.name)!;
+    assert.equal(diag.severity, 'near-limit'); assert.equal(diag.requiredSamplers, 2); assert.equal(diag.limit, 3);
+    assert.ok(diag.meshNames.includes('fixed')); assert.ok(point.getShadowGenerator());
+    caps.maxTexturesImageUnits = 1;
+    assert.equal(runtime.getHybridMetrics().samplerDiagnostics.find(item => item.materialName === f.material.name)!.severity, 'over-limit');
+  } finally { caps.maxTexturesImageUnits = originalLimit; runtime.dispose(); f.scene.dispose(); f.engine.dispose(); }
+});
+
+test('材质成本包含GI插件图集采样器而不只统计业务纹理', t => {
+  const f = fixture(), runtime = new SceneShadowRuntime(f.scene);
+  const sun = new DirectionalLight('sun', new Vector3(-1, -2, 1), f.scene);
+  const originalLimit = f.engine.getCaps().maxTexturesImageUnits;
+  try {
+    f.engine.getCaps().maxTexturesImageUnits = 3;
+    new BakedLightingMaterialPlugin(f.material, () => ({ enabled: true }));
+    f.fixed.setVerticesData(LIGHTING_UV_ATTRIBUTE, Array(f.fixed.getTotalVertices() * 2).fill(0), false, 2);
+    runtime.setHybridMeshRoles(f.roles); runtime.applySettings(settings); runtime.syncLight('sun', sun);
+    const diag = runtime.getHybridMetrics().samplerDiagnostics.find(item => item.materialName === f.material.name)!;
+    assert.equal(diag.requiredSamplers, 2, '单灯阴影和GI图集都占用片元采样器');
+    f.engine.getCaps().maxTexturesImageUnits = 1;
+    t.mock.method(console, 'error', () => undefined);
+    runtime.setHybridMeshRoles(f.roles); f.scene.onBeforeRenderObservable.notifyObservers(f.scene);
+    assert.ok(runtime.getValidationErrors().some(message => message.includes(f.material.name)), '正式应用验证和成本面板必须使用同一GI采样器预算');
+  } finally { f.engine.getCaps().maxTexturesImageUnits = originalLimit; runtime.dispose(); f.scene.dispose(); f.engine.dispose(); }
 });

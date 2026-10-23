@@ -610,9 +610,17 @@ type DeploymentExportRevealRequest = {
 };
 interface Window {
   editorApi: {
-    startLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput) => Promise<import('../electron/shared/sceneLightingBakeContract').SceneLightingBakeSnapshot>;
+    startLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput | import('../electron/shared/sceneLightingBakeBinary').LightingBakeBinaryInput) => Promise<import('../electron/shared/sceneLightingBakeContract').SceneLightingBakeSnapshot>;
+    preflightLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput | import('../electron/shared/sceneLightingBakeBinary').LightingBakeBinaryInput) => Promise<import('../electron/shared/sceneLightingBakePreflight').LightingBakePreflight>;
+    readLightingBakeTaskLog: (taskId: string) => Promise<string>;
+    getLightingBakeHistory: () => Promise<import('../electron/shared/sceneLightingBakeTasks').LightingBakeTaskHistory>;
+    cleanupLightingBakeTasks: (taskIds: string[]) => Promise<{ removedTaskIds: string[]; removedBytes: number }>;
     cancelLightingBake: (jobId: string) => Promise<boolean>;
     getLightingBakeEngineStatus: () => Promise<import('../electron/shared/sceneLightingBakeContract').LightingBakeEngineStatus>;
+    getLightingBakeEngineConfiguration: () => Promise<import('../electron/shared/lightingBakeEngineConfiguration').LightingBakeEngineConfiguration>;
+    chooseLightingBakeEnginePath: () => Promise<string | null>;
+    detectLightingBakeEnginePath: (candidate: string) => Promise<import('../electron/shared/sceneLightingBakeContract').LightingBakeEngineStatus>;
+    saveLightingBakeEngineConfiguration: (candidate: string | null) => Promise<import('../electron/shared/lightingBakeEngineConfiguration').LightingBakeEngineConfiguration>;
     onLightingBakeProgress: (handler: (progress: import('../electron/shared/sceneLightingBakeContract').LightingBakeProgress) => void) => (() => void);
     loadComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['loadComposition'];
     listCompositions: import('../electron/shared/compositionTypes').CompositionLibraryApi['listCompositions'];

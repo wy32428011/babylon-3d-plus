@@ -6,6 +6,7 @@ import { validateDigitalTwinForceOverwrite } from './digitalTwinForceOverwrite';
 import type { DigitalTwinPublishController } from './useDigitalTwinPublish';
 import { useEditorStore } from '../store/editorStore';
 import { normalizeDigitalTwinAllowedParentOrigins } from '../../../electron/shared/digitalTwinRuntimeConfig';
+import { LightingBakePublishEngineCheck } from './LightingBakePublishEngineCheck';
 
 export type DigitalTwinPublishDialogProps = {
   open: boolean;
@@ -461,6 +462,8 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
             </label>
           ) : null}
         </section>
+
+        <LightingBakePublishEngineCheck open={props.open} scene={scene} error={state.error} disabled={isBusy || completed} />
 
         {progress ? (
           <section className="deployment-export-dialog-section deployment-export-status" aria-label="发布进度">

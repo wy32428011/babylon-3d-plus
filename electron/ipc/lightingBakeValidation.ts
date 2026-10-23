@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { normalizeLightingProbeVolumes } from '../shared/sceneLightingProbeVolumes.ts';
+import { decodeLightingBakeTransport } from '../shared/sceneLightingBakeBinary.ts';
 import type { LightingBakeInput, LightingBakeMeshInput } from '../shared/sceneLightingBakeContract.js';
 
 type ObjectValue = Record<string, unknown>;
@@ -25,11 +27,20 @@ function assetUrl(value: unknown): void {
 
 /** IPC 是信任边界：只接收有限几何与固定材质字段，任何不支持的输入在启动引擎前失败。 */
 export function validateLightingBakeInput(value: unknown): LightingBakeInput {
+  if (value && typeof value === 'object' && 'version' in value && value.version === 2) return validateLightingBakeInput(decodeLightingBakeTransport(value));
   const input = object(value, '烘焙请求');
   if (input.version !== 1) throw new Error('不支持的烘焙请求版本。');
   if (typeof input.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.jobId)) throw new Error('烘焙任务标识格式不正确。');
+  if (input.captureMetrics !== undefined) {
+    const metrics = object(input.captureMetrics, '视口准备计量');
+    if (metrics.durationMs !== null) finite(metrics.durationMs, '视口准备耗时', 0);
+    if (metrics.rendererHeapMaxObservedBytes !== null) finite(metrics.rendererHeapMaxObservedBytes, '视口堆观察值', 0);
+    if (!['performance.memory.usedJSHeapSize','unavailable'].includes(metrics.rendererHeapBasis as string)) throw new Error('视口准备计量口径无效。');
+  }
   text(input.signature, '场景签名'); text(input.sceneName, '场景名称');
   const settings = object(input.settings, '烘焙设置');
+  const probeVolumes = normalizeLightingProbeVolumes(settings.probeVolumes);
+  if (settings.device !== undefined && !['cpu','auto','gpu'].includes(settings.device as string)) throw new Error('烘焙设备选择无效。');
   finite(settings.atlasSize, '图集大小', 64, 8192);
   if (!Number.isInteger(settings.atlasSize) || ((settings.atlasSize as number) & ((settings.atlasSize as number) - 1)) !== 0) throw new Error('图集大小必须是 2 的幂。');
   if (!['preview', 'standard', 'high'].includes(settings.quality as string)) throw new Error('烘焙质量设置不正确。');
@@ -99,7 +110,9 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
   numbers(environment.color, '环境颜色', 3); finite(environment.intensity, '环境强度', 0, 1e12);
   if (environment.textureUrl !== undefined) assetUrl(environment.textureUrl);
   if (environment.rotation !== undefined) finite(environment.rotation, '环境旋转');
-  return input as unknown as LightingBakeInput;
+  // 旧 v1 请求沿用原对象；只有显式区域需要建立不可变归一化副本。
+  if (probeVolumes === undefined) return input as unknown as LightingBakeInput;
+  return { ...input, settings: { ...settings, probeVolumes } } as unknown as LightingBakeInput;
 }
 
 /** 所有引擎产物使用简单文件名，禁止绝对路径、ADS、设备名及子目录逃逸。 */

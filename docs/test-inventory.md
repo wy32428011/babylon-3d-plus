@@ -4,10 +4,10 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：791；测试/runner/smoke 候选：704；fixture/helper/治理工具：87。
-- npm 测试/smoke 入口：102；有静态入口的候选：563；无静态 npm 入口：141（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：827；测试/runner/smoke 候选：731；fixture/helper/治理工具：96。
+- npm 测试/smoke 入口：109；有静态入口的候选：589；无静态 npm 入口：142（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
-- CI 静态可达候选：158。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
+- CI 静态可达候选：159。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
 - 解析 package.json 名称含 test/smoke 的入口（排除 test:inventory 工具）、npm run 递归、node/electron 的显式文件与 * / ** glob。构建/打包只记录前置，不运行。动态编译与 Electron runner 使用已核对的限定适配；其他动态调用保守标记待复核。
 - CI 只读取 workflow 单行 run；可达表示配置选中，不代表远端执行成功。平台为源码线索，未标 Windows 的文件也未证明跨平台。
@@ -152,6 +152,7 @@
 | tests/editor/generatedFollowControls.browser.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types tests/editor/generatedFollowControls.browser.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | 包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：NODE_ENV | 否 / 未确认 |
 | tests/editor/multiEffectBinding.browser.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types tests/editor/multiEffectBinding.browser.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | 包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：NODE_ENV | 否 / 未确认 |
 | tests/lightingBake/cycles_atlas_integrity_checks.py | 需人工判定；blender | blender --background --python tests/lightingBake/cycles_atlas_integrity_checks.py --（已分类，需定向执行并核对条件） | 未证明跨平台 | Blender 4+ / bpy / Cycles；以 Blender --background --python 执行；需要夹具素材和实际渲染引擎，普通 Python 不能证明通过；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/lightingBake/cycles_degenerate_uv_checks.py | 需人工判定；blender | npm run test:lighting-optimization:cycles（已分类，需定向执行并核对条件） | 未证明跨平台 | 真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。 | 否 / 未确认 |
 | tests/lightingBake/cycles_light_checks.py | 需人工判定；blender | blender --background --python tests/lightingBake/cycles_light_checks.py --（已分类，需定向执行并核对条件） | 未证明跨平台 | Blender 4+ / bpy / Cycles；以 Blender --background --python 执行；需要夹具素材和实际渲染引擎，普通 Python 不能证明通过；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/lightingBake/cycles_material_checks.py | 需人工判定；blender | blender --background --python tests/lightingBake/cycles_material_checks.py --（已分类，需定向执行并核对条件） | 未证明跨平台 | Blender 4+ / bpy / Cycles；以 Blender --background --python 执行；需要夹具素材和实际渲染引擎，普通 Python 不能证明通过；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/lightingBake/cycles_partition_checks.py | 需人工判定；blender | blender --background --python tests/lightingBake/cycles_partition_checks.py --（已分类，需定向执行并核对条件） | 未证明跨平台 | Blender 4+ / bpy / Cycles；以 Blender --background --python 执行；需要夹具素材和实际渲染引擎，普通 Python 不能证明通过；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
@@ -191,6 +192,7 @@
 | scripts/smoke-folder-group-move.mjs | NullEngine | smoke:folder-group-move | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-folder-group-runtime.mjs | NullEngine | smoke:folder-group-runtime | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-generated-cargo-click.mjs | NullEngine；包含文件/源码断言候选 | smoke:generated-cargo-click | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
+| scripts/smoke-generated-cargo-preload.mjs | browser / WebGL 候选 | smoke:generated-cargo-preload | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-glb-standard-preview.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选 | smoke:glb-standard-preview | 含 Windows 路径/命令，需 Windows 复核 | 前置 npm run build；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | scripts/smoke-gpu-acceleration.mjs | browser / WebGL 候选 | smoke:gpu | 未证明跨平台 | 前置 npm run build | 否 / 未确认 |
 | scripts/smoke-hierarchy-clipboard.mjs | Node 测试候选 | smoke:hierarchy-clipboard | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
@@ -200,7 +202,8 @@
 | scripts/smoke-lift-motion-arrow-viewer.mjs | browser / WebGL 候选；包含文件/源码断言候选 | smoke:lift-motion-arrows、test:smoke | 未证明跨平台 | 前置 npm run build；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-lift-motion-arrows.mjs | browser / WebGL 候选 | smoke:lift-motion-arrows、test:smoke | 未证明跨平台 | 前置 npm run build；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-light-editor.mjs | NullEngine | smoke:light-editor | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
-| scripts/smoke-lighting-bake-electron.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选 | smoke:lighting-bake-electron、smoke:lighting-manager、smoke:lighting-unified | 未证明跨平台 | 前置 npm run build:electron；前置 npm run build:viewer；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
+| scripts/smoke-lighting-bake-electron.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选；electron-integration | smoke:lighting-bake-electron、smoke:lighting-manager、smoke:lighting-optimization、smoke:lighting-unified | 未证明跨平台 | 前置 npm run build；前置 npm run build:electron；前置 npm run build:viewer；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；引用 dist-electron；核对 build:electron 前置；由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。 | 否 / 未确认 |
+| scripts/smoke-lighting-engine-configuration.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选 | smoke:lighting-engine-configuration | 含 Windows 路径/命令，需 Windows 复核 | 前置 npm run build；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | scripts/smoke-lighting-types.mjs | browser / WebGL 候选 | smoke:lighting-types | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-meter-unit-contract.mjs | 包含文件/源码断言候选 | smoke:units | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-model-array.mjs | NullEngine | smoke:model-array、smoke:units | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
@@ -312,6 +315,7 @@
 | tests/digitalTwin/glbStandardPreview.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit、test:glb-standard-preview | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/homeDataPlatformProject.test.ts | 包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/liftMotionArrowPackages.integration.mjs | Electron 候选；包含文件/源码断言候选 | smoke:lift-motion-arrows、test:integration、test:lift-motion-arrows:integration、test:smoke | 未证明跨平台 | Electron 二进制；前置 npm run build；前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置；引用 dist-viewer-template；核对 build:viewer 前置 | 否 / 未确认 |
+| tests/digitalTwin/lightingOptimizationSettings.test.ts | Node 测试候选；node-contract/effects | test、test:ci、test:contracts、test:contracts:effects、test:digital-twin、test:digital-twin:unit、test:lighting-optimization | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/modelClickFocusParity.test.ts | NullEngine；包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 strip-types | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/modelLibraryDeviceTypeFilter.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 strip-types | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/modelSelectionControls.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 strip-types | .github/workflows/ci.yml: windows-latest |
@@ -441,8 +445,12 @@
 | tests/editor/lightWallFence.integration.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/lightWallFence.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/lightingBake.integration.test.mjs | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/editor/lightingBakeManagerModel.test.mjs | Node 测试候选 | test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/lightingBakeEngineDialog.test.mjs | Node 测试候选 | test:lighting-engine-configuration | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/lightingBakeManagerModel.test.mjs | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor、test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/lightingBakeManagerUi.test.mjs | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/lightingEnginePublish.test.mjs | 包含文件/源码断言候选 | test:lighting-engine-configuration | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/lightingManager.integration.test.mjs | Node 测试候选 | test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/lightingManagerOperations.integration.test.mjs | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/lightingMobility.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/lightingUnified.integration.test.mjs | Node 测试候选 | test:lighting-unified、test:scene-theme | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/localSceneEnvironmentChoice.test.ts | 包含文件/源码断言候选 | test:local-scene-recovery | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -506,20 +514,29 @@
 | tests/encoding/utf8Integrity.test.mjs | 包含文件/源码断言候选 | test:encoding | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/encoding/utf8Transport.test.ts | Node 测试候选 | test:encoding | 未证明跨平台 | Node 原生 strip-types | 否 / 未确认 |
 | tests/lightingBake/cycles.integration.mjs | Electron 候选；包含文件/源码断言候选 | test:lighting-bake:cycles | 未证明跨平台 | 前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
-| tests/lightingBake/lightingArrayInstances.test.mjs | NullEngine；包含文件/源码断言候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/lightingBake/lightingBakeBackend.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingArrayInstances.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeBackend.test.ts | Node 测试候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeBinary.test.ts | Node 测试候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeDeployment.test.ts | 包含文件/源码断言候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeEngineConfiguration.test.ts | 包含文件/源码断言候选 | test:lighting-engine-configuration | 含 Windows 路径/命令，需 Windows 复核 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakePreflight.test.ts | Node 测试候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeProbeBounds.test.ts | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeProbeVolumesPython.test.ts | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakePythonContracts.test.mjs | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeRecovery.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeRelocation.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeRequirements.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeResources.test.ts | 包含文件/源码断言候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeServicePreflight.test.ts | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 含 Windows 路径/命令，需 Windows 复核 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingBakeSourcePackage.test.ts | 包含文件/源码断言候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingBakeTaskHistory.test.ts | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingMaterialValidation.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/lightingOptimizationCycles.integration.mjs | Electron 候选；包含文件/源码断言候选；blender | test:lighting-optimization:cycles | 未证明跨平台 | 前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置；本机Blender/Cycles和完整Electron产物；仅独立执行，不加入默认core。 | 否 / 未确认 |
 | tests/lightingBake/lightingPolicyPersistence.test.ts | Node 测试候选 | test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingUnifiedBackup.test.ts | 包含文件/源码断言候选 | test:lighting-unified | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/lightingUnifiedPersistence.test.ts | 包含文件/源码断言候选 | test:lighting-unified | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/lightingBake/playerLightingRuntimeStatus.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/lightingBake/sceneLightingRuntime.test.mjs | NullEngine；包含文件/源码断言候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/lightingBake/sceneLightingRuntime.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources、test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；前置 npm run build:electron；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/p4QualityGates.test.mjs | 包含文件/源码断言候选 | test:optimization-p4 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/p4TestInventory.test.mjs | browser / WebGL 候选；包含文件/源码断言候选 | test:optimization-p4 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamAnimationState.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -569,6 +586,7 @@
 | tests/runtime/environmentTransformPreparation.test.ts | NullEngine | test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/externalModelScriptLoad.test.ts | 包含文件/源码断言候选 | test:optimization-p1、test:scene-loading | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/frameTimingWindow.test.ts | Node 测试候选；node-contract/observability | test:contracts、test:contracts:observability、test:optimization-p2-r0 | 未证明跨平台 | Node 原生 transform-types；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/generatedCargoPreload.integration.test.mjs | NullEngine；包含文件/源码断言候选 | test:generated-cargo-preload | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/generatedEffectTargets.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/geographicOpeningData.test.ts | 包含文件/源码断言候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/runtime/geographicOpeningFlightsBreathing.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
@@ -576,20 +594,27 @@
 | tests/runtime/geographicOpeningMath.test.ts | Node 测试候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/runtime/geographicOpeningTechBreathing.test.ts | Node 测试候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/runtime/glbStandardPreview.webgl.mjs | browser / WebGL 候选 | smoke:glb-standard-preview、test:glb-standard-preview:webgl | 含 Windows 路径/命令，需 Windows 复核 | 前置 npm run build；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
-| tests/runtime/hybridShadows.test.ts | NullEngine | test:lighting-bake、test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/hybridShadows.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-bake、test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/liftMotionArrowRenderer.test.mjs | NullEngine | test、test:ci、test:lift-motion-arrows | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/runtime/liftMotionArrowSystem.test.mjs | Node 测试候选 | test、test:ci、test:lift-motion-arrows | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/runtime/lightWallFence.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/lightingBakeTask.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingCaptureMetrics.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingClassificationReview.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingClassificationRuntime.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingDraftPreviewController.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingFactoryGiPerformance.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingGeometry.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingGeometrySignatureCache.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | GC用例启动自有 --expose-gc 子进程，必须等待实际断言结束；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；包含模块hook与全局方法覆盖，禁止共享测试进程；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/lightingMaterialExport.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingNativeInstances.test.ts | NullEngine | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/runtime/lightingPolicyRuntime.test.ts | NullEngine | test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/runtime/lightingProbes.test.ts | Node 测试候选 | test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingPngArtifacts.test.ts | 包含文件/源码断言候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingPolicyRuntime.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-manager | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingProbeOcclusion.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingProbeVolumes.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingProbes.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-bake | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/lightingSourceCaching.test.ts | NullEngine | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/lightingTextureFailure.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖；模拟合同不代表真实WebGL或引擎验收。；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/localLightShadows.test.ts | NullEngine | test:light-editor、test:lighting-bake | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/locatorFetchTriangleStatistics.test.ts | NullEngine；node-contract/observability | test:contracts、test:contracts:observability | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/manualRoamAvatarAsset.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -601,11 +626,13 @@
 | tests/runtime/manualRoamUpperSkin.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/materialCloneDirtyGuard.test.ts | NullEngine；包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/runtime/materialTextureClone.test.ts | NullEngine | test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/runtime/modelAssetTemplateCache.test.ts | NullEngine | test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/modelAssetTemplateCache.test.ts | NullEngine | test:generated-cargo-preload、test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/modelAssetTemplatePreload.test.ts | NullEngine | test:generated-cargo-preload | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/modelEntranceAlarm.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/modelEntranceEnvironment.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/modelEntranceRuntime.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/modelEnvironmentConfiguration.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；前置 npm run build:electron；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
+| tests/runtime/modelGeneratorAssetPreloader.test.ts | Node 测试候选 | test:generated-cargo-preload | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/modelInitializationFrameScheduler.test.ts | Node 测试候选 | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/modelInitializationScheduler.test.ts | Node 测试候选 | test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/modelLoadingTraversal.test.ts | NullEngine | test:scene-loading | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -759,6 +786,7 @@
 | tests/fixtures/effectPathDrawing.harness.tsx | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/fixtures/environmentBuildingEffect.harness.tsx | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/fixtures/flowArrowDirection.harness.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/generatedCargoPreload.harness.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/generatedFollow.harness.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/geographicOpeningDemo.html | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/geographicOpeningDemo.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
@@ -808,9 +836,15 @@
 | tests/helpers/glbStandardPreviewEditor.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/helpers/glbStandardPreviewPublishing.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | tests/helpers/liftMotionArrowFixture.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
-| tests/helpers/lightingFactoryPerformance.mjs | helper | 辅助/治理文件，不计执行覆盖 | 含 Windows 路径/命令，需 Windows 复核 | 含全局状态/环境变量；保留独立进程；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
+| tests/helpers/lightingEngineConfigurationSmoke.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/helpers/lightingFactoryBakeReplay.mjs | helper；tooling | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；引用 dist-electron；核对 build:electron 前置；真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。 | 否 / 未确认 |
+| tests/helpers/lightingFactoryGiPerformance.mjs | helper；performance | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。 | 否 / 未确认 |
+| tests/helpers/lightingFactoryPerformance.mjs | helper；tooling | 辅助/治理文件，不计执行覆盖 | 含 Windows 路径/命令，需 Windows 复核 | 含全局状态/环境变量；保留独立进程；引用 dist-electron；核对 build:electron 前置；由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。 | 否 / 未确认 |
 | tests/helpers/lightingFactoryProfile.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/helpers/lightingManagerUiSmoke.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/helpers/lightingOptimizationDiagnosticsSmoke.mjs | helper；tooling | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。 | 否 / 未确认 |
+| tests/helpers/lightingOptimizationSourceRoundTrip.mjs | helper；tooling | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 引用 dist-electron；核对 build:electron 前置；真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。 | 否 / 未确认 |
+| tests/helpers/lightingOptimizationUiSmoke.mjs | helper；tooling | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 由实际Electron烟测导入，真实资产/硬件WebGL/前台窗口就绪；工具存在不代表验收通过。 | 否 / 未确认 |
 | tests/helpers/lightingSmokePort.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | tests/helpers/lightingUnifiedUiSmoke.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/helpers/lightingViewerSmoke.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；引用 dist-viewer-template；核对 build:viewer 前置 | 否 / 未确认 |
@@ -819,12 +853,16 @@
 | tests/helpers/rgvMotionArrowFixture.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/helpers/stackerMotionArrowFixture.mjs | helper | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/lightingBake/fixtures/actual-seven-surfaces.json | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/lightingBake/fixtures/degenerate-car-uv.json | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/lightingBake/fixtures/sliver-wall-uv.json | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 
 ## 必须人工复核的动态调用
 
+- 动态子进程需复核：scripts/smoke-generated-cargo-preload.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：scripts/smoke-manual-roam-skeletal.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：scripts/smoke-skybox-mosaic.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：scripts/test-model-download-progress.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：tests/dataPlatform/environmentBindingAuthority.runner.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：tests/lightingBake/cycles.integration.mjs（其子测试不计为已覆盖）
+- 动态子进程需复核：tests/lightingBake/lightingOptimizationCycles.integration.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：tests/telemetryTestRunner.test.mjs（其子测试不计为已覆盖）

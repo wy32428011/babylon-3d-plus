@@ -80,3 +80,13 @@ export function prepareLightingManagementDraft(
     ...scene, sceneSettings: sameSettings ? scene.sceneSettings : settings, entities,
   } };
 }
+
+export type LightingManagerPreflightState = {
+  phase: 'idle' | 'checking' | 'ready' | 'blocked' | 'error';
+  signature?: string;
+  report?: import('../../../electron/shared/sceneLightingBakePreflight').LightingBakePreflight;
+  message?: string;
+};
+export type LightingDraftPreview = {
+  baseScene: SceneDocument; sceneSessionId: string; lighting: SceneLightingConfig; appearance: SceneAppearanceConfig; suppressIndirect: boolean;
+};

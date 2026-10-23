@@ -546,6 +546,36 @@
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/scenePerformanceMonitor.test.mjs tests/runtime/frameTimingWindow.test.ts tests/runtime/p2R0Diagnostics.test.mjs tests/editor/editorPerformanceRunSession.test.ts tests/digitalTwin/playerPerformanceDiagnostics.test.ts",
       "category": "legacy",
       "reason": "P2-R0 真实监控计数器/墙钟窗口/缺失与零值传播校准；GPU及完整B0由隔离实机另验。"
+    },
+    {
+      "name": "test:lighting-optimization",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/lightingOptimizationSettings.test.ts tests/editor/lightingManagerOperations.integration.test.mjs tests/editor/lightingBakeManagerUi.test.mjs tests/lightingBake/lightingBakeBinary.test.ts tests/lightingBake/lightingBakePreflight.test.ts tests/lightingBake/lightingBakeProbeVolumesPython.test.ts tests/lightingBake/lightingBakePythonContracts.test.mjs tests/lightingBake/lightingBakeTaskHistory.test.ts tests/runtime/lightingProbeOcclusion.test.ts tests/runtime/lightingProbeVolumes.test.ts tests/runtime/lightingDraftPreviewController.test.mjs tests/lightingBake/lightingBakeServicePreflight.test.ts tests/runtime/lightingFactoryGiPerformance.test.mjs tests/lightingBake/lightingBakeProbeBounds.test.ts tests/runtime/lightingCaptureMetrics.test.ts tests/runtime/lightingPngArtifacts.test.ts tests/runtime/lightingTextureFailure.test.ts",
+      "category": "legacy",
+      "reason": "光照管理器预算、产物、二进制、任务、草稿和区域探针的定向回归。"
+    },
+    {
+      "name": "smoke:lighting-optimization",
+      "command": "npm run build && node scripts/smoke-lighting-bake-electron.mjs --optimization",
+      "category": "manual",
+      "reason": "真实Electron/Cycles/独立Viewer的光照管理器增强验收。"
+    },
+    {
+      "name": "test:lighting-optimization:cycles",
+      "command": "npm run build:electron && node tests/lightingBake/lightingOptimizationCycles.integration.mjs",
+      "category": "manual",
+      "reason": "独立真实CPU/GPU回退与区域/二进制Cycles验收。"
+    },
+    {
+      "name": "test:lighting-engine-configuration",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/lightingBake/lightingBakeEngineConfiguration.test.ts tests/editor/lightingBakeEngineDialog.test.mjs tests/editor/lightingEnginePublish.test.mjs",
+      "category": "legacy",
+      "reason": "本机引擎配置安全保存、精确路径检测、配置窗口与发布补救入口的定向回归。"
+    },
+    {
+      "name": "smoke:lighting-engine-configuration",
+      "command": "npm run build && node scripts/smoke-lighting-engine-configuration.mjs",
+      "category": "manual",
+      "reason": "隔离用户目录的真实Electron配置保存/重启、Blender检测/烘焙、正式本地DIST发布和独立Viewer验收。"
     }
   ]
 }

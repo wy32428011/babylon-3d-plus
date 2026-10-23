@@ -321,3 +321,41 @@
   .lighting-manager-bulk { grid-template-columns: minmax(0, 1fr); }
   .lighting-manager-bulk > * { grid-column: 1 !important; }
 }
+
+/* 变更、预检和诊断共享现有卡片层级；长身份及日志保持在内容区内滚动。 */
+.lighting-manager-change-summary { display: grid; gap: 6px; margin-bottom: 12px; padding: 12px 15px; border: 1px solid #4a7377; border-left: 3px solid #69d8df; border-radius: 5px; background: #243238; font-size: 12px; }
+.lighting-manager-change-summary > div { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.lighting-manager-change-summary strong { color: #93e6e9; }
+.lighting-manager-change-summary p { margin: 0; color: #c8d2d6; }
+.lighting-manager-diagnostic-group { margin-top: 13px; }
+.lighting-manager-diagnostic-group h4 { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+.lighting-manager-diagnostic-group h4 > span { border-radius: 10px; padding: 1px 7px; background: #41474a; font-size: 11px; }
+.lighting-manager-diagnostic-group.is-info .lighting-manager-diagnostics { color: #c5d7db; }
+.lighting-manager-diagnostic-group.is-error .lighting-manager-diagnostics { color: #f1a3a3; }
+.lighting-manager-diagnostics li > div { flex: 1 1 auto; min-width: 0; }
+.lighting-manager-diagnostics p { margin: 0 0 4px; }
+.lighting-manager-diagnostic-identity { display: block; color: #aebbc1; overflow-wrap: anywhere; }
+.lighting-manager-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.lighting-manager-diagnostic-actions button { min-height: 27px; padding: 4px 8px; font-size: 11px; }
+.lighting-manager-preflight-issues { display: grid; gap: 7px; padding-left: 18px; margin: 8px 0; font-size: 12px; }
+.lighting-manager-history-list { display: grid; gap: 9px; max-height: 400px; overflow: auto; }
+.lighting-manager-history-list article { border: 1px solid #434d52; border-radius: 4px; padding: 11px; }
+.lighting-manager-history-list article p { margin: 7px 0 0; font-size: 12px; color: #bec8ce; overflow-wrap: anywhere; }
+.lighting-manager-task-log { margin-top: 12px; }
+.lighting-manager-task-log pre { max-height: 300px; margin-top: 8px; padding: 11px; background: #171d21; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.lighting-manager-preview-card { height: auto; }
+.lighting-manager-preview-actions { max-width: calc(100% - 20px); flex-wrap: wrap; justify-content: flex-end; }
+.lighting-manager-preview-card > .lighting-manager-warning, .lighting-manager-preview-card > .lighting-manager-note { margin: 0; padding: 7px 13px; }
+.lighting-manager-preview-card > button { margin: 5px 13px 12px; align-self: flex-end; }
+
+.lighting-manager-probe-volume { display: grid; gap: 7px; margin: 10px 0; padding: 10px; border: 1px solid #455258; border-radius: 4px; }
+.lighting-manager-probe-volume .lighting-manager-card-heading strong { font-size: 12px; }
+.lighting-manager-probe-coordinates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.lighting-manager-probe-coordinates fieldset { min-width: 0; padding: 7px; border: 1px solid #475157; border-radius: 3px; }
+.lighting-manager-probe-coordinates legend { padding-inline: 4px; font-size: 11px; color: #bdced3; }
+.lighting-manager-probe-coordinates .lighting-manager-field { display: grid; gap: 4px; }
+.lighting-manager-probe-coordinates .lighting-manager-number input { min-width: 0; width: 100%; }
+
+.lighting-manager-device-status { display: flex; align-items: flex-start; gap: 8px; margin-top: 7px; }
+.lighting-manager-device-status p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.lighting-manager-device-status button { flex: 0 0 auto; font-size: 11px; padding: 4px 7px; }

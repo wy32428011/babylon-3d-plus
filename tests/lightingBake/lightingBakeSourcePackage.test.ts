@@ -42,7 +42,7 @@ test('SOURCE完整携带几何、探针、贴图并在其他工作区保留可�
   const scene: any = { name: '烘焙工厂', entityIds: ['a'], entities: { a: { id: 'a', components: {
     transform: { position: { x: 0, y: 0, z: 0 } }, modelAsset: { sourcePath: model, sourceUrl: url(model), assetRevision: 'r1' },
     lighting: { mobility: 'auto', nodeOverrides: { root: { mobility: 'static' } }, resourceIdentity: 'geometry-identity' },
-  } } }, sceneSettings: { lighting: normalizeSceneLightingConfig({ version: 2 }), appearance: normalizeSceneAppearanceConfig({}) } };
+  } } }, sceneSettings: { lighting: normalizeSceneLightingConfig({ version: 2, bake: { device: 'gpu', probeVolumes: [{ id: 'work-zone', name: '设备活动区', enabled: true, min: [0, 0, 0], max: [8, 4, 8] }] } }), appearance: normalizeSceneAppearanceConfig({}) } };
   scene.sceneSettings.lighting.result = { version: 1, signature: getSceneLightingBakeSignature(scene), createdAt: '2026-10-20T00:00:00Z', engineVersion: 'fixture',
     assets, surfaces: [{ key: 'a/root', entityId: 'a', nodeKey: 'root', geometryAssetId: 'g', lightmapAssetId: 'l' }], probeAssetId: 'p',
     statistics: { meshCount: 1, triangleCount: 1, atlasCount: 1, probeCount: 1, textureBytes: 3, durationMs: 1 } };
@@ -54,6 +54,8 @@ test('SOURCE完整携带几何、探针、贴图并在其他工作区保留可�
   const archive = await unzipper.Open.file(result.filePath);
   const portable = JSON.parse((await archive.files.find((file: any) => file.path === 'Scenes/main.scene.json').buffer()).toString());
   assert.equal(getSceneLightingBakeError(portable.scene), null);
+  assert.equal(portable.scene.sceneSettings.lighting.bake.device, 'gpu');
+  assert.deepEqual(portable.scene.sceneSettings.lighting.bake.probeVolumes, scene.sceneSettings.lighting.bake.probeVolumes);
   assert.equal(archive.files.some((file: any) => file.path.endsWith('not-referenced.txt')), false);
   for (const asset of portable.scene.sceneSettings.lighting.result.assets) {
     const member = decodeURIComponent(new URL(asset.url).pathname.slice(1));
@@ -65,6 +67,7 @@ test('SOURCE完整携带几何、探针、贴图并在其他工作区保留可�
   await archive.extract({ path: reopenedRoot });
   const reopened = relocateDataPlatformScene(portable, reopenedRoot) as any;
   assert.equal(getSceneLightingBakeError(reopened.scene), null);
+  assert.deepEqual(reopened.scene.sceneSettings.lighting.bake, scene.sceneSettings.lighting.bake);
   for (const asset of reopened.scene.sceneSettings.lighting.result.assets) assert.ok((await fs.readFile(decodeURIComponent(new URL(asset.url).pathname.slice(1)))).length);
   assert.deepEqual(reopened.scene.entities.a.components.lighting, scene.entities.a.components.lighting);
   await fs.writeFile(path.join(job, 'probes.json'), '{"probes":[2]}');

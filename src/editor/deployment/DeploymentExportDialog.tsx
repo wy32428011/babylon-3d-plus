@@ -10,6 +10,7 @@ import {
   type DeploymentExportStatus,
 } from './deploymentExport';
 import type { DeploymentExportController } from './useDeploymentExport';
+import { LightingBakePublishEngineCheck } from './LightingBakePublishEngineCheck';
 
 type DeploymentExportDialogProps = {
   open: boolean;
@@ -58,6 +59,7 @@ export function DeploymentExportDialog(props: DeploymentExportDialogProps) {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isCancelPending, setCancelPending] = useState(false);
   const [isRevealPending, setRevealPending] = useState(false);
+  const [isEngineConfigurationOpen, setEngineConfigurationOpen] = useState(false);
   const projectNameInputRef = useRef<HTMLInputElement>(null);
   const wasOpenRef = useRef(false);
   const titleId = useId();
@@ -89,7 +91,7 @@ export function DeploymentExportDialog(props: DeploymentExportDialogProps) {
 
     /** Esc 仅关闭非活动对话框，导出中必须显式取消以保持 worker 状态可见。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
-      if (event.key !== 'Escape' || isBusy) return;
+      if (event.key !== 'Escape' || isBusy || isEngineConfigurationOpen) return;
       event.preventDefault();
       controller.reset();
       props.onClose();
@@ -97,7 +99,7 @@ export function DeploymentExportDialog(props: DeploymentExportDialogProps) {
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
-  }, [controller, isBusy, props]);
+  }, [controller, isBusy, isEngineConfigurationOpen, props]);
 
   if (!props.open) return null;
 
@@ -228,6 +230,9 @@ export function DeploymentExportDialog(props: DeploymentExportDialogProps) {
             </label>
           </fieldset>
         </section>
+
+        <LightingBakePublishEngineCheck open={props.open} scene={scene} error={state.error} disabled={isBusy}
+          onDialogOpenChange={setEngineConfigurationOpen} />
 
         <section className="deployment-export-dialog-section" aria-labelledby={`${titleId}-summary`}>
           <div className="deployment-export-section-heading">
