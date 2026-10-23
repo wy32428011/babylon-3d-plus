@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-});
+const viteServer = await createP4SsrTestModules([
+  '/src/editor/model/SceneDocument.ts',
+  '/src/editor/model/dataPlatformScreen.ts',
+  '/src/editor/project/SceneSerializer.ts',
+  '/src/runtime/babylon/DataPlatformViewportScreenOverlay.tsx',
+  '/src/runtime/babylon/dataPlatformScreenBridge.ts',
+]);
 after(() => viteServer.close());
 
 const { createEmptySceneDocument } = await viteServer.ssrLoadModule('/src/editor/model/SceneDocument.ts') as typeof import('../../src/editor/model/SceneDocument');
@@ -42,7 +42,7 @@ test('视窗大屏只保存公开地址和嵌入引用', () => {
   });
 });
 
-test('完整大屏以 v5 场景配置序列化，并兼容旧 v4 文件', () => {
+test('完整大屏以 v6 场景配置序列化，并兼容旧 v4 文件', () => {
   const scene = createEmptySceneDocument('视窗大屏');
   scene.sceneSettings.viewportScreen = createDataPlatformViewportScreen({
     projectId: 'project-1',
@@ -51,7 +51,7 @@ test('完整大屏以 v5 场景配置序列化，并兼容旧 v4 文件', () => 
   });
 
   const serialized = JSON.parse(serializeScene(scene)) as { version: number; scene: typeof scene };
-  assert.equal(serialized.version, 5);
+  assert.equal(serialized.version, 6);
   assert.deepEqual(serialized.scene.sceneSettings.viewportScreen, scene.sceneSettings.viewportScreen);
   assert.deepEqual(deserializeScene(JSON.stringify(serialized)).sceneSettings.viewportScreen, scene.sceneSettings.viewportScreen);
 

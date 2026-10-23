@@ -1,16 +1,12 @@
-import {
-  CreateBox,
-  CreatePlane,
-  CreateSphere,
-  Material,
-  Matrix,
-  Mesh,
-  Scene,
-  TransformNode,
-  Quaternion,
-  Vector3,
-  VertexData,
-} from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { CreateBox } from '@babylonjs/core/Meshes/Builders/boxBuilder.js';
+import { CreatePlane } from '@babylonjs/core/Meshes/Builders/planeBuilder.js';
+import { CreateSphere } from '@babylonjs/core/Meshes/Builders/sphereBuilder.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorRule, ModelGeneratorTarget } from '../../editor/model/components';
 import type { EffectRuntimeTarget } from '../../editor/model/effectConfiguration';
 import { effectReferenceFromGeneratorTarget } from './GeneratedEffectTargets';

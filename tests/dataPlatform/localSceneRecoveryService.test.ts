@@ -50,6 +50,18 @@ const envelope = (asset?: Record<string, unknown>) => ({ version: 5, scene: { id
   sceneSettings: { environment: null as Record<string, unknown> | null },
 } });
 
+// 外层格式与光照配置按既定迁移合同升级，其余原始业务字段仍必须逐项完全相等。
+function assertOnlyLightingFormatMigrated(content: string, document: ReturnType<typeof envelope>): void {
+  const recovered = JSON.parse(content);
+  assert.equal(recovered.version, 6);
+  assert.equal(recovered.scene.sceneSettings.lighting.version, 2);
+  assert.equal(recovered.scene.sceneSettings.appearance.version, 1);
+  delete recovered.scene.sceneSettings.lighting;
+  delete recovered.scene.sceneSettings.appearance;
+  recovered.version = document.version;
+  assert.deepEqual(recovered, document);
+}
+
 async function fixture(t: TestContext) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'local-scene-service-'));
   assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
@@ -82,7 +94,7 @@ test('纯本地健康 GLB 不依赖损坏共享索引，保持参数与原文档
   const result = await f.run(document);
   assert.equal(result.configured, false);
   assert.deepEqual(result.issues, []);
-  assert.deepEqual(JSON.parse(result.recoveredSceneContent!), document);
+  assertOnlyLightingFormatMigrated(result.recoveredSceneContent!, document);
   assert.equal(JSON.stringify(document), before);
   assert.ok(result.resolvedFiles.includes(file));
 });
@@ -188,7 +200,7 @@ test('环境旧版本缺失时只返回可审阅选择，精确接受才真实�
   const pending = await f.run(document, remote.baseUrl);
   assert.equal(remote.downloads(), 0);
   assert.equal(remote.requests.filter(url => url.includes('sync-manifest')).length, 0);
-  assert.deepEqual(JSON.parse(pending.recoveredSceneContent!), document);
+  assertOnlyLightingFormatMigrated(pending.recoveredSceneContent!, document);
   assert.ok(pending.issues?.some(issue => issue.resourceKind === 'environment'));
   assert.equal(pending.environmentRecoveryChoice?.previousRevision, '1');
   assert.equal(pending.environmentRecoveryChoice?.availableRevision, '2');
@@ -201,7 +213,7 @@ test('环境旧版本缺失时只返回可审阅选择，精确接受才真实�
     const stale = await f.run(document, remote.baseUrl, accept);
     assert.ok(stale.issues?.some(issue => /已确认.*变化/.test(issue.message)), JSON.stringify(stale.issues));
     assert.equal(remote.downloads(), 0);
-    assert.deepEqual(JSON.parse(stale.recoveredSceneContent!), document);
+    assertOnlyLightingFormatMigrated(stale.recoveredSceneContent!, document);
   }
   const accepted = await f.run(document, remote.baseUrl,
     { resourceId: '101', fileRevision: '2', sha256: remote.record.fileSha256 });
@@ -235,6 +247,6 @@ test('损坏 editor-asset URL 在事务结果中结构化报告，不抛出 URIE
     const document = envelope({ sourceUrl, parameterValues: { sourceUrl } });
     const result = await f.run(document);
     assert.ok(result.issues?.some(issue => /URL|安全|路径/.test(issue.message)), JSON.stringify(result.issues));
-    assert.deepEqual(JSON.parse(result.recoveredSceneContent!), document);
+    assertOnlyLightingFormatMigrated(result.recoveredSceneContent!, document);
   }
 });

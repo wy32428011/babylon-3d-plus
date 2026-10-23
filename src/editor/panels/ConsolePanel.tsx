@@ -9,23 +9,24 @@ type ConsolePanelProps = {
 
 /** 渲染底部 Console 入口和日志弹窗，日志仍来自编辑器全局 store。 */
 export function ConsolePanel(props: ConsolePanelProps) {
+  const { isOpen, onClose } = props;
   const logs = useEditorStore((state) => state.logs);
   const latestLogMessage = logs[0]?.message ?? '暂无日志';
 
   useEffect(() => {
-    if (!props.isOpen) return;
+    if (!isOpen) return;
 
     /** 弹窗打开时监听 Escape，便于键盘快速收起 Console。 */
     function handleWindowKeyDown(event: KeyboardEvent): void {
       if (event.key !== 'Escape') return;
-      props.onClose();
+      onClose();
     }
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => {
       window.removeEventListener('keydown', handleWindowKeyDown);
     };
-  }, [props.isOpen, props.onClose]);
+  }, [isOpen, onClose]);
 
   return (
     <section aria-label="Console 日志入口" className="console-dock">

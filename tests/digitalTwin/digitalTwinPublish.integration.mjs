@@ -4,9 +4,9 @@ import { createServer } from 'node:http';
 import { statSync, utimesSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { app } from 'electron';
 import unzipper from 'unzipper';
-import { createServer as createViteServer } from 'vite';
 
 const PROJECT_ID = '2054201280000000001';
 const EDITOR_PROJECT_ID = '2054201280000000101';
@@ -810,7 +810,7 @@ async function run() {
   const sharedResourcesRoot = path.join(workspaceRoot, 'SharedResources');
   const scenePath = path.join(projectRoot, 'Scenes', 'main.scene.json');
   const cadSourcePath = path.join(projectRoot, CAD_SOURCE_PATH);
-  const sceneContent = createSceneContent(cadSourcePath);
+  let sceneContent = createSceneContent(cadSourcePath);
   const mock = new DigitalTwinMockServer();
   let originalGetAppPath = null;
   let clearCurrentDataPlatformBinding = () => undefined;
@@ -840,6 +840,15 @@ async function run() {
     const { authorizeAssetFile } = await import('../../dist-electron/ipc/assetRegistry.js');
     const deploymentSceneModule = await import('../../dist-electron/ipc/deploymentExportScene.js');
     const publishModule = await import('../../dist-electron/ipc/digitalTwinPublishService.js');
+    const { prepareLightingSceneSave } = await import('../../dist-electron/ipc/sceneLightingBakeResources.js');
+    // 发布稳定性使用正式保存后的当前文档；v3 首次保存必然迁移为 v6 并补齐统一光照。
+    const originalFixture = JSON.parse(sceneContent);
+    const preparedFixture = await prepareLightingSceneSave(sceneContent, scenePath, { projectRoot });
+    sceneContent = `${JSON.stringify(JSON.parse(preparedFixture.content), null, 2)}\n`;
+    assert.deepEqual(JSON.parse(sceneContent).scene.entities, originalFixture.scene.entities, '保存规范化不能改变资源与设备数据。');
+    assert.deepEqual(JSON.parse(sceneContent).scene.fetchConfig, originalFixture.scene.fetchConfig, '保存规范化不能改变 Fetch 配置。');
+    const resavedFixture = await prepareLightingSceneSave(sceneContent, scenePath, { projectRoot });
+    assert.equal(`${JSON.stringify(JSON.parse(resavedFixture.content), null, 2)}\n`, sceneContent, '正式当前场景序列化必须幂等。');
     clearCurrentDataPlatformBinding = bindingModule.clearCurrentDataPlatformBinding;
     clearSharedProjectSkyboxRoot = () => projectAssetModule.setSharedProjectSkyboxRoot(null);
 
@@ -1457,6 +1466,8 @@ async function run() {
       version: 3,
       scene: {
         name: '保留旧机器资源引用的备用场景',
+        // 本例验证 SOURCE 资源完备性，显式关闭无关烘焙门控以进入原资源失败路径。
+        sceneSettings: { lighting: { bake: { enabled: false } } },
         entities: {
           model: { components: { modelAsset: {
             sourcePath: path.join(testRoot, 'old-project', 'Assets', 'Models', 'OldChain', 'main.glb'),
@@ -1707,6 +1718,8 @@ async function run() {
     const externalCadPath = path.join(testRoot, 'ExternalCad', 'publish-reference.dxf');
     // 不创建也不授权原图，用真实缺失路径验证发布不读取 CAD。
     const localPublishScene = JSON.parse(createSceneContent(externalCadPath));
+    // 此用例验证旧模型资源身份和缺失 CAD 策略，使用无需烘焙的实时照明。
+    localPublishScene.scene.sceneSettings.lighting = { version: 2, bake: { enabled: false } };
     localPublishScene.scene.entityIds.push('legacy-device');
     localPublishScene.scene.entities['legacy-device'] = { id: 'legacy-device', name: '本地同步模型', visible: true,
       components: { transform: { position: { x: 1, y: 0, z: 2 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
@@ -1800,7 +1813,7 @@ async function run() {
             parameters: [{ key: 'length', label: '长度', type: 'number', defaultValue: 1 }], bindings: [] },
           parameterValues: { length: 9 } },
         telemetryBinding: { field: 'speed' },
-      } } }, sceneSettings: { environment: null, skybox: null },
+      } } }, sceneSettings: { environment: null, skybox: null, lighting: { version: 2, bake: { enabled: false } } },
     } });
     const preparedEntryContent = JSON.stringify(createPreparedFixture('准备入口', 'ENTRY-9'));
     const secondaryPath = path.join(projectRoot, 'Scenes', 'prepared-secondary.scene.json');
@@ -1931,18 +1944,15 @@ async function run() {
     assert.equal(mock.requests.some(item => item.path.endsWith('/publish-tasks/prepare')), false);
 
     // 使用实际内置 HDR 和 renderer 编排，覆盖空模型集合、凭据失效和完整双包上传。
-    const rendererModules = await createViteServer({ configFile: false, logLevel: 'error',
-      server: { watch: null }, optimizeDeps: { noDiscovery: true } });
-    try {
-      const { publishWithResourceRetry } = await rendererModules.ssrLoadModule('/src/editor/deployment/publishOrchestration.ts');
-      const { createEmptySceneDocument, createSkyboxEntity } = await rendererModules.ssrLoadModule('/src/editor/model/SceneDocument.ts');
-      const { serializeScene } = await rendererModules.ssrLoadModule('/src/editor/project/SceneSerializer.ts');
-      const { repairPublishSceneSkyboxes } = await rendererModules.ssrLoadModule('/src/editor/deployment/repairPublishSceneSkyboxes.ts');
+    {
+      // 同一真实源码入口由 Node runner 完整编译；Electron 主进程不再持有 Vite/Rolldown 的原生线程。
+      const { publishWithResourceRetry, createEmptySceneDocument, createSkyboxEntity, serializeScene, repairPublishSceneSkyboxes }
+        = await import(pathToFileURL(path.join(testRoot, 'renderer', 'publish-renderer.mjs')).href);
       const { recoverPublishSceneResources } = await import('../../dist-electron/ipc/digitalTwinPublishResourceRecovery.js');
       const { listBuiltinSkyboxAssets } = await import('../../dist-electron/ipc/builtinSkyboxAssets.js');
       const [builtin] = await listBuiltinSkyboxAssets();
       const builtinScene = createEmptySceneDocument('内置天空盒快照发布');
-      builtinScene.sceneSettings.shadows.enabled = false;
+      builtinScene.sceneSettings.lighting.shadows.enabled = false;
       const skybox = createSkyboxEntity({ packagePath: builtin.packagePath, sourcePath: builtin.path,
         sourceUrl: builtin.sourceUrl, format: builtin.format, assetRevision: builtin.assetRevision,
         rotationDegrees: 37, intensity: 0.8, resolution: 256 });
@@ -2008,7 +2018,7 @@ async function run() {
         assert.equal(await readFile(secondaryPath, 'utf8'), builtinContent, '重试不写回其他场景');
         assert.equal(mock.requests.some(item => item.path.endsWith('/skyboxes/query')), false, '本地文件有效时不因旧中台资源匹配阻断');
       }
-    } finally { await rendererModules.close(); }
+    }
 
     // 同时跨过旧的字节和节点阈值，覆盖当前入口及非入口场景的完整发布链路。
     {

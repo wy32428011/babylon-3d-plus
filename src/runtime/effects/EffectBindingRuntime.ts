@@ -1,4 +1,7 @@
-import { AbstractMesh, TransformNode, Vector3, Matrix, Quaternion, type Scene } from '@babylonjs/core';
+import { Vector3, Matrix, Quaternion } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { PoiEffectComponent } from '../../editor/model/components';

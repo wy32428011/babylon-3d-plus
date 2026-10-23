@@ -6,6 +6,7 @@ import { SceneModelEntrancePlayback } from '../shared/opening/SceneModelEntrance
 import { normalizeSceneModelEntranceSettings } from '../editor/model/sceneModelEntrance';
 import type { OpeningPlaybackCoordinator } from '../shared/opening/OpeningPlaybackCoordinator';
 import { OpeningAnimationOverlay } from '../shared/ui/OpeningAnimationOverlay';
+import { OpeningReplayButton } from './OpeningReplayButton';
 import { GeographicOpeningBridge } from './geographicOpeningBridge';
 import { configureEffectDataTransport } from '../runtime/effects/EffectDataRuntime';
 import type { AlarmActivation } from '../runtime/babylon/AlarmManagerRuntime';
@@ -75,6 +76,7 @@ import {
   shouldShowPlayerStatusOverlay,
   type PlayerFloatingControl,
 } from './statusOverlayControls';
+import { resolvePlayerLightingRuntimeStatus, updatePlayerRuntimeMessage } from './playerLightingRuntimeStatus';
 import {
   AutoPatrolControls,
   type AutoPatrolControlAction,
@@ -235,6 +237,7 @@ export function PlayerApp() {
   const [hasManualRoamSpawn, setHasManualRoamSpawn] = useState(false);
   const [message, setMessage] = useState('场景加载中...');
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [lightingRuntimeStatus, setLightingRuntimeStatus] = useState<string | null>(null);
   const [chartMarkerError, setChartMarkerError] = useState('');
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
@@ -258,6 +261,7 @@ export function PlayerApp() {
   const [openingSnapshot, setOpeningSnapshot] = useState<OpeningSnapshot | null>(null);
   const [openingSettings, setOpeningSettings] = useState(() => resolvePackageOpeningSettings(undefined));
   const openingPlaybackRef = useRef<OpeningPlaybackCoordinator | null>(null);
+  const replayOpeningRef = useRef<() => void>(() => {});
   const cancelOpeningForCommandRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (!openingActive) return;
@@ -382,6 +386,8 @@ export function PlayerApp() {
     };
     let openingSuppressed = false;
     let openingFinished = false;
+    let openingPlaybackRunning = false;
+    let openingPlaybackGeneration = 0;
     setOpeningActive(false);
     setOpeningSnapshot(null);
     const cancelOpeningForCommand = (): void => {
@@ -402,11 +408,25 @@ export function PlayerApp() {
     };
     const autoPatrolStartGate = new DeferredAutoPatrolStartGate();
     autoPatrolStartGateRef.current = autoPatrolStartGate;
-    const startOpening = (): void => {
-      if (disposed || !viewport || !runtime) return;
-      if (!sceneOpeningSettings.enabled || openingSuppressed) { openingFinished = true; modelEntrancePlayback?.start(); return; }
+    const startOpening = (replay = false): void => {
+      if (disposed || !viewport || !runtime || openingPlaybackRunning) return;
+      if (!sceneOpeningSettings.enabled || (!replay && openingSuppressed)) {
+        openingFinished = true;
+        if (!replay) modelEntrancePlayback?.start();
+        return;
+      }
+      // 协调器是单次对象；每轮新建并隔离迟到回调，不重载三维与数据订阅。
+      const generation = ++openingPlaybackGeneration;
+      const replayTrigger = replay && document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      openingPlaybackRef.current?.dispose();
+      openingPlaybackRunning = true;
+      openingSuppressed = false;
+      openingFinished = false;
+      setOpeningSnapshot(null);
+      openingBridge?.setPhase('waiting');
+      const isCurrentPlayback = () => !disposed && generation === openingPlaybackGeneration;
       const playback = createSceneOpeningPlayback({
-        container: canvas.parentElement!, settings: { ...sceneOpeningSettings, enabled: sceneOpeningSettings.enabled && !openingSuppressed },
+        container: canvas.parentElement!, settings: sceneOpeningSettings,
         getEnvironmentSnapshot: () => {
           if (!runtime) throw new Error('场景运行时尚未就绪，无法读取环境模型。');
           return runtime.getOpeningEnvironmentSnapshot();
@@ -420,23 +440,31 @@ export function PlayerApp() {
         },
         isHostVisible: () => openingBridge?.isHostVisible() ?? true,
         subscribeToHostVisibility: listener => openingBridge?.subscribeVisibility(listener) ?? (() => {}),
-        onActiveChange: active => { if (!disposed) setOpeningActive(active); },
+        onActiveChange: active => { if (isCurrentPlayback()) setOpeningActive(active); },
         onProgress: snapshot => {
-          if (disposed) return;
+          if (!isCurrentPlayback()) return;
           setOpeningSnapshot(snapshot);
           // 完成帧紧接着进入 onTerminal，不能把 handoff 再误报成一次 playing。
           if (snapshot.phase !== 'complete') openingBridge?.setPhase(snapshot.phase === 'handoff' ? 'handoff' : 'playing');
         },
         onTerminal: result => {
+          if (!isCurrentPlayback()) return;
+          openingPlaybackRunning = false;
           openingFinished = true;
-          if (disposed) return;
           if (sceneOpeningSettings.enabled) console.info('[Viewer opening] 开场结束', { result, template: sceneOpeningSettings.template });
           setOpeningActive(false);
           setOpeningSnapshot(null);
           openingBridge?.setPhase(result === 'cancelled' ? 'skipped' : result);
-          modelEntrancePlayback?.start();
+          // 展示层会暂时隐藏入口；恢复布局后再归还键盘焦点，避免落到页面根节点。
+          if (replayTrigger) requestAnimationFrame(() => {
+            if (isCurrentPlayback() && replayTrigger.isConnected && document.activeElement === document.body) {
+              replayTrigger.focus({ preventScroll: true });
+            }
+          });
+          // 模型入场只属于首次加载；返回开场结束仅显露持续运行的场景。
+          if (!replay) modelEntrancePlayback?.start();
         },
-        onError: error => { console.warn('[开场动画] 开场未完成，三维场景继续运行。', error); },
+        onError: error => { if (isCurrentPlayback()) console.warn('[开场动画] 开场未完成，三维场景继续运行。', error); },
       });
       openingPlaybackRef.current = playback;
       void playback.start();
@@ -446,6 +474,9 @@ export function PlayerApp() {
     setInitialLoadNotice('');
     setModelLoadProgress(null);
     let initialLoadCompletedForSession = false;
+    replayOpeningRef.current = () => {
+      if (initialLoadCompletedForSession) startOpening(true);
+    };
     let initialLoadFailed = false;
     let startupStage = '读取发布配置';
     const loadMonitor = new PlayerInitialLoadMonitor();
@@ -459,8 +490,8 @@ export function PlayerApp() {
       autoPatrolStartGate.markReady();
       publishedCache?.prefetch();
     }, {
-      // 开场与资源加载分别结算；场景可见后播放，终态才交还相机和巡检。
-      onSettled: startOpening,
+      // 开场与资源加载分别结算；开场只等待首帧，不接管业务相机或巡检。
+      onSettled: () => startOpening(),
       verifyReady: async signal => {
         if (!viewport || !runtime) throw new Error('场景视图尚未创建。');
         const before = runtime.getInitialLoadSnapshot().error;
@@ -658,7 +689,7 @@ export function PlayerApp() {
           viewport.scene,
           (logMessage) => {
             console.info(`[Viewer] ${logMessage}`);
-            if (!disposed) setRuntimeMessage(logMessage);
+            if (!disposed) setRuntimeMessage(previous => updatePlayerRuntimeMessage(previous, logMessage));
           },
           undefined,
           (snapshot) => {
@@ -1080,6 +1111,7 @@ export function PlayerApp() {
         requestAnimationFrame(() => {
           if (!disposed) resize?.();
         });
+        runtime.registerHostSceneObservers();
         const skyboxReadiness = runtime.getSkyboxReadiness();
         if (skyboxReadiness.phase === 'error') throw new Error(`天空盒加载失败：${skyboxReadiness.message}`);
         if (!initialLoadFailed) setPhase('ready');
@@ -1146,6 +1178,7 @@ export function PlayerApp() {
       openingPlaybackRef.current = null;
       openingBridge?.dispose();
       cancelOpeningForCommandRef.current = () => {};
+      replayOpeningRef.current = () => {};
       canvasResizeObserver?.disconnect();
       canvasResizeObserver = null;
       if (resize) window.removeEventListener('resize', resize);
@@ -1186,7 +1219,7 @@ export function PlayerApp() {
       clearDeploymentAssetManifest();
       publishedCache?.dispose();
     };
-  }, [pauseHistoryReplay]);
+  }, [pauseHistoryReplay, updateOpenedDigitalTwinFloatingControl]);
 
   const isDigitalTwin = Boolean(config?.digitalTwin);
   useEffect(() => {
@@ -1311,8 +1344,22 @@ export function PlayerApp() {
   const showOverlay = shouldShowPlayerStatusOverlay(
     phase,
     statusOverlayVisible,
-    viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError),
+    viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError) || Boolean(lightingRuntimeStatus),
   );
+
+  useEffect(() => {
+    const sampleLightingStatus = (): void => {
+      setLightingRuntimeStatus(resolvePlayerLightingRuntimeStatus(
+        initialLoadCompleted,
+        runtimeRef.current?.getLightingBakeRuntimeError() ?? null,
+      ));
+    };
+    sampleLightingStatus();
+    if (!initialLoadCompleted || phase !== 'ready') return undefined;
+    // 当前诊断独立于历史日志和状态栏显隐，静态真实失配仍会主动显示。
+    const timer = window.setInterval(sampleLightingStatus, 250);
+    return () => window.clearInterval(timer);
+  }, [initialLoadCompleted, phase]);
 
   useEffect(() => {
     if (phase !== 'ready' || !showOverlay) {
@@ -1335,7 +1382,7 @@ export function PlayerApp() {
     let session: PlayerPerformanceSession | null = null;
     try {
       runtime.setTelemetryPerformanceTimingEnabled(true);
-      session = startPlayerPerformanceSession(true, () => new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+      session = runtime.withControlledSceneObservers(() => startPlayerPerformanceSession(true, () => new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
         getRuntimeMetrics: () => runtime.getPerformanceMetrics(),
         getEditThinInstancePlanMetrics: () => ({
           planCount: 0, lastDurationMs: 0, maxDurationMs: 0,
@@ -1343,7 +1390,7 @@ export function PlayerApp() {
         }),
         collectDetailedGpuWorkloads: false,
         captureFrameTimings: true,
-      }), setPerformanceSnapshot, Date.now, () => runtime.getTelemetryPerformanceMetrics());
+      }), setPerformanceSnapshot, Date.now, () => runtime.getTelemetryPerformanceMetrics()));
       performanceSessionRef.current = session;
     } catch (error) {
       runtime.setTelemetryPerformanceTimingEnabled(false);
@@ -1399,6 +1446,7 @@ export function PlayerApp() {
   return (
     <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}${openingActive ? ' opening-presentation-active' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
+      {phase === 'ready' && initialLoadCompleted && openingSettings.enabled ? <OpeningReplayButton onReplay={() => replayOpeningRef.current()} /> : null}
       {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
       {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
         <DataPlatformScreenOverlay
@@ -1409,7 +1457,7 @@ export function PlayerApp() {
           scene={viewportRef.current.scene}
         />
       ) : null}
-      {phase === 'ready' && !openingActive ? (
+      {phase === 'ready' ? (
         <DataPlatformViewportScreenOverlay
           interactive
           onCommand={handleViewportDataPlatformScreenCommand}
@@ -1417,8 +1465,8 @@ export function PlayerApp() {
           selectedEntityIds={viewerSelectedEntityIds}
         />
       ) : null}
-      {phase === 'ready' && !openingActive ? <RuntimeFollowControls /> : null}
-      {phase === 'ready' && !openingActive && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
+      {phase === 'ready' ? <RuntimeFollowControls /> : null}
+      {phase === 'ready' && manualRoamControlsVisible && config?.viewer.allowCameraControl && hasManualRoamSpawn ? (
         <ManualRoamControls
           snapshot={manualRoamSnapshot}
           onConfigChange={handleManualRoamConfig}
@@ -1461,10 +1509,10 @@ export function PlayerApp() {
           </div>
           {performanceSnapshot ? (
             <>
-              <p>FPS {formatPlayerStatusFps(performanceSnapshot.fps)} · CPU 帧 {performanceSnapshot.frameTimeMs.toFixed(2)} ms</p>
-              <p>绘制 {performanceSnapshot.renderTimeMs.toFixed(2)} ms · GPU {performanceSnapshot.gpuFrameTimeMs === null ? '不可用' : `${performanceSnapshot.gpuFrameTimeMs.toFixed(2)} ms`}</p>
-              <p>活动网格评估 {performanceSnapshot.activeMeshesEvaluationMs.toFixed(2)} ms</p>
-              <p>Draw Call {performanceSnapshot.drawCalls} · Mesh {performanceSnapshot.activeMeshes}/{performanceSnapshot.totalMeshes}</p>
+              <p>FPS {formatPlayerStatusFps(performanceSnapshot.fps)} · CPU 帧 {performanceSnapshot.frameTimeMs?.toFixed(2) ?? '不可用'} ms</p>
+              <p>绘制 {performanceSnapshot.renderTimeMs?.toFixed(2) ?? '不可用'} ms · GPU {performanceSnapshot.gpuFrameTimeMs === null ? '不可用' : `${performanceSnapshot.gpuFrameTimeMs.toFixed(2)} ms`}</p>
+              <p>活动网格评估 {performanceSnapshot.activeMeshesEvaluationMs?.toFixed(2) ?? '不可用'} ms</p>
+              <p>Draw Call {performanceSnapshot.drawCalls ?? '不可用'} · Mesh {performanceSnapshot.activeMeshes}/{performanceSnapshot.totalMeshes}</p>
               <p>长任务 {performanceSnapshot.longTaskCount} 次 / {performanceSnapshot.longTaskDurationMs.toFixed(1)} ms</p>
               {performanceSnapshot.telemetry ? (
                 <p>遥测帧 {performanceSnapshot.telemetry.lastFrameTimeMs?.toFixed(2) ?? '--'} ms · 本次峰值 {performanceSnapshot.telemetry.maxFrameTimeMs?.toFixed(2) ?? '--'} ms</p>
@@ -1496,6 +1544,7 @@ export function PlayerApp() {
           {phase === 'ready' ? <p aria-hidden="true">FPS：{formatPlayerStatusFps(playerFps)}</p> : null}
           {phase !== 'blocked' ? <p>MQTT：{mqttStatus.state}{mqttStatus.lastError ? `（${mqttStatus.lastError}）` : ''}</p> : null}
           {runtimeMessage ? <p>{runtimeMessage}</p> : null}
+          {lightingRuntimeStatus ? <p>{lightingRuntimeStatus}</p> : null}
         </section>
       ) : null}
     </main>

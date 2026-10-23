@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../shared/asciiControlCharacters.ts';
 const TAGS = new Set(['svg', 'g', 'path', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'text', 'tspan', 'defs', 'lineargradient', 'radialgradient', 'stop', 'clippath', 'mask', 'use', 'title', 'desc']);
 const ATTRIBUTES = new Set(['id', 'xmlns', 'xmlns:xlink', 'viewbox', 'preserveaspectratio', 'width', 'height', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r', 'rx', 'ry', 'fx', 'fy', 'd', 'points', 'fill', 'fill-rule', 'fill-opacity', 'stroke', 'stroke-width', 'stroke-opacity', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit', 'stroke-dasharray', 'stroke-dashoffset', 'opacity', 'transform', 'gradienttransform', 'gradientunits', 'spreadmethod', 'offset', 'stop-color', 'stop-opacity', 'clip-path', 'clippathunits', 'mask', 'maskunits', 'maskcontentunits', 'font-size', 'font-family', 'font-weight', 'text-anchor', 'dominant-baseline', 'dx', 'dy', 'letter-spacing', 'href', 'xlink:href', 'version']);
 
@@ -23,7 +24,7 @@ export function assertStaticOpeningSvg(source: string): void {
       const attribute = /^\s+([A-Za-z][A-Za-z0-9:-]*)\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)')/.exec(attributes);
       if (!attribute) { invalid(); break; }
       const name = attribute[1].toLowerCase(), value = attribute[2] ?? attribute[3];
-      if (!ATTRIBUTES.has(name) || used.has(name) || /[&\\\u0000-\u001f\u007f]/.test(value)) invalid();
+      if (!ATTRIBUTES.has(name) || used.has(name) || containsAsciiControlCharactersOr(value, "&\\\u007f")) invalid();
       used.add(name);
       if (name === 'xmlns' && value !== 'http://www.w3.org/2000/svg') invalid();
       if (name === 'xmlns:xlink' && value !== 'http://www.w3.org/1999/xlink') invalid();

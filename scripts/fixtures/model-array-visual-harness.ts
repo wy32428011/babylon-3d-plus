@@ -1,15 +1,12 @@
-import {
-  ArcRotateCamera,
-  Color3,
-  Color4,
-  DirectionalLight,
-  Engine,
-  HemisphericLight,
-  Matrix,
-  Scene,
-  Vector3,
-} from '@babylonjs/core';
-import '@babylonjs/loaders/glTF/index.js';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Color3, Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import '../../src/runtime/babylon/babylonGltfLoader';
+import '../../src/runtime/babylon/babylonSideEffects';
 import { SceneRuntime } from '../../src/runtime/babylon/SceneRuntime';
 
 const canvas = document.querySelector('#renderCanvas') as HTMLCanvasElement;
@@ -374,6 +371,8 @@ async function waitForDirectReady(state: HarnessState): Promise<void> {
   const deadline = performance.now() + READY_TIMEOUT_MS;
   while (performance.now() < deadline) {
     state.scene.render();
+    const loadError = state.runtime.getInitialLoadSnapshot().error;
+    if (loadError) throw new Error(`${state.spec.packageName} 加载失败：${loadError}`);
     const direct = state.runtime.models.get(DIRECT_ID);
     if (
       direct?.measurementReady
@@ -401,19 +400,26 @@ async function waitForReady(state: HarnessState, requireBatch = true): Promise<v
   const deadline = performance.now() + READY_TIMEOUT_MS;
   while (performance.now() < deadline) {
     state.scene.render();
+    const loadError = state.runtime.getInitialLoadSnapshot().error;
+    if (loadError) throw new Error(`${state.spec.packageName} 加载失败：${loadError}`);
     const direct = state.runtime.models.get(DIRECT_ID);
     const source = state.runtime.models.get(SOURCE_ID);
     const batch = state.runtime.resolveModelArrayBatchForEntityId(SOURCE_ID);
     const batchReady = requireBatch
       ? Boolean(batch)
       : !source?.modelArrayBatch && (source?.modelArraySuspendedMeshes?.size ?? 0) === 0;
+    // 分帧初始化时基础批次可先于参数变体就绪。待初始化宿主在 afterRender 恢复脚本可见性，
+    // 此时不能把它当实际可绘制几何参与取景；先等待整轮变体稳定，再按原阈值截图。
+    const variantsReady = [...state.runtime.modelArrayParameterVariants.values()].every((variant: any) => (
+      variant.model.measurementReady && variant.model.externalScriptStarting === false
+    ));
     const ready = direct?.measurementReady
       && source?.measurementReady
       && direct.externalScriptStarting === false
       && source.externalScriptStarting === false
       && direct.externalScriptRuntime?.instances?.length > 0
       && source.externalScriptRuntime?.instances?.length > 0
-      && batchReady;
+      && batchReady && variantsReady;
     if (ready) {
       if (!state.texturesWarmed) {
         await waitForTextures(state.scene, 5_000);

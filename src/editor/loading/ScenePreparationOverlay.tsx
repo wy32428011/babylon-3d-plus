@@ -38,8 +38,10 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
     getScenePreparationSnapshot,
   );
 
+  const preparationSettled = isScenePreparationSettled(state);
+
   useEffect(() => {
-    if (isScenePreparationSettled(state) && !transaction) return undefined;
+    if (preparationSettled && !transaction) return undefined;
     const previousActiveElement = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
@@ -49,7 +51,7 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
     return () => {
       if (previousActiveElement?.isConnected) previousActiveElement.focus();
     };
-  }, [state.completed, state.sceneSessionId, state.assetRefreshStatus, state.editingAllowed, remoteScene, transaction]);
+  }, [state.completed, state.sceneSessionId, state.assetRefreshStatus, state.editingAllowed, remoteScene, transaction, preparationSettled]);
 
   const environmentError = environment.sceneSessionId === state.sceneSessionId ? environment.error : null;
   // 主动升级与打开模式无关；本地/快照场景局部失败也保留成功组并展示可重试的问题。

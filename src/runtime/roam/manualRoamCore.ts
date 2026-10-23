@@ -247,7 +247,7 @@ export function resolveRoamKinematicStep(
   const displacementZ = (localForward * cosYaw - localRight * sinYaw) * horizontalSpeed * delta;
 
   let verticalVelocity = finiteOrZero(state.verticalVelocity);
-  let displacementY = 0;
+  let displacementY: number;
   let jumped = false;
   if (locomotionMode === 'fly') {
     verticalVelocity = 0;

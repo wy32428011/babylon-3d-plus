@@ -1,4 +1,15 @@
-import { AbstractMesh, AssetContainer, Color3, InstancedMesh, Material, Mesh, MeshBuilder, Scene, SceneLoader, StandardMaterial, TransformNode, Vector3, Quaternion } from '@babylonjs/core';
+import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Quaternion } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { Entity } from '../../editor/model/Entity';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { ChartMarkerThemeScreen } from '../../editor/model/components';

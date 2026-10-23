@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
+import { createServer as createTcpServer } from 'node:net';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { _electron as electron } from 'playwright';
 import { createServer } from 'vite';
 
@@ -10,6 +12,11 @@ const workspace = process.cwd();
 const modelRoot = path.resolve(process.env.BABYLON_MODEL_ROOT ?? path.join(workspace, '..', '3d-models', 'models'));
 const scenePath = path.resolve(process.env.BABYLON_SCENE_PATH ?? String.raw`F:\3d-projects\Untitled Scene.scene(1).json`);
 const configuredReportPath = process.env.BABYLON_MODEL_ARRAY_VISUAL_REPORT?.trim();
+// 设置为 0 时保留原始 TS 路径，便于与生产预转译路径做相同视觉验收。
+const precompiledScriptsEnabled = process.env.BABYLON_MODEL_ARRAY_PRECOMPILED !== '0';
+const fullBabylonBaseline = process.env.BABYLON_MODEL_ARRAY_FULL_BABYLON_BASELINE === '1';
+let fullBabylonTransforms = 0;
+const scriptRequests = { source: 0, precompiled: 0, failures: 0 };
 const expectedPackageCount = 16;
 const screenshotWidth = 1280;
 const screenshotHeight = 800;
@@ -18,6 +25,19 @@ const outputStamp = new Date().toISOString().replace(/[:.]/g, '-');
 const runRoot = path.join(workspace, 'output', 'model-array-validation', `visual-${outputStamp}`);
 const originalSceneBytes = await fs.readFile(scenePath);
 const originalSceneHash = createHash('sha256').update(originalSceneBytes).digest('hex');
+
+/** Vite 将 port=0 当作默认端口，先通过系统取得真正的临时端口以隔离其他项目。 */
+async function getVisualServerPort() {
+  const probe = createTcpServer();
+  return new Promise((resolve, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      if (!address || typeof address === 'string') { probe.close(() => reject(new Error('无法分配视觉测试端口。'))); return; }
+      probe.close(error => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
 
 function unitScaleToMeters(lengthUnit) {
   if (lengthUnit === 'millimeter') return 0.001;
@@ -423,25 +443,55 @@ try {
     root: workspace,
     cacheDir: path.join(workspace, 'output', '.vite-model-array-visual-cache'),
     plugins: [{
+      name: 'full-babylon-registration-diagnostic',
+      enforce: 'pre',
+      transform(source, id) {
+        if (!fullBabylonBaseline || !id.split('?')[0].replaceAll(String.fromCharCode(92), '/').endsWith('/scripts/fixtures/model-array-visual-harness.ts')) return null;
+        // 仅诊断完整引擎注册与生产按需注册的差异，不改动业务源码。
+        const code = source.replace("import '../../src/runtime/babylon/babylonGltfLoader';", "import '@babylonjs/loaders/glTF/index.js';")
+          .replace("import '../../src/runtime/babylon/babylonSideEffects';", "import '@babylonjs/core';");
+        if (!code.includes("import '@babylonjs/core';") || !code.includes("import '@babylonjs/loaders/glTF/index.js';")) throw new Error('完整引擎注册诊断未能替换 harness 导入。');
+        fullBabylonTransforms++;
+        return { code, map: null };
+      },
+    }, {
       name: 'raw-external-model-script',
       configureServer(server) {
         server.middlewares.use((request, response, next) => {
           if (!request.url?.startsWith('/__model-script__/')) return next();
-          const requestUrl = new URL(request.url, 'http://127.0.0.1');
-          const relative = decodeURIComponent(requestUrl.pathname.slice('/__model-script__/'.length));
-          const resolved = path.resolve(modelRoot, relative.replace(/\//g, path.sep));
-          const rootPrefix = `${path.resolve(modelRoot)}${path.sep}`;
-          if (!resolved.startsWith(rootPrefix)) {
-            response.statusCode = 403;
-            response.end('Forbidden');
-            return;
-          }
-          void fs.readFile(resolved, 'utf8').then((source) => {
+          void (async () => {
+            const requestUrl = new URL(request.url, 'http://127.0.0.1');
+            let relative = decodeURIComponent(requestUrl.pathname.slice('/__model-script__/'.length));
+            const precompiled = relative.endsWith('.compiled.json');
+            if (precompiled) {
+              if (!precompiledScriptsEnabled) { response.statusCode = 404; response.end('Precompiled baseline disabled'); return; }
+              relative = relative.slice(0, -'.compiled.json'.length);
+            }
+            const resolved = path.resolve(modelRoot, relative.replace(/\//g, path.sep));
+            const rootPrefix = `${path.resolve(modelRoot)}${path.sep}`;
+            if (!resolved.startsWith(rootPrefix) || !/\.ts$/i.test(resolved)) {
+              response.statusCode = 403;
+              response.end('Forbidden');
+              return;
+            }
+            // 拒绝符号链接绕出授权模型目录；编译器仅在 Node 端读取实际 TS，不进入 renderer。
+            const [actualRoot, actualFile] = await Promise.all([fs.realpath(modelRoot), fs.realpath(resolved)]);
+            if (!actualFile.startsWith(actualRoot + path.sep)) { response.statusCode = 403; response.end('Forbidden'); return; }
+            let source;
+            if (precompiled) {
+              const { precompileModelScriptFile } = await import(pathToFileURL(path.join(workspace, 'dist-electron/ipc/modelScriptCompiler.js')).href);
+              source = JSON.stringify(await precompileModelScriptFile(actualFile));
+              scriptRequests.precompiled++;
+            } else {
+              source = await fs.readFile(actualFile, 'utf8');
+              scriptRequests.source++;
+            }
             response.statusCode = 200;
-            response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            response.setHeader('Content-Type', precompiled ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8');
             response.setHeader('Cache-Control', 'no-store');
             response.end(source);
-          }).catch((error) => {
+          })().catch((error) => {
+            scriptRequests.failures++;
             response.statusCode = error?.code === 'ENOENT' ? 404 : 500;
             response.end(error instanceof Error ? error.message : String(error));
           });
@@ -450,8 +500,8 @@ try {
     }],
     server: {
       host: '127.0.0.1',
-      port: 0,
-      strictPort: false,
+      port: await getVisualServerPort(),
+      strictPort: true,
       hmr: false,
       fs: { allow: [workspace, modelRoot, path.dirname(scenePath)] },
     },
@@ -473,12 +523,15 @@ try {
     },
   });
   const page = await electronApp.firstWindow({ timeout: 120_000 });
+  const rendererCompilerRequests = [];
+  page.on('request', request => { if (/typescript/i.test(request.url())) rendererCompilerRequests.push(request.url()); });
   page.setDefaultTimeout(180_000);
   page.on('console', (message) => browserMessages.push({ packageName: activePackageName, type: message.type(), text: message.text() }));
   page.on('pageerror', (error) => browserMessages.push({ packageName: activePackageName, type: 'pageerror', text: error.stack ?? error.message }));
   await page.waitForFunction(() => Boolean(window.modelArrayVisualHarness?.ready), null, { timeout: 240_000 });
   const canvas = page.locator('#renderCanvas');
   await canvas.waitFor({ state: 'visible' });
+  let webglInfo = null;
 
   for (let index = 0; index < packageNames.length; index += 1) {
     const packageName = packageNames[index];
@@ -491,6 +544,16 @@ try {
     try {
       const spec = await buildSpec(packageName, sceneValuesByPackage);
       const initialization = await page.evaluate((value) => window.modelArrayVisualHarness.initialize(value), spec);
+      if (!webglInfo) {
+        webglInfo = await page.evaluate(() => {
+          const gl = globalThis.document.querySelector('#renderCanvas').getContext('webgl2');
+          if (!gl) return null;
+          const debug = gl.getExtension('WEBGL_debug_renderer_info');
+          return { version: gl.getParameter(gl.VERSION), renderer: gl.getParameter(debug?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER),
+            vendor: gl.getParameter(debug?.UNMASKED_VENDOR_WEBGL ?? gl.VENDOR) };
+        });
+        assert.ok(webglInfo && !/swiftshader|llvmpipe|software rasterizer/i.test(webglInfo.renderer), '视觉验收需要真实硬件 WebGL 2');
+      }
       lifecycle.direct = initialization.lifecycle?.direct === true;
       lifecycle.parameter = initialization.lifecycle?.parameter === true;
       assert.ok(lifecycle.direct && lifecycle.parameter, `${packageName} 阵列前 direct/parameter 生命周期未通过`);
@@ -649,6 +712,13 @@ try {
         generatedAt: new Date().toISOString(),
         modelRoot,
         scenePath,
+        serverPort: address.port,
+        precompiledScriptsEnabled,
+        fullBabylonBaseline,
+        fullBabylonTransforms,
+        scriptRequests,
+        rendererCompilerRequests,
+        webglInfo,
         runRoot,
         packageCount: allPackageNames.length,
         executedPackageCount: results.length,
@@ -697,6 +767,13 @@ try {
     modelRoot,
     scenePath,
     originalSceneHash,
+    serverPort: address.port,
+    precompiledScriptsEnabled,
+    fullBabylonBaseline,
+    fullBabylonTransforms,
+    scriptRequests,
+    rendererCompilerRequests,
+    webglInfo,
     runRoot,
     contactSheetPath,
     contactSheetLayout,

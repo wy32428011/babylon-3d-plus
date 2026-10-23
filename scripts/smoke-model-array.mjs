@@ -66,12 +66,12 @@ function readEffectiveSideOrientation(mesh) {
 
 /** 读取当前临时克隆池；非模型实体继续沿用节点克隆预览。 */
 function readPreviewClones(runtime) {
-  return runtime.entityArrayPreview?.clones ?? [];
+  return runtime.transforms.entityArrayPreview?.clones ?? [];
 }
 
 /** 读取普通模型阵列的矩阵批次 Mesh。 */
 function readPreviewMatrixMeshes(runtime) {
-  return runtime.entityArrayPreview?.matrixPreview?.meshes ?? [];
+  return runtime.transforms.entityArrayPreview?.matrixPreview?.meshes ?? [];
 }
 
 /** 读取批次 Mesh 当前有效 thinInstance 的世界位置。 */
@@ -86,7 +86,7 @@ function findFormalBatchEntity(runtime, batch, entityId) {
   for (const internalBatch of batch?.batches ?? []) {
     const mesh = internalBatch.mesh;
     for (let thinInstanceIndex = 0; thinInstanceIndex < mesh.thinInstanceCount; thinInstanceIndex += 1) {
-      if (runtime.readEntityIdFromMesh(mesh, thinInstanceIndex) !== entityId) continue;
+      if (runtime.selection.readEntityIdFromMesh(mesh, thinInstanceIndex) !== entityId) continue;
       return {
         internalBatch,
         mesh,
@@ -221,7 +221,7 @@ try {
   sourceMesh.computeWorldMatrix(true);
 
   // 这些方法只依赖普通模型条目的根节点、内容根、加载句柄与测量就绪标记。
-  runtime.models.set(SOURCE_ENTITY_ID, {
+  runtime.assets.models.set(SOURCE_ENTITY_ID, {
     root,
     contentRoot,
     assetHandle: {
@@ -271,14 +271,14 @@ try {
   assert.equal(firstMatrixMeshes[0].isPickable, false, '矩阵批次不得参与拾取');
   assert.equal(firstMatrixMeshes[0].metadata, null, '矩阵批次不得保留实体 metadata');
 
-  const firstMatrixBuffer = runtime.entityArrayPreview?.matrixPreview?.batches?.[0]?.matrixBuffer;
+  const firstMatrixBuffer = runtime.transforms.entityArrayPreview?.matrixPreview?.batches?.[0]?.matrixBuffer;
   assert.equal(
     runtime.updateEntityArrayPreview(SOURCE_ENTITY_ID, { x: 1, y: 0, z: 0 }, 3, 2),
     true,
     '副本数量不变时必须原位更新净间距矩阵',
   );
-  assert.equal(runtime.entityArrayPreview?.matrixPreview?.meshes?.[0], firstMatrixMeshes[0], '净间距变化必须复用矩阵批次 Mesh');
-  const updatedMatrixBuffer = runtime.entityArrayPreview?.matrixPreview?.batches?.[0]?.matrixBuffer;
+  assert.equal(runtime.transforms.entityArrayPreview?.matrixPreview?.meshes?.[0], firstMatrixMeshes[0], '净间距变化必须复用矩阵批次 Mesh');
+  const updatedMatrixBuffer = runtime.transforms.entityArrayPreview?.matrixPreview?.batches?.[0]?.matrixBuffer;
   assert.equal(updatedMatrixBuffer, firstMatrixBuffer, '副本数量不变时必须复用 Float32Array 矩阵缓冲');
   assertClose(updatedMatrixBuffer[12], 36, '2 米净间距第一个矩阵副本 X');
   assertClose(updatedMatrixBuffer[28], 62, '2 米净间距第二个矩阵副本 X');
@@ -325,7 +325,7 @@ try {
     '清理不得修改源模型 metadata',
   );
 
-  const sourceModelRuntime = runtime.models.get(SOURCE_ENTITY_ID);
+  const sourceModelRuntime = runtime.assets.models.get(SOURCE_ENTITY_ID);
   sourceModelRuntime.assetHandle.kind = 'owned-container';
   assert.equal(
     runtime.updateEntityArrayPreview(SOURCE_ENTITY_ID, { x: 1, y: 0, z: 0 }, 1, 0),
@@ -367,7 +367,7 @@ try {
       modelArrayInstance: { sourceEntityId: SOURCE_ENTITY_ID },
     },
   };
-  runtime.modelArrayInstanceEntities.set(nestedMeasurementEntityId, nestedMeasurementEntity);
+  runtime.arrays.modelArrayInstanceEntities.set(nestedMeasurementEntityId, nestedMeasurementEntity);
   const currentNestedMeasurement = runtime.getModelMeasurement(nestedMeasurementEntityId);
   assert.equal(currentNestedMeasurement.status, 'ready', '原地更新 ThinInstance 缓冲后实例测量必须保持可用');
   assertClose(currentNestedMeasurement.sizeMeters.x, 9, '实例测量必须读取原地更新后的 ThinInstance X 跨度');
@@ -383,7 +383,7 @@ try {
   assertPosition(currentBatchPositions[0], currentExpectedPositions[0], '当前 ThinInstance 批次第一个矩阵');
   assertPosition(currentBatchPositions[1], currentExpectedPositions[1], '当前 ThinInstance 批次第二个矩阵');
   currentMatrixBatch.dispose();
-  runtime.modelArrayInstanceEntities.delete(nestedMeasurementEntityId);
+  runtime.arrays.modelArrayInstanceEntities.delete(nestedMeasurementEntityId);
   nestedThinMatrices[1].copyToArray(nestedThinBuffer, 16);
   sourceMesh.thinInstanceBufferUpdated('matrix');
   sourceMesh.thinInstanceRefreshBoundingInfo(true);
@@ -705,18 +705,18 @@ try {
       modelArrayInstance: { sourceEntityId: SOURCE_ENTITY_ID },
     },
   }));
-  const sourceModelEntry = runtime.models.get(SOURCE_ENTITY_ID);
+  const sourceModelEntry = runtime.assets.models.get(SOURCE_ENTITY_ID);
   const meshCountBeforeFormalArray = scene.meshes.length;
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
   for (const instance of formalArrayInstances) {
-    runtime.entityStates.set(instance.id, { visible: true, locked: false });
-    runtime.modelArrayInstanceEntities.set(instance.id, instance);
+    runtime.document.entityStates.set(instance.id, { visible: true, locked: false });
+    runtime.arrays.modelArrayInstanceEntities.set(instance.id, instance);
   }
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   const formalBatch = sourceModelEntry.modelArrayBatch;
   const formalBatchMeshes = [...(formalBatch?.meshes ?? [])];
-  assert.equal(runtime.models.size, 1, '1000 个独立阵列实体不得创建逐副本 ModelRuntimeEntry');
-  assert.equal(runtime.modelArrayInstanceEntities.size, 1000, '运行时必须保留 1000 个逻辑模型实体映射');
+  assert.equal(runtime.assets.models.size, 1, '1000 个独立阵列实体不得创建逐副本 ModelRuntimeEntry');
+  assert.equal(runtime.arrays.modelArrayInstanceEntities.size, 1000, '运行时必须保留 1000 个逻辑模型实体映射');
   assert.equal(
     formalBatchMeshes.length,
     1,
@@ -769,8 +769,8 @@ try {
   };
   sourceModelEntry.externalScriptSignature = sceneScanningScriptSignature;
   sourceModelEntry.externalScriptStarting = false;
-  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
-    runtime.applyModelInteractivity(current, SOURCE_ENTITY_ID);
+  runtime.assets.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
+    runtime.assets.applyModelInteractivity(current, SOURCE_ENTITY_ID);
   });
   assert.deepEqual(sceneScanResults, [true, true], '外置脚本的上下文更新和 onUpdate 都必须能扫描到完整宿主 Mesh');
   assert.equal(scene.meshes.includes(sourceMesh), false, '脚本同步完成后必须再次从场景遍历列表暂停宿主 Mesh');
@@ -778,10 +778,10 @@ try {
 
   sceneScanResults.length = 0;
   sourceModelEntry.externalScriptStarting = true;
-  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, () => {
+  runtime.assets.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, () => {
     throw new Error('异步脚本启动期间不应提前 settled');
   });
-  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  runtime.assets.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
   assert.deepEqual(sceneScanResults, [true], '异步 start 期间脚本上下文必须继续扫描到宿主 Mesh');
   assert.equal(scene.meshes.includes(sourceMesh), true, '异步 start settled 前不得再次移除宿主 Mesh');
   assert.equal(root.isEnabled(), true, '异步 start settled 前脚本宿主根节点必须保持启用');
@@ -799,15 +799,15 @@ try {
   scene.onAfterRenderObservable.notifyObservers(scene);
   assert.equal(root.isEnabled(), true, '帧结束后必须恢复脚本宿主，保持参数化脚本和动画的节点语义');
   sourceModelEntry.externalScriptStarting = false;
-  runtime.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
-    runtime.applyModelInteractivity(current, SOURCE_ENTITY_ID);
+  runtime.assets.syncModelAssetExternalScripts(sceneScanningModelAsset, sourceModelEntry, (current) => {
+    runtime.assets.applyModelInteractivity(current, SOURCE_ENTITY_ID);
   });
   assert.equal(scene.meshes.includes(sourceMesh), false, '异步 start settled 后必须重新暂停宿主 Mesh');
   assert.equal(root.isEnabled(), true, '异步 start settled 后根节点必须继续承载脚本与绑定子节点，宿主 Mesh 不再参与绘制');
   sourceModelEntry.externalScriptRuntime = null;
   sourceModelEntry.externalScriptSignature = '';
   assert.equal(
-    runtime.updateModelExternalScriptRuntimeContext(sourceModelEntry, 'runtime', null, true),
+    runtime.telemetry.updateModelExternalScriptRuntimeContext(sourceModelEntry, 'runtime', null, true),
     false,
     '没有外置脚本运行时时不得恢复阵列宿主或触发空批次刷新',
   );
@@ -840,9 +840,9 @@ try {
     [formalArrayEntity, ...formalArrayInstances].map((entity) => [entity.id, entity]),
   );
   formalSceneDocument.selectedEntityId = SOURCE_ENTITY_ID;
-  runtime.selectedEntityIds = new Set([SOURCE_ENTITY_ID]);
+  runtime.selection.selectedEntityIds = new Set([SOURCE_ENTITY_ID]);
   for (const entity of [formalArrayEntity, ...formalArrayInstances]) {
-    runtime.syncedEntities.set(entity.id, entity);
+    runtime.document.syncedEntities.set(entity.id, entity);
   }
   const sourceGizmoTargetBeforeSync = runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID);
   assert.ok(sourceGizmoTargetBeforeSync, '正式阵列原模型必须使用可编辑的 Gizmo 代理');
@@ -867,8 +867,8 @@ try {
     },
   };
   const originalFirstArrayInstance = formalArrayInstances[0];
-  const originalSyncModelArrayParameterVariant = runtime.syncModelArrayParameterVariant.bind(runtime);
-  runtime.syncModelArrayParameterVariant = (sourceEntity, key, renderSignature, entities) => ({
+  const originalSyncModelArrayParameterVariant = runtime.variants.syncModelArrayParameterVariant.bind(runtime.variants);
+  runtime.variants.syncModelArrayParameterVariant = (sourceEntity, key, renderSignature, entities) => ({
     key,
     sourceEntityId: sourceEntity.id,
     renderSignature,
@@ -878,13 +878,13 @@ try {
     model: { assetHandle: null, modelArrayBatch: null },
   });
   formalArrayInstances[0] = changedFirstArrayInstance;
-  runtime.modelArrayInstanceEntities.set(changedFirstArrayInstance.id, changedFirstArrayInstance);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.modelArrayInstanceEntities.set(changedFirstArrayInstance.id, changedFirstArrayInstance);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(sourceModelEntry.modelArrayBatch, formalBatch, '独立副本参数变化期间必须复用上一份基础批次');
   assert.equal(countActiveThinInstances(formalBatch.batches), 1001, '独立副本参数宿主等待期间不得缺少任何模型');
   formalArrayInstances[0] = originalFirstArrayInstance;
-  runtime.modelArrayInstanceEntities.set(originalFirstArrayInstance.id, originalFirstArrayInstance);
-  runtime.modelArrayParameterVariantByEntityId.clear();
+  runtime.arrays.modelArrayInstanceEntities.set(originalFirstArrayInstance.id, originalFirstArrayInstance);
+  runtime.variants.modelArrayParameterVariantByEntityId.clear();
 
   // 源模型参数首次与阵列副本分组时，新参数宿主尚未就绪；旧批次必须继续完整显示。
   const changedFormalArrayEntity = {
@@ -897,7 +897,7 @@ try {
       },
     },
   };
-  runtime.syncModelArrayBatch(changedFormalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(changedFormalArrayEntity, sourceModelEntry);
   assert.equal(
     sourceModelEntry.modelArrayBatch,
     formalBatch,
@@ -908,8 +908,8 @@ try {
     1001,
     '等待独立参数宿主期间源模型和全部阵列副本都不得消失',
   );
-  runtime.syncModelArrayParameterVariant = originalSyncModelArrayParameterVariant;
-  runtime.modelArrayParameterVariantByEntityId.clear();
+  runtime.variants.syncModelArrayParameterVariant = originalSyncModelArrayParameterVariant;
+  runtime.variants.modelArrayParameterVariantByEntityId.clear();
 
   const formalSourceBuffers = new Map(
     formalBatch.batches
@@ -927,8 +927,8 @@ try {
     },
   };
   formalArrayInstances[0] = movedFirstInstance;
-  runtime.modelArrayInstanceEntities.set(movedFirstInstance.id, movedFirstInstance);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.modelArrayInstanceEntities.set(movedFirstInstance.id, movedFirstInstance);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(sourceModelEntry.modelArrayBatch, formalBatch, '移动单个逻辑模型时必须复用正式矩阵批次');
   for (const batch of formalBatch.batches.filter((entry) => entry.mesh.thinInstanceCount > 0)) {
     assert.equal(
@@ -959,22 +959,22 @@ try {
   root.computeWorldMatrix(true);
   contentRoot.computeWorldMatrix(true);
   sourceMesh.computeWorldMatrix(true);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assertClose(readFormalBatchSourceMatrix(formalBatch, SOURCE_ENTITY_ID)?.m[12], 10, '脚本宿主节点移动不得改变源实体文档矩阵');
   assertClose(readFormalBatchSourceMatrix(formalBatch, movedFirstInstance.id)?.m[12], 123, '脚本宿主节点移动不得拖动独立逻辑实例');
   assertClose(readFormalBatchSourceMatrix(formalBatch, formalArrayInstances[999].id)?.m[12], 1010, '脚本宿主节点移动不得改变其他独立实体');
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: false, locked: false });
-  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: false, locked: false });
+  runtime.assets.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.ok(
     formalBatch.batches.some((batch) => batch.mesh.thinInstanceCount > 0 && batch.mesh.isEnabled()),
     '隐藏源模型不得隐藏独立阵列实体',
   );
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
-  runtime.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
+  runtime.assets.applyModelInteractivity(sourceModelEntry, SOURCE_ENTITY_ID);
 
-  runtime.entityStates.set(movedFirstInstance.id, { visible: false, locked: false });
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.document.entityStates.set(movedFirstInstance.id, { visible: false, locked: false });
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(
     countActiveThinInstances(formalBatch.batches),
     1000,
@@ -987,23 +987,23 @@ try {
     '隐藏首个逻辑实例后其他逻辑实体必须继续正确映射',
   );
 
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: true });
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: true });
   for (const instance of formalArrayInstances) {
-    runtime.entityStates.set(instance.id, { visible: true, locked: true });
+    runtime.document.entityStates.set(instance.id, { visible: true, locked: true });
   }
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.ok(
     formalBatch.batches.filter((batch) => batch.mesh.thinInstanceCount > 0).every((batch) => !batch.mesh.isPickable),
     '源实体和全部逻辑实例锁定后所有空间分片必须禁用拾取',
   );
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
   for (const instance of formalArrayInstances) {
-    runtime.entityStates.set(instance.id, { visible: true, locked: false });
+    runtime.document.entityStates.set(instance.id, { visible: true, locked: false });
   }
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
 
-  runtime.selectedEntityIds = new Set([formalArrayInstances[5].id]);
-  runtime.rebuildModelSelectionOutline();
+  runtime.selection.selectedEntityIds = new Set([formalArrayInstances[5].id]);
+  runtime.selection.rebuildModelSelectionOutline();
   const selectedFormalInstance = findFormalBatchEntity(runtime, formalBatch, formalArrayInstances[5].id);
   assert.ok(selectedFormalInstance, '选中的逻辑实例必须能跨空间分片定位');
   assert.equal(countSelectedThinInstances(formalBatch.batches), 1, '独立选中只能跨全部分片标记一个 thinInstance');
@@ -1024,8 +1024,8 @@ try {
     },
   };
   formalArrayInstances[5] = mirroredFormalInstance;
-  runtime.modelArrayInstanceEntities.set(mirroredFormalInstance.id, mirroredFormalInstance);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.modelArrayInstanceEntities.set(mirroredFormalInstance.id, mirroredFormalInstance);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   const activeOrientationBatches = formalBatch.batches.filter((batch) => batch.mesh.thinInstanceCount > 0);
   const negativeOrientationBatches = activeOrientationBatches.filter((batch) => batch.orientation < 0);
   const positiveOrientationBatches = activeOrientationBatches.filter((batch) => batch.orientation > 0);
@@ -1040,8 +1040,8 @@ try {
     mirroredBatchEntity.matrix.determinant() > 0,
     '负方向批次的局部 thinInstance determinant 必须保持为正',
   );
-  runtime.selectedEntityIds = new Set([mirroredFormalInstance.id]);
-  runtime.rebuildModelSelectionOutline();
+  runtime.selection.selectedEntityIds = new Set([mirroredFormalInstance.id]);
+  runtime.selection.rebuildModelSelectionOutline();
   assert.ok(
     mirroredBatchEntity.internalBatch.selectionBuffer?.[mirroredBatchEntity.thinInstanceIndex] > 0,
     '负方向逻辑模型必须可独立描边',
@@ -1059,8 +1059,8 @@ try {
     },
   };
   formalArrayInstances[5] = restoredFormalInstance;
-  runtime.modelArrayInstanceEntities.set(restoredFormalInstance.id, restoredFormalInstance);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.modelArrayInstanceEntities.set(restoredFormalInstance.id, restoredFormalInstance);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(
     formalBatch.batches.filter((batch) => batch.orientation < 0).length,
     0,
@@ -1079,7 +1079,7 @@ try {
   // 新脚本结果暂时没有有效 Mesh 时必须继续显示上一份有效批次。
   const stableBatchBeforeEmptyOutput = sourceModelEntry.modelArrayBatch;
   sourceModelEntry.meshes = [];
-  runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
+  runtime.arrays.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
     sourceEntityId: SOURCE_ENTITY_ID,
     namePrefix: '__modelArrayThinInstance',
     renderSignature: 'temporary-empty-output',
@@ -1107,7 +1107,7 @@ try {
     previousBatchAliveDuringReplacement = stableBatchBeforeEmptyOutput.meshes.every((mesh) => !mesh.isDisposed());
     return createBatchBeforeAtomicSwap(...args);
   };
-  runtime.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
+  runtime.arrays.syncModelArrayBatchForEntities(formalArrayEntity, sourceModelEntry, [formalArrayEntity, ...formalArrayInstances], [], {
     sourceEntityId: SOURCE_ENTITY_ID,
     namePrefix: '__modelArrayThinInstance',
     renderSignature: 'geometry-update-2',
@@ -1129,16 +1129,16 @@ try {
   sourceMesh.setVerticesData('position', originalSourcePositions, true);
   sourceMesh.refreshBoundingInfo();
 
-  runtime.selectedEntityIds = new Set();
+  runtime.selection.selectedEntityIds = new Set();
   const allFormalBatchMeshes = [...rebuiltFormalBatch.meshes];
   const sourceGizmoTargetBeforeArrayRemoval = runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID);
   assert.ok(sourceGizmoTargetBeforeArrayRemoval, '正式阵列释放前原模型代理必须仍可用');
 
   for (const instance of formalArrayInstances) {
-    runtime.modelArrayInstanceEntities.delete(instance.id);
-    runtime.entityStates.delete(instance.id);
+    runtime.arrays.modelArrayInstanceEntities.delete(instance.id);
+    runtime.document.entityStates.delete(instance.id);
   }
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(sourceModelEntry.modelArrayBatch, null, '删除全部逻辑实体必须释放正式矩阵批次');
   assert.ok(allFormalBatchMeshes.every((mesh) => mesh.isDisposed()), '正式矩阵批次释放必须覆盖全部方向批次 Mesh');
   assert.equal(sourceMesh.isDisposed(), false, '释放正式阵列不得释放源 Mesh');
@@ -1154,9 +1154,9 @@ try {
   };
   runtime.sync(sourceOnlySceneDocument);
   assert.equal(sourceGizmoTargetBeforeArrayRemoval.isDisposed(), true, '阵列释放后完整同步必须回收原模型代理');
-  assert.equal(runtime.modelArrayGizmoProxy, null, '阵列释放后不得遗留无效 Gizmo 代理引用');
+  assert.equal(runtime.transforms.modelArrayGizmoProxy, null, '阵列释放后不得遗留无效 Gizmo 代理引用');
   assert.equal(runtime.getGizmoTargetByEntityId(SOURCE_ENTITY_ID), root, '阵列释放后原模型必须恢复绑定真实根节点');
-  runtime.selectedEntityIds = new Set();
+  runtime.selection.selectedEntityIds = new Set();
   root.position.x = 10;
   root.computeWorldMatrix(true);
 
@@ -1173,7 +1173,7 @@ try {
   primitiveMesh.isPickable = true;
   primitiveMesh.metadata = { editorEntityId: primitiveEntityId };
   primitiveMesh.computeWorldMatrix(true);
-  runtime.meshes.set(primitiveEntityId, primitiveMesh);
+  runtime.presentation.meshes.set(primitiveEntityId, primitiveMesh);
 
   const primitiveWorldGeometry = runtime.getEntityArrayGeometry(primitiveEntityId, { x: 1, y: 0, z: 0 });
   assert.ok(primitiveWorldGeometry, '内置 Mesh 必须支持世界轴阵列测量');
@@ -1196,7 +1196,7 @@ try {
   assertPosition(primitivePreview, { x: 14, y: 1, z: 6 }, '内置 Mesh 零间距副本');
   assert.ok(readPreviewMeshes(primitivePreview).every((mesh) => !mesh.isPickable), '内置 Mesh 预览不得参与拾取');
   assert.ok(readPreviewMeshes(primitivePreview).every((mesh) => mesh.metadata === null), '内置 Mesh 预览不得保留实体 metadata');
-  runtime.disposeMesh(primitiveEntityId, primitiveMesh);
+  runtime.presentation.disposeMesh(primitiveEntityId, primitiveMesh);
   assert.equal(readPreviewClones(runtime).length, 0, '源 Mesh 释放时必须立即清理阵列预览');
   assert.equal(primitivePreview.isDisposed(), true, '源 Mesh 释放必须销毁临时副本');
 
@@ -1225,7 +1225,7 @@ try {
   locatorEdgeLines.isPickable = false;
   locatorRoot.computeWorldMatrix(true);
   locatorFillMesh.computeWorldMatrix(true);
-  runtime.locators.set(locatorEntityId, {
+  runtime.locators.locators.set(locatorEntityId, {
     root: locatorRoot,
     fillMesh: locatorFillMesh,
     edgeLines: locatorEdgeLines,
@@ -1296,7 +1296,7 @@ try {
     abortController: new AbortController(),
     unregisterCancellation: () => undefined,
   };
-  runtime.cadReferences.set(cadEntityId, cadRuntimeEntry);
+  runtime.cad.cadReferences.set(cadEntityId, cadRuntimeEntry);
   const cadLocalX = cadRoot.getDirection(Vector3.Right()).normalize();
   assert.equal(
     runtime.getEntityArrayGeometry(cadEntityId, cadLocalX),
@@ -1348,7 +1348,7 @@ try {
   poiBoundsProxy.isPickable = false;
   poiBoundsProxy.metadata = { effectBoundsProxy: true };
   const sourceParticleSystem = new ParticleSystem(`${poiEntity.id}_particles`, 16, scene);
-  runtime.poiEffectRuntime.entries.set(poiEntity.id, {
+  runtime.effects.poiEffectRuntime.entries.set(poiEntity.id, {
     root: poiRoot,
     pickMesh: poiPickMesh,
     pickMaterial: poiPickMaterial,
@@ -1934,10 +1934,10 @@ try {
       modelArrayInstance: { sourceEntityId: SOURCE_ENTITY_ID },
     },
   };
-  runtime.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
-  runtime.entityStates.set(stopLifecycleInstance.id, { visible: true, locked: false });
-  runtime.modelArrayInstanceEntities.set(stopLifecycleInstance.id, stopLifecycleInstance);
-  runtime.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
+  runtime.document.entityStates.set(SOURCE_ENTITY_ID, { visible: true, locked: false });
+  runtime.document.entityStates.set(stopLifecycleInstance.id, { visible: true, locked: false });
+  runtime.arrays.modelArrayInstanceEntities.set(stopLifecycleInstance.id, stopLifecycleInstance);
+  runtime.arrays.syncModelArrayBatch(formalArrayEntity, sourceModelEntry);
   assert.equal(scene.meshes.includes(sourceMesh), false, 'onStop 生命周期夹具必须先进入暂停宿主状态');
   const stopLifecycleObservations = [];
   sourceModelEntry.textureCache = new Map();
@@ -1948,14 +1948,14 @@ try {
       suspendedCount: sourceModelEntry.modelArraySuspendedMeshes.size,
     }),
   };
-  runtime.disposeModel(SOURCE_ENTITY_ID, sourceModelEntry);
+  runtime.assets.disposeModel(SOURCE_ENTITY_ID, sourceModelEntry);
   assert.deepEqual(
     stopLifecycleObservations,
     [{ sceneIncluded: true, rootEnabled: true, suspendedCount: 0 }],
     '模型脚本 onStop()/dispose() 前必须恢复 scene.meshes、根启用状态和暂停集合',
   );
-  runtime.modelArrayInstanceEntities.delete(stopLifecycleInstance.id);
-  runtime.entityStates.delete(stopLifecycleInstance.id);
+  runtime.arrays.modelArrayInstanceEntities.delete(stopLifecycleInstance.id);
+  runtime.document.entityStates.delete(stopLifecycleInstance.id);
 
   console.log(JSON.stringify({
     ok: true,
@@ -1998,7 +1998,7 @@ try {
   // synthetic 模型条目没有完整 ModelRuntimeEntry 字段，先从私有映射移除，再释放真实 Runtime 资源。
   gizmoController?.dispose();
   if (editorStore && editorStoreSnapshot) editorStore.setState(editorStoreSnapshot, true);
-  runtime?.models?.delete(SOURCE_ENTITY_ID);
+  runtime?.assets.models?.delete(SOURCE_ENTITY_ID);
   runtime?.dispose();
   scene?.dispose();
   engine?.dispose();

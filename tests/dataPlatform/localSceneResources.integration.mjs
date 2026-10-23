@@ -190,15 +190,22 @@ async function run() {
     assert.equal(cached.modelAssets.length, 2, '无库变更也必须返回全部权威候选');
     checks.push('cache-reuse-still-returns-all-candidates');
 
-    const localLatest = await service.prepareLocalSceneResources(baseUrl, workspaceRoot, { mode: 'local-latest',
-      sceneContent: JSON.stringify({ version: 5, scene: { entities: {}, sceneSettings: { environment: {
+    for (const version of [1, 2, 3, 4, 5, 6]) {
+      const localLatest = await service.prepareLocalSceneResources(baseUrl, workspaceRoot, { mode: 'local-latest',
+      sceneContent: JSON.stringify({ version, scene: { entities: {}, sceneSettings: { environment: {
         source: 'data-platform', dataPlatformResourceId: '101', dataPlatformSourceKey: first.sourceKey,
         dataPlatformRevision: '0',
       } } } }) });
     assert.equal(localLatest.environmentAssets.length, 1, '本地打开也应同步当前中台环境');
     assert.equal(localLatest.environmentAssets[0].dataPlatformResourceId, '101');
     assert.equal(localLatest.environmentAssets[0].dataPlatformRevision, first.environmentAssets[0].dataPlatformRevision);
+    }
+    for (const version of [7, '6', null]) {
+      await assert.rejects(service.prepareLocalSceneResources(baseUrl, workspaceRoot, { mode: 'local-latest',
+        sceneContent: JSON.stringify({ version, scene: { entities: {} } }) }), /场景模型更新格式无效/);
+    }
     checks.push('local-latest-environment-authority');
+    checks.push('scene-versions-1-through-6-and-unknown-rejected');
 
     const savedBinding = bindings.getCurrentDataPlatformBinding();
     bindings.clearCurrentDataPlatformBinding();
@@ -258,8 +265,8 @@ async function run() {
       sourcePath: 'old', parameterValues: { width: 0, enabled: false },
       dataPlatformModel: { sourceKey: oldSourceKey, kind: 'model', resourceId: id, modelPath: 'model.glb' } });
     const latestScene = { version: 5, scene: { entities: {
-      good: { components: { modelAsset: managedModel('301') } },
-      missing: { components: { modelAsset: managedModel('999') } },
+      good: { id: 'good', components: { modelAsset: managedModel('301') } },
+      missing: { id: 'missing', components: { modelAsset: managedModel('999') } },
     }, sceneSettings: { environment: { source: 'data-platform', dataPlatformSourceKey: oldSourceKey,
       dataPlatformResourceId: '101', opacity: 0.4, visible: true } } } };
     const latestRequest = () => ({ mode: 'data-platform-latest', sceneContent: JSON.stringify(latestScene) });
@@ -307,12 +314,16 @@ async function run() {
     delete unboundLegacyScene.scene.entities.good.components.modelAsset.dataPlatformModel;
     const legacyUnbound = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
       { mode: 'scene-latest', sceneContent: JSON.stringify(unboundLegacyScene) });
-    assert.equal(legacyUnbound.modelReplacements.length, 0);
-    assert.ok(legacyUnbound.issues.some(issue => issue.resourceId === '301' && /来源身份/.test(issue.message)));
+    assert.equal(legacyUnbound.modelReplacements.length, 1, '明确的历史资源 ID 按当前配置中台查询，不依赖旧来源标记');
+    assert.equal(legacyUnbound.modelReplacements[0].asset.dataPlatformResourceId, '301');
+    assert.equal(legacyUnbound.modelReplacements[0].asset.dataPlatformSourceKey, sourceKey);
+    assert.deepEqual(legacyUnbound.issues, []);
+    assert.equal(unboundLegacyScene.scene.entities.good.components.modelAsset.dataPlatformModel, undefined,
+      '资源准备返回候选，不改写传入业务快照');
     const identifiedUnbound = await service.prepareLocalSceneResources(baseUrl, workspaceRoot,
       { mode: 'scene-latest', sceneContent: JSON.stringify(compatibleScene) });
     assert.equal(identifiedUnbound.modelReplacements.length, 1);
-    checks.push('explicit-unbound-requires-source-identity');
+    checks.push('explicit-unbound-resolves-historical-id-against-current-source');
     const unboundPreparing = service.prepareLocalSceneResources(baseUrl, workspaceRoot,
       { mode: 'scene-latest', sceneContent: JSON.stringify(compatibleScene) });
     const unboundRejected = assert.rejects(unboundPreparing, /会话.*变化/);
@@ -326,7 +337,7 @@ async function run() {
 
     mode = 'parallel';
     const parallelScene = { version: 5, scene: { entities: Object.fromEntries(
-      Array.from({ length: 6 }, (_, index) => [`parallel-${index}`, { components: { modelAsset: managedModel(String(410 + index)) } }]),
+      Array.from({ length: 6 }, (_, index) => [`parallel-${index}`, { id: `parallel-${index}`, components: { modelAsset: managedModel(String(410 + index)) } }]),
     ), sceneSettings: { environment: { source: 'data-platform', dataPlatformSourceKey: sourceKey, dataPlatformResourceId: '901' } } } };
     const parallelPreparing = service.prepareLocalSceneResources(baseUrl, workspaceRoot,
       { mode: 'data-platform-latest', sceneContent: JSON.stringify(parallelScene) });

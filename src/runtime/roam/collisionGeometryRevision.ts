@@ -1,4 +1,5 @@
-import { VertexBuffer, type Geometry } from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import type { Geometry } from '@babylonjs/core';
 
 type GeometryUpdate = Geometry['onGeometryUpdated'];
 type RevisionState = {

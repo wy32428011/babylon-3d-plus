@@ -1,12 +1,47 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
-import test from 'node:test';
+import test, { after } from 'node:test';
+import ts from 'typescript';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 import { runInNewContext } from 'node:vm';
 import { repairPublishSceneSkyboxes } from '../../src/editor/deployment/repairPublishSceneSkyboxes.ts';
 
 const source = await readFile(new URL('../../src/editor/deployment/useDigitalTwinPublish.ts', import.meta.url), 'utf8');
 const hookSource = stripTypeScriptTypes(source.replace(/^import .*\r?\n/gm, '')).replace(/^export /gm, '');
+// P3 后发布流程和恢复命令有了独立归属；执行实际 helper/Store action，只替代 React 调度与 IPC。
+const modules = await createP4SsrTestModules([
+  '/src/editor/deployment/publishOrchestration.ts',
+  '/src/editor/assets/sceneModelSyncTransaction.ts',
+  '/src/editor/assets/applySceneModelUpdates.ts',
+  '/src/editor/store/slices/editorMutationGuard.ts',
+  '/src/editor/model/SceneDocument.ts',
+  '/electron/shared/sceneEnvironmentReferences.ts',
+  '/electron/shared/sceneLightingBakeContract.ts',
+]);
+after(() => modules.close());
+const [orchestration, transactions, updates, mutationGuard, sceneModule, environmentReferences, lightingContract] = await Promise.all([
+  '/src/editor/deployment/publishOrchestration.ts', '/src/editor/assets/sceneModelSyncTransaction.ts',
+  '/src/editor/assets/applySceneModelUpdates.ts', '/src/editor/store/slices/editorMutationGuard.ts',
+  '/src/editor/model/SceneDocument.ts', '/electron/shared/sceneEnvironmentReferences.ts',
+  '/electron/shared/sceneLightingBakeContract.ts',
+].map(entry => modules.ssrLoadModule(entry)));
+const preparationSource = stripTypeScriptTypes((await readFile(new URL('../../src/editor/deployment/preparePublishScene.ts', import.meta.url), 'utf8'))
+  .replace(/^import .*\r?\n/gm, '')).replace(/^export /gm, '');
+const resourcesSource = stripTypeScriptTypes(await readFile(new URL('../../src/editor/deployment/preparePublishResources.ts', import.meta.url), 'utf8'))
+  .replace(/^export /gm, '');
+const orchestrationSource = stripTypeScriptTypes(await readFile(new URL('../../src/editor/deployment/publishOrchestration.ts', import.meta.url), 'utf8')).replace(/^export /gm, '');
+const sliceSource = await readFile(new URL('../../src/editor/store/slices/dataPlatformAndPublishSlice.ts', import.meta.url), 'utf8');
+const sliceAst = ts.createSourceFile('dataPlatformAndPublishSlice.ts', sliceSource, ts.ScriptTarget.Latest, true);
+let commitAction: ts.Expression | undefined;
+function findCommitAction(node: ts.Node): void {
+  if (ts.isPropertyAssignment(node) && node.name.getText(sliceAst) === 'commitLatestSceneResources') commitAction = node.initializer;
+  ts.forEachChild(node, findCommitAction);
+}
+findCommitAction(sliceAst);
+assert.ok(commitAction, '发布恢复必须执行实际 Store 提交动作');
+const commitActionSource = stripTypeScriptTypes(commitAction.getText(sliceAst));
+
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const options = { projectId: 'project-1', publishName: '测试发布', remark: '', overwriteExisting: true,
   forceOverwrite: false, confirmResourceBindings: false, allowedParentOrigins: [] };
@@ -19,7 +54,7 @@ function deferred<T>() {
 }
 
 function context(projectId = 'project-1', versionConflict = false) {
-  return { available: true, projectId, baseVersionId: 'version-1', resourceRevision: '10',
+  return { available: true, targetToken: 'target-A', projectId, baseVersionId: 'version-1', resourceRevision: '10',
     remoteLatestVersionId: versionConflict ? 'version-2' : 'version-1', versionConflict,
     overwriteConfirmationRequired: true, allowedParentOrigins: [] };
 }
@@ -47,7 +82,8 @@ function fixture() {
     publish: async (_request: any): Promise<any> => result(),
   };
   const store: any = {
-    scene: { name: '测试场景' }, sceneSessionId: 'session-1', runtimeMode: 'edit', history: {},
+    scene: sceneModule.createEmptySceneDocument('测试场景'), sceneSessionId: 'session-1', runtimeMode: 'edit', history: {},
+    sceneResourceIssues: [], logs: [], latestSceneResourceTransaction: null,
     pushLog: (message: string) => logs.push(message),
     markScenePersisted: (content: string) => logs.push(`persisted:${content}`),
   };
@@ -55,8 +91,21 @@ function fixture() {
     getState: () => store,
     setState: (update: (value: any) => any) => Object.assign(store, update(store)),
   });
-  const useDigitalTwinPublish = runInNewContext(`${hookSource}\nuseDigitalTwinPublish;`, {
-    Error,
+  const preparation = { sceneSessionId: 'session-1', completed: true, runtime: { stable: true, forcedSettled: false } };
+  store.scene.sceneSettings.lighting.bake.enabled = false;
+  let clock = 0;
+  const useDigitalTwinPublish = runInNewContext(`${orchestrationSource}\n${preparationSource}\n${resourcesSource}\n${hookSource}\nstore.commitLatestSceneResources = (${commitActionSource});\nuseDigitalTwinPublish;`, {
+    Error, store,
+    set: (update: (state: typeof store) => Partial<typeof store>) => Object.assign(store, update(store)),
+    ...orchestration, ...transactions, ...updates, ...mutationGuard, ...environmentReferences, ...lightingContract,
+    performance: { now: () => { clock += 180_001; return clock; } },
+    setTimeout: (callback: () => void) => { queueMicrotask(callback); return 0; },
+    setInterval, clearInterval,
+    beginSceneModelAssetRefresh: () => undefined,
+    settleSceneModelAssetRefresh: () => { store.latestSceneResourceTransaction = null; },
+    reportSceneModelSyncProgress: () => undefined,
+    loadEnvironmentFromAsset: () => { throw new Error('本夹具不构造环境模型。'); },
+    preparePublishSceneSnapshot: () => { throw new Error('本夹具只构造入口场景。'); },
     crypto: { randomUUID: (() => { let id = 0; return () => `publish-${++id}`; })() },
     useState(initial: unknown) {
       const index = cursor++;
@@ -78,12 +127,15 @@ function fixture() {
     repairPublishSceneModels: (scene: unknown) => ({ scene }),
     repairPublishSceneSkyboxes,
     getSceneShadowBakeError: () => null,
-    getScenePreparationSnapshot: () => ({ completed: false, runtime: {} }),
-    environmentPreparationStore: { getSnapshot: () => ({}) },
+    getScenePreparationSnapshot: () => preparation,
+    environmentPreparationStore: { getSnapshot: () => ({}), clearError: () => undefined },
     executeCommand(scene: any, history: any, command: any) { commands.push(command.label); return { scene: command.apply(scene), history }; },
     updateSceneDocumentCommand(label: string, apply: any) { return { label, apply }; },
     window: { editorApi: {
       onDigitalTwinPublishProgress: (listener: (value: unknown) => void) => { progressListener = listener; return () => { progressListener = undefined; }; },
+      prepareDigitalTwinPublishSceneSnapshots: async () => ({ preparationId: 'context-fixture', scenes: [{ sceneId: 'entry', isEntry: true }] }),
+      prepareLocalSceneResources: async () => ({ configured: true, sourceKey: 'fixture', modelReplacements: [], environmentAssets: [], issues: [] }),
+      cancelSceneModelSync: async () => true,
       getDigitalTwinPublishContext: (request: unknown) => { contextCalls.push(request); return api.context(request); },
       recoverDigitalTwinModels: (request: any) => { recoveryCalls.push(request); return api.recover(); },
       publishDigitalTwin: (request: any) => { publishCalls.push(request); return api.publish(request); },
@@ -91,7 +143,7 @@ function fixture() {
     } },
   });
   const render = () => { cursor = 0; return useDigitalTwinPublish(); };
-  return { render, api, logs, contextCalls, publishCalls, recoveryCalls, commands, store, cancelCalls, initialContext,
+  return { render, api, logs, contextCalls, publishCalls, recoveryCalls, commands, store, cancelCalls, initialContext, preparation,
     progress: (value: unknown) => progressListener?.(value) };
 }
 
@@ -102,7 +154,7 @@ test('版本冲突后刷新上下文并保留冲突结果、进度，刷新期�
   f.api.context = () => refreshed.promise;
   const conflict = result();
   const progress = { requestId: 'publish-1', phase: 'prepare', detail: '创建发布任务', percent: 50 };
-  f.api.publish = async () => { f.progress(progress); return conflict; };
+  f.api.publish = async (request) => { progress.requestId = request.requestId; f.progress(progress); return conflict; };
   const publishing = f.render().start(options);
   await tick();
   assert.equal(f.contextCalls.length, 2);
@@ -244,6 +296,8 @@ test('本地恢复尚未完成首帧时不能进入发布恢复接口', async ()
   await f.render().loadContext();
   f.store.sceneResourcePolicy = 'local-refresh';
   f.store.sceneResourceIssues = [];
+  f.preparation.completed = false;
+  f.preparation.runtime.stable = false;
   assert.equal(await f.render().start(options), null);
   assert.equal(f.recoveryCalls.length, 0);
 });
@@ -275,7 +329,7 @@ test('发布请求返回前切换场景，不把新场景标记为已保存', as
 
 test('天空盒恢复经一次命令回写，并把恢复后的文档传给发布', async () => {
   const f = fixture();
-  f.store.scene = { sceneSettings: { skybox: { sourceUrl: 'old', sourcePath: 'D:/sky.exr', intensity: 0.5 } }, entities: {} };
+  f.store.scene = { ...f.store.scene, sceneSettings: { ...f.store.scene.sceneSettings, skybox: { sourceUrl: 'old', sourcePath: 'D:/sky.exr', intensity: 0.5 } }, entities: {} };
   f.api.recover = async () => ({ replacements: [], skyboxReplacements: [
     { entityId: null, sourceUrl: 'old', skybox: { sourceUrl: 'new', sourcePath: 'C:/sky.exr', intensity: 9 } },
   ] });

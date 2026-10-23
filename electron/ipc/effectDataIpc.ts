@@ -25,12 +25,12 @@ export function registerEffectDataIpc(): void {
       return await requestDataPlatformJson({ baseUrl: config.baseUrl, endpointPath: path, body,
         signal: controller.signal, timeoutMs: request.timeoutMs, context: '特效取数' });
     } catch (error) {
-      if (controller.signal.aborted) throw new Error('特效取数已取消。');
+      if (controller.signal.aborted) throw new Error('特效取数已取消。', { cause: error });
       const message = error instanceof Error ? error.message : '';
       // 不把网络库的 URL、查询参数或远端正文透传到 renderer。
       const businessCode = /\b(?:DATA_FLOW_MQTT_DATA_[A-Z_]+|DATA_SOURCE_[A-Z_]+)\b/.exec(message)?.[0];
       if (businessCode) return { success: false, code: businessCode };
-      throw new Error(message.includes('超时') ? '特效取数超时，请稍后重试。' : '特效取数失败，请检查中台地址、数据源和设备身份。');
+      throw new Error(message.includes('超时') ? '特效取数超时，请稍后重试。' : '特效取数失败，请检查中台地址、数据源和设备身份。', { cause: error });
     } finally { active.delete(key); if (!event.sender.isDestroyed()) event.sender.removeListener('destroyed', cancel); }
   });
   ipcMain.handle('effect-data:cancel', (event, requestId: unknown): boolean => {

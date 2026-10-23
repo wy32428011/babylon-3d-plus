@@ -86,6 +86,7 @@ export function DataPlatformViewportScreenOverlay({
       return null;
     }
   }, [screen?.screenUrl]);
+  const screenRenderMode = screen?.renderMode;
   const [iframeReady, setIframeReady] = useState(false);
   const [iframeFailed, setIframeFailed] = useState(false);
   const [nativeEmbedReady, setNativeEmbedReady] = useState(false);
@@ -97,14 +98,14 @@ export function DataPlatformViewportScreenOverlay({
     setIframeReady(false);
     setIframeFailed(false);
     setNativeEmbedReady(false);
-    if (!screen || screen.renderMode !== 'iframe' || !iframeSrc) return undefined;
+    if (screenRenderMode !== 'iframe' || !iframeSrc) return undefined;
     const timeoutId = window.setTimeout(() => setIframeFailed(true), IFRAME_FALLBACK_TIMEOUT_MS);
     iframeTimeoutRef.current = timeoutId;
     return () => {
       window.clearTimeout(timeoutId);
       if (iframeTimeoutRef.current === timeoutId) iframeTimeoutRef.current = undefined;
     };
-  }, [iframeSrc, screenKey, screen?.renderMode]);
+  }, [iframeSrc, screenKey, screenRenderMode]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<unknown>): void => {
@@ -122,8 +123,9 @@ export function DataPlatformViewportScreenOverlay({
 
   useEffect(() => {
     if (!screenOrigin || !iframeReady || !iframeRef.current?.contentWindow) return;
+    const currentSelection = JSON.parse(selectedEntityIdsSignature) as string[];
     iframeRef.current.contentWindow.postMessage(
-      createDataPlatformScreenSelectionMessage(selectedEntityIds, selectedEntityIds[0] ?? null),
+      createDataPlatformScreenSelectionMessage(currentSelection, currentSelection[0] ?? null),
       screenOrigin,
     );
   }, [iframeReady, screenOrigin, selectedEntityIdsSignature]);

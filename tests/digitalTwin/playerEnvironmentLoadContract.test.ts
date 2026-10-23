@@ -5,7 +5,9 @@ import ts from 'typescript';
 import { evaluateSourceExpression } from '../helpers/playerContractTestHelpers.ts';
 
 const playerSource = await readFile(new URL('../../src/player/PlayerApp.tsx', import.meta.url), 'utf8');
-const runtimeSource = await readFile(new URL('../../src/runtime/babylon/SceneRuntime.ts', import.meta.url), 'utf8');
+const facadeSource = await readFile(new URL('../../src/runtime/babylon/SceneRuntime.ts', import.meta.url), 'utf8');
+// P3 后环境加载及首帧门控由真实环境 Controller 持有，公共门面仍保留原调用入口。
+const runtimeSource = await readFile(new URL('../../src/runtime/babylon/scene-runtime/EnvironmentAndSkyboxController.ts', import.meta.url), 'utf8');
 const environmentRuntimeSource = await readFile(
   new URL('../../src/runtime/babylon/SceneEnvironmentRuntime.ts', import.meta.url),
   'utf8',
@@ -18,6 +20,8 @@ const engineSource = await readFile(new URL('../../src/runtime/babylon/createEng
 const mainSource = await readFile(new URL('../../electron/main.ts', import.meta.url), 'utf8');
 
 test('发布 Viewer 并行加载环境模型，但首次加载进度仍等待环境结算', () => {
+  assert.match(facadeSource, /new EnvironmentAndSkyboxController\(context,/);
+  assert.match(facadeSource, /return this\.environment\.applyEnvironment\(environment, options\)/);
   assert.match(
     playerSource,
     /void runtime\.applyEnvironment\(environment, \{ requestId: null, autoAlign: false \}\)/,
@@ -34,7 +38,7 @@ test('发布 Viewer 并行加载环境模型，但首次加载进度仍等待环
 
 test('环境模型首帧完成后才替换旧环境、发布 ready 并结算进度，失败保留旧环境', { timeout: 10_000 }, async () => {
   assert.match(runtimeSource, /waitForRenderReady: \(signal\) => this\.waitForEnvironmentRenderReady\(signal\)/);
-  assert.match(runtimeSource, /return this\.loadDiagnostics\.measureAsync\('environmentRenderReady', \(\) => waitForSceneRenderReady\(this\.scene, loadSignal\)\)/);
+  assert.match(runtimeSource, /return this\.dependencies\.readiness\.loadDiagnostics\.measureAsync\('environmentRenderReady', \(\) => waitForSceneRenderReady\(this\.context\.scene, loadSignal\)\)/);
   const loadAndSwap = evaluateSourceExpression(environmentRuntimeSource,
     node => ts.isMethodDeclaration(node) && node.name.getText() === 'loadAndSwap', {
       splitAssetUrl: (url: string) => ({ rootUrl: '', fileName: url }),

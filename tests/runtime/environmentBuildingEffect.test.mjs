@@ -78,14 +78,14 @@ function setup(t, prepare) {
 }
 const surfacePlugin = mesh => mesh.material.pluginManager.getPlugin('DigitalTwinModelSurface');
 
-test('环境建筑特效独立覆盖材质，参数编辑不重载，清除后恢复无光照原材质', async t => {
+test('环境建筑特效独立覆盖材质，参数编辑不重载，清除后恢复受光原材质', async t => {
   const h = setup(t), config = environment(), component = h.bind();
   const external = new PBRMaterial('普通设备材质', h.scene);
   const device = MeshBuilder.CreateBox('普通设备', {}, h.scene); device.material = external;
   await h.apply(config);
   const [mesh] = h.imported[0].meshes, original = h.imported[0].materials[0];
   assert.notEqual(mesh.material, original);
-  assert.equal(original.unlit, true);
+  assert.equal(original.unlit, false);
   assert.equal(mesh.material.isFrozen, false);
   assert.equal(mesh.isWorldMatrixFrozen, true);
   h.tick(); h.tick();
@@ -125,24 +125,18 @@ test('隐藏环境暂停建筑特效，恢复继续；透明度与 X-Ray 透明�
   assert.equal(mesh.edgesColor.a, edges.visual.opacity * 0.5);
 });
 
-test('阴影展示切换重新绑定建筑特效，关闭恢复当前阴影材质并保持灯光隔离', async t => {
+test('投影开关保持建筑特效和材质身份，关闭特效恢复同一受光原材质', async t => {
   const h = setup(t), config = environment(); h.bind('height-gradient');
   await h.apply(config);
-  const [mesh] = h.imported[0].meshes, source = h.imported[0].materials[0];
-  const firstEffect = mesh.material;
-  await h.runtime.syncShadows({ enabled: true, mode: 'realtime', bake: null });
-  assert.notEqual(mesh.material, firstEffect);
-  assert.ok(surfacePlugin(mesh));
-  assert.ok(mesh.material.pluginManager.getPlugin('EnvironmentShadow'));
-  assert.equal(mesh.receiveShadows, true);
+  const [mesh] = h.imported[0].meshes, source = h.imported[0].materials[0], firstEffect = mesh.material;
+  await h.runtime.syncLighting({ enabled: false });
+  assert.equal(mesh.material, firstEffect); assert.ok(surfacePlugin(mesh));
+  assert.equal(mesh.material.pluginManager.getPlugin('EnvironmentShadow'), null);
+  await h.runtime.syncLighting({ enabled: true });
+  assert.equal(mesh.material, firstEffect);
   h.effects.disposeMissing(new Set());
-  assert.notEqual(mesh.material, source);
-  assert.equal(mesh.material.pluginManager.getPlugin('DigitalTwinModelSurface'), null);
-  const light = new HemisphericLight('日光', Vector3.Up(), h.scene); light.intensity = 0;
-  assert.equal(mesh.material.unlit, true);
-  await h.runtime.syncShadows({ enabled: false, mode: 'baked', bake: null });
-  assert.equal(mesh.material, source);
-  assert.equal(mesh.receiveShadows, false);
+  assert.equal(mesh.material, source); assert.equal(source.unlit, false); assert.equal(source.disableLighting, false);
+  assert.equal(mesh.material.pluginManager?.getPlugin('DigitalTwinModelSurface') ?? null, null);
 });
 
 test('异步加载中最新绑定自动接管环境，变体替换和销毁清理覆盖', async t => {
@@ -178,7 +172,7 @@ test('八类建筑特效均支持环境，切换后无克隆累积且自发光�
     if (kind === 'model-emissive') {
       assert.equal(mesh.material.unlit, false);
       assert.equal(mesh.material.disableLighting, true);
-      assert.equal(container.materials[0].unlit, true);
+      assert.equal(container.materials[0].unlit, false);
       assert.ok(mesh.material.emissiveColor.asArray().some(value => value > 0));
     }
     h.effects.disposeMissing(new Set());

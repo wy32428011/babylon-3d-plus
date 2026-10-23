@@ -1,13 +1,11 @@
-import {
-  AbstractMesh,
-  AssetContainer,
-  Camera,
-  Light,
-  Material,
-  type Scene,
-  TransformNode,
-  type Node,
-} from '@babylonjs/core';
+import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Light } from '@babylonjs/core/Lights/light.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene, Node } from '@babylonjs/core';
 
 export type AcquireEnvironmentWorkingContainerOptions = {
   cacheKey: string;
@@ -108,25 +106,46 @@ export class EnvironmentAssetContainerCache {
 
 /** 从源容器克隆一套独立节点和材质，并移出场景，交给现有 addToScene 事务。 */
 function createWorkingContainer(scene: Scene, source: AssetContainer): AssetContainer {
-  const sourceMeshes = [...source.meshes];
+  const sourceMeshes = [...source.meshes], removeCloneObservers: Array<() => void> = [];
   try {
-    const instantiated = source.instantiateModelsToScene(
-      (sourceName) => sourceName,
-      true,
-      { doNotInstantiate: true },
-    );
-    const working = harvestInstantiatedEntries(scene, instantiated);
-    const sourceMeshSet = new Set(sourceMeshes);
-    const harvestedSourceMeshes = working.meshes.some((mesh) => sourceMeshSet.has(mesh));
-    if (working.meshes.length > 0 && !harvestedSourceMeshes) {
-      working.removeAllFromScene();
-      return working;
+    for (const mesh of new Set(sourceMeshes)) {
+      if (!(mesh instanceof Mesh) || hasVertexDeformation(mesh)) continue;
+      const observer = mesh.onClonedObservable.add(clone => {
+        if (!(clone instanceof Mesh) || clone === mesh || hasVertexDeformation(clone)) return;
+        // Babylon clone 已计算好包围盒，但会为完整 POSITION 再保留 Vector3[]。
+        // 静态环境按每个 clone 立即释放这份可重建缓存，避免共享 VB 被大量 primitive 展开占满主堆。
+        if (clone._internalAbstractMeshDataInfo !== mesh._internalAbstractMeshDataInfo) {
+          clone._internalAbstractMeshDataInfo._positions = null;
+        }
+      });
+      removeCloneObservers.push(() => { mesh.onClonedObservable.remove(observer); });
     }
-    if (!harvestedSourceMeshes) instantiated.dispose();
-  } catch {
-    // NullEngine 或手搓测试容器可能无法实例化，回退到逐网格克隆。
+    try {
+      const instantiated = source.instantiateModelsToScene(
+        (sourceName) => sourceName,
+        true,
+        { doNotInstantiate: true },
+      );
+      const working = harvestInstantiatedEntries(scene, instantiated);
+      const sourceMeshSet = new Set(sourceMeshes);
+      const harvestedSourceMeshes = working.meshes.some((mesh) => sourceMeshSet.has(mesh));
+      if (working.meshes.length > 0 && !harvestedSourceMeshes) {
+        working.removeAllFromScene();
+        return working;
+      }
+      if (!harvestedSourceMeshes) instantiated.dispose();
+    } catch {
+      // NullEngine 或手搓测试容器可能无法实例化，回退到逐网格克隆。
+    }
+    return cloneSourceMeshes(scene, sourceMeshes);
+  } finally {
+    for (const remove of removeCloneObservers) remove();
   }
-  return cloneSourceMeshes(scene, sourceMeshes);
+}
+
+/** 骨骼、形变及顶点烘焙动画仍保留 Babylon 原本的位置缓存行为。 */
+function hasVertexDeformation(mesh: Mesh): boolean {
+  return Boolean(mesh.skeleton || mesh.morphTargetManager || mesh.bakedVertexAnimationManager);
 }
 
 /** 把 instantiateModelsToScene 产生的克隆节点收进独立 AssetContainer。 */

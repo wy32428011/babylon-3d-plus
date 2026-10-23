@@ -1,5 +1,6 @@
 import type { Scene } from '@babylonjs/core';
-import { TransformNode, Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   clampNumber,
   filterTopLevelMotionNodes,
@@ -36,6 +37,11 @@ import {
  * 只托举多穿小车（hcliftPlatformSurfaces 发布台面实时高度供 shuttle x=-2 跟随），不交接货箱。
  */
 export class HcliftTelemetryDriver {
+  /** 只读暴露实际驱动解析的运动节点，光照分类不另建名称猜测规则。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
+    return { moving: this.findHcliftDeckNodes(model), fixed: [] };
+  }
+
   private readonly motionObservations = new WeakMap<ModelRuntimeEntry, {
     runtimeState: ModelRuntimeEntry['hcliftTelemetry']; baseline: Vector3; deviceIdentity: string;
   }>();

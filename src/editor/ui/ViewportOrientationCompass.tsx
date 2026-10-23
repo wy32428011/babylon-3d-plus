@@ -5,7 +5,8 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { type ArcRotateCamera, Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { ArcRotateCamera } from '@babylonjs/core';
 import {
   STANDARD_SCENE_CAMERA_ORIENTATIONS,
   type SceneCameraOrientation,

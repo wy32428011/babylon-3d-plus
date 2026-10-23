@@ -1,4 +1,4 @@
-import type { CadReferenceGeometryBudget, CadReferenceParseResult } from './cadReference';
+import type { CadReferenceGeometryBudget, CadReferenceParseResult } from './cadReferenceCore';
 
 export type CadReferenceDxfWorkerRequest = {
   id: string;

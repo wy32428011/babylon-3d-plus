@@ -1,4 +1,8 @@
-import { AbstractMesh, Matrix, Mesh, TransformNode, Vector3, type Scene } from '@babylonjs/core';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { LiftMotionArrowChannel, LiftMotionArrowChannelConfig } from '../../../editor/model/liftMotionArrows';
 import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { getModelAxis, getModelTransformNodes, getNodeMeshes, mergeWorldBounds, transformWorldBounds, type RuntimeWorldBounds } from '../runtimeNodeGeometry';

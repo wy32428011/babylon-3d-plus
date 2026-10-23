@@ -20,11 +20,13 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [编辑器基础操作](docs/editor-operations.md)
 - [领域专题：参数化模型 / MQTT / POI](docs/domain-guides.md)
 - [提升机与换层提升机运动箭头](docs/lift-motion-arrows.md)
+- [材质与光照烘焙、动静混合阴影](docs/hybrid-lighting.md)
 - [最近完成与变更记录](docs/changelog.md)
 - [极致性能实施说明](docs/extreme-performance-implementation.md)
 - [性能指南检测与无损优化](docs/babylon-perf-guide-audit.md)
 - [测试入口、平台与隔离要求清单](docs/test-inventory.md)
 - [S1 工程治理实施与验收记录](docs/optimization-s1-validation.md)
+- [项目专项优化计划](docs/project-optimization-plan.md)、[P1 执行和验收记录](docs/tasks/2026-10-21-project-optimization.md)、[P2 执行和验收记录](docs/tasks/2026-10-21-project-optimization-p2.md)、[P3 执行和验收记录](docs/tasks/2026-10-22-project-optimization-p3.md) 与 [P4 执行和验收记录](docs/tasks/2026-10-22-project-optimization-p4.md)（P3模块解耦、P4类型安全与测试治理已完成本地验收；P2总验收未完成，动静合批缺省关闭）。
 
 ## 启动方式
 
@@ -125,13 +127,25 @@ npm run build
 - runtime/babylon：负责将编辑器场景文档增量同步到 Babylon.js 运行时场景，包括 Mesh 创建、模型导入、灯光同步、Transform 同步与选中高亮；安全静态模型和 Shelf 通过共享源容器实例化，资产加载由固定并发调度器控制，Scene View 统一处理 WebGL 上下文与渲染循环恢复。
 - panels：按编辑器区域拆分 UI，包括 Hierarchy、Scene、Inspector、Project、Console 等面板。
 
+## 材质与光照烘焙
+
+操作说明更新：2026-10-21。
+
+Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑入口，包含“总览与烘焙”“分类规则”“对象与部件”“任务与资源”四个页签。总览集中设置场景照明、显示效果和烘焙；“光照预设”“显示预设”只暂存对应草稿，应用后才生效。场景和模型 Inspector 保留状态及有效分类来源摘要，并可进入管理器定位对象。规则按字段采用上方优先，已有对象及部件例外保留；草稿整体应用形成一次可撤销更改。
+
+新版本统一采用材质/间接光烘焙与动静混合阴影，不再提供旧 baked/realtime 模式选择、旧太阳阴影烘焙或主题自动接管灯光。编辑端使用本机 Blender/Cycles 计算静态间接光和环境漫反射，原生实时直接光、高光、反射及动态阴影继续保留。关闭“启用阴影”不会关闭主光、补光或环境反射；修改曝光、对比度和雾等显示效果不会使 GI 过期。总览展示当前已应用配置的真实 Scene 快照。
+
+结果作为独立 PNG、几何 JSON 和探针 JSON 保存在工程 Assets/LightingBakes 中，随保存、SOURCE/DIST 和工程迁移携带；Viewer 读取成品，不依赖 Blender。旧场景只在内存中转换，不因打开文件而写盘或启动 Blender；首次覆盖旧文件前保存原始字节备份。旧 v1 GI 保留资源和原签名并标为过期，需明确重新烘焙；旧太阳阴影贴图不能充当新 GI。“允许昼夜循环控制光照”由 allowDayNightCycle 显式记录，旧主题场景保留原禁用状态；实际日夜控制器活动时须先暂停，再烘焙。具体操作与迁移边界见[混合光照指南](docs/hybrid-lighting.md)。
+
+`npm run test:lighting-unified` 覆盖统一配置、Store、原生光照与环境材质、备份及保存发布；`npm run test:lighting-manager` 与 `npm run test:lighting-bake` 继续覆盖管理器和烘焙，均已采用新结构且不需要 Blender/GPU。真实统一光照闭环使用 `npm run smoke:lighting-unified`；已有当前流程保存的真实 v2 烘焙工程后，可用 `node scripts/smoke-lighting-bake-state.mjs --unified` 检查过期、清除和撤销恢复。真实 Cycles 与浏览器/Electron 检查独立执行，不加入默认 core 组。具体通过状态和截图以[统一光照任务记录](docs/tasks/2026-10-21-unified-lighting.md)为准，单测和文件链检查不等同于真实 Viewer 画面通过。
+
 ## 场景文件说明
 
 当前场景文件使用 `.scene.json` 后缀，内容为 JSON 格式的 `SceneDocument`。
 
 场景文件的核心约定：
 
-- `version` 当前为 `3`，加载器继续兼容 version 1/2；旧场景缺少天空盒字段时默认关闭。
+- 新保存场景文件外层 `version` 为 `6`，新版加载器兼容 version 1–6；统一配置使用 `sceneSettings.lighting.version: 2` 与 `sceneSettings.appearance.version: 1`，不混同文件版本。旧场景经过共享迁移器只读转换，新保存只写统一结构；新文件需要配套新版编辑器与 Viewer，旧版本不会静默按旧阴影默认值读取。
 - 长度单位固定为米：`1 scene unit = 1 m`。
 - 所有模型最终都按米进入场景：内置模型使用显式米制基准；普通模型、模型生成器导入目标和环境模型通过 `lengthUnit + unitScaleToMeters` 把厘米/毫米源几何换算到米；普通模型缺少单位声明时按 `meter / 1`，不根据几何大小或参数脚本猜测；直接导入的环境 GLB 按 `meter / 1` 登记。
 - 新保存的场景文件会写入 `units.length = "meter"`；旧版没有 `units` 字段的场景文件会按米兼容加载。
@@ -149,8 +163,9 @@ npm run build
 - 场景级 MQTT 配置保存在 `mqttConfig.enabled`、`mqttConfig.ip`、`mqttConfig.address`、`mqttConfig.topic`、`mqttConfig.simulatorEnabled`、`mqttConfig.simulatorAssetCode`、`mqttConfig.simulatorScenario` 和 `mqttConfig.simulatorIntervalMs` 中；旧场景缺少该字段时会自动补齐 MQTT 默认 topic 和本地模拟默认值。
 - 场景级编辑设置保存在 `sceneSettings.camera`、`sceneSettings.sensitivity`、`sceneSettings.environment` 和 `sceneSettings.skybox` 中；`sceneSettings.camera` 的 `savedPose`、`savedOrientation` 与 `savedProjection` 共同组成显式保存视角。编辑器通过文件选择器、最近场景、Project 场景资产或内置示例加载后会自动恢复一次，导出 Web Viewer 也使用同一启动视角；仅切换编辑/运行预览不会强制复位。旧场景缺少朝向/投影字段时按轨道与透视兼容，完全没有保存位姿时使用默认相机。
 - 场景属性的“场景”分组在名称下展示“模型总面数”，按三角面统计普通/内置模型、完整逻辑实例、环境和实际生成货物；“统计明细”可展开核对场景模型与环境模型。隐藏实体、父组显隐、相机裁剪、双面材质与位置缩放不会改变几何总量，参数关闭的内部部件按当前结果排除。编辑辅助、天空盒、线点与 CAD 线稿不计入；加载未完成或失败时显示明确状态，不把部分结果当作完整总数。计数及明细展开仅保存在编辑器运行状态，不写入场景文件或撤销历史。
-- `sceneSettings.environment` 记录环境模型包路径、显示名称、文件大小、源单位、`unitScaleToMeters`、摆放模式、根节点 position / XYZ rotation / 统一 scale、显隐、透明度、缩略图、当前激活变体和包内变体列表。新环境默认作为唯一全局场景底座，按包围盒 X/Z 居中、Y=0 落地；旧场景缺少新字段时继续使用右边界 `X=-2m` 的 `legacy-left` 兼容摆放，并可在 Inspector 显式转换。环境不进入 Hierarchy、默认不可拾取，不启用 GLB 相机、灯光、动画或模型脚本；环境 PBR/Standard 材质保留原始底色与纹理，独立于场景光源显示，光源编辑不会改变环境外观，显隐与透明度只由环境设置控制；半透明使用关闭深度写入的幽灵显示。环境切换、变体、源单位修正、重置和重导先后台加载候选资源，成功后原子替换，失败时保留当前有效环境。
+- `sceneSettings.environment` 记录环境模型包路径、显示名称、文件大小、源单位、`unitScaleToMeters`、摆放模式、根节点 position / XYZ rotation / 统一 scale、显隐、透明度、缩略图、当前激活变体和包内变体列表。新环境默认作为唯一全局场景底座，按包围盒 X/Z 居中、Y=0 落地；旧场景缺少新字段时继续使用右边界 `X=-2m` 的 `legacy-left` 兼容摆放，并可在 Inspector 显式转换。环境不进入 Hierarchy、默认不可拾取，不启用 GLB 相机、灯光、动画或模型脚本；环境 PBR/Standard 材质保留原始底色与纹理；默认原貌模式与场景光源隔离，hybrid 模式让环境参与场景受光；显隐与编辑透明度仍由环境设置控制，物理材质透明度另行保留；半透明使用关闭深度写入的幽灵显示。环境切换、变体、源单位修正、重置和重导先后台加载候选资源，成功后原子替换，失败时保留当前有效环境。
 - `sceneSettings.skybox` 记录授权资源包/文件路径、`editor-asset://` URL、格式、`assetRevision`、旋转、强度和分辨率；运行时使用 Babylon HDR/EXR CubeTexture，在加载和预过滤成功后原子替换可见背景与环境反射。
+- 唯一照明配置保存在 `sceneSettings.lighting`（version 2），其中 `main`、`fill`、`environmentIntensity`、`disabledLightIds`、`allowDayNightCycle`、`shadows`、`bake`、`policy` 和 `result` 分别承载灯光、控制状态、阴影、烘焙、规则和结果；纯外观位于 `sceneSettings.appearance`（version 1）。旧 `theme`、`shadows`、`lightingBake`、`lightingPolicy`、`lightingBakeResult` 只用于兼容读取，新写删除这些旧字段。对象/部件例外仍在 `components.lighting`，按字段恢复继承由 `inheritPolicy` 记录；实体、动作、材质和未知扩展数据保留。临时生成部件采用资源或类型规则，真实场景宿主和逻辑阵列实例仍可分别编辑。新 v2 GI 只有输入与产物严格等价才可随地址迁移；旧 v1 与已有过期结果不会通过重签变成有效。
 
 ## 当前限制
 
@@ -158,11 +173,11 @@ npm run build
 - 大场景共享只对明确安全的重复资产生效：普通无脚本模型可共享源几何/材质，Shelf 使用独立验证过的脚本化共享路径；自动 thinInstance 另允许 8 个已核对参数脚本按完整结构模板签名合批，并在保存、发布和部署导出快照中持久化直接源引用。未列入白名单的动态脚本继续独占容器，因此不同资产、动态脚本和高面数贴图本身仍受 GPU 能力限制；本轮不会用降分辨率、LOD 或纹理降采样换取容量。
 - CAD/DXF 导入属于布局参考层能力：承诺常见二维线稿实体 `LINE`、`ARC`、`CIRCLE`、`ELLIPSE`、`SPLINE`、`LWPOLYLINE`、`POLYLINE`、`HATCH` 边界、`SOLID/TRACE/3DFACE` 外轮廓与 `LEADER`，并完整保留 BLOCK、嵌套/阵列 INSERT 的几何实例；不承诺完整 TEXT/MTEXT 字形、Paper Space、多布局、实体填充、3D Solid 曲面或可编辑 CAD 图元。普通图纸保持精确解析，`64 MiB` 及以上图纸使用后台两遍流式扫描和按字节核算的几何预算，不自动减少线稿。`AC1021` 及以上 DXF 使用严格 UTF-8 解码；旧版或缺少版本时保留 ANSI_936 中文代码页兼容。DXF 合法 `$INSUNITS` 0–24 会换算为米；无单位图纸只能依据 `$MEASUREMENT` 或毫米 fallback，建议源 CAD 明确写入单位。超过 `±1e15` 的异常原始坐标会被过滤。
 - 参数化模型依赖模型包中稳定的节点、网格或材质名称；安全 DSL 只支持 JSON AST 中的白名单运算和白名单属性绑定，不执行任意 JavaScript/TypeScript。贴图参数允许编辑器登记过的内置 `editor-image://` 逻辑引用，或模型包内 `.png`、`.jpg`、`.jpeg`、`.webp` 相对路径；仍不支持绝对路径、网络 URL、`data:`、反斜杠路径、未登记逻辑引用或 `../` 路径逃逸。重新导入模型包后，场景实例会使用新的 `modelParameters` 与 TypeScript 脚本元数据清洗参数：同名且仍合法的实例值会保留，新增参数使用新默认值，删除或非法参数会移除。
-- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器、自动巡检和图表立标，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表面板、组合及其它主题卡片仍为占位，主题库中的科技蓝夜景已接入场景配置；图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
+- Project 资源库中模型库、环境库、天空盒库、图表库和图片库已接入项目目录持久化；模型库普通模型包复制到 `Assets/Models`，环境库单个 GLB 保存到 `Assets/Environments/<安全化文件 stem>/`，天空盒 HDR/EXR 保存到 `Assets/Skyboxes/<安全化文件名>/` 独立包，数据中台同步大屏索引保存到当前绑定工程的 `.babylon-editor/data-platform-charts.json`，数据中台同步图片保存到 `Assets/Images/<iconKey>.<ext>`。新导入或从数据中台同步且未显式声明 `lengthUnit` 的环境模型默认按 `centimeter`（`×0.01 m`）解释，普通模型仍默认 `meter`，旧场景兼容语义不变。POI 库已接入模型生成器、自动巡检和图表立标，运行预览与 Viewer 已接入手动漫游控制器，特效库已接入 16 种内置 EFF；图表面板、组合及其它主题卡片仍为占位。原场景主题的照明/显示参数改由光照管理器预设草稿承接，资源库点击和拖入不再直接接管全局灯光。图片库已接入内置方向箭头、数据中台同步图片和 texture 参数拖放，支持按名称、图标 Key 与分类搜索。
 - 首页数据中台配置、远程项目列表、项目打开和最近场景都依赖 Electron preload IPC；普通 Vite 浏览器页面会显示降级提示，并仅保留进入空白编辑器、新建场景等不依赖桌面权限的基础入口。当前不包含身份令牌配置或数据中台项目详情交互。
 - 主布局自适应当前只包含随窗口尺寸自动调整、左右面板贯通到底部、Project/Console 限定为中间 Scene 同宽以及底部 Console 弹窗入口，不包含拖拽分隔条、其它面板折叠或用户自定义布局保存；小于约 `1024×640` 的窗口会继续尽量收缩，但不保证所有内容舒适可读。
 - 图片库当前登记内置方向箭头和数据中台同步图片；用户手动导入本地图片、更多图片类型与分类管理仍待扩展。
-- 灯光支持五种类型及各自有效参数，模型库另提供 HDRI/IBL 环境光入口。点光源和聚光灯投影需要开启场景实时阴影；矩形面光与半球光不投影。编辑器点光和聚光统一使用线性距离衰减，PBR 与 Standard 材质都按相同的强度、照射范围及聚光衰减参数呈现；已有 PBR 场景中的远距离低强度灯会比旧版更明显。环境模型默认保留原色，与光源隔离；原貌模式也接收点光源与聚光灯的实时阴影。局部灯有效范围内优先显示局部阴影，未遮挡处恢复环境原色，范围外保留主阴影；有效距离最外侧 10% 和聚光锥边缘平滑过渡，多盏局部灯取最暗的一层而不累积变黑。原貌环境最多同时叠加前四盏有效局部投影灯，复杂材质超出显卡采样器预算时逐路减少局部采样；静态烘焙仍只使用场景太阳方向，不烘焙局部灯光。需要环境模型参与灯光照明时，在主题配置中启用“环境受光”。新增、删除或切换局部灯会刷新冻结接收材质的阴影定义，普通位置和正强度变化不重新编译材质。场景级阴影可在未选中对象时的 Inspector 场景属性中调节。
+- 灯光支持五种类型及各自有效参数，模型库另提供 HDRI/IBL 环境光入口。管理器可选择“统一主光”或“场景方向光”，并显式控制各场景灯是否参与照明；阴影开关只控制投影，不负责灯光生灭。点光与聚光在启用阴影时使用原生实时投影，矩形面光和半球光不具备相同的实时投影能力。编辑器点光和聚光继续使用线性距离衰减，PBR 与 Standard 材质按相同的强度、范围和聚光衰减参数呈现。环境统一参与场景照明，旧“保持环境原貌”和旧太阳阴影叠图路径已退出。材质、灯光和采样器预算不足时应查看明确诊断；不会以削弱校验或丢弃贡献伪装成功。完整材质与动态阴影边界见[混合光照指南](docs/hybrid-lighting.md)。
 - 当前 Hierarchy 文件夹用于场景对象组织分组并支持任意层级嵌套；文件夹显隐和锁定会作用到组内对象。单选文件夹或任意多选可用世界坐标移动递归展开并去重后的普通成员，或绕完整世界包围盒中心旋转全部成员并保持各自缩放；Inspector 按“位置 / 旋转 / 缩放”三行展示群组空间信息：位置可按世界包围盒中心绝对坐标修改，旋转可按角度修改并绕群组中心应用，缩放当前显示为 1 且禁用。文件夹仍不保存 Transform，也不提供持续的父子 Transform 继承或整组缩放。
 
 ## 后续路线
@@ -185,6 +200,10 @@ npm run build
 - 当前图表库同步绑定项目的完整大屏，卡片可以拖入 POI 图表立标或其 Inspector 大屏槽位。拖到场景空白处不会创建大屏或覆盖相机视窗。已有场景中的 `viewportScreen` 和 `dataPlatformScreen` 数据继续兼容；沿用现有数据中台访问权限。
 - 大屏与三维对象通过 `postMessage` 双向联动：大屏可发送 `zending.data-platform-screen.bridge` v1 的 `screen.selectEntity`、`screen.focusEntity` 或 `screen.clearSelection`，目标可使用 `entityId` 或唯一 `assetCode`；Viewer 将三维点击结果回传为 `viewer.selectionChanged`。消息仅接受来自对应大屏 URL origin 且 source 为对应 iframe 的事件，不把 `jsonContent` 或内部 widget 配置写入场景。
 
+## GLB 标准预览与默认环境照明
+
+新建场景默认带有与 Babylon Sandbox 同款的离线环境，普通模型与环境模型共用，同时保留可编辑的主光、补光等默认设置以保持基础对象可见。显式应用标准预览后关闭额外主光、补光及烘焙应用，建立材质预览基线。已有场景继续保留原配置；在“光照与烘焙管理器”的“光照预设”中选择“GLB 标准预览（对齐 Sandbox）”，点击“应用配置”后才切换，并可一次撤销。照明来源、独立旋转与强度会保存并随本地发布保留；隐藏天空背景不撤下内置照明。完整参数与兼容说明见[光照指南](docs/hybrid-lighting.md)。
+
 ## 数据中台天空盒同步
 
 - 从首页打开数据中台业务项目时，编辑器先进入已经绑定的数字孪生工程，再在后台同步数据中台天空盒资源；查询或下载延迟不会阻塞项目打开。本地项目不会自动联网，只能在 Project 面板的天空盒 Tab 手动发起同步。
@@ -195,7 +214,7 @@ npm run build
 
 ## 场景 Web 部署导出
 
-Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，通过与保存、发布相同的序列化入口生成一次幂等合批快照，再自动收集普通模型、模型生成器目标、环境、天空盒、DXF、模型脚本与贴图，输出可部署目录或 ZIP。该离线部署包能力继续保留，并与 `发布到数据中台` 相互独立；导出结果使用独立只读 Web Viewer，直接消费快照中的合批关系，不包含编辑器界面和 Electron 运行环境。
+Toolbar 的 `📦 导出部署工程` 会捕获当前内存场景，通过与保存、发布相同的序列化入口生成一次幂等合批快照，再自动收集普通模型、模型生成器目标、环境、天空盒、DXF、模型脚本、贴图及独立光照烘焙产物，输出可部署目录或 ZIP。该离线部署包能力继续保留，并与 `发布到数据中台` 相互独立；导出结果使用独立只读 Web Viewer，直接消费快照中的合批关系，不包含编辑器界面和 Electron 运行环境。
 
 部署包通过根目录 `runtime-config.json` 外置页面、资源和 MQTT 配置；修改 JSON 后刷新页面即可生效。真实 MQTT 仅支持 `ws://` / `wss://`，静态 JSON 不应保存用户名、密码或长期 Token。部署包必须通过 HTTP/HTTPS 静态服务器访问，不支持直接双击 `index.html`。Viewer 要求浏览器启用硬件加速 WebGL，不再静默降级到软件 renderer；无法获得 GPU 时会在页面状态层显示明确错误。 Viewer 打开页面后立即显示与编辑器一致的品牌加载蒙版（ZENDING Logo 蓝色填充、蓝色进度条与百分数），覆盖配置读取、场景文档解析、引擎创建、模型与环境资源加载全过程，全部就绪后才消失；首次资源加载超过 120 秒仍保留超时提示与未完成状态，真实资源结算后才允许依赖完整场景的巡检启动；天空盒和首帧验证错误优先展示错误状态层。正常完成必须由实际首帧验证触发界面重绘，空场景也执行该验证。
 

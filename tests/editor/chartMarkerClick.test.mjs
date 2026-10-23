@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 function createEntity(id, name, chartMarker) {
   return {
@@ -47,12 +47,9 @@ function deepFreeze(value) {
 const event = (...actions) => ({ type: 'left-click', actions });
 
 test('图表立标点击动作调度', async (t) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/chartMarkerClick.ts',
+  ]);
   t.after(() => server.close());
   const { executeChartMarkerClick: execute } = await server.ssrLoadModule('/src/runtime/babylon/chartMarkerClick.ts');
 

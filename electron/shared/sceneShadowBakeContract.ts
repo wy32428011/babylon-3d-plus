@@ -149,7 +149,7 @@ function normalizeShadowAssetLocations(value: unknown): unknown {
 export function getSceneShadowBakeErrorContract(value: unknown): string | null {
   const settings = object(object(value).sceneSettings);
   const shadows = object(settings.shadows);
-  if (shadows.enabled === false || shadows.mode === 'realtime' || !settings.environment) return null;
+  if (shadows.enabled === false || (shadows.mode === 'realtime' || shadows.mode === 'hybrid') || !settings.environment) return null;
   const bake = sanitizeSceneShadowBake(shadows.bake);
   if (!bake) return '静态阴影尚未烘焙或结果无效，请先在场景属性中点击“更新阴影”，再发布或导出。';
   if (bake.signature !== getSceneShadowBakeSignatureContract(value)) {

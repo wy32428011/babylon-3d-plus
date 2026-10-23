@@ -45,12 +45,12 @@ function selectPerformanceMetrics(sample: PlayerPerformanceSourceSnapshot): Play
   return {
     sampledAt: sample.sampledAt,
     fps: sample.fps,
-    frameTimeMs: sample.frameTimeMs,
-    renderTimeMs: sample.renderTimeMs,
-    activeMeshesEvaluationMs: sample.activeMeshesEvaluationMs,
-    gpuFrameTimeMs: sample.gpuFrameTimeMs,
-    shaderCompilationMs: sample.shaderCompilationMs,
-    drawCalls: sample.drawCalls,
+    frameTimeMs: nullableMetric(sample.frameTimeMs),
+    renderTimeMs: nullableMetric(sample.renderTimeMs),
+    activeMeshesEvaluationMs: nullableMetric(sample.activeMeshesEvaluationMs),
+    gpuFrameTimeMs: nullableMetric(sample.gpuFrameTimeMs),
+    shaderCompilationMs: nullableMetric(sample.shaderCompilationMs),
+    drawCalls: nullableMetric(sample.drawCalls),
     activeMeshes: sample.activeMeshes,
     totalMeshes: sample.totalMeshes,
     totalVertices: sample.totalVertices,
@@ -58,6 +58,11 @@ function selectPerformanceMetrics(sample: PlayerPerformanceSourceSnapshot): Play
     longTaskCount: sample.longTaskCount,
     longTaskDurationMs: sample.longTaskDurationMs,
   };
+}
+
+/** 未采集与真实零值分开，避免缺失指标进入均值或分位数。 */
+function nullableMetric(value: number | null): number | null {
+  return value !== null && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function selectTelemetryMetrics(metrics: PlayerTelemetryPerformanceMetrics | null): PlayerTelemetryPerformanceMetrics | null {
@@ -74,8 +79,9 @@ function selectTelemetryMetrics(metrics: PlayerTelemetryPerformanceMetrics | nul
 }
 
 function summarize(samples: PlayerPerformanceSourceSnapshot[]) {
-  const frameTimes = samples.map((sample) => sample.frameTimeMs).sort((a, b) => a - b);
+  const frameTimes = samples.map((sample) => sample.frameTimeMs).filter((value): value is number => value !== null).sort((a, b) => a - b);
   const gpuTimes = samples.map((sample) => sample.gpuFrameTimeMs).filter((value): value is number => value !== null);
+  const drawCounts = samples.map((sample) => sample.drawCalls).filter((value): value is number => value !== null);
   return {
     sampleCount: samples.length,
     averageFps: samples.length > 0 ? samples.reduce((total, sample) => total + sample.fps, 0) / samples.length : null,
@@ -84,7 +90,7 @@ function summarize(samples: PlayerPerformanceSourceSnapshot[]) {
     p95SampleFrameTimeMs: frameTimes[Math.ceil(frameTimes.length * 0.95) - 1] ?? null,
     p99SampleFrameTimeMs: frameTimes[Math.ceil(frameTimes.length * 0.99) - 1] ?? null,
     maximumGpuFrameTimeMs: gpuTimes.length > 0 ? Math.max(...gpuTimes) : null,
-    maximumDrawCalls: samples.length > 0 ? Math.max(...samples.map((sample) => sample.drawCalls)) : null,
+    maximumDrawCalls: drawCounts.length > 0 ? Math.max(...drawCounts) : null,
     maximumActiveMeshes: samples.length > 0 ? Math.max(...samples.map((sample) => sample.activeMeshes)) : null,
     longTaskCount: samples.reduce((total, sample) => total + sample.longTaskCount, 0),
     longTaskDurationMs: samples.reduce((total, sample) => total + sample.longTaskDurationMs, 0),
@@ -135,7 +141,7 @@ export function startPlayerPerformanceSession(
         generatedAt: new Date(now()).toISOString(),
         sampleIntervalMs: SAMPLE_INTERVAL_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
-        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe samples, not individual frames. frameTiming separately reports completed-render-frame intervals. GPU null means unavailable.',
+        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe samples, not individual frames. frameTiming separately reports completed-render-frame intervals. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
         telemetrySemantics: 'Counters cover the runtime lifetime; lastFrameTimeMs times the last telemetry frame and maxFrameTimeMs covers this diagnostic session. stages are exclusive subspans and must not be added to the total. Callbacks outside this frame require a CPU profile. Null timing means unavailable.',
         summary: summarize(samples),
         frameTiming: monitor.getFrameTimingReport?.() ?? null,

@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../../../electron/shared/asciiControlCharacters.ts';
 import type { SceneDocument } from '../model/SceneDocument';
 import type { ModelAssetTemplate, ModelGeneratorTarget } from '../model/components';
 
@@ -189,7 +190,7 @@ export function getDeploymentProjectNameError(projectName: string): string | nul
   const normalizedName = projectName.trim();
   if (!normalizedName) return '请输入工程名称。';
   if (normalizedName.length > 120) return '工程名称不能超过 120 个字符。';
-  if (/[<>:"/\\|?*\u0000-\u001f]/u.test(normalizedName)) {
+  if (containsAsciiControlCharactersOr(normalizedName, "<>:\"/\\|?*")) {
     return '工程名称不能包含 < > : " / \\ | ? * 等文件名非法字符。';
   }
   if (/[. ]$/u.test(normalizedName)) return '工程名称不能以空格或句点结尾。';

@@ -26,6 +26,11 @@ const TOOLBAR_PATH = 'src/editor/ui/Toolbar.tsx';
 const PERFORMANCE_MONITOR_PATH = 'src/runtime/babylon/ScenePerformanceMonitor.ts';
 const ENTITY_ARRAY_BATCH_PATH = 'src/runtime/babylon/EntityArrayThinInstanceBatch.ts';
 const SCENE_RUNTIME_PATH = 'src/runtime/babylon/SceneRuntime.ts';
+const SCENE_READINESS_PATH = 'src/runtime/babylon/scene-runtime/SceneTriangleAndReadinessController.ts';
+const SCENE_ARRAY_RUNTIME_PATH = 'src/runtime/babylon/scene-runtime/ModelArrayRuntimeController.ts';
+const SCENE_TRANSFORM_RUNTIME_PATH = 'src/runtime/babylon/scene-runtime/SceneTransformPreviewController.ts';
+const SCENE_PERFORMANCE_HUD_PATH = 'src/editor/panels/scene-view/ScenePerformanceHud.tsx';
+const BATCH_MODULE_PATHS = ['thinInstanceBatchTypes.ts', 'thinInstanceStaticGeometry.ts', 'thinInstanceMatrixBuilder.ts', 'thinInstanceFrustum.ts'];
 
 /** 创建同一静态模板下的独立逻辑模型，保持真实 SceneDocument 不可变引用语义。 */
 function createLargeStaticModelScene(entityCount) {
@@ -1098,28 +1103,61 @@ function verifyPerformanceSummary(summarizeScenePerformance) {
 
 /** 静态约束 React 调用链：选区 effect 不得重新依赖或调用完整 sync。 */
 async function verifySceneViewWiring() {
-  const [layoutSource, panelSource, toolbarSource, monitorSource, batchSource, runtimeSource] = await Promise.all([
+  const [layoutSource, panelSource, toolbarSource, monitorSource, batchSource, runtimeSource, readinessSource, arrayRuntimeSource, transformRuntimeSource, hudSource, ...batchModuleSources] = await Promise.all([
     readFile(EDITOR_LAYOUT_PATH, 'utf8'),
     readFile(SCENE_VIEW_PANEL_PATH, 'utf8'),
     readFile(TOOLBAR_PATH, 'utf8'),
     readFile(PERFORMANCE_MONITOR_PATH, 'utf8'),
     readFile(ENTITY_ARRAY_BATCH_PATH, 'utf8'),
     readFile(SCENE_RUNTIME_PATH, 'utf8'),
+    readFile(SCENE_READINESS_PATH, 'utf8'),
+    readFile(SCENE_ARRAY_RUNTIME_PATH, 'utf8'),
+    readFile(SCENE_TRANSFORM_RUNTIME_PATH, 'utf8'),
+    readFile(SCENE_PERFORMANCE_HUD_PATH, 'utf8'),
+    ...BATCH_MODULE_PATHS.map(file => readFile('src/runtime/babylon/' + file, 'utf8')),
   ]);
   const fullSyncStart = panelSource.indexOf('/** 参数值变化走单实体同步');
   const selectionSyncStart = panelSource.indexOf('/** Hierarchy 选区变化只刷新目标表现');
   assert.ok(fullSyncStart >= 0 && selectionSyncStart > fullSyncStart, 'SceneView 必须拆分内容与选择 effect');
 
-  const fullSyncBlock = panelSource.slice(fullSyncStart, selectionSyncStart);
-  const fullSyncDependencies = fullSyncBlock.slice(fullSyncBlock.lastIndexOf('}, ['));
+  // 精确读取真实注册的 effect，避免后续 readiness effect 被混入内容同步依赖检查。
+  const panelAst = ts.createSourceFile(SCENE_VIEW_PANEL_PATH, panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const panelNodes = [];
+  const visitPanelNode = node => { panelNodes.push(node); ts.forEachChild(node, visitPanelNode); };
+  visitPanelNode(panelAst);
+  const effectWith = marker => {
+    const effects = panelNodes.filter(node => ts.isCallExpression(node) && node.expression.getText(panelAst) === 'useEffect'
+      && node.arguments[0]?.getText(panelAst).includes(marker));
+    assert.equal(effects.length, 1, '必须唯一定位实际 effect：' + marker);
+    return effects[0];
+  };
+  const fullSyncEffect = effectWith('runtime.syncModelParameters(');
+  const documentPublicationEffect = effectWith('editRuntimeSceneDocumentRef.current = editRuntimeSceneDocument;');
+  const fullSyncBlock = fullSyncEffect.getText(panelAst);
+  const fullSyncDependencies = fullSyncEffect.arguments[1].getText(panelAst);
+  assert.ok(documentPublicationEffect.end < fullSyncEffect.pos, '当前文档必须在内容同步 effect 之前发布');
+  assert.match(documentPublicationEffect.arguments[1].getText(panelAst), /\beditRuntimeSceneDocument\b/, '文档变化必须触发 Ref 发布');
+  assert.match(fullSyncBlock, /const currentDocument = editRuntimeSceneDocumentRef\.current;/, '同步入口必须读取前序发布的当前文档');
+  assert.match(fullSyncBlock, /if \(!runtime \|\| !gizmo \|\| !currentDocument\) return;/, '未发布文档时不得启动同步');
+  assert.deepEqual(fullSyncEffect.arguments[1].elements.map(node => node.getText(panelAst)), [
+    'sceneSessionId', 'editRuntimeSceneDocument.entityIds', 'editRuntimeSceneDocument.entities',
+    'modelParameterSyncEntityId', 'sceneRuntimeStartupDeferred', 'isRuntimePreview',
+    'attachCurrentSelectionGizmo', 'publishSelectedInspectorSpatialInfo',
+  ], '内容同步保持已审的实体、会话和运行门控，不引入选择依赖');
+  assert.match(fullSyncBlock, /if \(modelParameterSyncEntityId\) \{[\s\S]*?runtime\.syncModelParameters\([\s\S]*?\} else \{\s*runtime\.sync\(/, '参数单实体分支与其它内容完整同步分支必须互斥');
+  const planComputations = panelNodes.filter(node => ts.isVariableDeclaration(node) && node.name.getText(panelAst) === 'editModeThinInstancePlanComputation');
+  assert.equal(planComputations.length, 1, '必须唯一定位实际 thinInstance 规划 memo');
+  const planDependencies = planComputations[0].initializer.arguments[1].getText(panelAst);
+  assert.match(panelSource, /const \{ entityIds: sceneEntityIds, entities: sceneEntities \} = sceneDocument;/, '规划别名必须直接来自权威实体图');
+  assert.match(documentPublicationEffect.getText(panelAst), /modelParameterSceneChangeRef\.current = \{\s*entities: sceneDocument\.entities,\s*entityId: modelParameterSyncEntityId,\s*\};/, '前序发布必须缓存当前实体图及参数变更识别结果');
   assert.match(
     fullSyncBlock,
-    /runtime\.syncModelParameters\([\s\S]*?editRuntimeSceneDocument,[\s\S]*?modelParameterSyncEntityId,[\s\S]*?hierarchySelectionIds[\s\S]*?\)/,
+    /runtime\.syncModelParameters\([\s\S]*?currentDocument,[\s\S]*?modelParameterSyncEntityId,[\s\S]*?hierarchySelectionIds[\s\S]*?\)/,
     '参数 effect 必须调用单实体参数同步',
   );
   assert.match(
     fullSyncBlock,
-    /runtime\.sync\([\s\S]*?editRuntimeSceneDocument,[\s\S]*?hierarchySelectionIds,[\s\S]*?modelArrayIdentityMode: 'visual'[\s\S]*?\)/,
+    /runtime\.sync\([\s\S]*?currentDocument,[\s\S]*?hierarchySelectionIds,[\s\S]*?modelArrayIdentityMode: 'visual'[\s\S]*?\)/,
     '其它内容变化必须保留编辑态视觉合批、完整同步和完整多选',
   );
   assert.match(fullSyncBlock, /gizmo\.cancelActiveGroupDrag\(\)/, '内容 effect 只能取消过期的选区群组拖动');
@@ -1145,8 +1183,8 @@ async function verifySceneViewWiring() {
     '纯 Hierarchy 多选范围变化必须显式取消拖动并重新绑定组 Gizmo',
   );
   assert.match(
-    panelSource,
-    /\}, \[sceneDocument\.entityIds, sceneDocument\.entities\]\);/,
+    planDependencies,
+    /\[sceneEntityIds, sceneEntities, parameterSceneChangeEntityId\]/,
     '编辑态 thinInstance 分组只能依赖实体表和顺序，不得依赖 selectedEntityId',
   );
   const runtimeModeEffectStart = panelSource.indexOf('    if (runtimeModeRef.current === runtimeMode) return;');
@@ -1162,7 +1200,8 @@ async function verifySceneViewWiring() {
     '运行模式切换不得把视觉合批拆回逐设备模型',
   );
   assert.match(panelSource, /ScenePerformanceMonitor/, 'SceneView 必须启用独立性能监控器');
-  assert.match(panelSource, /复制最近一分钟报告/, 'HUD 必须提供可复制性能报告');
+  assert.match(panelSource, /<ScenePerformanceHud/, 'SceneView 必须接入独立性能 HUD');
+  assert.match(hudSource, /复制最近一分钟报告/, 'HUD 必须提供可复制性能报告');
   assert.match(
     layoutSource,
     /const \[performanceHudVisible, setPerformanceHudVisible\] = useState\(true\);/,
@@ -1174,7 +1213,6 @@ async function verifySceneViewWiring() {
   assert.match(toolbarSource, /aria-label="性能监控"/, 'Toolbar 必须提供性能监控显隐入口');
   // 执行真实 JSX 与派生状态，覆盖性能运行临时强制显示及停止后恢复用户设置。
   const toolbarAst = ts.createSourceFile(TOOLBAR_PATH, toolbarSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const panelAst = ts.createSourceFile(SCENE_VIEW_PANEL_PATH, panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const selectOne = (root, predicate) => {
     const found = [];
     const visit = node => { if (predicate(node)) found.push(node); ts.forEachChild(node, visit); };
@@ -1194,6 +1232,19 @@ async function verifySceneViewWiring() {
     const js = ts.transpileModule('return (' + node.getText() + ');', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     return new Function(...Object.keys(scope), js)(...Object.values(scope));
   };
+  // 选择/设置重绘仍读取同一实体图的已提交识别结果，不能额外触发规划。
+  const parameterChange = variable(panelAst, 'parameterSceneChangeEntityId');
+  const unchangedEntities = {};
+  for (const selectedEntityId of ['selection-a', 'selection-b']) {
+    assert.equal(evaluate(parameterChange, {
+      editModeThinInstancePlanRef: { current: {} },
+      cachedParameterSceneChange: { entities: unchangedEntities, entityId: 'parameter-entity' },
+      sceneEntities: unchangedEntities,
+      sceneDocumentRef: { current: {} },
+      sceneDocument: { entities: unchangedEntities, selectedEntityId, sceneSettings: {} },
+      resolveModelParameterOnlySceneChangeEntityId: () => { throw new Error('同一实体图不应重新识别参数变更'); },
+    }), 'parameter-entity', '纯选择或设置重绘必须保持参数识别依赖稳定');
+  }
   for (const initialVisible of [false, true]) {
     const props = { performanceHudVisible: initialVisible, runtimePerformanceEnabled: false, runtimeMode: 'edit',
       onSetPerformanceHudVisible: value => { props.performanceHudVisible = value; } };
@@ -1221,22 +1272,22 @@ async function verifySceneViewWiring() {
   assert.match(monitorSource, /const MAX_HISTORY_SAMPLES = 60;/, '性能报告必须保持最近一分钟有界历史');
   assert.match(monitorSource, /estimatedActiveVertexInvocations/, '性能报告必须估算 Active Mesh 的 GPU 顶点调用量');
   assert.match(monitorSource, /frustumVisibleThinInstances/, '性能报告必须估算批次内真正进入视锥的 thinInstance 数量');
-  assert.match(panelSource, /GPU vertex calls/, '展开 HUD 必须显示 GPU 顶点调用估算');
-  assert.match(panelSource, /原模型 \/ 代理/, '展开 HUD 必须明确显示原模型与代理数量');
-  assert.doesNotMatch(batchSource, /ScreenSpaceProxy|getScreenSpaceProxyMetrics/, '矩阵批次不得保留代理 API');
-  assert.match(runtimeSource, /const modelArrayProxyEntityCount = 0;/, 'SceneRuntime 报告必须把代理实体数固定为 0');
+  assert.match(hudSource, /GPU vertex calls/, '展开 HUD 必须显示 GPU 顶点调用估算');
+  assert.match(hudSource, /原模型 \/ 代理/, '展开 HUD 必须明确显示原模型与代理数量');
+  assert.doesNotMatch([batchSource, ...batchModuleSources].join('\n'), /ScreenSpaceProxy|getScreenSpaceProxyMetrics/, '矩阵批次不得保留代理 API');
+  assert.match(readinessSource, /const modelArrayProxyEntityCount = 0;/, 'SceneRuntime 报告必须把代理实体数固定为 0');
   assert.match(
-    runtimeSource,
+    readinessSource,
     /const modelArrayDetailedEntityCount = modelArrayBatchEntityCount;/,
     'SceneRuntime 必须把全部矩阵实体计入原模型 Geometry',
   );
   assert.doesNotMatch(
-    batchSource,
+    [batchSource, ...batchModuleSources].join('\n'),
     /screenSpaceProxyPixelThreshold|screenSpaceFrameProxyPixelThreshold|createScreenSpaceProxy|MeshBuilder\.CreateBox/,
     '矩阵批次不得保留方块、框架或其它屏幕空间代理实现',
   );
   assert.doesNotMatch(
-    runtimeSource,
+    [runtimeSource, arrayRuntimeSource].join('\n'),
     /shouldEnableEntityArrayScreenSpaceProxy|MODEL_ARRAY_SCREEN_SPACE_PROXY|screenSpaceProxyPixelThreshold/,
     'SceneRuntime 正式路径不得启用或传入任何屏幕空间代理参数',
   );
@@ -1250,7 +1301,7 @@ async function verifySceneViewWiring() {
   assert.match(groupCallbacksBlock, /commitHierarchyGroupTranslation/, '组拖动结束必须调用通用 Store 原子提交');
   assert.doesNotMatch(groupCallbacksBlock, /runtime\.sync\(|createEditModeModelThinInstancePlan/, '拖动帧不得触发完整场景同步或 thinInstance 规划');
   assert.match(
-    runtimeSource,
+    transformRuntimeSource,
     /onBeforeActiveMeshesEvaluationObservable\.add\(\(\) => \{\s*this\.flushGroupTranslationPreview\(\)/,
     'SceneRuntime 必须把同帧拖动事件合并到 active-mesh 评估前的一次更新',
   );

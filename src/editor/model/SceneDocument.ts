@@ -1,10 +1,12 @@
 import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from './sceneModelEntrance';
 import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from './sceneOpeningAnimation';
-import { normalizeSceneTheme, type SceneThemeSettings } from './sceneTheme';
 import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from './lightSettings';
 import { createId } from '../../shared/ids';
 import { normalizeSceneRegionViews, type SceneRegionView } from './sceneRegionViews';
 import { sanitizeSceneShadowBake, type SceneShadowBakeSnapshot } from './sceneShadowBake';
+import { createDefaultEditorLightingConfig } from '../../../electron/shared/glbStandardPreview';
+import { migrateSceneLightingDocument, normalizeSceneLightingConfig, normalizeSceneAppearanceConfig,
+  type SceneLightingConfig, type SceneAppearanceConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { CadReferenceComponent, LightKind, MeshKind, PoiEffectKind, SkyboxComponent, SkyboxFormat, SkyboxResolution } from './components';
 import type { Entity } from './Entity';
 import type { Vector3Data } from './math';
@@ -145,7 +147,7 @@ export type SceneShadowQuality = (typeof SCENE_SHADOW_QUALITIES)[number];
 export type SceneShadowSettings = {
   enabled: boolean;
   /** 缺省使用静态烘焙；实时阴影由用户显式选择。 */
-  mode?: 'baked' | 'realtime';
+  mode?: 'baked' | 'realtime' | 'hybrid';
   bake?: SceneShadowBakeSnapshot | null;
   quality: SceneShadowQuality;
   darkness: number;
@@ -254,13 +256,13 @@ export type SceneEnvironmentSettingsInput = Omit<
 >>;
 
 export type SceneSettings = {
-  theme?: SceneThemeSettings | null;
+  lighting: SceneLightingConfig;
+  appearance: SceneAppearanceConfig;
   camera: SceneCameraSettings;
   regionViews: SceneRegionView[];
   openingAnimation?: SceneOpeningConfig;
   modelEntrance?: SceneModelEntranceSettings;
   sensitivity: SceneSensitivitySettings;
-  shadows: SceneShadowSettings;
   environment: SceneEnvironmentSettings | null;
   skybox: SceneSkyboxSettings | null;
   /** 场景级默认模型生成器实体 ID；设备/定位线框未单独绑定时回退到它，仍为空才用内置立方体。 */
@@ -330,7 +332,8 @@ export const DEFAULT_MQTT_CONFIG: MqttConfig = {
 };
 
 export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
-  theme: null,
+  lighting: createDefaultEditorLightingConfig(),
+  appearance: normalizeSceneAppearanceConfig(undefined),
   regionViews: [],
   openingAnimation: normalizeSceneOpeningConfig(undefined),
   modelEntrance: normalizeSceneModelEntranceSettings(undefined),
@@ -345,7 +348,6 @@ export const DEFAULT_SCENE_SETTINGS: SceneSettings = {
     pan: SCENE_SENSITIVITY_DEFAULT,
     rotate: SCENE_SENSITIVITY_DEFAULT,
   },
-  shadows: { ...DEFAULT_SCENE_SHADOW_SETTINGS },
   environment: null,
   skybox: null,
   defaultCargoGeneratorId: null,
@@ -519,7 +521,7 @@ export function sanitizeSceneShadowSettings(
 ): SceneShadowSettings {
   return {
     enabled: typeof value?.enabled === 'boolean' ? value.enabled : DEFAULT_SCENE_SHADOW_SETTINGS.enabled,
-    mode: value?.mode === 'realtime' ? 'realtime' : 'baked',
+    mode: value?.mode === 'realtime' || value?.mode === 'hybrid' ? value.mode : 'baked',
     bake: sanitizeSceneShadowBake(value?.bake),
     quality: isSceneShadowQuality(value?.quality) ? value.quality : DEFAULT_SCENE_SHADOW_SETTINGS.quality,
     darkness: sanitizeSceneShadowDarkness(
@@ -921,6 +923,8 @@ export function sanitizeSceneEnvironment(
 
 /** 归一化场景级编辑设置，作为 UI、运行时和序列化共同使用的边界。 */
 export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
+  // 兼容读取集中在共享迁移器；返回值只有一份可写光照配置。
+  const migrated = migrateSceneLightingDocument({ sceneSettings: settings }).sceneSettings;
   const regionViews = normalizeSceneRegionViews(settings.regionViews);
   if (regionViews.issues.length) console.warn('[区域视角]', regionViews.issues.join('；'));
   const savedPose = isValidCameraPose(settings.camera.savedPose)
@@ -940,6 +944,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     : SCENE_CAMERA_PROJECTION_DEFAULT;
 
   return {
+    ...migrated,
     camera: {
       savedPose,
       savedOrientation,
@@ -954,10 +959,10 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),
       rotate: sanitizeSceneSensitivityValue(settings.sensitivity.rotate),
     },
-    theme: normalizeSceneTheme(settings.theme),
     environment: sanitizeSceneEnvironment(settings.environment),
     skybox: sanitizeSceneSkybox(settings.skybox),
-    shadows: sanitizeSceneShadowSettings(settings.shadows),
+    lighting: normalizeSceneLightingConfig(migrated.lighting),
+    appearance: normalizeSceneAppearanceConfig(migrated.appearance),
     defaultCargoGeneratorId: sanitizeDefaultCargoGeneratorId(settings.defaultCargoGeneratorId),
     viewportScreen: normalizeDataPlatformViewportScreen(settings.viewportScreen),
   };

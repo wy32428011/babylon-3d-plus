@@ -1,4 +1,4 @@
-import type { CadReferenceParseResult } from './cadReference';
+import type { CadReferenceParseResult } from './cadReferenceCore';
 import { CAD_REFERENCE_MAX_GEOMETRY_BYTES } from './cadReferenceGeometryPolicy';
 import { parseCadReferenceDxfStream } from './cadReferenceLargeDxf';
 import type { CadReferenceDxfWorkerMessage, CadReferenceDxfWorkerRequest } from './cadReferenceWorkerMessages';

@@ -1,5 +1,6 @@
 import type { Scene } from '@babylonjs/core';
-import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core';
+import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   clampNumber,
   filterTopLevelMotionNodes,
@@ -53,6 +54,11 @@ type RgvMotionState = { initialized: boolean; deviceIdentity: string | null; fro
  * （conveyor task 订阅/广播状态仲裁，起转锁列即尝试交付，停转边沿兜底）；无等待方时保持停转销毁语义。
  */
 export class RgvTelemetryDriver {
+  /** 只读暴露实际驱动解析的运动节点，光照分类不另建名称猜测规则。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
+    return { moving: this.findRgvTravelNodes(model, false), fixed: this.findRgvFixedNodes(model) };
+  }
+
   // resetRgvTelemetryState 原地清理状态但替换位置基准，以该基准作为会话边界。
   private readonly motionStates = new WeakMap<Vector3, RgvMotionState>();
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
@@ -327,9 +333,9 @@ export class RgvTelemetryDriver {
   }
 
   /** 查找随车行走的车体节点：全部模型节点剔除固定轨道节点及其祖先/子孙，避免轨道被行走带动。 */
-  private findRgvTravelNodes(model: ModelRuntimeEntry): TransformNode[] {
+  private findRgvTravelNodes(model: ModelRuntimeEntry, reportIssues = true): TransformNode[] {
     const fixedNodes = this.findRgvFixedNodes(model);
-    if (fixedNodes.length === 0) {
+    if (fixedNodes.length === 0 && reportIssues) {
       this.reportRgvIssueOnce(
         `rgv-no-track:${model.assetCode}`,
         `RGV ${model.assetCode} 未识别到固定轨道节点（A37~A46），整车参与行走且不做轨道约束。`,

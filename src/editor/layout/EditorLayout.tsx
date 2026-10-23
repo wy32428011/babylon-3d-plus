@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { DeploymentExportDialog } from '../deployment/DeploymentExportDialog';
-import { DigitalTwinPublishDialog } from '../deployment/DigitalTwinPublishDialog';
 import { useDeploymentExport } from '../deployment/useDeploymentExport';
 import { useDigitalTwinPublish } from '../deployment/useDigitalTwinPublish';
 import { ConsolePanel } from '../panels/ConsolePanel';
@@ -11,6 +9,7 @@ import { SceneViewPanel } from '../panels/SceneViewPanel';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import { useEditorStore, type TransformTool } from '../store/editorStore';
 import { Toolbar } from '../ui/Toolbar';
+import { LazyEditorDialog } from '../ui/LazyEditorDialog';
 import { ScenePreparationOverlay } from '../loading/ScenePreparationOverlay';
 import { isScenePreparationActive } from '../loading/scenePreparationProgress';
 import { cancelProjectLoading } from '../home/projectLoadingCancellation';
@@ -18,6 +17,10 @@ import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
 import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
 import styles from './EditorLayout.module.css';
+
+const loadDeploymentExportDialog = () => import('../deployment/DeploymentExportDialog').then(module => ({ default: module.DeploymentExportDialog }));
+const loadDigitalTwinPublishDialog = () => import('../deployment/DigitalTwinPublishDialog').then(module => ({ default: module.DigitalTwinPublishDialog }));
+const loadLightingBakeManager = () => import('../panels/LightingBakeManager').then(module => ({ default: module.LightingBakeManager }));
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
   e: 'translate',
@@ -58,6 +61,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
   const [isDigitalTwinPublishDialogOpen, setDigitalTwinPublishDialogOpen] = useState(false);
+  const lightingManagerOpen = useEditorStore(state => state.lightingManagerOpen);
   const [performanceHudVisible, setPerformanceHudVisible] = useState(true);
   const deploymentExport = useDeploymentExport();
   const digitalTwinPublish = useDigitalTwinPublish();
@@ -136,8 +140,11 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         return;
       }
 
+      // 管理器草稿不能被底层 Delete、变换或撤销快捷键穿透修改。
+      if (document.querySelector('dialog.lighting-manager[open]')) return;
       // 人物预览有独立的漫游输入；模态窗口内不能操作底层场景或抢走 Esc。
       if (document.querySelector('dialog.manual-roam-avatar-preview[open]')) return;
+      if (document.querySelector('dialog[data-editor-lazy-dialog][open]')) return;
       const key = event.key.toLowerCase();
       // F11 走场景全屏，而不是浏览器默认的整页全屏。
       if (key === 'f11') {
@@ -378,6 +385,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         digitalTwinPublishBusy={digitalTwinPublish.isBusy}
         digitalTwinPublishProgress={digitalTwinPublish.state.progress}
         onOpenDeploymentExport={() => setDeploymentExportDialogOpen(true)}
+        onOpenLightingManager={() => useEditorStore.getState().openLightingManager({ tab: 'overview' })}
         deploymentExportStatus={deploymentExport.state.status}
         deploymentExportProgress={deploymentExport.state.progress}
         deploymentExportBusy={deploymentExport.isBusy}
@@ -405,16 +413,22 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         canUndo={!isRuntimePreview && canUndo}
         canRedo={!isRuntimePreview && canRedo}
       />
-      <DeploymentExportDialog
-        controller={deploymentExport}
+      <LazyEditorDialog
+        load={loadDeploymentExportDialog}
+        title="部署工程导出"
+        dialogProps={{ controller: deploymentExport, onClose: () => setDeploymentExportDialogOpen(false), open: isDeploymentExportDialogOpen }}
         onClose={() => setDeploymentExportDialogOpen(false)}
         open={isDeploymentExportDialogOpen}
       />
-      <DigitalTwinPublishDialog
-        controller={digitalTwinPublish}
+      <LazyEditorDialog
+        load={loadDigitalTwinPublishDialog}
+        title="数字孪生发布"
+        dialogProps={{ controller: digitalTwinPublish, onClose: () => setDigitalTwinPublishDialogOpen(false), open: isDigitalTwinPublishDialogOpen }}
         onClose={() => setDigitalTwinPublishDialogOpen(false)}
         open={isDigitalTwinPublishDialogOpen}
       />
+      <LazyEditorDialog load={loadLightingBakeManager} title="光照与烘焙管理器" dialogProps={{}}
+        open={lightingManagerOpen} onClose={() => useEditorStore.getState().closeLightingManager()} />
       <div className={styles.workspace}>
         <aside className={styles.leftColumn}>
           <HierarchyPanel readOnly={isRuntimePreview} />

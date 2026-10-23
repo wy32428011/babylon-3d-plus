@@ -704,10 +704,10 @@ function assertEntityBatchEquivalent(label, direct, batched, model, scene, entit
 async function waitReady(runtime, sourceId, instanceIds = [], timeoutMs = READY_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const source = runtime.models.get(sourceId);
+    const source = runtime.assets.models.get(sourceId);
     const sourceReady = source?.measurementReady && source.externalScriptStarting === false;
-    const batchesReady = instanceIds.every((entityId) => runtime.resolveModelArrayBatchForEntityId(entityId));
-    const variantsReady = [...runtime.modelArrayParameterVariants.values()].every((variant) => (
+    const batchesReady = instanceIds.every((entityId) => runtime.arrays.resolveModelArrayBatchForEntityId(entityId));
+    const variantsReady = [...runtime.variants.modelArrayParameterVariants.values()].every((variant) => (
       variant.model.measurementReady && variant.model.externalScriptStarting === false && variant.model.modelArrayBatch
     ));
     if (sourceReady && batchesReady && variantsReady) return source;
@@ -719,12 +719,12 @@ async function waitReady(runtime, sourceId, instanceIds = [], timeoutMs = READY_
 /** 收集源基础批次和参数变体批次在当前帧实际提交的逻辑实体覆盖。 */
 function collectModelArrayFrameCoverage(runtime, sourceEntityId) {
   const entries = [];
-  const sourceModel = runtime.models.get(sourceEntityId);
+  const sourceModel = runtime.assets.models.get(sourceEntityId);
   const sourceBatch = sourceModel?.modelArrayBatch;
   if (sourceBatch) {
     entries.push({ kind: 'base', batch: sourceBatch, sourceSignature: sourceModel.modelArraySourceSignature });
   }
-  for (const variant of runtime.modelArrayParameterVariants.values()) {
+  for (const variant of runtime.variants.modelArrayParameterVariants.values()) {
     if (variant.sourceEntityId === sourceEntityId && variant.model.modelArrayBatch) {
       entries.push({
         kind: 'variant',
@@ -801,8 +801,8 @@ function collectModelArrayFrameCoverage(runtime, sourceEntityId) {
     (activeMeshCollection?.data ?? []).slice(0, activeMeshCollection?.length ?? 0),
   );
   const hostModels = [
-    runtime.models?.get?.(sourceEntityId),
-    ...[...(runtime.modelArrayParameterVariants?.values?.() ?? [])]
+    runtime.assets.models?.get?.(sourceEntityId),
+    ...[...(runtime.variants.modelArrayParameterVariants?.values?.() ?? [])]
       .filter((variant) => variant.sourceEntityId === sourceEntityId)
       .map((variant) => variant.model),
   ].filter(Boolean);
@@ -928,7 +928,7 @@ function hasSameEntityIds(batch, expectedEntityIds) {
 }
 
 function sourceVariants(runtime, sourceEntityId) {
-  return [...runtime.modelArrayParameterVariants.values()].filter((variant) => variant.sourceEntityId === sourceEntityId);
+  return [...runtime.variants.modelArrayParameterVariants.values()].filter((variant) => variant.sourceEntityId === sourceEntityId);
 }
 
 function captureBatchMatrixBuffers(batch) {
@@ -998,7 +998,7 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     runtime.sync(documentFor([sourceEntity(defaults)]));
     await waitReady(runtime, sourceId);
     scene.render();
-    const defaultModel = runtime.models.get(sourceId);
+    const defaultModel = runtime.assets.models.get(sourceId);
     const directDefault = hostMetrics(defaultModel, scene);
     assert.ok(directDefault.meshCount > 0 && directDefault.vertices > 0 && directDefault.bounds, `${spec.packageName} 默认参数没有可渲染几何`);
     assert.ok(scriptInstanceCount(defaultModel) > 0, `${spec.packageName} 参数化脚本没有成功启动`);
@@ -1009,7 +1009,7 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
       runtime.sync(documentFor([sourceEntity(candidate.values)]));
       await waitReady(runtime, sourceId);
       scene.render();
-      const changedModel = runtime.models.get(sourceId);
+      const changedModel = runtime.assets.models.get(sourceId);
       const candidateMetrics = hostMetrics(changedModel, scene);
       assert.ok(candidateMetrics.meshCount > 0 && candidateMetrics.vertices > 0 && candidateMetrics.bounds, `${spec.packageName} 参数 ${candidate.key} 修改后没有可渲染几何`);
       assert.ok(scriptInstanceCount(changedModel) > 0, `${spec.packageName} 参数 ${candidate.key} 修改后脚本未保持运行`);
@@ -1025,20 +1025,20 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     runtime.sync(documentFor([sourceEntity(changedValues)]));
     await waitReady(runtime, sourceId);
     scene.render();
-    const repeatedDirectChanged = hostMetrics(runtime.models.get(sourceId), scene);
+    const repeatedDirectChanged = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertHostEquivalent(`${spec.packageName} 相同参数重复同步`, repeatedDirectChanged, directChanged);
 
     const defaultArrayEntityList = arrayEntities(defaults);
     runtime.sync(documentFor([sourceEntity(defaults), ...defaultArrayEntityList]));
     await waitReady(runtime, sourceId, instanceIds);
     scene.render();
-    const arrayHostDefault = hostMetrics(runtime.models.get(sourceId), scene);
+    const arrayHostDefault = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertHostEquivalent(`${spec.packageName} 创建阵列前默认宿主`, arrayHostDefault, directDefault);
-    const baseBatchDefault = batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene);
+    const baseBatchDefault = batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene);
     assertEquivalent(`${spec.packageName} 默认参数阵列`, arrayHostDefault, baseBatchDefault);
     for (const instanceEntity of defaultArrayEntityList) {
-      const batch = runtime.resolveModelArrayBatchForEntityId(instanceEntity.id);
-      const renderModel = runtime.models.get(sourceId);
+      const batch = runtime.arrays.resolveModelArrayBatchForEntityId(instanceEntity.id);
+      const renderModel = runtime.assets.models.get(sourceId);
       const metrics = batchMetrics(batch, instanceEntity.id, renderModel, scene);
       assertEntityBatchEquivalent(
         `${spec.packageName} ${instanceEntity.id} 默认阵列`,
@@ -1051,8 +1051,8 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     }
 
     const expectedArrayEntityIds = [sourceId, ...instanceIds];
-    const defaultRenderSignature = runtime.createModelArrayRenderSignature(makeAsset(defaults));
-    const changedRenderSignature = runtime.createModelArrayRenderSignature(makeAsset(changedValues));
+    const defaultRenderSignature = runtime.arrays.createModelArrayRenderSignature(makeAsset(defaults));
+    const changedRenderSignature = runtime.arrays.createModelArrayRenderSignature(makeAsset(changedValues));
     const defaultExpectedRenderSignatures = new Map(
       expectedArrayEntityIds.map((entityId) => [entityId, [defaultRenderSignature]]),
     );
@@ -1079,26 +1079,26 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
       label: `${spec.packageName} 源参数默认值切到 ${changedSelection.key}`,
       expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
       isSettled: () => {
-        const sourceModel = runtime.models.get(sourceId);
+        const sourceModel = runtime.assets.models.get(sourceId);
         const sourceBatch = sourceModel?.modelArrayBatch;
-        const defaultVariant = runtime.modelArrayParameterVariantByEntityId.get(instanceIds[0]);
+        const defaultVariant = runtime.variants.modelArrayParameterVariantByEntityId.get(instanceIds[0]);
         return Boolean(
           sourceModel
           && sourceBatch
-          && runtime.isModelArrayBatchCurrent(sourceModel, changedRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(sourceModel, changedRenderSignature)
           && hasSameEntityIds(sourceBatch, [sourceId])
           && defaultVariant
           && defaultVariant.renderSignature === defaultRenderSignature
-          && runtime.isModelArrayBatchCurrent(defaultVariant.model, defaultRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(defaultVariant.model, defaultRenderSignature)
           && hasSameEntityIds(defaultVariant.model.modelArrayBatch, instanceIds)
-          && instanceIds.every((entityId) => runtime.modelArrayParameterVariantByEntityId.get(entityId) === defaultVariant)
+          && instanceIds.every((entityId) => runtime.variants.modelArrayParameterVariantByEntityId.get(entityId) === defaultVariant)
           && sourceVariants(runtime, sourceId).length === 1
         );
       },
     });
     assertHostEquivalent(
       `${spec.packageName} 源参数切离默认值宿主`,
-      hostMetrics(runtime.models.get(sourceId), scene),
+      hostMetrics(runtime.assets.models.get(sourceId), scene),
       directChanged,
     );
 
@@ -1111,51 +1111,51 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
       label: `${spec.packageName} 源参数 ${changedSelection.key} 恢复默认值`,
       expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
       isSettled: () => {
-        const sourceModel = runtime.models.get(sourceId);
+        const sourceModel = runtime.assets.models.get(sourceId);
         return Boolean(
           sourceModel
-          && runtime.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature)
           && hasSameEntityIds(sourceModel.modelArrayBatch, expectedArrayEntityIds)
           && sourceVariants(runtime, sourceId).length === 0
-          && instanceIds.every((entityId) => !runtime.modelArrayParameterVariantByEntityId.has(entityId))
+          && instanceIds.every((entityId) => !runtime.variants.modelArrayParameterVariantByEntityId.has(entityId))
         );
       },
     });
-    const sourceTransitionRestoredHost = hostMetrics(runtime.models.get(sourceId), scene);
+    const sourceTransitionRestoredHost = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertHostEquivalent(`${spec.packageName} 源参数恢复默认值宿主`, sourceTransitionRestoredHost, directDefault);
     assertEquivalent(
       `${spec.packageName} 源参数恢复默认值阵列`,
       sourceTransitionRestoredHost,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene),
     );
 
-    const lifecycleBatch = runtime.resolveModelArrayBatchForEntityId(sourceId);
+    const lifecycleBatch = runtime.arrays.resolveModelArrayBatchForEntityId(sourceId);
     const lifecycleMeshes = [...(lifecycleBatch?.meshes ?? [])];
     const lifecycleMatrixBuffers = captureBatchMatrixBuffers(lifecycleBatch);
     const lifecyclePerformance = runtime.getPerformanceMetrics();
     runtime.beginTelemetryPreview();
     scene.render();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 进入运行预览不得重建参数 Geometry 批次`);
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 进入运行预览不得重建参数 Geometry 批次`);
     assertSameReferences([...(lifecycleBatch?.meshes ?? [])], lifecycleMeshes, `${spec.packageName} 进入运行预览不得替换参数批次 Mesh`);
     assertSameReferences(captureBatchMatrixBuffers(lifecycleBatch), lifecycleMatrixBuffers, `${spec.packageName} 进入运行预览不得重新分配矩阵缓冲`);
     assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, `${spec.packageName} 进入运行预览不得增加完整 sync 次数`);
-    const runtimePreviewHost = hostMetrics(runtime.models.get(sourceId), scene);
+    const runtimePreviewHost = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertEquivalent(
       `${spec.packageName} 运行预览脚本更新后阵列`,
       runtimePreviewHost,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene),
     );
     runtime.endTelemetryPreview();
     scene.render();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 退出运行预览不得重新合批`);
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), lifecycleBatch, `${spec.packageName} 退出运行预览不得重新合批`);
     assertSameReferences([...(lifecycleBatch?.meshes ?? [])], lifecycleMeshes, `${spec.packageName} 退出运行预览不得替换参数批次 Mesh`);
     assertSameReferences(captureBatchMatrixBuffers(lifecycleBatch), lifecycleMatrixBuffers, `${spec.packageName} 退出运行预览不得重新分配矩阵缓冲`);
     assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, `${spec.packageName} 退出运行预览不得增加完整 sync 次数`);
-    const editRestoredHost = hostMetrics(runtime.models.get(sourceId), scene);
+    const editRestoredHost = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertEquivalent(
       `${spec.packageName} 结束运行预览后阵列`,
       editRestoredHost,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene),
     );
 
     // 相同参数默认继续共享宿主；只有显式启用的遥测绑定才按设备身份隔离，
@@ -1173,45 +1173,45 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     runtime.sync(documentFor([sourceEntity(defaults), ...telemetryArrayEntityList]));
     await waitReady(runtime, sourceId, instanceIds);
     scene.render();
-    const telemetryVariant = runtime.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
+    const telemetryVariant = runtime.variants.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
     assert.ok(telemetryVariant, `${spec.packageName} 显式遥测绑定未创建独立参数宿主`);
     assert.equal(telemetryVariant.representativeEntityId, instanceIds[1], `${spec.packageName} 遥测宿主代表实体错误`);
     assert.equal(telemetryVariant.entities.length, 1, `${spec.packageName} 遥测宿主不得合并未绑定实例`);
     assert.deepEqual(telemetryVariant.model.telemetryBinding, telemetryBinding, `${spec.packageName} 遥测宿主未保留实体绑定`);
-    assert.equal(runtime.modelArrayParameterVariantByEntityId.has(instanceIds[0]), false, `${spec.packageName} 未绑定实例 A 被错误拆分`);
-    assert.equal(runtime.modelArrayParameterVariantByEntityId.has(instanceIds[2]), false, `${spec.packageName} 未绑定实例 C 被错误拆分`);
-    const telemetryBaseBatch = runtime.resolveModelArrayBatchForEntityId(sourceId);
+    assert.equal(runtime.variants.modelArrayParameterVariantByEntityId.has(instanceIds[0]), false, `${spec.packageName} 未绑定实例 A 被错误拆分`);
+    assert.equal(runtime.variants.modelArrayParameterVariantByEntityId.has(instanceIds[2]), false, `${spec.packageName} 未绑定实例 C 被错误拆分`);
+    const telemetryBaseBatch = runtime.arrays.resolveModelArrayBatchForEntityId(sourceId);
     assert.ok(telemetryBaseBatch && !telemetryBaseBatch.getEntityIds().includes(instanceIds[1]), `${spec.packageName} 遥测实例仍错误进入共享基础批次`);
     const telemetryVariantHost = hostMetrics(telemetryVariant.model, scene);
     assertHostEquivalent(`${spec.packageName} 显式遥测独立宿主`, telemetryVariantHost, directDefault, { compareOrigin: false });
     assertEquivalent(
       `${spec.packageName} 显式遥测独立宿主阵列`,
       telemetryVariantHost,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(instanceIds[1]), instanceIds[1], telemetryVariant.model, scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(instanceIds[1]), instanceIds[1], telemetryVariant.model, scene),
     );
 
     const changedArrayEntityList = arrayEntities(changedValues, defaults);
     runtime.sync(documentFor([sourceEntity(changedValues), ...changedArrayEntityList]));
     await waitReady(runtime, sourceId, instanceIds);
     scene.render();
-    const arrayHostChanged = hostMetrics(runtime.models.get(sourceId), scene);
+    const arrayHostChanged = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertHostEquivalent(`${spec.packageName} 阵列后参数修改宿主`, arrayHostChanged, directChanged);
-    const baseBatchChanged = batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene);
+    const baseBatchChanged = batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene);
     assertEquivalent(`${spec.packageName} 阵列后参数修改`, arrayHostChanged, baseBatchChanged);
-    const variant = runtime.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
+    const variant = runtime.variants.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
     const variantHostMetrics = hostMetrics(variant?.model, scene);
-    const variantBatch = runtime.resolveModelArrayBatchForEntityId(instanceIds[1]);
+    const variantBatch = runtime.arrays.resolveModelArrayBatchForEntityId(instanceIds[1]);
     const variantMetrics = batchMetrics(variantBatch, instanceIds[1], variant?.model, scene);
     // 参数变体由独立 GLB 容器加载，归一化中心可能有亚毫米浮点漂移；此处比较局部尺寸，
     // 真实实例的完整 min/max 仍由下一行宿主与批次的同实体断言严格校验。
     assertHostEquivalent(`${spec.packageName} 独立参数宿主`, variantHostMetrics, directDefault, { compareOrigin: false });
     assertEquivalent(`${spec.packageName} 独立参数宿主阵列`, variantHostMetrics, variantMetrics);
-    assert.ok(runtime.modelArrayParameterVariants.size >= 1, `${spec.packageName} 不同参数未创建独立宿主`);
+    assert.ok(runtime.variants.modelArrayParameterVariants.size >= 1, `${spec.packageName} 不同参数未创建独立宿主`);
     for (const instanceEntity of changedArrayEntityList) {
-      const activeVariant = runtime.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
-      const renderModel = activeVariant?.model ?? runtime.models.get(sourceId);
+      const activeVariant = runtime.variants.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
+      const renderModel = activeVariant?.model ?? runtime.assets.models.get(sourceId);
       const renderHostMetrics = activeVariant ? hostMetrics(activeVariant.model, scene) : arrayHostChanged;
-      const metrics = batchMetrics(runtime.resolveModelArrayBatchForEntityId(instanceEntity.id), instanceEntity.id, renderModel, scene);
+      const metrics = batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(instanceEntity.id), instanceEntity.id, renderModel, scene);
       assertEntityBatchEquivalent(
         `${spec.packageName} ${instanceEntity.id} 阵列后参数修改`,
         renderHostMetrics,
@@ -1225,20 +1225,20 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     runtime.sync(documentFor([sourceEntity(changedValues), ...changedArrayEntityList]));
     await waitReady(runtime, sourceId, instanceIds);
     scene.render();
-    const repeatedArrayHostChanged = hostMetrics(runtime.models.get(sourceId), scene);
+    const repeatedArrayHostChanged = hostMetrics(runtime.assets.models.get(sourceId), scene);
     assertHostEquivalent(`${spec.packageName} 阵列后相同参数重复同步宿主`, repeatedArrayHostChanged, arrayHostChanged);
     assertEquivalent(
       `${spec.packageName} 阵列后相同参数重复同步批次`,
       repeatedArrayHostChanged,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.models.get(sourceId), scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(sourceId), sourceId, runtime.assets.models.get(sourceId), scene),
     );
-    const repeatedVariant = runtime.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
+    const repeatedVariant = runtime.variants.modelArrayParameterVariantByEntityId.get(instanceIds[1]);
     const repeatedVariantHost = hostMetrics(repeatedVariant?.model, scene);
     assertHostEquivalent(`${spec.packageName} 独立参数宿主重复同步`, repeatedVariantHost, variantHostMetrics, { compareOrigin: false });
     assertEquivalent(
       `${spec.packageName} 独立参数宿主阵列重复同步`,
       repeatedVariantHost,
-      batchMetrics(runtime.resolveModelArrayBatchForEntityId(instanceIds[1]), instanceIds[1], repeatedVariant?.model, scene),
+      batchMetrics(runtime.arrays.resolveModelArrayBatchForEntityId(instanceIds[1]), instanceIds[1], repeatedVariant?.model, scene),
     );
 
     const remainingArrayEntities = arrayEntities(changedValues, changedValues).slice(0, 2);
@@ -1246,10 +1246,10 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
     runtime.sync(documentFor([sourceEntity(changedValues), ...remainingArrayEntities]));
     await waitReady(runtime, sourceId, instanceIds.slice(0, 2));
     scene.render();
-    assert.equal(runtime.modelArrayParameterVariants.size, 0, `${spec.packageName} 参数恢复后未合并批次`);
-    assert.equal(runtime.modelArrayInstanceEntities.has(removedInstanceId), false, `${spec.packageName} 已移除阵列实例仍保留在运行时实体表`);
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(removedInstanceId), null, `${spec.packageName} 已移除阵列实例仍可解析到旧批次`);
-    const remainingBatch = runtime.resolveModelArrayBatchForEntityId(sourceId);
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 0, `${spec.packageName} 参数恢复后未合并批次`);
+    assert.equal(runtime.arrays.modelArrayInstanceEntities.has(removedInstanceId), false, `${spec.packageName} 已移除阵列实例仍保留在运行时实体表`);
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(removedInstanceId), null, `${spec.packageName} 已移除阵列实例仍可解析到旧批次`);
+    const remainingBatch = runtime.arrays.resolveModelArrayBatchForEntityId(sourceId);
     assert.ok(remainingBatch, `${spec.packageName} 移除单个实例后剩余阵列批次丢失`);
     assert.deepEqual(
       [...remainingBatch.getEntityIds()].sort(),
@@ -1257,17 +1257,17 @@ async function runPackageLifecycle(spec, defaults, changedCandidates) {
       `${spec.packageName} 移除单个实例后批次逻辑实体集合不准确`,
     );
     for (const remainingEntityId of [sourceId, ...instanceIds.slice(0, 2)]) {
-      assert.equal(runtime.resolveModelArrayBatchForEntityId(remainingEntityId), remainingBatch, `${spec.packageName} 剩余实体未映射到同一批次`);
+      assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(remainingEntityId), remainingBatch, `${spec.packageName} 剩余实体未映射到同一批次`);
     }
 
     runtime.sync(documentFor([sourceEntity(defaults)]));
     await waitReady(runtime, sourceId);
     scene.render();
-    const restored = hostMetrics(runtime.models.get(sourceId), scene);
-    assert.equal(runtime.models.get(sourceId)?.modelArrayBatch, null, `${spec.packageName} 取消阵列后仍残留批次`);
-    assert.equal(runtime.models.get(sourceId)?.modelArraySuspendedMeshes.size, 0, `${spec.packageName} 取消阵列后宿主 Mesh 未恢复`);
+    const restored = hostMetrics(runtime.assets.models.get(sourceId), scene);
+    assert.equal(runtime.assets.models.get(sourceId)?.modelArrayBatch, null, `${spec.packageName} 取消阵列后仍残留批次`);
+    assert.equal(runtime.assets.models.get(sourceId)?.modelArraySuspendedMeshes.size, 0, `${spec.packageName} 取消阵列后宿主 Mesh 未恢复`);
     assertHostEquivalent(`${spec.packageName} 取消阵列后默认模型`, restored, directDefault);
-    assert.ok(scriptInstanceCount(runtime.models.get(sourceId)) > 0, `${spec.packageName} 取消阵列后参数化脚本未恢复`);
+    assert.ok(scriptInstanceCount(runtime.assets.models.get(sourceId)) > 0, `${spec.packageName} 取消阵列后参数化脚本未恢复`);
 
     const failureLogs = [...logs, ...warnings].filter((message) => (
       /模型(?:加载|脚本|参数|矩阵阵列).*失败/i.test(message)

@@ -7,6 +7,7 @@ export type RuntimePreviewReadiness =
       code:
         | 'mqtt-disabled'
         | 'cad-import-active'
+        | 'lighting-bake-active'
         | 'environment-load-active'
         | 'environment-relink-active'
         | 'missing-address'

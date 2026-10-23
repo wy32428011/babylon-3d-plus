@@ -1,11 +1,9 @@
-import {
-  InstancedMesh,
-  LinesMesh,
-  Material,
-  Mesh,
-  MultiMaterial,
-  type AbstractMesh,
-} from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import type { AbstractMesh } from '@babylonjs/core';
 
 export type ModelTriangleStatisticsOptions = {
   /** 业务阵列有独立全量实例登记时，可只读取一份源几何面数。 */
@@ -14,6 +12,7 @@ export type ModelTriangleStatisticsOptions = {
 
 const EDITOR_HELPER_FLAGS = [
   'digitalTwinEffectProxy',
+  'lightingDerived',
   'effectBoundsProxy',
   'editorGroundGrid',
   'editorOverlay',

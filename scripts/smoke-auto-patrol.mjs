@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
 import { ArcRotateCamera, Matrix, NullEngine, Scene, Vector3 } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../tests/helpers/p4SsrTestModules.mjs';
 
-const server = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-  ssr: { noExternal: ['@linkiez/dxf-renew'] },
-});
+const server = await createP4SsrTestModules([
+  '/src/editor/store/editorStore.ts',
+  '/src/editor/model/SceneDocument.ts',
+  '/src/editor/model/autoPatrol.ts',
+  '/src/editor/project/SceneSerializer.ts',
+  '/src/runtime/babylon/SceneRuntime.ts',
+]);
 
 function assertVectorClose(actual, expected, message) {
   assert.ok(actual, message);
@@ -199,7 +198,7 @@ try {
       true,
     );
     assert.equal(runtime.updateFolderGroupTranslation({ x: 3, y: 0, z: 0 }), true);
-    runtime.flushGroupTranslationPreview();
+    runtime.transforms.flushGroupTranslationPreview();
     assertVectorClose(
       runtime.getGizmoTargetByEntityId(runtimeRoute.id)?.position,
       { x: 7, y: 2, z: 6 },

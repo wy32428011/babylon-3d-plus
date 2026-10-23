@@ -1,12 +1,7 @@
-import {
-  type ArcRotateCamera,
-  Camera,
-  type Engine,
-  type Observer,
-  Scalar,
-  type Scene,
-  Vector3,
-} from '@babylonjs/core';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Scalar } from '@babylonjs/core/Maths/math.scalar.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { ArcRotateCamera, Engine, Observer, Scene } from '@babylonjs/core';
 import {
   isStandardSceneCameraOrientation,
   type SceneCameraOrientation,

@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from './asciiControlCharacters.ts';
 /** 特效仅可读取已登记数据源或最新遥测，场景不能提供 URL、请求头或凭据。 */
 export type EffectDataRequest = {
   requestId: string;
@@ -10,7 +11,7 @@ export type EffectDataRequest = {
 };
 
 function text(value: unknown, max: number, label: string, required = true): string {
-  if (typeof value !== 'string' || value.length > max || /[\u0000-\u001f\u007f]/.test(value) || (required && !value.trim())) {
+  if (typeof value !== 'string' || value.length > max || containsAsciiControlCharactersOr(value, "\u007f") || (required && !value.trim())) {
     throw new Error(`${label}必须是${required ? '非空' : ''}字符串，最多 ${max} 个字符。`);
   }
   return value.trim();

@@ -14,7 +14,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: {
 } }).outputText;
 const exports = {};
 new vm.Script(`(function(require,exports){${compiled}\n})`).runInThisContext()((id) => {
-  if (id === '@babylonjs/core') return babylon;
+  if (id === '@babylonjs/core' || id.startsWith('@babylonjs/core/')) return babylon;
   if (id === 'react' || id === 'react/jsx-runtime') return require(id);
   // 本测试只走旧大屏平面路径；三维立标遮挡由已有真实浏览器集成测试覆盖。
   if (id === './chartMarkerVisibility') return { getVisibleChartMarkerPolygons: () => new Map() };

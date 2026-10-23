@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../shared/asciiControlCharacters.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -21,7 +22,7 @@ export type OpeningPackageFile = { sourcePath: string; relativePath: string; siz
 export function assertOpeningPackageRelativePath(value: string, directory = false): string {
   const relative = directory && value.endsWith('/') ? value.slice(0, -1) : value;
   const segments = relative.split('/');
-  if (!relative || relative.length > 240 || /[\\:%?#<>"|*\u0000-\u001f\u007f]/.test(relative)
+  if (!relative || relative.length > 240 || containsAsciiControlCharactersOr(relative, "\"#%*:<>?\\|\u007f")
     || segments.some(segment => !segment || segment === '.' || segment === '..' || /[. ]$/.test(segment)
       || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) {
     throw new Error(`开场包包含不安全路径：${value}`);

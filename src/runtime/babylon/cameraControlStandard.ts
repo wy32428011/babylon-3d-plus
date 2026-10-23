@@ -1,4 +1,5 @@
-import { Camera, type ArcRotateCamera } from '@babylonjs/core';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import type { ArcRotateCamera } from '@babylonjs/core';
 
 /** 数字孪生相机灵敏度；数值只调整运动幅度，不允许改变原有键位。 */
 export type DigitalTwinCameraSensitivity = {

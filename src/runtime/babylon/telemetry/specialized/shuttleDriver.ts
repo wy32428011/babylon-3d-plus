@@ -1,5 +1,6 @@
 import type { Scene } from '@babylonjs/core';
-import { TransformNode, Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   resolveLocatorBoxIndex,
   resolveLocatorCellSupportWorldPosition,
@@ -130,6 +131,11 @@ const HCLIFT_PLATFORM_SURFACE_STALE_MS = 2000;
  * - Status=1 货从格到车（伸满绑定、收回完结），Status=3 货从车到格（伸满解绑落格、收回完结）。
  */
 export class ShuttleTelemetryDriver {
+  /** 只读暴露实际驱动解析的运动节点，光照分类不另建名称猜测规则。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
+    return { moving: [...new Set([...this.findShuttleTravelNodes(model), ...this.findShuttleForkStage1Nodes(model), ...this.findShuttleForkStage2Nodes(model)])], fixed: this.findShuttleFixedNodes(model) };
+  }
+
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {

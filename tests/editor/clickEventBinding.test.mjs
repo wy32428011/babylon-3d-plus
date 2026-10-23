@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 const REGISTERED_URL = 'editor-asset://local/models/stacker.glb';
 const OTHER_URL = 'editor-asset://local/models/conveyor.glb';
@@ -49,12 +49,9 @@ function registeredSlot(sourceUrl) {
 }
 
 test('点击事件绑定：接管决策与清理迁移', async (t) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/model/clickEventBinding.ts',
+  ]);
   t.after(async () => server.close());
 
   const {

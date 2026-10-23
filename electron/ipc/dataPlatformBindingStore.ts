@@ -1,3 +1,4 @@
+import { containsAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -141,7 +142,7 @@ export async function readDataPlatformBinding(projectRoot: string): Promise<Data
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') return null;
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`读取本地数据中台项目绑定失败：${message}`);
+    throw new Error(`读取本地数据中台项目绑定失败：${message}`, { cause: error });
   }
 }
 
@@ -347,7 +348,7 @@ function normalizeProjectId(value: string): string {
 function normalizeProjectName(value: string): string {
   if (typeof value !== 'string') throw new Error('数据中台项目名称无效。');
   const normalized = value.trim();
-  if (!normalized || normalized.length > 256 || /[\x00-\x1f]/.test(normalized)) throw new Error('数据中台项目名称无效。');
+  if (!normalized || normalized.length > 256 || containsAsciiControlCharacters(normalized)) throw new Error('数据中台项目名称无效。');
   return normalized;
 }
 
@@ -413,7 +414,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
       } catch (rollbackError) {
         const originalMessage = error instanceof Error ? error.message : String(error);
         const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        throw new Error(`替换文件失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`);
+        throw new Error(`替换文件失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`, { cause: rollbackError });
       }
     }
     throw error;

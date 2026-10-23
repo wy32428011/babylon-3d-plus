@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { build } from 'vite';
 
 const require = createRequire(import.meta.url);
 const electronPath = require('electron');
@@ -17,6 +18,8 @@ const testEntries = [
 let exitCode = 1;
 
 try {
+  // 原生编译工作留在普通 Node 进程；Electron 只执行真实 renderer 产物，避免强制退出时竞逐编译线程关闭。
+  await prepareRendererFixture();
   for (const testEntry of testEntries) {
     exitCode = await new Promise((resolve, reject) => {
       const child = spawn(electronPath, [testEntry], {
@@ -42,6 +45,32 @@ try {
 }
 
 process.exitCode = exitCode;
+
+async function prepareRendererFixture() {
+  const entries = [
+    ['publishWithResourceRetry', 'src/editor/deployment/publishOrchestration.ts'],
+    ['createEmptySceneDocument, createSkyboxEntity', 'src/editor/model/SceneDocument.ts'],
+    ['serializeScene', 'src/editor/project/SceneSerializer.ts'],
+    ['repairPublishSceneSkyboxes', 'src/editor/deployment/repairPublishSceneSkyboxes.ts'],
+  ];
+  const inputPath = path.join(testRoot, 'renderer-entry.mjs');
+  await fs.writeFile(inputPath, entries.map(([names, source]) => {
+    const modulePath = path.resolve(workspaceRoot, source).replace(/\\/g, '/');
+    return `export { ${names} } from ${JSON.stringify(modulePath)};`;
+  }).join('\n') + '\n', 'utf8');
+  await build({
+    configFile: false,
+    root: workspaceRoot,
+    logLevel: 'error',
+    ssr: { noExternal: true },
+    build: {
+      ssr: true,
+      outDir: path.join(testRoot, 'renderer'),
+      emptyOutDir: false,
+      rollupOptions: { input: inputPath, output: { entryFileNames: 'publish-renderer.mjs' } },
+    },
+  });
+}
 
 async function removeWithRetry(targetPath) {
   const tempBase = path.resolve(tmpdir());

@@ -1,14 +1,12 @@
-import {
-  AbstractMesh,
-  Color3,
-  Constants,
-  Effect,
-  Scene,
-  SelectionOutlineLayer,
-  ShaderLanguage,
-  ShaderStore,
-  VertexBuffer,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { ShaderStore } from '@babylonjs/core/Engines/shaderStore.js';
+import { SelectionOutlineLayer } from '@babylonjs/core/Layers/selectionOutlineLayer.js';
+import { Effect } from '@babylonjs/core/Materials/effect.js';
+import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Scene } from '@babylonjs/core/scene.js';
 
 export const SCENE_SELECTION_GLOW_COLOR_HEX = '#8B0000';
 export const SCENE_SELECTION_GLOW_BLUR_PIXELS = 5;

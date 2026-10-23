@@ -1,3 +1,4 @@
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../types.js';
@@ -177,7 +178,7 @@ async function readMappings(workspaceRoot: string, signal: AbortSignal): Promise
   } catch (error) {
     signal.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    throw new Error(`发布资源映射不可用：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`发布资源映射不可用：${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 
@@ -247,7 +248,7 @@ export async function resolvePublishModelIdentityReplacements(sceneContent: stri
   signal.throwIfAborted();
   if (typeof sceneContent !== 'string' || !sceneContent) throw new Error('发布身份恢复场景内容不能为空。');
   const parsed: unknown = JSON.parse(sceneContent);
-  if (!object(parsed) || typeof parsed.version !== 'number' || ![1, 2, 3, 4, 5].includes(parsed.version) || !object(parsed.scene)) throw new Error('发布身份恢复场景格式无效。');
+  if (!object(parsed) || !isSupportedSceneFileVersion(parsed.version) || !object(parsed.scene)) throw new Error('发布身份恢复场景格式无效。');
   const baseUrl = normalizeDataPlatformSourceUrl(context.baseUrl);
   const entries = await readMappings(path.resolve(context.workspaceRoot), signal);
   if (!entries.length) return { replacements: [] };

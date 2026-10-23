@@ -1,7 +1,19 @@
-import {
-  AbstractMesh, BoundingInfo, Color3, Constants, DynamicTexture, Material, Matrix, Mesh, MeshBuilder,
-  Quaternion, Scene, ShaderMaterial, StandardMaterial, Texture, TransformNode, Vector3, Vector4, VertexBuffer, VertexData,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { BoundingInfo } from '@babylonjs/core/Culling/boundingInfo.js';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Matrix, Quaternion, Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { SURFACE_VERTEX, SURFACE_FRAGMENT, PARTICLE_VERTEX, PARTICLE_FRAGMENT } from './SpatialEffectShaders';
 

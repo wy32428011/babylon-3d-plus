@@ -1,5 +1,6 @@
+import path from 'node:path';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
@@ -7,6 +8,36 @@ import ts from 'typescript';
 import type { ProjectSkyboxAssetEntry } from '../../src/editor/assets/AssetDatabase.ts';
 
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
+
+
+/** 只沿面板实际导入且使用的 P3 子模块读取，避免把孤立测试文本当成产品入口。 */
+function readConnectedPanelSource(entry: string): string {
+  const visited = new Set<string>();
+  const parts: string[] = [];
+  function visit(file: string): void {
+    const absolute = path.resolve(file);
+    if (visited.has(absolute)) return;
+    visited.add(absolute);
+    const source = readFileSync(absolute, 'utf8');
+    parts.push(source);
+    const ast = ts.createSourceFile(absolute, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const body = ast.statements.filter(node => !ts.isImportDeclaration(node)).map(node => node.getText(ast)).join('\n');
+    for (const statement of ast.statements) {
+      if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+      const specifier = statement.moduleSpecifier.text;
+      if (!specifier.startsWith('.')) continue;
+      const resolved = path.resolve(path.dirname(absolute), specifier);
+      if (!/[\\/]panels[\\/](?:scene-view|project-library)[\\/]/.test(resolved)) continue;
+      const bindings = statement.importClause?.namedBindings;
+      if (bindings && ts.isNamedImports(bindings)) for (const binding of bindings.elements) {
+        assert.match(body, new RegExp('\\b' + binding.name.text + '\\b'), '子模块导出必须在真实调用面板中使用');
+      }
+      visit(resolved + (path.extname(resolved) ? '' : existsSync(resolved + '.tsx') ? '.tsx' : '.ts'));
+    }
+  }
+  visit(entry);
+  return parts.join('\n');
+}
 
 const PROJECT_PANEL_PATH = 'src/editor/panels/ProjectPanel.tsx';
 const PROJECT_LIBRARY_PATH = 'src/editor/assets/projectLibrary.ts';
@@ -53,7 +84,7 @@ function readProjectLibraryDefinition(source: string, libraryKey: string): strin
 }
 
 test('天空盒资源只出现在天空盒 Tab，不混入模型库', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
   const modelBranch = readLibraryBranch(source, 'model');
   const skyboxBranch = readLibraryBranch(source, 'skybox');
 
@@ -63,7 +94,7 @@ test('天空盒资源只出现在天空盒 Tab，不混入模型库', () => {
 });
 
 test('模型库空状态只由普通模型资产决定', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
 
   assert.match(source, /activeLibrary\.key === 'model' && modelAssets\.length === 0/);
   assert.doesNotMatch(
@@ -103,7 +134,7 @@ test('特效 Inspector 使用独立于 POI 的用户可见术语', () => {
 });
 
 test('模型库提供 deviceType 下拉筛选并与名称筛选组合生效', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
   const styles = readFileSync(GLOBAL_STYLE_PATH, 'utf8');
 
   assert.ok(source.includes("from '../assets/modelLibraryDeviceTypeFilter'"));
@@ -118,7 +149,7 @@ test('模型库提供 deviceType 下拉筛选并与名称筛选组合生效', ()
 });
 
 test('切换资源库或聚焦模型卡片时重置模型类型筛选', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
 
   const resetCalls = source.match(/setModelDeviceTypeFilter\(''\)/g) ?? [];
   assert.ok(resetCalls.length >= 2, 'Tab 切换和模型聚焦至少各有一次类型重置');
@@ -275,7 +306,7 @@ test('项目资源初载不刷新当前天空盒，显式刷新才委托稳定 I
 });
 
 test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案并接入纯 controller', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
 
   assert.ok(source.includes('syncDataPlatformSkyboxes?: () => Promise<boolean>'));
   assert.ok(source.includes('retryDataPlatformSkyboxSync?: () => Promise<boolean>'));
@@ -297,7 +328,7 @@ test('ProjectPanel 天空盒 Tab 使用现有同步 API、固定阶段文案并�
 });
 
 test('天空盒同步订阅委托 controller 清理迟到事件，列表成功后才按稳定 ID 命令重关联', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
   const controllerSource = readFileSync(SKYBOX_SYNC_CONTROLLER_PATH, 'utf8');
 
   assert.ok(source.includes('onDataPlatformSkyboxSyncProgress?.((progress) => {'));
@@ -362,15 +393,17 @@ test('天空盒同步订阅委托 controller 清理迟到事件，列表成功�
 });
 
 test('天空盒工具栏支持手动同步、失败重试关闭、资源库重载，且 readOnly 双重门控', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
 
   assert.ok(source.includes('同步数据中台天空盒'));
   assert.ok(source.includes('isSkyboxSyncActive'));
   assert.ok(source.includes('disabled={props.readOnly || isStartingSkyboxSync || isSkyboxSyncActive || isRetryingSkyboxSync}'));
+  assert.ok(source.includes('readOnly: props.readOnly'));
+  assert.ok(source.includes('activeLibraryKey: activeLibrary.key'));
   assert.ok(source.includes('重试同步'));
   assert.ok(source.includes('重新加载资源库'));
   assert.ok(source.includes('关闭'));
-  assert.ok(source.includes("activeLibrary.key === 'skybox' && skyboxSyncProgress ? ("));
+  assert.ok(source.includes("activeLibraryKey === 'skybox' && skyboxSyncProgress ? ("));
   assert.ok(source.includes('role="status" aria-live="polite"'));
   assert.ok(source.includes('async function handleSyncDataPlatformSkyboxes'));
   assert.ok(source.includes('skyboxSyncControllerRef.current?.start()'));
@@ -380,17 +413,23 @@ test('天空盒工具栏支持手动同步、失败重试关闭、资源库重�
   const retryEnd = source.indexOf('async function handleReloadSkyboxAssets', retryStart);
   const retryHandler = source.slice(retryStart, retryEnd);
   assert.ok(retryHandler.includes('props.readOnly'));
-  assert.ok(source.includes('disabled={props.readOnly || isRetryingSkyboxSync || isReloadingSkyboxAssets}'));
+  assert.ok(source.includes('disabled={readOnly || isRetryingSkyboxSync || isReloadingSkyboxAssets}'));
 
-  const dismissStart = source.indexOf('function handleDismissDataPlatformSkyboxSyncFailure');
-  const dismissEnd = source.indexOf('function handleDismissDataPlatformModelSyncFailure', dismissStart);
-  const dismissHandler = source.slice(dismissStart, dismissEnd);
+  const panel = ts.createSourceFile(PROJECT_PANEL_PATH, readFileSync(PROJECT_PANEL_PATH, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let dismissDeclaration: ts.FunctionDeclaration | undefined;
+  const findDismiss = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'handleDismissDataPlatformSkyboxSyncFailure') dismissDeclaration = node;
+    ts.forEachChild(node, findDismiss);
+  };
+  findDismiss(panel);
+  assert.ok(dismissDeclaration, '关闭失败提示的真实函数必须存在');
+  const dismissHandler = dismissDeclaration.getText(panel);
   assert.ok(dismissHandler.includes('dismissFailure()'));
   assert.doesNotMatch(dismissHandler, /retryDataPlatformSkyboxSync|clearDataPlatformSkyboxSyncRetryContext/);
 });
 
 test('active 与 orphaned 天空盒严格分离，当前场景只按稳定 ID 显示孤立警告', () => {
-  const source = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const source = readConnectedPanelSource(PROJECT_PANEL_PATH);
   const sceneSettingsSource = readFileSync(SCENE_SETTINGS_PANEL_PATH, 'utf8');
 
   assert.ok(source.includes('setSkyboxAssets(result.skyboxes ?? [])'));
@@ -413,7 +452,7 @@ test('active 与 orphaned 天空盒严格分离，当前场景只按稳定 ID �
 });
 
 test('手动天空盒同步不依赖业务项目且明确不存在本地场景自动联网入口', () => {
-  const projectPanelSource = readFileSync(PROJECT_PANEL_PATH, 'utf8');
+  const projectPanelSource = readConnectedPanelSource(PROJECT_PANEL_PATH);
   const sceneSettingsSource = readFileSync(SCENE_SETTINGS_PANEL_PATH, 'utf8');
   const projectIpcSource = readFileSync(PROJECT_IPC_PATH, 'utf8');
   const forbidden = /syncDataPlatformSkyboxesAfterLocalSceneLoad/;

@@ -1,4 +1,5 @@
-import { getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
+import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
 import { promises as fs, createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -83,9 +84,9 @@ async function resolveVersion(source: Reference, sharedRoot: string, projectRoot
 export async function recoverSceneCompositions(scene:unknown,sharedRoot:string,projectRoot:string|null,baseUrl:string,signal:AbortSignal){
   const issues:Array<{resourceKind:'other';resourceId?:string;message:string}>=[];
   if(!object(scene)||!object(scene.entities))return {scene,issues};
-  const oldSettings=object(scene.sceneSettings)?scene.sceneSettings:{},oldShadows=object(oldSettings.shadows)?oldSettings.shadows:{};
-  const preserveBake=object(oldShadows.bake)&&oldShadows.bake.signature===getSceneShadowBakeSignatureContract(scene);
-  const result=structuredClone(scene),entities=result.entities as Record<string,Json>,resolved=new Map<string,Promise<Reference>>();
+  const canonical=migrateSceneLightingDocument(scene);
+  const restoreLighting=captureSceneLightingBakeRelocation(canonical);
+  const result=structuredClone(canonical),entities=result.entities as Record<string,Json>,resolved=new Map<string,Promise<Reference>>();
   for(const original of Object.values(entities)){
     const root=entities[String(original.id)];
     const components=object(root.components)?root.components:{},asset=object(components.modelAsset)?components.modelAsset:{},snapshot=object(asset.sourceSnapshot)?asset.sourceSnapshot:{};
@@ -125,7 +126,6 @@ export async function recoverSceneCompositions(scene:unknown,sharedRoot:string,p
       }
     }catch(error){signal.throwIfAborted();issues.push({resourceKind:'other',resourceId:source.resourceId,message:'组合“'+String(root.name)+'”：'+(error instanceof Error?error.message:String(error))});}
   }
-  const settings=object(result.sceneSettings)?result.sceneSettings:{},shadows=object(settings.shadows)?settings.shadows:{};
-  if(preserveBake&&object(shadows.bake))shadows.bake.signature=getSceneShadowBakeSignatureContract(result);
+  if(restoreLighting&&issues.length===0&&!restoreLighting(result))issues.push({resourceKind:'other',message:'组合资源恢复后与原光照烘焙不等价，旧结果已保留为过期。'});
   return {scene:result,issues};
 }

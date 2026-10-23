@@ -3,7 +3,7 @@
  * 和货箱长度决定的行程范围内，货箱前沿走到输送线末端即停住，不做回绕循环。
  */
 
-import { Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 
 /** 行程半径下限，避免跨度数据异常时货箱完全钉死在中心。 */
 const MIN_CARGO_TRAVEL_HALF_RANGE_METERS = 0.01;

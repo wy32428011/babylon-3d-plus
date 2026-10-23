@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -8,9 +9,39 @@ import { app } from 'electron';
 
 const root = process.env.ZENDING_WORKSPACE_OPEN_TEST_ROOT;
 if (!root) throw new Error('请通过 workspaceProjectOpen.test.ts 运行隔离测试。');
+const CURRENT_SCENE_VERSION = 6;
 await mkdir(path.join(root, 'user-data'));
 app.setPath('userData', path.join(root, 'user-data'));
 app.disableHardwareAcceleration();
+
+function unifiedSettings() {
+  return {
+    lighting: { version: 2,
+      main: { source: 'managed', enabled: true, color: '#aabbcc', azimuthDegrees: 123, elevationDegrees: 28, intensity: 1.7 },
+      fill: { intensity: .35, color: '#ffddaa', groundColor: '#152535' }, environmentIntensity: .7,
+      disabledLightIds: ['future-light'], allowDayNightCycle: false,
+      shadows: { enabled: false, quality: 'performance', darkness: .2, distanceMeters: 120, bias: .004, normalBias: .04 },
+      bake: { enabled: false, quality: 'preview', atlasSize: 1024, texelsPerMeter: 8, probeSpacing: 6, maxTextureMiB: 64, cacheStaticShadows: true, dynamicShadows: true },
+      policy: { version: 1, defaults: { castShadows: false }, rules: [] }, result: null, extension: { keep: 'v6-lighting' },
+    },
+    appearance: { version: 1, backgroundColor: '#123456', skyboxVisible: false, exposure: 1.25, contrast: 1.15,
+      toneMappingEnabled: true, glowIntensity: .45, bloomEnabled: false, bloomWeight: .2,
+      fogEnabled: true, fogColor: '#334455', fogStart: 120, fogEnd: 850 },
+  };
+}
+
+function assertCurrentSceneFile(loaded) {
+  assert.equal(loaded.version, CURRENT_SCENE_VERSION, '旧场景读取后按已声明的外层版本6合同迁移');
+  assert.equal(loaded.scene.sceneSettings.lighting.version, 2);
+  assert.equal(loaded.scene.sceneSettings.appearance.version, 1);
+}
+
+function assertLegacyScenePayload(loaded, expected) {
+  assertCurrentSceneFile(loaded);
+  // 旧文件新增统一照明与显示配置；原场景业务字段仍需逐项完全保留。
+  const { sceneSettings: _migratedSettings, ...payload } = loaded.scene;
+  assert.deepEqual(payload, expected);
+}
 
 async function createPackage(version, scene = { entities: {}, entityIds: [] }) {
   const archivePath = path.join(root, `v${version}.zip`);
@@ -49,13 +80,17 @@ async function run() {
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const sourceKey = createHash('sha256').update(baseUrl).digest('hex');
   const oldWorkspace = path.join(root, '原工作区');
   const newWorkspace = path.join(root, '新工作区');
   try {
-    for (const version of [1, 2, 3, 4, 5]) {
+    for (const version of [1, 2, 3, 4, 5, 6]) {
       const oldModelPath = path.join(oldWorkspace, 'Projects', String(version), 'Assets', 'Models', '设备', 'model.glb');
-      const scene = { entities: {}, entityIds: [], sourcePath: oldModelPath, sourceUrl: `editor-asset://local/${encodeURIComponent(oldModelPath)}` };
-      archiveByPath.set(`/v${version}.zip`, await createPackage(version, scene));
+      const scene = { entities: {}, entityIds: [], sourcePath: oldModelPath, sourceUrl: `editor-asset://local/${encodeURIComponent(oldModelPath)}`,
+        ...(version === 6 ? { sceneSettings: unifiedSettings(), extension: { keep: 'v6-scene' } } : {}) };
+      const originalSource = JSON.stringify({ version, scene });
+      const sourcePackage = await createPackage(version, scene);
+      archiveByPath.set(`/v${version}.zip`, sourcePackage);
       const project = {
         id: String(version), projectName: `工作区工程 v${version}`,
         latestEditorProjectId: '100', latestEditorProjectVersionId: String(version),
@@ -66,19 +101,26 @@ async function run() {
       assert.equal(original.source, 'package', `v${version}: ${original.warning}`);
       assert.ok(original.sceneFilePath);
       const originalContent = await readFile(original.sceneFilePath, 'utf8');
+      assertCurrentSceneFile(JSON.parse(originalContent));
       const markerPath = path.join(original.projectRoot, 'local-only.txt');
       await writeFile(markerPath, '保留本地未发布内容');
 
       const opened = await service.openDataPlatformProject(project, baseUrl, newWorkspace);
       assert.equal(opened.source, 'package', `切换工作区后 v${version}: ${opened.warning}`);
-      assert.equal(opened.projectRoot, path.join(newWorkspace, 'Projects', project.id));
+      assert.equal(opened.projectRoot, path.join(newWorkspace, 'Platforms', sourceKey, 'Projects', project.id));
       assert.equal(opened.binding.workspaceRoot, newWorkspace);
       const loaded = JSON.parse(await readFile(opened.sceneFilePath, 'utf8'));
-      assert.equal(loaded.version, version);
+      assertCurrentSceneFile(loaded);
+      if (version === 6) {
+        assert.deepEqual(loaded.scene.sceneSettings, scene.sceneSettings, 'v6真实工程打开不能忽略或重置统一照明和显示字段');
+        assert.deepEqual(loaded.scene.extension, scene.extension);
+      }
       assert.equal(loaded.scene.sourcePath, path.join(opened.projectRoot, 'Assets', 'Models', '设备', 'model.glb'));
       assert.equal(decodeURIComponent(new URL(loaded.scene.sourceUrl).pathname.slice(1)), loaded.scene.sourcePath);
       assert.equal(await readFile(original.sceneFilePath, 'utf8'), originalContent);
       assert.equal(await readFile(markerPath, 'utf8'), '保留本地未发布内容');
+      assert.deepEqual(await readFile(path.join(root, `v${version}.zip`)), sourcePackage, '打开工程不得改写远端SOURCE原始包');
+      assert.equal(JSON.stringify({ version, scene }), originalSource);
       const failedPublishScene = JSON.parse(originalContent);
       failedPublishScene.scene.name = '发布失败留下的本地修改';
       await writeFile(original.sceneFilePath, JSON.stringify(failedPublishScene));
@@ -122,7 +164,7 @@ async function run() {
     archiveByPath.set('/rollback-v2.zip', await createPackage(5, olderScene));
     const newer = await service.openDataPlatformProject(rollbackProject, baseUrl, oldWorkspace);
     const newerContent = await readFile(newer.sceneFilePath, 'utf8');
-    assert.deepEqual(JSON.parse(newerContent).scene, newerScene);
+    assertLegacyScenePayload(JSON.parse(newerContent), newerScene);
     const newerAsset = path.join('Assets', 'Models', '新版工作区资源.txt');
     await writeFile(path.join(newer.projectRoot, newerAsset), '新版资源应随冲突副本保留');
     const downloadsBeforeRollback = downloads;
@@ -133,7 +175,7 @@ async function run() {
     assert.equal(rolledBack.projectRoot, newer.projectRoot, '回滚必须替换同一项目工作区');
     assert.equal(rolledBack.source, 'package');
     assert.equal(downloads, downloadsBeforeRollback + 1, '回滚版本号更小时仍须下载远端 SOURCE');
-    assert.deepEqual(JSON.parse(await readFile(rolledBack.sceneFilePath, 'utf8')).scene, olderScene);
+    assertLegacyScenePayload(JSON.parse(await readFile(rolledBack.sceneFilePath, 'utf8')), olderScene);
     assert.equal(rolledBack.binding.latestVersionId, '200');
     assert.equal(rolledBack.binding.latestVersionNumber, 2);
     const persistedBinding = JSON.parse(await readFile(path.join(rolledBack.projectRoot,
@@ -144,15 +186,35 @@ async function run() {
     assert.equal(await readFile(path.join(rolledBack.conflictCopyPath, 'Scenes', '工厂.scene.json'), 'utf8'), newerContent);
     assert.equal(await readFile(path.join(rolledBack.conflictCopyPath, newerAsset), 'utf8'), '新版资源应随冲突副本保留');
     assert.ok(!(await readdir(path.join(rolledBack.projectRoot, 'Assets', 'Models'))).includes('新版工作区资源.txt'));
-    for (const [id, version, scene] of [['6', 6, {}], ['7', 5, []]]) {
+    for (const [id, version, scene] of [['70', 7, { entities: {}, entityIds: [] }], ['71', 6, []]]) {
+      archiveByPath.set(`/seed-${id}.zip`, await createPackage(6, { entities: {}, entityIds: [], sceneSettings: unifiedSettings() }));
+      const seeded = await service.openDataPlatformProject({
+        id, projectName: id, latestEditorProjectPackageUrl: `/seed-${id}.zip`,
+        latestEditorProjectId: '100', latestEditorProjectVersionId: `${id}0`,
+        latestEditorProjectVersionNumber: 6, currentResourceRevision: '0',
+      }, baseUrl, newWorkspace);
+      assert.equal(seeded.source, 'package');
+      assert.equal(seeded.projectRoot, path.join(newWorkspace, 'Platforms', sourceKey, 'Projects', id));
       archiveByPath.set(`/${id}.zip`, await createPackage(version, scene));
+      const localRoot = seeded.projectRoot;
+      const localScenePath = seeded.sceneFilePath;
+      assert.ok(localScenePath);
+      const localAssetPath = path.join(localRoot, 'Assets', 'Models', '本地资源.txt');
+      const localContent = JSON.stringify({ version: CURRENT_SCENE_VERSION, scene: { name: '拒绝无效包时必须保留的编辑', entities: {}, entityIds: [], sceneSettings: unifiedSettings() } });
+      await mkdir(path.dirname(localScenePath), { recursive: true });
+      await mkdir(path.dirname(localAssetPath), { recursive: true });
+      await writeFile(localScenePath, localContent);
+      await writeFile(localAssetPath, '不能被未来版本或损坏场景覆盖');
       await assert.rejects(service.openDataPlatformProject({
         id, projectName: id, latestEditorProjectPackageUrl: `/${id}.zip`,
         latestEditorProjectId: '100', latestEditorProjectVersionId: id,
         latestEditorProjectVersionNumber: version, currentResourceRevision: '0',
       }, baseUrl, newWorkspace), /不是当前编辑器场景格式/);
+      assert.equal(await readFile(localScenePath, 'utf8'), localContent);
+      assert.equal(await readFile(localAssetPath, 'utf8'), '不能被未来版本或损坏场景覆盖');
+      assert.deepEqual(await readdir(path.dirname(localScenePath)), ['工厂.scene.json']);
     }
-    console.log('PASS: v1-v5 remote authority, rollback SOURCE and binding, same-version failed-publish recovery, local backups, no fallback, remote empty and invalid package rejection');
+    console.log('PASS: v1-v6 SOURCE open and canonical v6 output, unified lighting preservation, raw package immutability, path relocation, rollback binding, local backups, no fallback, remote empty, future v7 and invalid scene rejection without overwrite');
   } finally {
     await service.disposeDataPlatformProjectTasks();
     server.closeAllConnections();

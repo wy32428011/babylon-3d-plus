@@ -35,7 +35,8 @@ export async function readSkyboxTextureBlob(url: string, signal: AbortSignal,
     : declaredLength !== null && declaredLength > limit ? tooLarge() : null;
   if (earlyError) {
     // 读取已被判定失败时归还上游；即使取消也失败，仍保留原始 HTTP/体积错误。
-    try { await response.body?.cancel(earlyError); } finally { throw earlyError; }
+    try { await response.body?.cancel(earlyError); } catch { /* 取消失败仍优先报告原始读取错误。 */ }
+    throw earlyError;
   }
   onProgress?.(0, declaredLength);
   if (url.startsWith('editor-asset://local/') && declaredLength !== null && declaredLength <= limit) {

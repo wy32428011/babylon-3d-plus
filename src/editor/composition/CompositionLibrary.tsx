@@ -1,5 +1,5 @@
 import { captureCompositionPreview } from './compositionPreview';
-import { useEffect, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useEffectEvent, useRef, useState, type DragEvent } from 'react';
 import type { CompositionLibraryApi, CompositionLibrarySummary } from '../../../electron/shared/compositionTypes';
 import { useEditorStore } from '../store/editorStore';
 import { captureComposition, COMPOSITION_DRAG, COMPOSITION_SELECTION_DRAG } from './composition';
@@ -21,10 +21,14 @@ export function CompositionLibrary({ readOnly = false, search = '', onSearchChan
   const [target, setTarget] = useState<string | null>(null), [draftName, setDraftName] = useState(''), [pendingIds, setPendingIds] = useState<string[] | null>(null);
   const session = useEditorStore(s => s.sceneSessionId), generation = useRef(0), saving = useRef(false);
   useEffect(() => { const clear = () => setTarget(null); window.addEventListener('dragend', clear); return () => window.removeEventListener('dragend', clear); }, []);
-  useEffect(() => { const token = ++generation.current; setPendingIds(null); setEntries([]);
+  // 自动读取只由场景会话触发，readOnly 与同步入口采用本次会话初始化时的快照。
+  const loadSessionCompositions = useEffectEvent((token: number) => {
     if (!api()?.listCompositions) { setMessage('当前运行环境未提供组合资源库，请使用新版桌面编辑器。'); return; }
     void api()!.listCompositions().then(e => { if (token === generation.current) { setEntries(e); if (!readOnly) void sync(); } }).catch(e => { if (token === generation.current) setMessage(String(e.message ?? e)); });
-    return () => { generation.current++; };
+  });
+  useEffect(() => { const lifetime = generation; const token = ++lifetime.current; setPendingIds(null); setEntries([]);
+    loadSessionCompositions(token);
+    return () => { lifetime.current++; };
   }, [session]);
   const report = (e: unknown) => { const m = e instanceof Error ? e.message : String(e); setMessage(m); useEditorStore.getState().pushLog(m); };
   const saveRequest = useEditorStore(state => state.compositionSaveRequest);

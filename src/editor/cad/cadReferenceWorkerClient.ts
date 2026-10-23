@@ -1,9 +1,8 @@
 import { CAD_REFERENCE_MAX_GEOMETRY_BYTES } from './cadReferenceGeometryPolicy';
 import {
   CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
-  parseCadReferenceDxf,
   type CadReferenceParseResult,
-} from './cadReference';
+} from './cadReferenceCore';
 import type { CadReferenceDxfWorkerMessage, CadReferenceDxfWorkerRequest } from './cadReferenceWorkerMessages';
 
 export type CadReferenceLargeDxfProgress = { percent: number; detail: string };
@@ -56,6 +55,8 @@ export async function parseCadReferenceDxfForImport(options: ParseCadReferenceDx
   throwIfCadImportAborted(options.signal);
   options.onProgress({ percent: 76, detail: '正在精确解析 CAD 图元...' });
   await waitForCadImportFrame();
+  throwIfCadImportAborted(options.signal);
+  const { parseCadReferenceDxf } = await import('./cadReferenceParser');
   throwIfCadImportAborted(options.signal);
   return parseCadReferenceDxf(content, { unitScaleToMeters: options.unitScaleToMeters });
 }

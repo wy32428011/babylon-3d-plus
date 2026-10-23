@@ -38,7 +38,7 @@ test('绑定工程内无中台ID的包内环境仍按当前本地包路径选中
 });
 
 test('实际完成apply提交当前来源身份但只在runtimeOverride保留同步缓存键', async () => {
-  const source = await readFile(new URL('../../src/editor/store/editorStore.ts', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../../src/editor/store/slices/projectAssetsSlice.ts', import.meta.url), 'utf8');
   const start = source.indexOf('  completeEnvironmentApply: (requestId, applyResult) =>');
   const end = source.indexOf('  failEnvironmentApply:', start);
   const clean = { dataPlatformSourceKey: 'current', dataPlatformResourceId: '1', dataPlatformRevision: '8',

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 test('环形图表立标的兼容、校验与持久化', async (t) => {
-  const server = await createServer({
-    configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/model/chartMarker.ts',
+    '/src/editor/project/SceneSerializer.ts',
+    '/src/editor/store/editorStore.ts',
+  ]);
   t.after(() => server.close());
   const previousWindow = globalThis.window;
   globalThis.window = { addEventListener() {}, removeEventListener() {} };

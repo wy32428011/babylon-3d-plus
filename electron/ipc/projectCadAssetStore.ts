@@ -52,11 +52,11 @@ export async function importCadFileIntoProject(projectRoot: string, sourceFilePa
   } catch (error) {
     try {
       // 只清理本次创建且仍位于可信项目内的独立目录。
-      if (path.dirname(packagePath) !== cadRoot) throw new Error('CAD 临时目录越界，已停止清理。');
+      if (path.dirname(packagePath) !== cadRoot) throw new Error('CAD 临时目录越界，已停止清理。', { cause: error });
       await assertTrustedPathWithinRoot(root, packagePath, 'CAD 临时目录');
       await fs.rm(packagePath, { recursive: true, force: true });
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'CAD 导入失败，项目副本目录清理失败。');
+      throw new AggregateError([error, cleanupError], 'CAD 导入失败，项目副本目录清理失败。', { cause: cleanupError });
     }
     throw error;
   }

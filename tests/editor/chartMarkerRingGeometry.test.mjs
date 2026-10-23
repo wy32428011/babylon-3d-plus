@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FreeCamera, MeshBuilder, NullEngine, Ray, Scene, Vector3, VertexBuffer } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 const close = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-5,
   `${message}: expected ${expected}, got ${actual}`);
 
 test('环形图表立标真实几何与生命周期', async (t) => {
-  const server = await createServer({ configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/ChartMarkerPresentation.ts',
+    '/src/editor/model/chartMarker.ts',
+  ]);
   t.after(() => server.close());
   const presentationModule = await server.ssrLoadModule('/src/runtime/babylon/ChartMarkerPresentation.ts');
   const { ChartMarkerPresentation } = presentationModule;

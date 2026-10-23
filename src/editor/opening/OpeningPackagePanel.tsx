@@ -34,7 +34,7 @@ export function OpeningPackagePanel({ disabled, sceneSessionId }: { disabled: bo
   const available = Boolean(window.editorApi?.listOpeningPackages);
   const currentSession = () => mounted.current && session.current === sceneSessionId && useEditorStore.getState().sceneSessionId === sceneSessionId;
   const canEdit = () => !disabled && currentSession() && useEditorStore.getState().runtimeMode !== 'preview';
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; loadSequence.current++; }; }, []);
+  useEffect(() => { const sequence = loadSequence; mounted.current = true; return () => { mounted.current = false; sequence.current++; }; }, []);
   useEffect(() => {
     setPackages([]); setSelection(''); setStatus(null); setBusy(false); setInventoryLoaded(false);
     if (!window.editorApi?.listOpeningPackages) return;

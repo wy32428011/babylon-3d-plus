@@ -1,11 +1,8 @@
-import {
-  type AbstractMesh,
-  Color3,
-  Mesh,
-  MeshBuilder,
-  type Scene,
-  StandardMaterial,
-} from '@babylonjs/core';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import type { AbstractMesh, Scene } from '@babylonjs/core';
 import type {
   ManualRoamCollisionBoundsResolver,
   ManualRoamPoint,

@@ -1,16 +1,15 @@
-import '@babylonjs/loaders';
+import './babylonSideEffects.js';
+import './babylonGltfLoader.js';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
-import {
-  type AbstractMesh,
-  Color3,
-  Mesh,
-  MeshBuilder,
-  Scene,
-  SceneLoader,
-  StandardMaterial,
-  TransformNode,
-  Vector3,
-} from '@babylonjs/core';
+import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { AbstractMesh } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { TransformComponent } from '../../editor/model/components';
 import { resolveDefaultManualRoamAvatarUrl, resolveManualRoamMotionUrls } from '../assets/manualRoamAvatarAsset';

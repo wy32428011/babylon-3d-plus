@@ -32,9 +32,9 @@ try {
   try {
     // 真实登记/更新/结算路径的数量级守卫，不能通过更快的测试机器掩盖逐事件全表汇总。
     const startedAt = performance.now();
-    const ids = Array.from({ length: 5000 }, (_, index) => runtime.beginModelLoadProgressUnit(`model-${index}.glb`));
-    for (const id of ids) runtime.updateModelLoadProgressUnit(id, { loaded: 50, total: 100 });
-    for (const id of ids) runtime.settleModelLoadProgressUnit(id);
+    const ids = Array.from({ length: 5000 }, (_, index) => runtime.readiness.beginModelLoadProgressUnit(`model-${index}.glb`));
+    for (const id of ids) runtime.readiness.updateModelLoadProgressUnit(id, { loaded: 50, total: 100 });
+    for (const id of ids) runtime.readiness.settleModelLoadProgressUnit(id);
     await Promise.resolve();
     const progressNotifications = notificationCount;
     const progressMs = performance.now() - startedAt;
@@ -66,16 +66,16 @@ try {
     }]));
     const document = { ...createEmptySceneDocument('load-test'), entities, entityIds, selectedEntityId: null };
     let outlines = 0;
-    const originalOutline = runtime.rebuildModelSelectionOutline.bind(runtime);
-    runtime.rebuildModelSelectionOutline = () => { outlines += 1; originalOutline(); };
+    const originalOutline = runtime.selection.rebuildModelSelectionOutline.bind(runtime.selection);
+    runtime.selection.rebuildModelSelectionOutline = () => { outlines += 1; originalOutline(); };
     runtime.sync(document);
     const deadline = performance.now() + 15000;
-    while ([...runtime.models.values()].some((model) => !model.measurementReady)) {
+    while ([...runtime.assets.models.values()].some((model) => !model.measurementReady)) {
       assert.ok(performance.now() < deadline, `模型未就绪: ${logs.join('; ')}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(loadCount, 1);
-    assert.equal(runtime.models.size, 100);
+    assert.equal(runtime.assets.models.size, 100);
     assert.equal(runtime.isModelReady(entityIds[0]), true);
     assert.equal(runtime.isModelReady('missing-model'), false, '失败或缺失模型不能当作已加载');
     const loading = runtime.getPerformanceMetrics().loading;
@@ -84,35 +84,43 @@ try {
     assert.equal(loading.stages.assetReadDecode.count, 1);
     if (!baseline) assert.ok(outlines < 10, `100个同批就绪模型应合并轮廓重建，实际 ${outlines}`);
     runtime.syncSelection({ ...document, selectedEntityId: entityIds[5] });
-    assert.equal(runtime.models.get(entityIds[5]).highlighted, true);
-    assert.equal(runtime.models.get(entityIds[6]).highlighted, false);
+    assert.equal(runtime.assets.models.get(entityIds[5]).highlighted, true);
+    assert.equal(runtime.assets.models.get(entityIds[6]).highlighted, false);
     const changed = structuredClone(entities[entityIds[5]]);
     changed.components.transform.position.x = 500;
     runtime.sync({ ...document, entities: { ...entities, [changed.id]: changed } });
-    assert.equal(runtime.models.get(changed.id).root.position.x, 500);
+    assert.equal(runtime.assets.models.get(changed.id).root.position.x, 500);
     assert.equal(loadCount, 1, 'Transform变化不得重新解析');
     const refreshed = structuredClone(document);
     for (const entity of Object.values(refreshed.entities)) entity.components.modelAsset.assetRevision = 'two';
     runtime.sync(refreshed);
     const refreshDeadline = performance.now() + 15000;
-    while ([...runtime.models.values()].some((model) => !model.measurementReady)) {
+    while ([...runtime.assets.models.values()].some((model) => !model.measurementReady)) {
       assert.ok(performance.now() < refreshDeadline, '资源版本更新后未就绪');
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(loadCount, 2, '新版本只解析一次，不能继续复用旧版本几何');
-    assert.equal(runtime.models.size, 100);
+    assert.equal(runtime.assets.models.size, 100);
     assert.deepEqual(logs, []);
     console.log(JSON.stringify({ progressNotifications, progressMs, outlines, loading }));
     // 实例创建失败发生在源容器成功读取之后，必须单独保留失败证据。
+    // 模板按资产 URL/修订缓存；兼容保留的第二参数不换缓存键，故障夹具须采用独立修订。
+    entities[entityIds[0]].components.modelAsset.assetRevision = 'broken-clone';
+    let failedLoaderCalls = 0;
+    let failedCloneCalls = 0;
     SceneLoader.LoadAssetContainerAsync = async () => {
+      failedLoaderCalls += 1;
       const container = new AssetContainer(scene);
-      container.instantiateModelsToScene = () => { throw new Error('intentional clone failure'); };
+      container.instantiateModelsToScene = () => { failedCloneCalls += 1; throw new Error('intentional clone failure'); };
       return container;
     };
-    await assert.rejects(runtime.loadModelRuntimeAssets(entities[entityIds[0]].components.modelAsset, 'broken-clone'), /intentional clone failure/);
+    await assert.rejects(runtime.assets.loadModelRuntimeAssets(entities[entityIds[0]].components.modelAsset, 'broken-clone'), /intentional clone failure/);
     assert.equal(runtime.getPerformanceMetrics().loading.failedModelAcquisitions, 1);
+    assert.equal(failedLoaderCalls, 1, '故障必须进入本次真实源读取，不能命中此前成功模板');
+    assert.equal(failedCloneCalls, 1, '故障必须发生在真实实例创建边界');
+    assert.equal(runtime.getPerformanceMetrics().loading.stages.modelClone.failedCount, 1);
     const beforeDispose = notificationCount;
-    runtime.beginModelLoadProgressUnit('pending.glb');
+    runtime.readiness.beginModelLoadProgressUnit('pending.glb');
     runtime.dispose();
     await Promise.resolve();
     if (!baseline) assert.equal(notificationCount, beforeDispose, '释放后不得推送过期进度');

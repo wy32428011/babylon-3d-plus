@@ -1,7 +1,14 @@
-import {
-  Color3, DynamicTexture, Material, Mesh, MeshBuilder, Scene, StandardMaterial, Texture,
-  TransformNode, Vector3, VertexData,
-} from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 
 const KINDS = new Set(['alarm-icon', 'alarm-zone', 'alarm-label', 'alarm-route']);

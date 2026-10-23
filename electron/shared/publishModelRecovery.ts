@@ -1,3 +1,4 @@
+import { collectSceneResourceReferences } from './sceneResourceTraversal.js';
 import { getClickEventModelResourceKey } from './clickEventModelIdentity.js';
 
 type JsonObject = Record<string, unknown>;
@@ -9,39 +10,13 @@ export type PublishModelRecoveryItem = {
   displayName: string;
 };
 
-function object(value: unknown): JsonObject | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null;
-}
-
 /** 与发布支持的模型位置保持一致，生成器及报警目标也参与缺失资源恢复。 */
 export function collectPublishModelReferences(scene: unknown): { models: PublishModelReference[]; devices: JsonObject[] } {
-  const models: PublishModelReference[] = [], devices: JsonObject[] = [];
-  const add = (asset: unknown, target?: JsonObject, clickTarget = false) => {
-    const value = object(asset);
-    if (value) models.push({ asset: value, target, clickTarget });
+  const references = collectSceneResourceReferences(scene);
+  return {
+    models: references.models.map(({ asset, target, clickTarget }) => ({ asset, target, clickTarget })),
+    devices: references.clickEventBindings.map(({ deviceType }) => deviceType),
   };
-  const addTarget = (value: unknown, clickTarget = false) => {
-    const target = object(value);
-    if (target?.kind === 'model') add(target.modelAsset, target, clickTarget);
-  };
-  for (const entity of Object.values(object(object(scene)?.entities) ?? {})) {
-    const components = object(object(entity)?.components);
-    if (!components) continue;
-    add(components.modelAsset, undefined, true);
-    add(object(components.manualRoamSpawn)?.avatar);
-    const generator = object(components.modelGenerator);
-    addTarget(generator?.defaultTarget, true);
-    for (const rule of Array.isArray(generator?.rules) ? generator.rules : []) addTarget(object(rule)?.target, true);
-    const alarm = object(components.alarmManager);
-    addTarget(alarm?.appearanceModel);
-    for (const slot of Array.isArray(alarm?.targets) ? alarm.targets : []) addTarget(object(slot)?.model);
-    const binding = object(components.clickEventBinding);
-    for (const slot of Array.isArray(binding?.deviceSlots) ? binding.deviceSlots : []) {
-      const device = object(object(slot)?.deviceType);
-      if (device) devices.push(device);
-    }
-  }
-  return { models, devices };
 }
 
 export function publishModelMatchKey(sourceUrl: unknown): string {

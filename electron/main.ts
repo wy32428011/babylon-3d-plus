@@ -1,5 +1,7 @@
+import { configureModelScriptPersistentCache, precompileModelScriptFile } from './ipc/modelScriptCompiler.js';
+import { assertLightingBakeResourceFile } from './ipc/sceneLightingBakeResources.js';
 import { registerCompositionIpc } from './ipc/compositionIpc.js';
-import { app, BrowserWindow, protocol } from 'electron';
+import { app, BrowserWindow, protocol, safeStorage } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
@@ -7,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
 import { registerEffectDataIpc } from './ipc/effectDataIpc.js';
+import { disposeLightingBakeJobs, registerLightingBakeIpc } from './ipc/lightingBakeIpc.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
 import { disposeDataPlatformChartSync } from './ipc/dataPlatformChartSync.js';
 import { findDataPlatformDeepLink, parseDataPlatformDeepLink, type DataPlatformDeepLink } from './deepLink.js';
@@ -232,13 +235,26 @@ function registerEditorAssetProtocol(): void {
       return new Response('Forbidden', { status: 403 });
     }
 
+    const lightingResource = /[\\/]Assets[\\/]LightingBakes[\\/]/i.test(filePath);
     let stat;
-    try { stat = await fs.stat(filePath); }
+    try {
+      if (lightingResource) await assertLightingBakeResourceFile(filePath);
+      stat = await fs.stat(filePath);
+    }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') return new Response('本地资源文件不存在。', { status: 404 });
       if (code === 'EACCES' || code === 'EPERM') return new Response('无权限读取本地资源文件。', { status: 403 });
+      if (lightingResource) return new Response('光照资源路径未通过校验。', { status: 403 });
       throw error;
+    }
+    if (new URL(request.url).searchParams.get('modelScriptCompiled') === '1') {
+      if (!/\.ts$/i.test(filePath)) return new Response('仅支持模型 TypeScript 脚本。', { status: 400 });
+      // 使用同一授权路径读取实际 TS，编译结果不接受 scene 或 renderer 提供的代码。
+      const artifact = await precompileModelScriptFile(filePath);
+      return new Response(JSON.stringify(artifact), { headers: {
+        'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+      } });
     }
     const decision = resolveEditorAssetProtocolResponse({
       filePath,
@@ -255,10 +271,15 @@ function registerEditorAssetProtocol(): void {
 }
 
 if (hasSingleInstanceLock) app.whenReady().then(() => {
+  configureModelScriptPersistentCache(path.join(app.getPath('userData'), 'model-script-cache'), safeStorage.isEncryptionAvailable() ? {
+    protect: key => safeStorage.encryptString(key.toString('base64')),
+    unprotect: encrypted => Buffer.from(safeStorage.decryptString(encrypted), 'base64'),
+  } : undefined);
   registerEditorAssetProtocol();
   registerProjectIpc();
   registerCompositionIpc();
   registerEffectDataIpc();
+  registerLightingBakeIpc();
   registerDataPlatformIpc();
   registerAssetIpc();
   registerMqttIpc();
@@ -289,6 +310,7 @@ app.on('before-quit', (event) => {
   quitCleanupStarted = true;
 
   disposeAllDeploymentExportTasks();
+  disposeLightingBakeJobs();
   disposeAllMqttIpcClients();
   void Promise.allSettled([
     disposeAllDigitalTwinPublishTasks(),

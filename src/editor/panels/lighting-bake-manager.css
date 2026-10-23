@@ -1,0 +1,323 @@
+.lighting-manager {
+  --lm-accent: #00d3e4;
+  --lm-static: #18cddc;
+  --lm-dynamic: #f4a04b;
+  --lm-warning: #f3c15c;
+  box-sizing: border-box;
+  width: min(1140px, calc(100vw - 48px));
+  height: min(840px, calc(100dvh - 48px));
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid #606468;
+  border-radius: 7px;
+  background: #25282a;
+  color: #e5e7e8;
+  box-shadow: 0 20px 65px #0009;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+  color-scheme: dark;
+}
+.lighting-manager[open] { display: flex; flex-direction: column; }
+.lighting-manager:not([open]), .lighting-manager [hidden] { display: none !important; }
+.lighting-manager::backdrop { background: #0009; }
+.lighting-manager *, .lighting-manager-summary * { box-sizing: border-box; }
+.lighting-manager h2, .lighting-manager h3, .lighting-manager h4, .lighting-manager p { margin: 0; }
+.lighting-manager h2 { font-size: 21px; line-height: 1.3; font-weight: 650; }
+.lighting-manager h3 { font-size: 17px; line-height: 1.4; font-weight: 600; }
+.lighting-manager h4 { font-size: 13px; font-weight: 600; }
+.lighting-manager button, .lighting-manager input, .lighting-manager select { font: inherit; }
+.lighting-manager button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 31px; padding: 5px 11px; border: 1px solid #5b6063;
+  border-radius: 3px; background: #33373a; color: #e5e7e8; cursor: pointer;
+}
+.lighting-manager button:hover:not(:disabled) { background: #3c4347; border-color: #7f8c93; }
+.lighting-manager button:disabled, .lighting-manager input:disabled, .lighting-manager select:disabled { opacity: .48; cursor: not-allowed; }
+.lighting-manager button:focus-visible, .lighting-manager input:focus-visible, .lighting-manager select:focus-visible, .lighting-manager summary:focus-visible,
+.lighting-manager-summary button:focus-visible { outline: 2px solid var(--lm-accent, #00d3e4); outline-offset: 2px; }
+.lighting-manager input:not([type="checkbox"]), .lighting-manager select {
+  width: 100%; min-width: 0; height: 32px; padding: 4px 8px; border: 1px solid #555d61;
+  border-radius: 3px; color: #e5e7e8; background: #1f2325;
+}
+.lighting-manager input::placeholder { color: #a7acb0; }
+.lighting-manager input[type="checkbox"] { width: 16px; height: 16px; margin: 0; flex: 0 0 16px; accent-color: var(--lm-accent); }
+.lighting-manager summary { cursor: pointer; color: #d0d4d6; padding: 7px 0; }
+.lighting-manager button.lighting-manager-primary, .lighting-manager-summary .lighting-manager-open-button {
+  border-color: #0cdae8; color: #e8fdff; background: #087486; font-weight: 600;
+}
+.lighting-manager button.lighting-manager-primary:hover:not(:disabled), .lighting-manager-summary .lighting-manager-open-button:hover { background: #07899c; border-color: #7ce9f0; }
+.lighting-manager button.lighting-manager-danger { border-color: #8a6258; color: #ffd3c6; background: #543b34; }
+.lighting-manager button.lighting-manager-text-danger { border-color: transparent; background: transparent; color: #f4b2a4; }
+.lighting-manager button.lighting-manager-text-button { border-color: transparent; background: transparent; color: #77dce7; }
+.lighting-manager-header { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: flex-start; padding: 17px 21px 13px; gap: 20px; }
+.lighting-manager-header > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 9px 22px; min-width: 0; }
+.lighting-manager-header p { color: #bfc5c8; font-size: 12px; overflow-wrap: anywhere; }
+.lighting-manager-header p strong { font-weight: 500; color: #e2e4e5; }
+.lighting-manager button.lighting-manager-close { border: 0; background: transparent; padding: 0; min-width: 30px; min-height: 30px; }
+.lighting-manager-tabs { display: flex; flex: 0 0 auto; gap: 0; margin: 0 18px; border-bottom: 1px solid #4a5155; background: #202426; overflow-x: auto; }
+.lighting-manager-tabs button { position: relative; flex: 0 0 165px; border: 0; border-radius: 0; min-height: 45px; padding: 10px 20px; background: transparent; font-size: 14px; white-space: nowrap; }
+.lighting-manager-tabs button[aria-selected="true"] { background: #173f47; color: #76eff7; }
+.lighting-manager-tabs button[aria-selected="true"]::after { content: ""; position: absolute; inset: auto 0 0; height: 3px; background: var(--lm-accent); }
+.lighting-manager-content { min-height: 0; overflow: auto; padding: 15px 18px; flex: 1 1 auto; scrollbar-color: #687178 #24282b; scrollbar-width: thin; }
+.lighting-manager-content > [role="tabpanel"] { min-width: 0; }
+.lighting-manager-banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 13px; margin-bottom: 12px !important; border: 1px solid #356474; border-radius: 4px; background: #193c49; color: #b4e9f2; }
+.lighting-manager-banner svg, .lighting-manager-note svg, .lighting-manager-warning svg { flex: 0 0 auto; }
+.lighting-manager-conflict { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; margin-bottom: 12px; border: 1px solid #9b7944; background: #463b29; color: #f7dab0; }
+.lighting-manager-conflict button { flex: 0 0 auto; }
+.lighting-manager-note { color: #b6bdc1; font-size: 12px; overflow-wrap: anywhere; }
+.lighting-manager-warning { color: #f3c675; font-size: 12px; overflow-wrap: anywhere; }
+.lighting-manager .with-icon { display: flex; align-items: flex-start; gap: 8px; }
+.lighting-manager-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 16px 8px; margin-bottom: 14px; border: 1px solid #4a5155; border-radius: 5px; background: #24282a; }
+.lighting-manager-metrics > div { display: flex; align-items: center; justify-content: center; gap: 17px; padding: 0 12px; }
+.lighting-manager-metrics > div + div { border-inline-start: 1px solid #566065; }
+.lighting-manager-metrics span { display: grid; gap: 1px; color: #d9dde0; font-size: 13px; }
+.lighting-manager-metrics strong { font-size: 27px; line-height: 1.2; font-weight: 650; font-variant-numeric: tabular-nums; }
+.lighting-manager-metrics .is-static, .lighting-manager-metrics .is-static strong { color: var(--lm-static); }
+.lighting-manager-metrics .is-dynamic, .lighting-manager-metrics .is-dynamic strong { color: var(--lm-dynamic); }
+.lighting-manager-metrics .is-warning, .lighting-manager-metrics .is-warning strong { color: var(--lm-warning); }
+.lighting-manager-card { min-width: 0; padding: 14px 16px; border: 1px solid #4c5357; border-radius: 5px; background: #25292b; }
+.lighting-manager-card h3 { margin-bottom: 13px; }
+.lighting-manager-card-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-width: 0; }
+.lighting-manager-card-heading h3, .lighting-manager-card-heading h4 { margin: 0; min-width: 0; }
+.lighting-manager-field { display: grid; grid-template-columns: 95px minmax(0, 1fr); align-items: center; gap: 10px; margin: 8px 0; }
+.lighting-manager-field > span:first-child { color: #d0d5d8; }
+.lighting-manager-number { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.lighting-manager-number > span { color: #b9c1c5; font-size: 12px; }
+.lighting-manager-color { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; align-items: center; }
+.lighting-manager-color input[type="color"] { padding: 3px; cursor: pointer; }
+.lighting-manager-color code { font-size: 12px; color: #c5cdd2; }
+.lighting-manager-config-section > summary { font-size: 15px; font-weight: 600; }
+.lighting-manager-config-section > summary > span { float: right; margin-left: 8px; font-size: 12px; font-weight: 400; color: #adb9c0; }
+.lighting-manager-config-section[open] > summary { margin-bottom: 10px; }
+.lighting-manager-scene-lights { max-height: 220px; overflow: auto; padding: 2px; }
+.lighting-manager-scene-lights .lighting-manager-toggle { border-bottom: 1px solid #42494d; padding: 7px 0; }
+.lighting-manager-scene-lights .lighting-manager-toggle > span { flex: 1 1 180px; overflow-wrap: anywhere; }
+.lighting-manager-scene-lights .lighting-manager-toggle > small { padding-left: 25px; }
+.lighting-manager-toggle { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; min-height: 34px; margin: 5px 0; }
+.lighting-manager-toggle > span { min-width: 100px; }
+.lighting-manager-toggle small { flex: 1 1 160px; color: #afb8be; font-size: 11px; }
+.lighting-manager-overview { display: grid; grid-template-columns: minmax(325px, .87fr) minmax(360px, 1.1fr); align-items: stretch; gap: 14px; }
+.lighting-manager-overview-settings { display: grid; align-content: start; gap: 13px; }
+.lighting-manager-overview-settings .with-icon { border-top: 1px solid #42494d; padding-top: 10px; margin-top: 9px; }
+.lighting-manager-advanced { border-top: 1px solid #42494d; margin-top: 12px; padding-top: 3px; }
+.lighting-manager-advanced > p { margin-top: 10px; }
+.lighting-manager-preview-card { display: flex; flex-direction: column; min-width: 0; min-height: 440px; border: 1px solid #4c5357; border-radius: 5px; overflow: hidden; background: #1d2225; }
+.lighting-manager-preview-card > .lighting-manager-card-heading { padding: 10px 13px; }
+.lighting-manager-segment { display: flex; flex: 0 0 auto; }
+.lighting-manager-segment button { border-radius: 0; min-height: 30px; font-size: 12px; }
+.lighting-manager-segment button:first-child { border-radius: 3px 0 0 3px; }
+.lighting-manager-segment button:last-child { border-radius: 0 3px 3px 0; margin-left: -1px; }
+.lighting-manager-segment button[aria-pressed="true"] { border-color: #20cee0; color: #b9f7fc; background: #115565; z-index: 1; }
+.lighting-manager-preview { position: relative; flex: 1 1 auto; min-height: 300px; display: grid; place-items: center; overflow: hidden; background: #151b20; }
+.lighting-manager-preview img { display: block; width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; }
+.lighting-manager-preview-actions { position: absolute; inset: auto 10px 10px auto; display: flex; gap: 7px; }
+.lighting-manager-preview-actions button { background: #22292deb; font-size: 12px; }
+.lighting-manager-preview-result { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 15px; border-top: 1px solid #42494d; background: #272c2f; }
+.lighting-manager-preview-result h4 { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+.lighting-manager-preview-result p { display: flex; gap: 10px; flex-wrap: wrap; color: #c5ccd0; font-size: 12px; }
+.lighting-manager-preview-result button { flex: 0 0 auto; }
+.lighting-manager-preview-caption { padding: 7px 13px; text-align: right; color: #b6bec2; font-size: 11px; }
+.lighting-manager-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 10px; padding: 28px 16px; color: #aebbc3; }
+.lighting-manager-badge { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: #c7cdd1; font-size: 12px; font-weight: 500; }
+.lighting-manager-badge > span { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: 0 0 8px; }
+.lighting-manager-badge.is-static { color: var(--lm-static, #18cddc); }
+.lighting-manager-badge.is-dynamic { color: var(--lm-dynamic, #f4a04b); }
+.lighting-manager-badge.is-warning { color: var(--lm-warning, #f3c15c); }
+.lighting-manager-badge.is-success { color: #55e5bf; }
+.lighting-manager-rule-columns { display: grid; grid-template-columns: minmax(260px, .72fr) minmax(420px, 1.15fr); gap: 14px; }
+.lighting-manager-rule-list { display: flex; flex-direction: column; gap: 13px; min-height: 480px; }
+.lighting-manager-rule-list > .lighting-manager-note { font-size: 11px; }
+.lighting-manager-rule-list ol { list-style: none; padding: 0; margin: 0; display: grid; align-content: start; gap: 9px; max-height: 420px; overflow: auto; }
+.lighting-manager-rule-list li { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 68px; padding: 8px; border: 1px solid #464f54; border-radius: 4px; background: #2c3134; }
+.lighting-manager-rule-list li.is-selected { border-color: var(--lm-accent); background: #153e47; }
+.lighting-manager button.lighting-manager-rule-select { display: grid; align-content: center; justify-content: start; gap: 5px; flex: 1 1 auto; min-width: 0; border: 0; padding: 0; text-align: left; background: transparent; }
+.lighting-manager-rule-select strong, .lighting-manager-rule-select small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lighting-manager-rule-select small { font-size: 11px; color: #b6c2c9; }
+.lighting-manager-order-buttons { display: grid; gap: 2px; }
+.lighting-manager-order-buttons button { padding: 1px 5px; min-height: 22px; border: 0; background: transparent; font-size: 12px; }
+.lighting-manager button.lighting-manager-default-rule { display: flex; justify-content: flex-start; text-align: left; gap: 12px; margin-top: auto; padding: 12px; background: #292f32; }
+.lighting-manager-default-rule > span { display: grid; gap: 4px; }
+.lighting-manager-default-rule small { color: #b5bec4; font-size: 11px; }
+.lighting-manager button.lighting-manager-default-rule.is-selected { border-color: var(--lm-accent); background: #153e47; }
+.lighting-manager-rule-editor { display: flex; flex-direction: column; gap: 12px; }
+.lighting-manager-rule-editor > .lighting-manager-card-heading { padding-bottom: 10px; border-bottom: 1px solid #474f54; }
+.lighting-manager-rule-editor .lighting-manager-field { margin: 0; }
+.lighting-manager-target-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 12px; }
+.lighting-manager-target-fields label { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; }
+.lighting-manager-target-fields label > span { white-space: nowrap; color: #c4ccd1; }
+.lighting-manager-scope-note { color: #bac4ca; font-size: 12px; }
+.lighting-manager-scope-note strong { color: #f2c273; font-weight: 600; }
+.lighting-manager-policy-fields { display: grid; grid-template-columns: 1.15fr 1fr 1fr 1.1fr; gap: 9px; }
+.lighting-manager-policy-fields label { min-width: 0; display: grid; gap: 5px; }
+.lighting-manager-policy-fields label > span { font-size: 11px; color: #b6c1c8; }
+.lighting-manager-policy-fields select { font-size: 12px; padding-inline: 5px; }
+.lighting-manager-node-heading { flex-wrap: wrap; }
+.lighting-manager-add-parts { display: flex; gap: 5px; flex-wrap: wrap; }
+.lighting-manager-add-parts button { font-size: 11px; min-height: 26px; padding: 3px 7px; }
+.lighting-manager-node-rules { border-top: 1px solid #465057; }
+.lighting-manager-node-rule { display: grid; gap: 10px; padding: 12px 0; border-bottom: 1px solid #465057; }
+.lighting-manager-node-rule-heading { display: flex; align-items: center; gap: 8px; }
+.lighting-manager-node-rule-heading strong { font-size: 13px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.lighting-manager-node-rule-heading > span { display: flex; gap: 3px; }
+.lighting-manager-node-rule-heading button { min-height: 23px; padding: 2px 6px; background: transparent; border-color: transparent; }
+.lighting-manager-node-rules > .lighting-manager-note { padding-top: 10px; }
+.lighting-manager-rule-impact { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid #465057; padding-top: 12px; margin-top: auto; }
+.lighting-manager-rule-impact p { margin-top: 5px; color: #bbc4ca; font-size: 11px; }
+.lighting-manager-rule-impact button { padding-inline: 0; border-color: transparent; background: transparent; color: #75dce8; font-size: 12px; white-space: nowrap; }
+.lighting-manager-diagnostics { padding: 0; margin: 0; list-style: none; display: grid; gap: 8px; color: #efc77d; font-size: 12px; }
+.lighting-manager-diagnostics li { display: flex; align-items: flex-start; gap: 8px; overflow-wrap: anywhere; }
+.lighting-manager-diagnostics svg { flex: 0 0 auto; }
+.lighting-manager-object-columns { display: grid; grid-template-columns: 170px minmax(0, 1fr) 232px; gap: 11px; min-height: 470px; }
+.lighting-manager-scopes { display: flex; flex-direction: column; padding: 12px 8px; max-height: 560px; overflow: auto; scrollbar-width: thin; }
+.lighting-manager-scopes h3 { font-size: 15px; margin: 0 6px 10px; }
+.lighting-manager-scopes button { width: 100%; min-width: 0; justify-content: flex-start; gap: 8px; padding: 8px; border: 0; min-height: 35px; background: transparent; font-size: 12px; }
+.lighting-manager-scopes button > svg { flex: 0 0 auto; }
+.lighting-manager-scopes button > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.lighting-manager-scopes button > b { flex: 0 0 auto; color: #c2cbd0; font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.lighting-manager-scopes button[aria-pressed="true"] { background: #145363; color: #c9faff; }
+.lighting-manager-scopes details { margin-top: 10px; border-top: 1px solid #454d52; }
+.lighting-manager-scopes summary { font-size: 11px; color: #afbfc8; padding: 9px 6px 4px; }
+.lighting-manager-scope-shortcuts { border-top: 1px solid #454d52; margin-top: auto; padding-top: 10px; }
+.lighting-manager-object-table { display: flex; flex-direction: column; padding: 10px; min-height: 470px; }
+.lighting-manager-object-filters { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+.lighting-manager-object-filters > select { width: auto; flex: 0 1 91px; font-size: 11px; padding-inline: 4px; }
+.lighting-manager-search { display: flex; align-items: center; gap: 6px; min-width: 130px; flex: 1 1 150px; padding-left: 7px; background: #202528; border: 1px solid #555e63; border-radius: 3px; }
+.lighting-manager-search input:not([type="checkbox"]) { border: 0; background: transparent; padding-left: 0; }
+.lighting-manager-search > svg { flex: 0 0 auto; }
+.lighting-manager-inline-check { display: flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
+.lighting-manager-table-scroll { flex: 1 1 auto; min-width: 0; overflow: auto; max-height: 470px; scrollbar-width: thin; }
+.lighting-manager-table { width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; }
+.lighting-manager-table th { position: sticky; top: 0; z-index: 1; padding: 8px 7px; background: #30373b; color: #dce2e6; font-weight: 500; white-space: nowrap; border-bottom: 1px solid #4a555c; }
+.lighting-manager-table td { padding: 9px 6px; border-bottom: 1px solid #3b454b; color: #ccd6dd; vertical-align: middle; }
+.lighting-manager-object-table .lighting-manager-table td:nth-child(4) { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lighting-manager-table th:first-child, .lighting-manager-table td:first-child { width: 29px; text-align: center; }
+.lighting-manager-table tr.is-selected { background: #12424e; }
+.lighting-manager-table tr.is-entity { background-color: #282f33; }
+.lighting-manager-table tr.is-entity.is-selected { background-color: #174c58; }
+.lighting-manager-table tr:hover { background-color: #303c43; }
+.lighting-manager-table .lighting-manager-badge { font-size: 11px; }
+.lighting-manager-object-name { display: flex; align-items: center; gap: 6px; min-width: 130px; }
+.lighting-manager-object-name > span:nth-last-child(1) { min-width: 0; }
+.lighting-manager-object-name strong { display: block; max-width: 155px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: #e4ecef; }
+.lighting-manager-object-name small { display: block; max-width: 155px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: #9fadb6; margin-top: 2px; }
+.lighting-manager-object-name > span:last-child > svg { color: #f1c25a; flex: 0 0 auto; }
+.lighting-manager button.lighting-manager-expand { flex: 0 0 17px; min-height: 20px; padding: 0; border: 0; background: transparent; }
+.lighting-manager-expand[aria-expanded="true"] svg { transform: rotate(90deg); }
+.lighting-manager-tree-indent { flex: 0 0 17px; }
+.lighting-manager-table tr.is-node .lighting-manager-tree-indent { border-inline-start: 1px solid #6a7982; border-bottom: 1px solid #6a7982; height: 10px; flex-basis: 10px; margin-left: 7px; margin-top: -5px; }
+.lighting-manager-pagination { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 9px; flex-wrap: wrap; color: #b7c3cb; font-size: 11px; }
+.lighting-manager-pagination > div { display: flex; gap: 5px; align-items: center; }
+.lighting-manager-pagination button { min-height: 25px; padding: 1px 6px; }
+.lighting-manager-pagination select { width: 84px; min-height: 25px; height: 26px; padding: 2px 3px; font-size: 10px; }
+.lighting-manager-bulk { display: flex; flex-direction: column; gap: 14px; padding: 14px; }
+.lighting-manager-bulk h3 { margin: 0; }
+.lighting-manager-selected-count { color: #96dbe5; font-size: 12px; }
+.lighting-manager-bulk-field { display: grid; grid-template-columns: 72px minmax(0, 1fr); align-items: center; gap: 7px; font-size: 12px; }
+.lighting-manager-bulk-field select { font-size: 11px; padding-inline: 4px; }
+.lighting-manager-bulk-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; padding-top: 10px; border-top: 1px solid #47535b; }
+.lighting-manager-bulk-actions button { font-size: 11px; padding-inline: 5px; }
+.lighting-manager-selected-source { padding-top: 11px; border-top: 1px solid #47535b; font-size: 11px; color: #b7c8d2; overflow-wrap: anywhere; }
+.lighting-manager-selected-source strong { color: #d3dee4; font-size: 12px; }
+.lighting-manager-selected-source p { margin-top: 5px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.lighting-manager-selected-source dl { margin: 8px 0 0; display: grid; gap: 4px; }
+.lighting-manager-selected-source dl > div { display: flex; justify-content: space-between; gap: 8px; }
+.lighting-manager-selected-source dt { color: #a7b7c2; }
+.lighting-manager-selected-source dd { margin: 0; text-align: right; color: #d4e0e7; }
+.lighting-manager button.lighting-manager-focus-button { border-color: var(--lm-accent); color: #8cebf3; background: #133a43; margin-top: auto; }
+.lighting-manager-resources { display: grid; gap: 13px; }
+.lighting-manager-job { display: grid; gap: 13px; }
+.lighting-manager-job progress { width: 100%; height: 8px; accent-color: var(--lm-accent); }
+.lighting-manager-job > button { justify-self: start; }
+.lighting-manager-resource-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 20px; margin: 14px 0; }
+.lighting-manager-resource-summary > div { display: flex; flex-direction: column; gap: 3px; }
+.lighting-manager-resource-summary dt { color: #aebdc6; font-size: 11px; }
+.lighting-manager-resource-summary dd { margin: 0; color: #e0e9ee; font-size: 14px; font-variant-numeric: tabular-nums; }
+.lighting-manager-asset-scroll { max-height: 280px; overflow: auto; margin: 11px 0; scrollbar-width: thin; }
+.lighting-manager-asset-scroll .lighting-manager-table th:first-child, .lighting-manager-asset-scroll .lighting-manager-table td:first-child { width: auto; text-align: left; }
+.lighting-manager-resource-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 10px; border-top: 1px solid #46525a; }
+.lighting-manager-resource-actions button { flex: 0 0 auto; }
+.lighting-manager-footer { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 19px; border-top: 1px solid #4a5359; background: #242b2f; }
+.lighting-manager-footer-status { display: flex; align-items: center; gap: 9px; min-width: 0; color: #61e2c4; font-size: 12px; }
+.lighting-manager-footer-status > svg { flex: 0 0 auto; }
+.lighting-manager-footer-status > span { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.lighting-manager-footer-status small { color: #aebec7; font-size: 10px; }
+.lighting-manager-footer-status.is-warning { color: #f5c268; }
+.lighting-manager-footer-actions { display: flex; flex: 0 0 auto; gap: 9px; }
+.lighting-manager-footer-actions button { min-width: 95px; min-height: 34px; }
+.lighting-manager-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; width: 100%; color: #f4d096; }
+.lighting-manager-confirm > span { flex: 1 1 380px; }
+.lighting-manager-summary { padding: 8px 10px 12px; }
+.lighting-manager-summary > .collapsible-fieldset-content { gap: 10px; }
+.lighting-manager-summary dl { display: grid; gap: 7px; margin: 4px 0; }
+.lighting-manager-summary dl > div { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 12px; }
+.lighting-manager-summary dt { color: #aeb9bf; }
+.lighting-manager-summary dd { margin: 0; color: #dce4e8; }
+.lighting-manager-summary p { margin: 0; color: #aebbc4; font-size: 11px; overflow-wrap: anywhere; }
+.lighting-manager-summary .lighting-manager-open-button { width: 100%; min-height: 33px; border-radius: 3px; cursor: pointer; }
+.lighting-manager-summary-counts { display: flex; flex-wrap: wrap; gap: 7px 12px; }
+@media (min-width: 1060px) and (min-height: 850px) {
+  .lighting-manager-metrics { padding-block: 12px; margin-bottom: 12px; }
+  .lighting-manager-overview-settings { gap: 10px; max-height: 530px; overflow-y: auto; padding-right: 4px; scrollbar-width: thin; }
+  .lighting-manager-overview-settings .lighting-manager-card { padding: 12px 15px; }
+  .lighting-manager-overview-settings .lighting-manager-card h3 { margin-bottom: 8px; }
+  .lighting-manager-overview-settings .lighting-manager-field { margin-block: 5px; }
+  .lighting-manager-overview-settings input:not([type="checkbox"]), .lighting-manager-overview-settings select { height: 30px; }
+  .lighting-manager-overview-settings .lighting-manager-toggle { min-height: 27px; margin-block: 3px; }
+  .lighting-manager-overview-settings .lighting-manager-advanced { margin-top: 8px; padding-top: 0; }
+  .lighting-manager-overview-settings .lighting-manager-advanced summary { padding-block: 6px; }
+  .lighting-manager-preview-card { height: 530px; min-height: 420px; align-self: start; }
+  .lighting-manager-preview { min-height: 270px; }
+  .lighting-manager-rule-columns { height: min(580px, calc(100dvh - 380px)); }
+  .lighting-manager-rule-list { min-height: 0; max-height: 100%; overflow: hidden; }
+  .lighting-manager-rule-list ol { flex: 1 1 auto; min-height: 0; max-height: none; }
+  .lighting-manager-rule-list .lighting-manager-default-rule { flex: 0 0 auto; }
+  .lighting-manager-rule-editor { min-height: 0; height: 100%; overflow: auto; gap: 7px; padding: 12px 14px; scrollbar-width: thin; }
+  .lighting-manager-rule-editor > * { flex-shrink: 0; }
+  .lighting-manager-rule-editor > .lighting-manager-card-heading { padding-bottom: 8px; }
+  .lighting-manager-rule-editor input:not([type="checkbox"]), .lighting-manager-rule-editor select { height: 30px; }
+  .lighting-manager-rule-editor .lighting-manager-policy-fields label { gap: 4px; }
+  .lighting-manager-rule-editor .lighting-manager-node-rule { gap: 7px; padding-block: 8px; }
+  .lighting-manager-rule-editor .lighting-manager-rule-impact {
+    position: sticky; bottom: -12px; z-index: 2; min-height: 58px;
+    margin: 3px -14px -12px; padding: 10px 14px; background: #25292b;
+    box-shadow: 0 -5px 8px #25292bed;
+  }
+}
+@media (max-width: 1050px) {
+  .lighting-manager { width: calc(100vw - 24px); height: calc(100dvh - 24px); }
+  .lighting-manager-overview { grid-template-columns: minmax(290px, .9fr) minmax(320px, 1fr); }
+  .lighting-manager-object-columns { grid-template-columns: 160px minmax(0, 1fr); }
+  .lighting-manager-bulk { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .lighting-manager-bulk > h3, .lighting-manager-bulk > .lighting-manager-selected-count, .lighting-manager-bulk > .lighting-manager-note, .lighting-manager-bulk > .lighting-manager-warning { grid-column: 1 / -1; }
+  .lighting-manager-bulk .lighting-manager-focus-button { margin-top: 0; }
+  .lighting-manager-rule-columns { grid-template-columns: minmax(230px, .7fr) minmax(350px, 1fr); }
+  .lighting-manager-add-parts { width: 100%; }
+}
+@media (max-width: 760px) {
+  .lighting-manager { width: calc(100vw - 12px); height: calc(100dvh - 12px); border-radius: 4px; }
+  .lighting-manager-header { padding: 12px; gap: 10px; }
+  .lighting-manager h2 { font-size: 18px; }
+  .lighting-manager-tabs { margin-inline: 9px; }
+  .lighting-manager-tabs button { flex-basis: 132px; padding-inline: 11px; font-size: 12px; }
+  .lighting-manager-content { padding: 11px 9px; }
+  .lighting-manager-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 0; padding: 12px 5px; }
+  .lighting-manager-metrics > div { justify-content: flex-start; padding-left: 18px; gap: 10px; }
+  .lighting-manager-metrics > div:nth-child(3) { border-inline-start: 0; }
+  .lighting-manager-metrics strong { font-size: 23px; }
+  .lighting-manager-overview, .lighting-manager-rule-columns, .lighting-manager-object-columns { grid-template-columns: minmax(0, 1fr); }
+  .lighting-manager-preview-card { min-height: 390px; }
+  .lighting-manager-rule-list { min-height: 0; }
+  .lighting-manager-rule-list ol, .lighting-manager-scopes { max-height: 230px; }
+  .lighting-manager-default-rule { margin-top: 8px !important; }
+  .lighting-manager-target-fields { grid-template-columns: minmax(0, 1fr); }
+  .lighting-manager-policy-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lighting-manager-resource-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lighting-manager-footer { align-items: stretch; flex-direction: column; gap: 9px; padding: 10px; }
+  .lighting-manager-footer-actions { justify-content: flex-end; flex-wrap: wrap; }
+  .lighting-manager-footer-actions button { flex: 1; min-width: 88px; }
+  .lighting-manager-bulk { grid-template-columns: minmax(0, 1fr); }
+  .lighting-manager-bulk > * { grid-column: 1 !important; }
+}

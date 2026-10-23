@@ -1,9 +1,9 @@
 import type { Scene } from '@babylonjs/core';
-import { Quaternion, TransformNode, Vector3 } from '@babylonjs/core';
+import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   clampNumber,
   filterTopLevelMotionNodes,
-  findModelNodesByName,
   getHorizontalModelAxis,  getModelAxis,
   getModelTransformNodes,
   getNodesProjectedBounds,
@@ -64,6 +64,11 @@ type LiftMotionObservation = {
  * 目标层不在绑定表内则不响应不移动（一次性 Console 提示）。货箱全程只平移不旋转。
  */
 export class LiftTelemetryDriver {
+  /** 只读暴露实际驱动解析的运动节点，光照分类不另建名称猜测规则。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
+    return { moving: this.findLiftDeckNodes(model), fixed: [] };
+  }
+
   private readonly motionObservations = new WeakMap<ModelRuntimeEntry, LiftMotionObservation>();
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
@@ -653,7 +658,7 @@ export class LiftTelemetryDriver {
 
   /** 解析 travelAxis 声明值：字符串轴向取模型水平轴（负号反向），数组按模型局部向量变换到世界后取水平投影。 */
   private parseLiftTravelAxisValue(model: ModelRuntimeEntry, value: unknown): Vector3 | null {
-    let local: Vector3 | null = null;
+    let local: Vector3 | null;
     if (typeof value === 'string') {
       const normalized = value.trim().toLowerCase();
       const negative = normalized.startsWith('-');

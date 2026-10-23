@@ -1,4 +1,7 @@
-import { type BaseTexture, type Material, PBRMaterial, SerializationHelper, StandardMaterial } from '@babylonjs/core';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { SerializationHelper } from '@babylonjs/core/Misc/decorators.serialization.js';
+import type { BaseTexture, Material } from '@babylonjs/core';
 import { cloneMaterialWithSharedTexturePixels } from './cloneMaterialWithSharedTexturePixels.ts';
 import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard.ts';
 

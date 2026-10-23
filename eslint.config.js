@@ -1,6 +1,6 @@
 // @ts-check
-// 渐进式 ESLint 配置：先用非类型感知规则（快，适配 9000+ 行的大文件），
-// 只对确定性的正确性问题报 error，其余先保持 warn，后续再逐步收紧。
+// 使用非类型感知规则保持检查速度，正确性与导入边界规则作为硬门禁。
+// 其余质量告警持续保留，不能通过忽略源码或降低规则隐藏问题。
 import js from '@eslint/js';
 import globals from 'globals';
 import reactHooks from 'eslint-plugin-react-hooks';
@@ -32,12 +32,31 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ['src/**/*.{ts,tsx,js}'],
+    files: ['src/**/*.{ts,tsx,js}', 'electron/**/*.{ts,cts,js}'],
     languageOptions: { globals: { ...globals.browser } },
     plugins: { 'react-hooks': reactHooks },
     rules: {
       'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
+      'react-hooks/exhaustive-deps': 'error',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@babylonjs/core',
+              allowTypeImports: true,
+              message:
+                '禁止从 @babylonjs/core 根入口导入运行时值；请使用精确的 @babylonjs/core/.../*.js 子路径或 import type。',
+            },
+            {
+              name: '@babylonjs/loaders',
+              allowTypeImports: true,
+              message:
+                '禁止从 @babylonjs/loaders 根入口导入；请使用 babylonGltfLoader.js 或具体子路径。',
+            },
+          ],
+        },
+      ],
     },
   },
   {
@@ -63,15 +82,15 @@ export default tseslint.config(
       'no-case-declarations': 'warn',
       'prefer-const': 'warn',
       // ESLint 10 新增的风格类推荐规则：存量代码较多，先告警后治理。
-      'preserve-caught-error': 'warn',
-      'no-useless-assignment': 'warn',
+      'preserve-caught-error': 'error',
+      'no-useless-assignment': 'error',
       '@typescript-eslint/no-unused-expressions': [
         'warn',
         { allowShortCircuit: true, allowTernary: true },
       ],
       'no-extra-boolean-cast': 'warn',
-      // 已人工核实：skyboxTextureLoad 的 finally-throw 用于保留原始错误；cadUnits 的秒差距常量精度损失可接受。
-      'no-unsafe-finally': 'warn',
+      // 取消失败显式保留原错误；常量使用与原IEEE754值严格相等的表示。
+      'no-unsafe-finally': 'error',
       'no-loss-of-precision': 'warn',
     },
   },

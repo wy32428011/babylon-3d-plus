@@ -4,7 +4,7 @@ import type { Vector3Data } from './math';
 import type { SceneDocument } from './SceneDocument';
 
 /** 按 Hierarchy 顺序查找全场唯一的手动漫游出生点。 */
-export function findManualRoamSpawnEntity(scene: SceneDocument): Entity | null {
+export function findManualRoamSpawnEntity(scene: Pick<SceneDocument, 'entityIds' | 'entities'>): Entity | null {
   for (const entityId of scene.entityIds) {
     const entity = scene.entities[entityId];
     if (entity?.components.manualRoamSpawn) return entity;
@@ -13,7 +13,7 @@ export function findManualRoamSpawnEntity(scene: SceneDocument): Entity | null {
 }
 
 /** 场景中是否已摆放手动漫游 POI；未摆放时运行预览和 Viewer 不开放漫游功能。 */
-export function hasManualRoamSpawnEntity(scene: SceneDocument): boolean {
+export function hasManualRoamSpawnEntity(scene: Pick<SceneDocument, 'entityIds' | 'entities'>): boolean {
   return findManualRoamSpawnEntity(scene) !== null;
 }
 

@@ -1,7 +1,12 @@
-import {
-  AbstractMesh, AssetContainer, Camera, Light, Material, Mesh, MultiMaterial, TransformNode,
-  type Animation, type Node,
-} from '@babylonjs/core';
+import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Light } from '@babylonjs/core/Lights/light.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Animation, Node } from '@babylonjs/core';
 import { cloneMaterialWithSharedTexturePixels } from './cloneMaterialWithSharedTexturePixels.ts';
 
 type ModelAnimationPlayback = { started: boolean; playing: boolean; loop: boolean; speed: number; from: number; to: number; additive: boolean };

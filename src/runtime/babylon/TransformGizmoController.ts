@@ -1,21 +1,12 @@
-import {
-  AbstractMesh,
-  GizmoManager,
-  GizmoCoordinatesMode,
-  Matrix,
-  Node,
-  Quaternion,
-  Scene,
-  TransformNode,
-  UtilityLayerRenderer,
-  Vector3,
-  type DragEvent,
-  type DragStartEndEvent,
-  type IPositionGizmo,
-  type IRotationGizmo,
-  type IScaleGizmo,
-  type Observable,
-} from '@babylonjs/core';
+import { GizmoCoordinatesMode } from '@babylonjs/core/Gizmos/gizmo.js';
+import { GizmoManager } from '@babylonjs/core/Gizmos/gizmoManager.js';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Node } from '@babylonjs/core/node.js';
+import { UtilityLayerRenderer } from '@babylonjs/core/Rendering/utilityLayerRenderer.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { DragEvent, DragStartEndEvent, IPositionGizmo, IRotationGizmo, IScaleGizmo, Observable } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
 import {
   normalizeSkyboxSphereScale,
@@ -28,6 +19,7 @@ import {
   MODEL_ARRAY_MIN_SPAN_METERS,
 } from '../../editor/model/modelArray';
 import type { TransformSnapSettings, TransformSpace, TransformTool } from '../../editor/store/editorStore';
+import { TransformDragPreviewRateLimiter } from './TransformDragPreviewRateLimiter';
 
 export type TransformGizmoAxis = 'x' | 'y' | 'z';
 
@@ -45,6 +37,12 @@ export type EntityArrayDragUpdate = EntityArrayDragContext & {
 };
 
 type DragCallbacks = {
+  /** 开始独立预览会话；必须同时保护运行时节点免受文档重同步覆盖。 */
+  beginTransformDrag?: (entityId: string, before: TransformComponent) => boolean;
+  cancelTransformDrag?: (entityId: string, before: TransformComponent) => void;
+  isTransformDragValid?: (entityId: string) => boolean;
+  /** 每个指针事件同步运行时保护快照，避免 Inspector 限频窗口里的末帧被重同步覆盖。 */
+  previewRuntimeTransform?: (entityId: string, transform: TransformComponent) => void;
   previewTransform: (entityId: string, transform: TransformComponent) => void;
   commitTransform: (entityId: string, before: TransformComponent, after: TransformComponent) => void;
   previewSubTransform?: (entityId: string, subTargetId: string, transform: TransformComponent) => void;
@@ -118,9 +116,10 @@ const LOCAL_AXIS_VECTORS: Record<TransformGizmoAxis, Vector3> = {
 };
 
 function transformFromTarget(target: GizmoTarget): TransformComponent {
+  const rotation = target.rotationQuaternion?.toEulerAngles() ?? target.rotation;
   return {
     position: { x: target.position.x, y: target.position.y, z: target.position.z },
-    rotation: { x: target.rotation.x, y: target.rotation.y, z: target.rotation.z },
+    rotation: { x: rotation.x, y: rotation.y, z: rotation.z },
     scale: { x: target.scaling.x, y: target.scaling.y, z: target.scaling.z },
   };
 }
@@ -198,6 +197,9 @@ export class TransformGizmoController {
   private attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
   private dragStartTransform: TransformComponent | null = null;
   private activeTransformDrag = false;
+  private isolatedTransformDrag = false;
+  private dragParent: Node | null = null;
+  private readonly transformPreviewRateLimiter = new TransformDragPreviewRateLimiter();
   private activeGroupTool: 'translate' | 'rotate' | null = null;
   private activeGroupTranslationAxes: ReadonlySet<TransformGizmoAxis> | null = null;
   private entityArrayDragSession: EntityArrayDragSession | null = null;
@@ -441,6 +443,7 @@ export class TransformGizmoController {
   /** 记录拖拽开始时的 Transform 快照，后续 Undo/Redo 使用这一份 before。 */
   beginDragSnapshot(translationAxes?: readonly TransformGizmoAxis[]): void {
     if (!this.attachedTarget) return;
+    if (this.activeTransformDrag) this.cancelActiveTransformDrag();
     this.activeGroupTool = null;
     this.activeGroupTranslationAxes = null;
     if (this.attachedGroupId) {
@@ -462,11 +465,26 @@ export class TransformGizmoController {
     this.blockCanvasSelectionBriefly();
     this.dragStartTransform = this.readFiniteTransform(this.attachedTarget);
     this.activeTransformDrag = this.dragStartTransform !== null;
+    this.dragParent = this.attachedTarget.parent;
+    this.isolatedTransformDrag = false;
+    this.transformPreviewRateLimiter.reset();
+    if (this.activeTransformDrag && this.dragStartTransform && this.attachedEntityId
+      && !this.attachedSubTargetId && !this.attachedEnvironment && this.callbacks.beginTransformDrag) {
+      this.isolatedTransformDrag = this.callbacks.beginTransformDrag(this.attachedEntityId, this.dragStartTransform);
+      if (!this.isolatedTransformDrag) {
+        this.activeTransformDrag = false;
+        this.releaseAllGizmoDrags();
+      }
+    }
   }
 
   /** 拖拽过程中预览 Transform，但不写入命令历史。 */
   previewAttachedTransform(): void {
     if (!this.activeTransformDrag || !this.attachedTarget || !this.dragStartTransform) return;
+    if (!this.isActiveTransformTargetValid()) {
+      this.cancelActiveTransformDrag();
+      return;
+    }
 
     const transform = this.readFiniteTransform(this.attachedTarget);
     if (!transform) return;
@@ -506,14 +524,23 @@ export class TransformGizmoController {
     if (this.attachedEntityId && this.attachedSubTargetId) {
       this.callbacks.previewSubTransform?.(this.attachedEntityId, this.attachedSubTargetId, transform);
     } else if (this.attachedEntityId) {
-      this.callbacks.previewTransform(this.attachedEntityId, transform);
+      if (this.isolatedTransformDrag) this.callbacks.previewRuntimeTransform?.(this.attachedEntityId, transform);
+      if (!this.isolatedTransformDrag || this.transformPreviewRateLimiter.shouldPublish()) {
+        this.callbacks.previewTransform(this.attachedEntityId, transform);
+      }
     }
   }
 
   /** 拖拽结束时提交一条完整 Transform 命令。 */
   commitActiveDrag(): void {
     if (this.entityArrayDragSession || !this.activeTransformDrag) return;
+    if (!this.isActiveTransformTargetValid() || !this.attachedTarget
+      || !this.readFiniteTransform(this.attachedTarget)) {
+      this.cancelActiveTransformDrag();
+      return;
+    }
     this.activeTransformDrag = false;
+    this.isolatedTransformDrag = false;
     const activeGroupTool = this.activeGroupTool;
     const activeGroupTranslationAxes = this.activeGroupTranslationAxes;
     this.activeGroupTool = null;
@@ -753,10 +780,27 @@ export class TransformGizmoController {
     const environmentAttached = this.attachedEnvironment;
     const activeGroupTool = this.activeGroupTool;
     const before = this.dragStartTransform;
+    const isolatedTransformDrag = this.isolatedTransformDrag;
     this.activeTransformDrag = false;
+    this.isolatedTransformDrag = false;
     this.activeGroupTool = null;
     this.activeGroupTranslationAxes = null;
     this.releaseAllGizmoDrags();
+
+    // 文档可能已经删掉目标或切到新场景，独立预览仍必须结束，不能依赖节点继续存活。
+    if (isolatedTransformDrag) {
+      if (target && !target.isDisposed() && before && target.parent === this.dragParent) {
+        target.position.copyFromFloats(before.position.x, before.position.y, before.position.z);
+        target.rotationQuaternion = null;
+        target.rotation.copyFromFloats(before.rotation.x, before.rotation.y, before.rotation.z);
+        target.scaling.copyFromFloats(before.scale.x, before.scale.y, before.scale.z);
+        target.computeWorldMatrix(true);
+      }
+      if (entityId && before) this.callbacks.cancelTransformDrag?.(entityId, before);
+      this.dragStartTransform = target && !target.isDisposed() ? this.readFiniteTransform(target) : null;
+      this.blockCanvasSelectionBriefly();
+      return;
+    }
 
     if (!target || target.isDisposed() || !before) return;
     target.position.copyFromFloats(before.position.x, before.position.y, before.position.z);
@@ -776,6 +820,13 @@ export class TransformGizmoController {
     }
     this.dragStartTransform = this.readFiniteTransform(target);
     this.blockCanvasSelectionBriefly();
+  }
+
+  private isActiveTransformTargetValid(): boolean {
+    const target = this.attachedTarget;
+    if (!target || target.isDisposed() || target.parent !== this.dragParent) return false;
+    return !this.isolatedTransformDrag || !this.attachedEntityId
+      || this.callbacks.isTransformDragValid?.(this.attachedEntityId) !== false;
   }
 
   /** 把群组代理限制在当前轴或平面内，避免 Babylon 非目标轴漂移污染持久化坐标。 */

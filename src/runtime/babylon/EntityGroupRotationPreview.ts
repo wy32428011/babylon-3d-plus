@@ -1,4 +1,4 @@
-import { Matrix, Quaternion, Vector3 } from '@babylonjs/core';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import type { TransformComponent } from '../../editor/model/components';
 
 /** 普通运行时节点或灯光的稳定 Transform 写入目标。 */

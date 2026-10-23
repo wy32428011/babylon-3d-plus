@@ -111,14 +111,14 @@ test('真实Runtime遇到旧类型/缺失节点/非法纹理仅隔离该绑定�
       ] } };
     const savedValues = structuredClone(values);
     const entry = { root, meshes: [mesh], assetHandle: {}, parameterBaseline: new Map(), textureCache: new Map(), parameterSignature: null };
-    assert.doesNotThrow(() => runtime.applyModelAssetParameters(asset, entry));
+    assert.doesNotThrow(() => runtime.parameters.applyModelAssetParameters(asset, entry));
     assert.equal(mesh.isVisible, false);
     assert.equal(mesh.position.x, 0);
     assert.equal(entry.textureCache.size, 0);
     assert.equal(entry.readinessError, undefined);
     assert.deepEqual(values, savedValues);
     assert.equal(logs.filter(message => message.includes('暂时无法执行')).length, 3);
-    runtime.applyModelAssetParameters(asset, entry);
+    runtime.parameters.applyModelAssetParameters(asset, entry);
     assert.equal(logs.length, 3, '相同参数快照不重复刷日志');
   } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
 });

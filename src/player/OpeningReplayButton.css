@@ -1,0 +1,77 @@
+.player-opening-replay {
+  position: absolute;
+  z-index: 9;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: #e2e6eb;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.player-opening-replay-icon {
+  display: block;
+  opacity: 0.28;
+  transition: opacity 140ms ease;
+  pointer-events: none;
+}
+
+.player-opening-replay:hover:not(:disabled) .player-opening-replay-icon,
+.player-opening-replay:focus-visible .player-opening-replay-icon {
+  opacity: 0.9;
+}
+
+.player-opening-replay:focus-visible {
+  outline: 1px solid rgb(226 230 235 / 70%);
+  outline-offset: 2px;
+}
+
+.player-opening-replay:disabled {
+  cursor: default;
+}
+
+.player-opening-replay-tooltip {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  padding: 5px 8px;
+  border-radius: 4px;
+  color: #f5f7fa;
+  background: rgb(12 16 22 / 92%);
+  font: 12px/1.5 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 140ms ease, visibility 140ms ease;
+}
+
+.player-opening-replay:hover:not(:disabled) .player-opening-replay-tooltip,
+.player-opening-replay:focus-visible .player-opening-replay-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+@media (max-width: 520px) {
+  .player-opening-replay {
+    top: 8px;
+    right: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player-opening-replay-icon,
+  .player-opening-replay-tooltip {
+    transition: none;
+  }
+}

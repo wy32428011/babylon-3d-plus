@@ -19,9 +19,9 @@ import {
   getAutoPatrolWaypointWorldPose,
   getSceneCameraPosition,
   sanitizeAutoPatrolComponent as sanitizeLegacyAutoPatrolComponent,
-} from './autoPatrol.js';
+} from './autoPatrol.ts';
 
-export * from './autoPatrol.js';
+export * from './autoPatrol.ts';
 
 export const AUTO_PATROL_EYE_HEIGHT_METERS = 1.7;
 export const AUTO_PATROL_DEFAULT_SPEED_METERS_PER_SECOND = 1;

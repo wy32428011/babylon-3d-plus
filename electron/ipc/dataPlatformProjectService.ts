@@ -1,3 +1,5 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { recoverSceneCompositions } from './compositionSceneRecovery.js';
 import { validateSceneModelResourceReferences } from './sceneModelResourceValidation.js';
 import { includeSceneModelPackageVariants } from './sceneModelPackageVariants.js';
@@ -32,7 +34,7 @@ import { relocateDataPlatformScene } from './dataPlatformSceneRelocation.js';
 import { cancelDataPlatformModelSync } from './dataPlatformModelIncrementalSync.js';
 import { cancelDataPlatformEnvironmentSync } from './dataPlatformEnvironmentSync.js';
 import { disposeEnvironmentFileValidation } from './environmentFileValidation.js';
-import { encodeAssetUrl, authorizeAssetRoot, authorizeAssetFile, isAuthorizedAssetFile, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
+import { authorizeAssetRoot, authorizeAssetFile, isAuthorizedAssetFile, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import {
   activateProjectRoot,
   ensureProjectDirectories,
@@ -114,7 +116,7 @@ const PROJECT_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 const DATA_PLATFORM_WORKSPACE_DIRECTORY = 'data-platform-workspace';
 const TEST_STORAGE_ROOT_ENV = 'ZENDING_EDITOR_STORAGE_ROOT';
 const TEST_STORAGE_OVERRIDE_GUARD_ENV = 'ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE';
-const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
+
 const DIGITAL_TWIN_SOURCE_MANIFEST_PATH = '.babylon-editor/digital-twin-source-manifest.json';
 const MAX_PROJECT_SCENE_FILES = 1_000;
 const MAX_CONCURRENT_SCENE_MODEL_RESOURCES = 4;
@@ -354,7 +356,7 @@ export async function prepareLocalSceneResources(
       throw new Error('场景模型更新内容不能为空。');
     }
     const parsed = JSON.parse(request.sceneContent) as { version?: number; scene?: { sceneSettings?: { environment?: { dataPlatformSourceKey?: string } } } };
-    if (![1, 2, 3, 4, 5].includes(parsed.version ?? 0) || !parsed.scene) throw new Error('场景模型更新格式无效。');
+    if (!isSupportedSceneFileVersion(parsed?.version) || !parsed.scene) throw new Error('场景模型更新格式无效。');
     const current = expectedBinding;
     if (!current && !explicit) throw new Error('当前数据中台项目会话已关闭，请重新打开项目。');
     // 本地文件以当前配置来源为准，不能被上次打开工程残留的旧绑定地址带回旧中台。
@@ -484,7 +486,7 @@ export async function prepareLocalSceneResources(
                   .filter(asset => asset.dataPlatformSourceKey === sourceKey && asset.dataPlatformResourceId === resolvedItem.resourceId)
                   .map(asset => ({ kind: resolvedItem.kind, resourceId: resolvedItem.resourceId,
                     name: asset.displayName ?? '', fileName: path.basename(asset.path) })));
-                if (confirmed.resourceId !== resolvedItem.resourceId) throw new Error('当前模型详情与目录匹配结果不一致，请重新同步。');
+                if (confirmed.resourceId !== resolvedItem.resourceId) throw new Error('当前模型详情与目录匹配结果不一致，请重新同步。', { cause: error });
               }
             }
             const replacements = matchSceneModelUpdates([resolvedItem], await includeSceneModelPackageVariants(resolvedItem, assets, controller.signal));
@@ -1171,7 +1173,7 @@ export async function ensureWritableEditorRoot(editorRoot: string): Promise<void
     stat = await fs.stat(editorRoot);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`数据中台工作目录无法创建或访问：${editorRoot}（${message}）`);
+    throw new Error(`数据中台工作目录无法创建或访问：${editorRoot}（${message}）`, { cause: error });
   }
   if (!stat.isDirectory()) throw new Error(`数据中台工作路径不是目录：${editorRoot}`);
   await assertWorkspaceRealPathOutsideInstallation(editorRoot);
@@ -1185,7 +1187,7 @@ export async function ensureWritableEditorRoot(editorRoot: string): Promise<void
     await handle.sync();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`数据中台工作目录不可写：${editorRoot}。请检查当前用户对该目录的读写权限后重试。（${message}）`);
+    throw new Error(`数据中台工作目录不可写：${editorRoot}。请检查当前用户对该目录的读写权限后重试。（${message}）`, { cause: error });
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     await fs.rm(probePath, { force: true }).catch(() => undefined);
@@ -1240,8 +1242,8 @@ async function inspectPackageCandidate(packageRoot: string): Promise<PackageDete
     try {
       const parsed = await readProjectPackageJson(sceneFilePath, '工程包场景');
       const sceneVersion = isPlainObject(parsed) ? parsed.version : null;
-      // 与场景加载器及 SOURCE 发布入口保持一致，避免新工作区把 v4/v5 工程误判为空项目。
-      if (!isPlainObject(parsed) || (sceneVersion !== 1 && sceneVersion !== 2 && sceneVersion !== 3 && sceneVersion !== 4 && sceneVersion !== 5) || !isPlainObject(parsed.scene)) {
+      // 工程包与编辑器、SOURCE 发布入口共用场景版本合同，避免拒绝新保存格式。
+      if (!isPlainObject(parsed) || !isSupportedSceneFileVersion(sceneVersion) || !isPlainObject(parsed.scene)) {
         return { kind: 'incompatible', reason: `工程包中的场景文件不是当前编辑器场景格式：${path.basename(sceneFilePath)}` };
       }
     } catch (error) {
@@ -1574,8 +1576,7 @@ async function safeReadDirectories(root: string): Promise<string[]> {
 }
 
 function sanitizeSceneFileName(value: string, projectId: string): string {
-  let name = value
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  let name = replaceAsciiControlCharacters(value, '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 180);

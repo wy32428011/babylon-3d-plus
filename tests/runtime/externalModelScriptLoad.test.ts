@@ -1,3 +1,5 @@
+import { digestModelScriptText, normalizePrecompiledModelScript, prepareModelScriptCompilation } from '../../electron/shared/modelScriptCompilation.ts';
+import { precompileModelScript } from '../../electron/ipc/modelScriptCompiler.ts';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
@@ -8,7 +10,7 @@ import { ModelInitializationScheduler } from '../../src/runtime/babylon/modelIni
 const source = await readFile(new URL('../../src/runtime/babylon/ExternalModelScriptRuntime.ts', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('ExternalModelScriptRuntime.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const statements = ast.statements.filter(node => !ts.isImportDeclaration(node)
-  && !(ts.isFunctionDeclaration(node) && node.name?.text === 'loadTypeScriptCompiler'));
+  && !(ts.isFunctionDeclaration(node) && ['loadTypeScriptCompiler', 'fetchPrecompiledModelScript'].includes(node.name?.text ?? '')));
 const executable = ts.transpileModule(statements.map(node => node.getText(ast).replace(/^export /, '')).join('\n')
   + '\n({ loadCompiledExternalModelScript, ExternalModelScriptRuntime, diagnostics: typeof getExternalModelScriptLoadDiagnostics === "function" ? getExternalModelScriptLoadDiagnostics : undefined });',
 { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
@@ -20,7 +22,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function fixture() {
+function fixture(precompiled?: unknown) {
   const compilerGate = deferred<typeof ts>();
   const requests: Array<{ url: string; resolve(value: unknown): void; settled: boolean }> = [];
   let compiles = 0;
@@ -31,10 +33,11 @@ function fixture() {
     return ts.transpileModule(...args);
   } };
   const api = runInNewContext(executable, {
-    Map, Set, Error, performance, console, BabylonCore: {}, resolveRuntimeAssetUrl: (url: string) => url,
+    Map, Set, Error, performance, console, fetchPrecompiledModelScript: async () => precompiled, digestModelScriptText, normalizePrecompiledModelScript, prepareModelScriptCompilation,
+    resolveBabylonScriptRuntimeNamespace: async () => ({}), resolveRuntimeAssetUrl: (url: string) => url,
     modelInitializationScheduler: new ModelInitializationScheduler(),
     readUtf8ResponseText: (response: any) => response.text(), loadTypeScriptCompiler: () => compilerGate.promise,
-    fetch: (url: string) => new Promise(resolve => requests.push({ url, resolve, settled: false })),
+    fetch: (url: string) => new Promise(resolve => requests.push({ url, resolve, settled: false })), fetchRuntimeAsset: (url: string) => new Promise(resolve => requests.push({ url, resolve, settled: false })),
   });
   return { ...api, requests, compiles: () => compiles, releaseCompiler: () => compilerGate.resolve(compiler),
     failNextCompile: () => { failNextCompile = true; },
@@ -170,4 +173,41 @@ test('只读诊断区分共享与实际工作，完成和失败均释放在途�
   f.respond('', 500); await failure;
   assert.equal(f.diagnostics().pendingReads, 0);
   assert.equal(f.diagnostics().pendingCompiles, 0);
+});
+
+test('可信资源中的预转译产物跳过 renderer TypeScript compiler，保持独立实例', async () => {
+  const artifact = await precompileModelScript(script);
+  const f = fixture(artifact);
+  const a: any = {}; const b: any = {};
+  const first = new f.ExternalModelScriptRuntime(a, { assetCode: 'A', scriptAssets: [asset] });
+  const second = new f.ExternalModelScriptRuntime(b, { assetCode: 'B', scriptAssets: [asset] });
+  const pending = Promise.all([first.start(), second.start()]);
+  f.respond();
+  await pending;
+  assert.equal(f.compiles(), 0);
+  assert.equal(f.diagnostics().precompiledHits, 1);
+  assert.equal(f.diagnostics().compilerFallbacks, 0);
+  assert.equal(a.script.started, true);
+  assert.notEqual(a.script, b.script);
+  assert.equal(a.script.constructor, b.script.constructor);
+  first.dispose(); second.dispose();
+});
+
+test('过期或损坏 sidecar 回退原 TS，scene inline code 从不进入执行路径', async () => {
+  const artifact = await precompileModelScript(script);
+  const malicious = { ...artifact, code: 'throw new Error("不可信 scene code 被执行");' };
+  malicious.codeSha256 = await digestModelScriptText(malicious.code);
+  for (const sidecar of [undefined, { ...artifact, sourceSha256: 'a'.repeat(64) }, { ...artifact, code: '损坏代码' }]) {
+    const f = fixture(sidecar); f.releaseCompiler();
+    const node: any = {};
+    const runtime = new f.ExternalModelScriptRuntime(node, {
+      assetCode: 'safe', scriptAssets: [{ ...asset, precompiled: malicious }],
+    });
+    const pending = runtime.start(); f.respond(); await pending;
+    assert.equal(runtime.getInitializationError(), null);
+    assert.equal(node.script.started, true);
+    assert.equal(f.compiles(), 1);
+    assert.equal(f.diagnostics().precompiledHits, 0);
+    runtime.dispose();
+  }
 });

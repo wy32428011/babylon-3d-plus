@@ -1,4 +1,7 @@
-import { Constants, RawTexture, type Scene, Texture } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import type { Scene } from '@babylonjs/core';
 import ltcDataUrl from '../../assets/lighting/areaLightsLTC.bin?url&inline';
 
 let decoded: [Uint16Array, Uint16Array] | null = null;

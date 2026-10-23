@@ -1,15 +1,14 @@
-import {
-  Color3,
-  EnvCubeTexture,
-  HDRFiltering,
-  Material,
-  Mesh,
-  MeshBuilder,
-  PBRMaterial,
-  Scene,
-  Texture,
-  Vector3,
-} from '@babylonjs/core';
+import { refreshSceneLightingMaterialDrawCaches } from './refreshDetachedInstanceSourceMaterials.ts';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { EnvCubeTexture } from '@babylonjs/core/Materials/Textures/envCubeTexture.js';
+import { HDRFiltering } from '@babylonjs/core/Materials/Textures/Filtering/hdrFiltering.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { TransformComponent } from '../../editor/model/components';
 import {
   normalizeSkyboxSphereScale,
@@ -23,6 +22,7 @@ import { prepareSkyboxData, type SkyboxDecodeMetrics } from './skyboxDecodedData
 import { PreparedSkyboxTexture } from './PreparedSkyboxTexture';
 import { BilinearHDRCubeTexture, BilinearEXRCubeTexture } from './BilinearSkyboxTexture';
 import { waitForSkyboxPrefilter } from './skyboxPrefilter';
+import { SandboxEnvironmentRuntime, type SandboxEnvironmentOptions } from './SandboxEnvironmentRuntime';
 import type { CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap.js';
 import {
   clearSceneSelectionHighlight,
@@ -59,6 +59,10 @@ type PendingSkybox = {
 
 export type SkyboxReadiness = { phase: 'idle' | 'loading' | 'ready' | 'error'; message: string | null; sourceUrl: string | null };
 
+export type SkyboxLightingOverrides = {
+  visible: boolean; intensity: number; source?: 'scene' | 'sandbox'; rotationDegrees?: number;
+};
+
 const DEFAULT_ENVIRONMENT_INTENSITY = 1;
 const LEGACY_SKYBOX_ENTITY_KEY = '__legacy_scene_skybox';
 const SKYBOX_PLACEHOLDER_COLOR = Color3.FromHexString('#263d4d');
@@ -92,10 +96,18 @@ function getEntityKey(target: SceneSkyboxRuntimeTarget): string {
 
 /** 管理可移动球形 HDR/EXR 天空盒、异步纹理替换和 PBR 环境照明。 */
 export class SceneSkyboxRuntime {
-  private themeOverrides: { visible: boolean; intensity: number } | null = null;
-  setThemeOverrides(value: { visible: boolean; intensity: number } | null): void {
-    this.themeOverrides = value;
-    if (this.active && this.desired) this.applyTarget(this.active, this.desired);
+  private lightingOverrides: SkyboxLightingOverrides | null = null;
+  private readonly sandboxEnvironment: SandboxEnvironmentRuntime;
+  setLightingOverrides(value: SkyboxLightingOverrides | null): void {
+    const sourceChanged = (this.lightingOverrides?.source ?? 'scene') !== (value?.source ?? 'scene');
+    const lightingChanged = this.lightingOverrides?.intensity !== value?.intensity;
+    this.lightingOverrides = value;
+    this.sandboxEnvironment.sync(value?.source === 'sandbox', value?.rotationDegrees ?? 0);
+    // 显示开关和内置纹理异步完成都不能重置昼夜组件当前有效强度。
+    if (this.active && this.desired) this.applyTarget(this.active, this.desired, false);
+    if ((sourceChanged || lightingChanged) && (sourceChanged || value?.source === 'sandbox' || (this.active && this.desired))) {
+      this.applyEnvironment(true);
+    }
   }
 
   private active: ActiveSkybox | null = null;
@@ -115,7 +127,10 @@ export class SceneSkyboxRuntime {
     private readonly scene: Scene,
     private readonly pushLog: (message: string) => void = () => undefined,
     private readonly onReadinessChanged: (state: SkyboxReadiness) => void = () => undefined,
+    environmentOptions: Pick<SandboxEnvironmentOptions, 'loadTexture'> = {},
   ) {
+    this.sandboxEnvironment = new SandboxEnvironmentRuntime(scene, { ...environmentOptions, pushLog: this.pushLog,
+      onChanged: () => { this.applyEnvironment(false); this.onReadinessChanged(this.getReadiness()); } });
     this.selectionHighlightLayer = createSceneSelectionHighlightLayer(
       scene,
       'EditorSkyboxSelectionHighlightLayer',
@@ -172,12 +187,20 @@ export class SceneSkyboxRuntime {
   }
 
   getReadiness(): SkyboxReadiness {
-    if (!this.desired) return { phase: 'idle', message: null, sourceUrl: null };
-    return { phase: this.pending ? 'loading' : this.loadError ? 'error' : this.active?.texture ? 'ready' : 'idle',
-      message: this.loadError, sourceUrl: this.desired.skybox.sourceUrl };
+    const environment = this.sandboxEnvironment.getReadiness();
+    // 内置照明不需要隐藏的天空背景；保留背景诊断，重新显示时再恢复其等待或失败状态。
+    if (this.lightingOverrides?.source === 'sandbox'
+      && (!this.desired?.visible || this.lightingOverrides.visible === false)) return environment;
+    if (environment.phase === 'error') return environment;
+    if (this.loadError && this.desired) return { phase: 'error', message: this.loadError, sourceUrl: this.desired.skybox.sourceUrl };
+    if (environment.phase === 'loading') return environment;
+    if (!this.desired) return environment;
+    return { phase: this.pending ? 'loading' : this.active?.texture ? 'ready' : environment.phase,
+      message: null, sourceUrl: this.desired.skybox.sourceUrl };
   }
 
   retry(): void {
+    this.sandboxEnvironment.retry();
     if (!this.loadError || this.pending || !this.desired) return;
     this.startLoad(this.desired, getEntityKey(this.desired), createSceneSkyboxSignature(this.desired.skybox));
   }
@@ -189,6 +212,8 @@ export class SceneSkyboxRuntime {
   dispose(): void {
     this.desired = null;
     this.cancelPending();
+    if (this.scene.environmentTexture === this.sandboxEnvironment.getTexture()) this.updateEnvironmentTexture(null);
+    this.sandboxEnvironment.dispose();
     this.disposeActive(true);
     this.selectionHighlightLayer.dispose();
   }
@@ -361,33 +386,46 @@ export class SceneSkyboxRuntime {
     if (previousReflection && previousReflection !== reflectionTexture) previousReflection.dispose();
   }
 
-  private applyTarget(active: ActiveSkybox, target: SceneSkyboxRuntimeTarget): void {
+  private applyTarget(active: ActiveSkybox, target: SceneSkyboxRuntimeTarget, updateEnvironment = true): void {
     const transform = target.transform;
     active.mesh.position = new Vector3(transform.position.x, transform.position.y, transform.position.z);
     active.mesh.rotationQuaternion = null;
     active.mesh.rotation = new Vector3(transform.rotation.x, transform.rotation.y, transform.rotation.z);
     const scale = normalizeSkyboxSphereScale(transform.scale);
     active.mesh.scaling = new Vector3(scale.x, scale.y, scale.z);
-    active.mesh.setEnabled(target.visible && (this.themeOverrides?.visible ?? true));
-    active.mesh.isPickable = target.visible && (this.themeOverrides?.visible ?? true) && target.pickable && Boolean(target.entityId);
-    this.syncSelectionHighlight(active.mesh, target.visible && (this.themeOverrides?.visible ?? true) && target.selected);
+    active.mesh.setEnabled(target.visible && (this.lightingOverrides?.visible ?? true));
+    active.mesh.isPickable = target.visible && (this.lightingOverrides?.visible ?? true) && target.pickable && Boolean(target.entityId);
+    this.syncSelectionHighlight(active.mesh, target.visible && (this.lightingOverrides?.visible ?? true) && target.selected);
 
     const rotationY = degreesToRadians(target.skybox.rotationDegrees);
     if (active.texture && active.texture.rotationY !== rotationY) {
       active.texture.rotationY = rotationY;
       // Engine 纹理没有所属 Scene，旋转后显式刷新接收环境照明的材质。
       this.scene.markAllMaterialsAsDirty(Material.TextureDirtyFlag);
+      if (this.scene.environmentTexture === active.texture) refreshSceneLightingMaterialDrawCaches(this.scene);
     }
     const reflectionTexture = active.material.reflectionTexture as SkyboxTexture | null;
     if (reflectionTexture) reflectionTexture.rotationY = rotationY;
 
-    if (active.texture && target.visible) {
-      this.scene.environmentTexture = active.texture;
-      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? target.skybox.intensity;
-    } else if (this.scene.environmentTexture === active.texture) {
-      this.scene.environmentTexture = null;
-      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
-    }
+    if (updateEnvironment && this.lightingOverrides?.source !== 'sandbox') this.applyEnvironment(true);
+  }
+
+  /** 背景网格和照明源分别选择；内置环境不依赖天空盒实体显隐。 */
+  private applyEnvironment(updateIntensity: boolean): void {
+    const sandbox = this.lightingOverrides?.source === 'sandbox';
+    const texture = sandbox ? this.sandboxEnvironment.getTexture()
+      : this.desired?.visible ? this.active?.texture ?? null : null;
+    const intensity = updateIntensity ? this.lightingOverrides?.intensity
+      ?? (this.desired?.visible ? this.desired.skybox.intensity : DEFAULT_ENVIRONMENT_INTENSITY) : undefined;
+    this.updateEnvironmentTexture(texture, intensity);
+  }
+
+  private updateEnvironmentTexture(texture: Scene['environmentTexture'], intensity?: number): void {
+    const changed = this.scene.environmentTexture !== texture
+      || (intensity !== undefined && this.scene.environmentIntensity !== intensity);
+    this.scene.environmentTexture = texture;
+    if (intensity !== undefined) this.scene.environmentIntensity = intensity;
+    if (changed) refreshSceneLightingMaterialDrawCaches(this.scene);
   }
 
   private cancelPending(): void {
@@ -400,17 +438,15 @@ export class SceneSkyboxRuntime {
   private disposeActive(resetScene: boolean): void {
     const active = this.active;
     if (!active) {
-      if (resetScene) {
-        this.scene.environmentTexture = null;
-        this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
+      if (resetScene && this.lightingOverrides?.source !== 'sandbox') {
+        this.updateEnvironmentTexture(null, this.lightingOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY);
       }
       return;
     }
 
     this.active = null;
-    if (resetScene && this.scene.environmentTexture === active.texture) {
-      this.scene.environmentTexture = null;
-      this.scene.environmentIntensity = this.themeOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY;
+    if (resetScene && this.lightingOverrides?.source !== 'sandbox' && this.scene.environmentTexture === active.texture) {
+      this.updateEnvironmentTexture(null, this.lightingOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY);
     }
     this.clearSelectionHighlight();
     active.mesh.dispose(false, true);

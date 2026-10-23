@@ -1,3 +1,5 @@
+import { babylonCodeSplitting } from './scripts/babylon-build-chunks';
+import { precompileModelScriptFile } from './electron/ipc/modelScriptCompiler';
 import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { createReadStream, existsSync, statSync } from 'node:fs';
@@ -43,6 +45,15 @@ function editorLocalAssetDevServerPlugin(devAssetRoots: string[]): Plugin {
           return;
         }
 
+        if (new URL(request.url ?? '/', 'http://localhost').searchParams.get('modelScriptCompiled') === '1') {
+          if (!/\.ts$/i.test(filePath)) { response.statusCode = 400; response.end('仅支持模型 TypeScript 脚本。'); return; }
+          void precompileModelScriptFile(filePath).then(artifact => {
+            response.setHeader('Content-Type', 'application/json; charset=utf-8');
+            response.setHeader('Cache-Control', 'no-store');
+            response.end(JSON.stringify(artifact));
+          }).catch(next);
+          return;
+        }
         response.setHeader('Content-Type', getDevAssetContentType(filePath));
         createReadStream(filePath).on('error', next).pipe(response);
       });
@@ -54,6 +65,7 @@ export default defineConfig(({ mode }) => {
   const devAssetRoots = resolveDevAssetRoots(workspaceRoot, mode);
   return {
     base: './',
+    build: { rolldownOptions: { output: { strictExecutionOrder: true, codeSplitting: babylonCodeSplitting() } } },
     cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
     plugins: [react(), editorLocalAssetDevServerPlugin(devAssetRoots), ...buildAnalysisPlugins('editor')],
     optimizeDeps: {

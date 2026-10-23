@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useEffect, useEffectEvent, useState, useSyncExternalStore } from 'react';
 import type { PoiEffectComponent } from '../model/components';
 import { cancelEffectPathDrawing, commitEffectPathDrawing, getEffectPathDrawing, getEffectPathDrawingMode, startEffectPathDrawing, subscribeEffectPathDrawing, undoEffectPathDrawingPoint } from '../model/effectPathDrawing';
 
@@ -10,7 +10,9 @@ export function EffectPathDrawingControls({ entityId, component, disabled, onCha
   const mode = getEffectPathDrawingMode(component.effectKind);
   const regions = Array.isArray(component.configuration?.parameters.regions) ? component.configuration.parameters.regions : [];
   const [regionId, setRegionId] = useState(() => typeof regions[0]?.id === 'string' ? regions[0].id : '区域1');
-  useEffect(() => { setRegionId(typeof regions[0]?.id === 'string' ? regions[0].id : '区域1'); }, [entityId, component.effectKind]);
+  // 路线选择变化才初始化区域草稿，运行时参数刷新不覆盖用户输入。
+  const resetRegionForSelection = useEffectEvent(() => setRegionId(typeof regions[0]?.id === 'string' ? regions[0].id : '区域1'));
+  useEffect(() => { resetRegionForSelection(); }, [entityId, component.effectKind]);
   useEffect(() => () => cancelEffectPathDrawing(entityId), [entityId]);
   useEffect(() => { if (active && (disabled || session.effectKind !== component.effectKind)) cancelEffectPathDrawing(entityId); }, [active, disabled, entityId, component.effectKind, session]);
   if (!mode) return null;

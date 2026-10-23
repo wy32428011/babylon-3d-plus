@@ -1,3 +1,5 @@
+import { collectSceneSkyboxReferences, visitSceneResourceValues, mapSceneResourceValues, sceneResourceFieldKind } from '../shared/sceneResourceTraversal.js';
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { ZipArchive } from 'archiver';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
@@ -16,14 +18,16 @@ import type { SourceEnvironmentPackageIntegrity } from './digitalTwinSourceEnvir
 import type { SourceResourcePlan, SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 import { openingSourceBundles, resolveOpeningPackageResources, type ResolvedOpeningResources } from './openingPackageResources.js';
 import { createOpeningPublishPlan, rawSceneOpening } from '../shared/openingPublishPlan.js';
+import { getSceneLightingBakeError, getSceneLightingBakeSignature } from '../shared/sceneLightingBakeContract.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { captureSceneLightingBakeRelocation, stripLightingPolicyIdentityLocationHints } from '../shared/sceneLightingBakeRelocation.js';
+import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
 type DeploymentExportFileSystemModule = typeof import('./deploymentExportFileSystem.js');
 type DeploymentSkyboxCacheModule = typeof import('./deploymentSkyboxCache.js');
 type DigitalTwinSourceEnvironmentRelinkModule = typeof import('./digitalTwinSourceEnvironmentRelink.js');
-type SceneShadowBakeContractModule = typeof import('../shared/sceneShadowBakeContract.js');
-const { captureSceneShadowBakeRelocation, getSceneShadowBakeSignatureContract } = require(`../shared/sceneShadowBakeContract${runtimeExtension}`) as SceneShadowBakeContractModule;
 const { stripCadReferencesFromSceneFile } = require(`./sceneCadReferenceSanitizer${runtimeExtension}`) as typeof import('./sceneCadReferenceSanitizer.js');
 const { collectEffectModelReferences, relocateLegacyEffectModelReferences } = require('../shared/effectDeploymentReferences' + runtimeExtension) as typeof import('../shared/effectDeploymentReferences.js');
 const { createSourceResourcePlan } = require(`./digitalTwinSourceResourcePlan${runtimeExtension}`) as typeof import('./digitalTwinSourceResourcePlan.js');
@@ -38,6 +42,7 @@ const {
   createDeploymentSkyboxValidationCache,
   loadDeploymentSkyboxCacheContext,
   resolveDeploymentSkyboxReference,
+  readSceneSkyboxDataPlatformResourceId,
 } = require(`./deploymentSkyboxCache${runtimeExtension}`) as DeploymentSkyboxCacheModule;
 
 const { builtinSkyboxPackageForPath, validateBuiltinSkyboxPackage, BUILTIN_SKYBOX_FILE_NAME, BUILTIN_SKYBOX_FILE_SIZE, BUILTIN_SKYBOX_SHA256 } = require(`./builtinSkyboxAssets${runtimeExtension}`) as typeof import('./builtinSkyboxAssets.js');
@@ -45,9 +50,6 @@ const { builtinSkyboxPackageForPath, validateBuiltinSkyboxPackage, BUILTIN_SKYBO
 const MAX_SCENE_FILES = 1_000;
 const MAX_SOURCE_FILES = 200_000;
 const MAX_SOURCE_BYTES = 8 * 1024 * 1024 * 1024;
-const PATH_KEYS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
-const URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl']);
-const PATH_ARRAY_KEYS = new Set(['scriptPaths']);
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 const STABLE_SKYBOX_PATH_FIELDS = new Set(['packagePath', 'sourcePath', 'sourceUrl']);
 
@@ -178,10 +180,21 @@ export async function buildDigitalTwinSourcePackage(
       options.preparedSceneContents,
     );
     const scenes = scenesResult.snapshots;
-    for (const scene of scenes) relocateLegacyEffectModelReferences(scene.parsed);
+    for (const scene of scenes) {
+      relocateLegacyEffectModelReferences(scene.parsed);
+      stripLightingPolicyIdentityLocationHints(scene.parsed.scene);
+    }
     const cadBundleMap = await prepareSourceSceneCadFiles(scenes.map(scene => scene.parsed),
       projectRoot, sharedResourcesRoot, legacyWorkspaceRoot, options.signal, options.isAuthorizedCadFile);
-    const restoreRelocatedBakes = new Map(scenes.map(scene => [scene, captureSceneShadowBakeRelocation(scene.parsed.scene)]));
+    const restoreRelocatedLighting = new Map(scenes.map(scene => [scene, captureSceneLightingBakeRelocation(scene.parsed.scene)]));
+    const lightingAssets = [];
+    for (const scene of scenes) {
+      const error = getSceneLightingBakeError(scene.parsed.scene);
+      if (error) throw new Error('场景「' + scene.name + '」：' + error);
+      lightingAssets.push(...await resolveSceneLightingBakeAssets(scene.parsed.scene, { projectRoot, signal: options.signal,
+        isAuthorizedFile: file => isPathInsideOrEqual(sharedResourcesRoot, file) || Boolean(legacyWorkspaceRoot && isPathInsideOrEqual(legacyWorkspaceRoot, file)),
+      }));
+    }
     const platformImageBundleMap = scenesResult.platformImageBundleMap;
     const entryScene = scenes.find((scene) => path.resolve(scene.sourcePath) === entrySceneFilePath);
     if (!entryScene) throw new Error('入口场景不在当前项目 Scenes 目录中。');
@@ -234,24 +247,34 @@ export async function buildDigitalTwinSourcePackage(
       cadBundleMap,
     );
     candidates.push(...openingSourceBundles(resolvedOpenings, projectRoot));
+    // 光照文件按显式清单收集，JSON 产物和 PNG 使用同等的内容完整性约束。
+    const candidateBySource = new Map(candidates.map(bundle => [createPathKey(bundle.sourcePath), bundle]));
+    for (const asset of lightingAssets) {
+      const key = createPathKey(asset.sourcePath);
+      let bundle = candidateBySource.get(key);
+      if (!bundle) {
+        bundle = { sourcePath: asset.sourcePath, destinationRelativePath: asset.relativePath };
+        candidates.push(bundle); candidateBySource.set(key, bundle);
+      }
+      bundle.integrityFiles = [{ relativePath: path.basename(asset.sourcePath), expectedSize: asset.byteLength,
+        expectedSha256: asset.sha256, label: '光照烘焙固定产物 ' + asset.asset.id }];
+    }
     await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
     const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
     const bundles = resourcePlan.bundles;
     for (const scene of scenes) {
       resourcePlan.validateModelReferences(scene.parsed, scene.relativePath);
       const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan, new WeakSet(collectEffectModelReferences(scene.parsed)));
-      const restoreBake = restoreRelocatedBakes.get(scene);
-      if (isPlainObject(portableScene) && restoreBake) {
-        // 内容指纹已确认版本；先逆向验证本次目标分配，再更新纯位置变化后的签名。
+      const restoreLighting = restoreRelocatedLighting.get(scene);
+      if (isPlainObject(portableScene) && restoreLighting) {
+        // 仅逆向本清单实际重写的资源位置，并还原本轮新增的内容快照注释后验证等价性。
         const originalTargets = mapSceneReferenceStrings(portableScene, resourcePlan.originalReference) as PlainObject;
         restoreSnapshotAnnotations(scene.parsed, originalTargets);
-        if (!restoreBake(originalTargets.scene)) throw new Error(`场景「${scene.name}」的资源版本在源工程准备过程中发生变化，无法保留有效烘焙；请更新资源并重新烘焙后发布。`);
+        if (!restoreLighting(originalTargets.scene)) throw new Error('场景「' + scene.name + '」的输入或产物在准备 SOURCE 时变化，不能保留光照烘焙。');
         const settings = (portableScene.scene as PlainObject).sceneSettings as PlainObject;
-        const shadows = settings.shadows as PlainObject;
-        shadows.bake = { ...(shadows.bake as PlainObject), signature: getSceneShadowBakeSignatureContract(portableScene.scene) };
-        const runtimeSettings = (scene.parsed.scene as PlainObject).sceneSettings as PlainObject;
-        const runtimeShadows = runtimeSettings.shadows as PlainObject;
-        runtimeShadows.bake = { ...(runtimeShadows.bake as PlainObject), signature: getSceneShadowBakeSignatureContract(scene.parsed.scene) };
+        const lighting = settings.lighting as PlainObject;
+        lighting.result = { ...(lighting.result as PlainObject), signature: getSceneLightingBakeSignature(portableScene.scene) };
+        if (!restoreLighting(scene.parsed.scene)) throw new Error('场景「' + scene.name + '」的运行快照与原光照烘焙不再等价。');
       }
       scene.portableContent = `${JSON.stringify(portableScene, null, 2)}\n`;
     }
@@ -390,18 +413,24 @@ async function readSceneSnapshots(
     } catch {
       throw new Error(`场景文件不是有效 JSON：${sourcePath}`);
     }
-    if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || !isPlainObject(parsed.scene)) {
+    if (!isPlainObject(parsed) || !isSupportedSceneFileVersion(parsed.version) || !isPlainObject(parsed.scene)) {
       throw new Error(`场景文件格式不受支持：${sourcePath}`);
     }
+    const originalScene = parsed.scene;
+    // SOURCE 与 DIST 使用同一描述符预检，迁移或克隆前拒绝 accessor / 继承身份。
+    for (const skybox of collectSceneSkyboxReferences(originalScene)) readSceneSkyboxDataPlatformResourceId(skybox);
+    parsed.scene = migrateSceneLightingDocument(originalScene);
+    const migrated = parsed.scene !== originalScene || parsed.version !== CURRENT_SCENE_FILE_VERSION;
+    parsed.version = CURRENT_SCENE_FILE_VERSION;
     const skippedCadCount = skipCadReferences ? stripCadReferencesFromSceneFile(parsed) : 0;
-    const snapshotContent = skippedCadCount > 0 ? `${JSON.stringify(parsed, null, 2)}\n` : content;
+    const snapshotContent = migrated || skippedCadCount > 0 ? `${JSON.stringify(parsed, null, 2)}\n` : content;
     const relativeFromScenes = path.relative(scenesRoot, sourcePath);
     if (!relativeFromScenes || relativeFromScenes.startsWith('..') || path.isAbsolute(relativeFromScenes)) {
       throw new Error('场景文件路径逃逸 Scenes 目录。');
     }
     const relativePath = `Scenes/${toPortablePath(relativeFromScenes)}`;
-    const sceneName = typeof parsed.scene.name === 'string' && parsed.scene.name.trim()
-      ? parsed.scene.name.trim().slice(0, 128)
+    const sceneName = typeof originalScene.name === 'string' && originalScene.name.trim()
+      ? originalScene.name.trim().slice(0, 128)
       : path.basename(sourcePath).replace(/\.scene\.json$/i, '');
     snapshots.push({
       sourcePath,
@@ -459,20 +488,9 @@ async function collectPlatformImageBundleMap(
   findSyncedImageForReference: (editorRoots: readonly string[], reference: string) => Promise<SyncedImageAssetEntry | null>,
 ): Promise<ReadonlyMap<string, PlatformImageBundle>> {
   const references = new Set<string>();
-  const visit = (value: unknown): void => {
-    if (typeof value === 'string') {
-      if (isPlatformImageReference(value)) references.add(value);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    if (isPlainObject(value)) {
-      for (const child of Object.values(value)) visit(child);
-    }
-  };
-  for (const content of sceneContents) visit(JSON.parse(content) as unknown);
+  for (const content of sceneContents) visitSceneResourceValues(JSON.parse(content) as unknown, value => {
+    if (typeof value === 'string' && isPlatformImageReference(value)) references.add(value);
+  });
 
   const bundles = new Map<string, PlatformImageBundle>();
   for (const reference of [...references].sort()) {
@@ -516,16 +534,7 @@ async function prepareSourceSceneSkyboxes(
 ): Promise<void> {
   const scene = isPlainObject(sceneFile.scene) ? sceneFile.scene : null;
   if (!scene) return;
-  const skyboxes: PlainObject[] = [];
-  if (isPlainObject(scene.entities)) {
-    for (const entity of Object.values(scene.entities)) {
-      if (!isPlainObject(entity) || !isPlainObject(entity.components)) continue;
-      if (isPlainObject(entity.components.skybox)) skyboxes.push(entity.components.skybox);
-    }
-  }
-  if (isPlainObject(scene.sceneSettings) && isPlainObject(scene.sceneSettings.skybox)) {
-    skyboxes.push(scene.sceneSettings.skybox);
-  }
+  const skyboxes = collectSceneSkyboxReferences(scene);
 
   for (const skybox of skyboxes) {
     const resolved = await resolveDeploymentSkyboxReference(
@@ -591,15 +600,9 @@ async function prepareSourceSceneCadFiles(
   isAuthorizedCadFile?: (filePath: string) => boolean,
 ): Promise<ReadonlyMap<string, ResourceBundle>> {
   const references: PlainObject[] = [];
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) { for (const child of value) visit(child); return; }
-    if (!isPlainObject(value)) return;
-    for (const [key, child] of Object.entries(value)) {
-      if (key === 'cadReference' && isPlainObject(child)) references.push(child);
-      else visit(child);
-    }
-  };
-  for (const scene of sceneFiles) visit(scene);
+  for (const scene of sceneFiles) visitSceneResourceValues(scene, (value, location) => {
+    if (location.key === 'cadReference' && isPlainObject(value)) { references.push(value); return false; }
+  });
   const bundles = new Map<string, ResourceBundle>();
   for (const cad of references) {
     throwIfAborted(signal);
@@ -679,49 +682,24 @@ function collectResourceBundles(
   const effectMetadata = new WeakSet(sceneValues.flatMap(collectEffectModelReferences));
   const openingMetadata = new WeakSet<object>(sceneValues.map(rawSceneOpening).filter((value): value is NonNullable<typeof value> => value !== null));
 
-  const visit = (value: unknown, fieldName: string | null = null): void => {
+  for (const sceneValue of sceneValues) visitSceneResourceValues(sceneValue, (value, { field: fieldName, parent, key }) => {
+    // 稳定天空盒的地址由固定版本解析器负责，不再按普通包扫描。
+    if (parent && stableSkyboxObjects.has(parent) && typeof key === 'string' && STABLE_SKYBOX_PATH_FIELDS.has(key)) return false;
     if (typeof value === 'string') {
       const platformBundle = cadBundleMap.get(value) ?? platformImageBundleMap.get(value);
-      if (platformBundle) {
-        registerBundle(platformBundle);
-        return;
-      }
-      const isResourceReference = Boolean(
-        fieldName
-        && (PATH_KEYS.has(fieldName) || URL_KEYS.has(fieldName) || PATH_ARRAY_KEYS.has(fieldName)),
-      );
+      if (platformBundle) { registerBundle(platformBundle); return; }
+      const isResourceReference = sceneResourceFieldKind(fieldName) !== null;
       const isImageAssetReference = isPortableImageAssetReference(value);
       if (!isResourceReference && !isImageAssetReference && !value.startsWith(LOCAL_ASSET_URL_PREFIX)) return;
-      const bundle = resolveResourceBundle(
-        value,
-        projectRoot,
-        sharedResourcesRoot,
-        sourceEnvironmentPackagesByPath,
-        warnSkippedResource,
-        value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(fieldName && fieldName !== 'path'),
-        legacyWorkspaceRoot,
-      );
-      if (!bundle) return;
-      registerBundle(bundle);
-      return;
+      const bundle = resolveResourceBundle(value, projectRoot, sharedResourcesRoot,
+        sourceEnvironmentPackagesByPath, warnSkippedResource,
+        value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(fieldName && fieldName !== 'path'), legacyWorkspaceRoot);
+      if (bundle) registerBundle(bundle);
+    } else if (isPlainObject(value) && (openingMetadata.has(value) || effectMetadata.has(value))) {
+      // 固定开场版本和效果模型由专用资源计划统一处理。
+      return false;
     }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, fieldName);
-      return;
-    }
-    if (isPlainObject(value)) {
-      // 开场按完整固定版本显式收集，避免通用 URL 扫描把 manifest 当独立包或重复复制素材。
-      if (openingMetadata.has(value)) return;
-      if (effectMetadata.has(value)) return;
-      const stableSkybox = stableSkyboxObjects.has(value);
-      for (const [childKey, child] of Object.entries(value)) {
-        if (stableSkybox && STABLE_SKYBOX_PATH_FIELDS.has(childKey)) continue;
-        visit(child, childKey);
-      }
-    }
-  };
-
-  for (const sceneValue of sceneValues) visit(sceneValue, null);
+  });
   return [...bundles.values()].sort((left, right) => left.destinationRelativePath.localeCompare(right.destinationRelativePath, 'en'));
 }
 
@@ -869,62 +847,59 @@ function rewriteSceneToPortableAssets(
   resourcePlan?: SourceResourcePlan,
   effectMetadata = new WeakSet<object>(),
 ): unknown {
-  if (typeof value === 'string') {
-    const isReference = value.startsWith(LOCAL_ASSET_URL_PREFIX)
-      || Boolean(key && (PATH_KEYS.has(key) || URL_KEYS.has(key) || PATH_ARRAY_KEYS.has(key)))
-      || isPortableImageAssetReference(value);
-    if (!isReference) return value;
-    const platformBundle = platformImageBundleMap.get(value);
-    if (platformBundle) {
-      const target = resourcePlan?.reference(platformBundle.sourcePath)?.destination ?? platformBundle.destinationRelativePath;
-      return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(target)}`;
-    }
-    const planned = resourcePlan?.reference(value);
-    if (planned) {
-      // 受管环境沿用便携 SOURCE 不携带缓存查询修订的契约；普通模型 URL 保留查询和片段。
-      const suffix = /^Assets\/Environments\//i.test(planned.destination) && !planned.bundle.isDirectory ? '' : planned.suffix;
-      return value.startsWith(LOCAL_ASSET_URL_PREFIX) || Boolean(key && URL_KEYS.has(key)) || isPortableImageAssetReference(value)
-        ? `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(planned.destination)}${suffix}` : planned.destination;
-    }
-    const portablePath = toPortableAssetReference(value);
-    if (!portablePath) return value;
-    const isImageAssetPortablePath = portablePath.toLowerCase().startsWith('assets/images/');
-    if (key && URL_KEYS.has(key)) return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
-    if (isImageAssetPortablePath) return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
-    if (key && PATH_KEYS.has(key)) return portablePath;
-    return value;
-  }
-  if (Array.isArray(value)) {
-    if (key && PATH_ARRAY_KEYS.has(key)) {
-      return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan, effectMetadata));
-    }
-    return value.map((item) => rewriteSceneToPortableAssets(item, key, platformImageBundleMap, resourcePlan));
-  }
-  if (!isPlainObject(value)) return value;
-  if (effectMetadata.has(value)) {
-    const model = { ...value };
-    for (const field of ['sourcePath', 'sourceUrl']) {
-      const source = typeof value[field] === 'string' ? resourcePlan?.reference(value[field] as string) : null;
-      if (source?.kind === 'file') model[field] = field === 'sourceUrl' ? LOCAL_ASSET_URL_PREFIX + encodeURIComponent(source.destination) + source.suffix : source.destination;
-    }
-    return model;
-  }
-  const rewritten = Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
-    childKey,
-    rewriteSceneToPortableAssets(childValue, childKey, platformImageBundleMap, resourcePlan, effectMetadata),
-  ]));
-  const model = typeof value.sourcePath === 'string' ? resourcePlan?.reference(value.sourcePath) : null;
-  if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
-    rewritten.sourceSnapshot = { contentSha256: model.bundle.contentSha256 };
-  }
-  return rewritten;
+  return mapSceneResourceValues(value, {
+    string: (value, key) => {
+      const isReference = value.startsWith(LOCAL_ASSET_URL_PREFIX)
+        || sceneResourceFieldKind(key) !== null
+        || isPortableImageAssetReference(value);
+      if (!isReference) return value;
+      const platformBundle = platformImageBundleMap.get(value);
+      if (platformBundle) {
+        const target = resourcePlan?.reference(platformBundle.sourcePath)?.destination ?? platformBundle.destinationRelativePath;
+        return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(target)}`;
+      }
+      const planned = resourcePlan?.reference(value);
+      if (planned) {
+        // 受管环境沿用便携 SOURCE 不携带缓存查询修订的契约；普通模型 URL 保留查询和片段。
+        const suffix = /^Assets\/Environments\//i.test(planned.destination) && !planned.bundle.isDirectory ? '' : planned.suffix;
+        return value.startsWith(LOCAL_ASSET_URL_PREFIX) || sceneResourceFieldKind(key) === 'url' || isPortableImageAssetReference(value)
+          ? `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(planned.destination)}${suffix}` : planned.destination;
+      }
+      const portablePath = toPortableAssetReference(value);
+      if (!portablePath) return value;
+      const isImageAssetPortablePath = portablePath.toLowerCase().startsWith('assets/images/');
+      if (sceneResourceFieldKind(key) === 'url') return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
+      if (isImageAssetPortablePath) return `${LOCAL_ASSET_URL_PREFIX}${encodeURIComponent(portablePath)}`;
+      if (sceneResourceFieldKind(key) === 'path') return portablePath;
+      return value;
+    },
+    array: (items, field, mapChild) => sceneResourceFieldKind(field) === 'path-array'
+      ? items.map(item => mapChild(item, field))
+      : items.map(item => rewriteSceneToPortableAssets(item, field, platformImageBundleMap, resourcePlan)),
+    object: (value, _field, mapChild) => {
+      if (effectMetadata.has(value)) {
+        const model = { ...value };
+        for (const field of ['sourcePath', 'sourceUrl']) {
+          const source = typeof value[field] === 'string' ? resourcePlan?.reference(value[field] as string) : null;
+          if (source?.kind === 'file') model[field] = field === 'sourceUrl' ? LOCAL_ASSET_URL_PREFIX + encodeURIComponent(source.destination) + source.suffix : source.destination;
+        }
+        return model;
+      }
+      const rewritten = Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        mapChild(childValue, childKey),
+      ]));
+      const model = typeof value.sourcePath === 'string' ? resourcePlan?.reference(value.sourcePath) : null;
+      if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
+        rewritten.sourceSnapshot = { contentSha256: model.bundle.contentSha256 };
+      }
+      return rewritten;
+    },
+  }, key);
 }
 
 function mapSceneReferenceStrings(value: unknown, transform: (value: string) => string): unknown {
-  if (typeof value === 'string') return transform(value);
-  if (Array.isArray(value)) return value.map(item => mapSceneReferenceStrings(item, transform));
-  if (isPlainObject(value)) return Object.fromEntries(Object.entries(value).map(([name, child]) => [name, mapSceneReferenceStrings(child, transform)]));
-  return value;
+  return mapSceneResourceValues(value, { string: transform });
 }
 
 /** 新增快照身份不改变几何；验证烘焙时只还原本轮添加的身份字段，其余内容仍严格比较。 */
@@ -956,7 +931,7 @@ function toPortableAssetReference(value: string): string | null {
     const relativePath = segments.slice(environmentCachePath.revisionEndIndex).join('/');
     return relativePath ? `${packagePath}/${relativePath}` : packagePath;
   }
-  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/.*|$))/i.exec(normalized);
+  const match = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets|LightingBakes)(?:\/.*|$))/i.exec(normalized);
   return match ? path.posix.normalize(match[1]) : null;
 }
 

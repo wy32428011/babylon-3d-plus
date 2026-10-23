@@ -6,7 +6,7 @@ import {
   type CadReferenceParseOptions,
   type CadReferenceParseResult,
   type DxfEntityRecord,
-} from './cadReference';
+} from './cadReferenceCore';
 
 export { parseCadReferenceDxfStream } from './cadReferenceStreamingDxf';
 

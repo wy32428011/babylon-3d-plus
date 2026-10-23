@@ -1,3 +1,5 @@
+import { transformPreviewStore } from '../store/transformPreviewStore';
+import { useSyncExternalStore } from 'react';
 import { CompositionInspector } from '../composition/CompositionControls';
 import { AlarmManagerInspector } from './AlarmManagerInspector';
 import { ChartMarkerInspector } from './ChartMarkerInspector';
@@ -10,8 +12,6 @@ import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE, LIG
 import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import {
-  SCENE_SKYBOX_INTENSITY_MAX,
-  SCENE_SKYBOX_INTENSITY_MIN,
   SCENE_SKYBOX_RESOLUTIONS,
   getSkyboxSphereDiameterMeters,
   SKYBOX_SPHERE_DIAMETER_METERS,
@@ -35,6 +35,7 @@ import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
 import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
+import { LightingBakeInspector } from './LightingBakeInspector';
 import { AutoPatrolInspector } from './AutoPatrolInspector';
 import { ManualRoamAvatarInspector } from './ManualRoamAvatarInspector';
 
@@ -144,6 +145,8 @@ type InspectorPanelProps = {
 
 export function InspectorPanel(props: InspectorPanelProps) {
   const scene = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore(state => state.sceneSessionId);
+  const transformPreview = useSyncExternalStore(transformPreviewStore.subscribe, transformPreviewStore.getSnapshot, transformPreviewStore.getSnapshot);
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
   const selectedModelMeasurement = useEditorStore((state) => state.selectedModelMeasurement);
   const selectedGroupSpatialInfo = useEditorStore((state) => state.selectedGroupSpatialInfo);
@@ -153,6 +156,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const updateSelectedMaterialColor = useEditorStore((state) => state.updateSelectedMaterialColor);
   const updateSelectedDataPlatformScreen = useEditorStore((state) => state.updateSelectedDataPlatformScreen);
   const updateSelectedSkybox = useEditorStore((state) => state.updateSelectedSkybox);
+  const openLightingManager = useEditorStore((state) => state.openLightingManager);
   const updateSelectedCadReference = useEditorStore((state) => state.updateSelectedCadReference);
   const updateSelectedLight = useEditorStore((state) => state.updateSelectedLight);
   const updateSelectedModelAssetCode = useEditorStore((state) => state.updateSelectedModelAssetCode);
@@ -209,13 +213,6 @@ export function InspectorPanel(props: InspectorPanelProps) {
     if (!Number.isFinite(intensity)) return;
 
     updateSelectedLight({ intensity });
-  }
-
-  function handleSkyboxIntensityChange(rawValue: string) {
-    if (rawValue === '') return;
-    const intensity = Number(rawValue);
-    if (!Number.isFinite(intensity)) return;
-    updateSelectedSkybox({ intensity });
   }
 
   function handleSkyboxResolutionChange(rawValue: string) {
@@ -280,6 +277,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
             <p className="muted">群组包含锁定对象，空间信息仍可查看，但不能整体变换。</p>
           ) : null}
         </fieldset>
+        <LightingBakeInspector entityIds={groupSelection.entityIds} disabled={props.readOnly === true} />
         {groupSpatialInfo?.status === 'ready' ? (
           <fieldset className="transform-fieldset group-spatial-transform-fieldset">
             <legend>空间信息</legend>
@@ -357,7 +355,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
     );
   }
 
-  const transform = selectedEntity.components.transform;
+  const transform = transformPreview?.sceneSessionId === sceneSessionId && transformPreview.entityId === selectedEntity.id
+    ? transformPreview.transform : selectedEntity.components.transform;
   const meshRenderer = selectedEntity.components.meshRenderer;
   const dataPlatformScreen = selectedEntity.components.dataPlatformScreen;
   const skybox = selectedEntity.components.skybox;
@@ -399,6 +398,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           onKeyDown={handleNameKeyDown}
         />
       </label>
+      {(modelAsset || meshRenderer || modelGenerator || deviceSpawner) && <LightingBakeInspector entityIds={[selectedEntity.id]} disabled={isLocked} />}
       {transformFields.map((field) => (
         <fieldset className="transform-fieldset transform-axis-fieldset" key={field}>
           <legend>{getTransformLegend(field, meshRenderer?.meshKind, light?.lightKind)}</legend>
@@ -528,18 +528,11 @@ export function InspectorPanel(props: InspectorPanelProps) {
           <p className="muted">
             实际直径：{MODEL_MEASUREMENT_FORMATTER.format(getSkyboxSphereDiameterMeters(transform.scale))} m
           </p>
-          <label className="number-row">
-            <span>环境强度</span>
-            <input
-              disabled={isLocked}
-              max={SCENE_SKYBOX_INTENSITY_MAX}
-              min={SCENE_SKYBOX_INTENSITY_MIN}
-              step="0.1"
-              type="number"
-              value={skybox.intensity}
-              onChange={(event) => handleSkyboxIntensityChange(event.target.value)}
-            />
-          </label>
+          <div className="inspector-row">
+            <span>环境反射强度</span>
+            <output aria-label="环境反射强度">{scene.sceneSettings.lighting.environmentIntensity}</output>
+          </div>
+          <button type="button" onClick={() => openLightingManager({ tab: 'overview' })}>在管理器中调整</button>
           <label className="inspector-row">
             <span>纹理分辨率</span>
             <select

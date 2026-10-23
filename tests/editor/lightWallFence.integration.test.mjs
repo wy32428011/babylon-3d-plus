@@ -193,7 +193,7 @@ test('读取场景拒绝自交、退化、超限、缺字段和非法坐标轮�
   }
 });
 
-test('缺省 lightWall 配置兼容默认矩形，16 种既有效果保持配置和序列化行为', () => {
+test('缺省 lightWall 配置兼容默认矩形，P4 入场 66 种完整登记和 16 种旧效果配置与序列化保持', () => {
   addWall();
   const valid = JSON.parse(serializeScene(store.getState().scene));
   const id = store.getState().scene.selectedEntityId;
@@ -203,7 +203,24 @@ test('缺省 lightWall 配置兼容默认矩形，16 种既有效果保持配置
   const legacyKinds = ['alarm-pulse', 'warning-beacon', 'locator-beam', 'radar-scan', 'fire', 'smoke', 'sparks',
     'steam-leak', 'gas-leak', 'water-jet', 'pipeline-flow-particles', 'pipeline-flow-arrows', 'moving-double-arrow',
     'cargo-target-frame', 'conveyor-direction', 'evacuation-route'];
-  assert.deepEqual(POI_EFFECT_KINDS.filter(kind => kind !== 'light-wall-fence'), legacyKinds);
+  // P4 入场已包含后续箭头和数字孪生类型；冻结完整顺序，不能只检查旧类型子集。
+  const frozenKinds = [
+    ...legacyKinds, 'light-wall-fence',
+    'conveyor-arrow-single', 'conveyor-arrow-chevron', 'conveyor-arrow-segmented', 'conveyor-arrow-ribbon',
+    'conveyor-arrow-double', 'conveyor-arrow-speed', 'model-color', 'model-flash',
+    'alarm-icon', 'alarm-zone', 'alarm-label', 'alarm-route',
+    'model-outline', 'model-edges', 'model-emissive', 'model-scan',
+    'height-gradient', 'hologram', 'xray', 'dissolve',
+    'boundary-flow', 'area-fill', 'ripple-ring', 'breathing-ring',
+    'radar-sector', 'light-pillar', 'energy-dome', 'flow-path',
+    'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal',
+    'pipe-flow', 'heatmap', 'region-level', 'data-bars',
+    'camera-frustum', 'floor-expand', 'explode', 'clip-section',
+    'roof-fade', 'target-follow', 'environment-fog', 'rain',
+    'snow', 'smoke-plume', 'flame', 'day-night',
+    'water-surface',
+  ];
+  assert.deepEqual(POI_EFFECT_KINDS, frozenKinds);
   const created = legacyKinds.map(kind => {
     store.getState().createPoiEffect(kind);
     const entityId = store.getState().scene.selectedEntityId;

@@ -1,3 +1,4 @@
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../types.js';
@@ -75,7 +76,7 @@ async function inspectPublishSceneModels(sceneContent: string, signal: AbortSign
     throw new Error('发布前模型恢复的场景内容不能为空。');
   }
   const parsed = JSON.parse(sceneContent) as { version?: number; scene?: unknown };
-  if (![1, 2, 3, 4, 5].includes(parsed.version ?? 0) || !parsed.scene) throw new Error('发布前模型恢复的场景格式无效。');
+  if (!isSupportedSceneFileVersion(parsed?.version) || !parsed.scene) throw new Error('发布前模型恢复的场景格式无效。');
   const plan = await planPublishModelRecovery(parsed.scene, async (asset, reference) => {
     signal.throwIfAborted();
     return areModelReferencePathsAvailable(asset, reference?.target, signal, scope);

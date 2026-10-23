@@ -4,7 +4,6 @@ const clamp01=x=>Math.max(0,Math.min(1,x));
 const cyclePhase=x=>((x%1)+1)%1;
 const lerp=(a,b,t)=>a+(b-a)*t;
 const smooth=(a,b,x)=>{const t=clamp01((x-a)/(b-a));return t*t*(3-2*t);};
-const easeQuint=t=>{t=clamp01(t);return t<.5?16*t*t*t*t*t:1-Math.pow(-2*t+2,5)/2;};
 const mapRect=(w,h,cx=800,cy=430)=>({w,h,cx,cy});
 const MAP_RECTS={world:mapRect(1420,1420*941/1672),china:mapRect(1080,720),jiangsu:mapRect(960,720),wuxi:mapRect(960,720),huishan:mapRect(1120,840,900,430)};
 const uvPoint=(r,u,v)=>({x:r.cx+(u-.5)*r.w,y:r.cy+(v-.5)*r.h});
@@ -59,7 +58,7 @@ export function createPainter(backCanvas,effectsCanvas,images,configuration){
  function background(t){
    const fxTime=effectTime(t),fxAmplitude=amplitude();
    bg.setTransform(1,0,0,1,0,0);bg.fillStyle='#020813';bg.fillRect(0,0,backCanvas.width,backCanvas.height);prepare(bg,false);
-   let nebula=bg.createRadialGradient(920,330,30,820,450,900);nebula.addColorStop(0,'rgba(9,49,82,.36)');nebula.addColorStop(.48,'rgba(6,29,57,.32)');nebula.addColorStop(1,'rgba(0,3,10,0)');bg.fillStyle=nebula;bg.fillRect(-200,-200,2000,1300);
+   const nebula=bg.createRadialGradient(920,330,30,820,450,900);nebula.addColorStop(0,'rgba(9,49,82,.36)');nebula.addColorStop(.48,'rgba(6,29,57,.32)');nebula.addColorStop(1,'rgba(0,3,10,0)');bg.fillStyle=nebula;bg.fillRect(-200,-200,2000,1300);
    for(const star of stars){
      const x=star.x+Math.sin(fxTime*.055+star.phase)*3*fxAmplitude,y=star.y+Math.cos(fxTime*.04+star.phase)*2*fxAmplitude;
      bg.globalAlpha=star.a*(.65+.35*Math.sin(fxTime*.7+star.phase)*fxAmplitude);bg.fillStyle=star.r>1.4?'#77caff':'#c1dcee';bg.beginPath();bg.arc(x,y,star.r,0,Math.PI*2);bg.fill();

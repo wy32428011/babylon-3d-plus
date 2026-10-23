@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr, trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharacters.ts';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ProjectModelAssetEntry } from '../types.js';
@@ -216,7 +217,7 @@ function collectModelTargets(document: JsonObject): ModelTargets {
 
 function resolvePackageReference(root: string, base: string, value: string, label: string, allowPackageParent = false): string {
   // glTF 子模型可引用包内兄弟目录，最终范围仍由 resolve + realpath 双重约束；参数纹理保持原规则。
-  if (!value || (!allowPackageParent && value.includes('..')) || /[\\\x00-\x1f?#]/.test(value) || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(value)) {
+  if (!value || (!allowPackageParent && value.includes('..')) || containsAsciiControlCharactersOr(value, "#?\\") || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(value)) {
     throw new Error(`${label} 引用不安全：${value}`);
   }
   const candidate = path.resolve(base, value);
@@ -237,7 +238,7 @@ async function requirePackageFile(
       throw new Error('引用不安全：文件不是包内普通文件。');
     }
   } catch (error) {
-    throw new Error(`${label} 不存在或不可用：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`${label} 不存在或不可用：${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
   checkCancelled(signal);
   verifiedFiles.add(cacheKey);
@@ -262,7 +263,7 @@ async function readModelDocument(file: string, signal: AbortSignal): Promise<Jso
     if (offset + length > stat.size) throw new Error('模型 JSON 长度超出文件边界。');
     const bytes = await readExactly(handle, length, offset);
     checkCancelled(signal);
-    const parsed = object(JSON.parse(bytes.toString('utf8').replace(/[\u0000\u0020]+$/g, '')));
+    const parsed = object(JSON.parse(trimTrailingNullAndSpaceCharacters(bytes.toString('utf8'))));
     if (!parsed || object(parsed.asset)?.version !== '2.0') throw new Error('模型 JSON 缺少 glTF 2.0 asset 声明。');
     return parsed;
   } finally { await handle.close(); }

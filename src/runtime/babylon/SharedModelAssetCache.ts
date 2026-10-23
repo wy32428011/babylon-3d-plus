@@ -1,6 +1,7 @@
 import type { AssetContainer, InstantiatedEntries } from '@babylonjs/core';
 import type { ModelAssetComponent } from '../../editor/model/components';
 import { cloneModelAssetContainer, estimateModelAssetContainerBytes, prepareModelAssetTemplate } from './cloneModelAssetContainer.ts';
+import { refreshDetachedSourceMeshes } from './refreshDetachedInstanceSourceMaterials.ts';
 
 /** 共享模型实例句柄；释放实例后会同步归还共享源资源引用。 */
 export type SharedModelInstantiation = {
@@ -16,6 +17,7 @@ type SharedModelSourceEntry = {
   estimatedBytes: number;
   idleOrder: number;
   controller: AbortController;
+  needsSourceDrawRefresh: boolean;
 };
 
 /**
@@ -97,6 +99,11 @@ export class SharedModelAssetCache {
       if (this.disposed || entry.disposed || this.entries.get(key) !== entry) {
         throw new Error('共享模型源资源在实例创建前已失效。');
       }
+      // 空闲期间没有活动实例接收场景照明更新；成功消费者在首次重用前恢复源状态。
+      if (entry.needsSourceDrawRefresh) {
+        refreshDetachedSourceMeshes(container.scene, container.meshes);
+        entry.needsSourceDrawRefresh = false;
+      }
 
       const startedAt = performance.now();
       let failed = true;
@@ -174,6 +181,7 @@ export class SharedModelAssetCache {
       estimatedBytes: 0,
       idleOrder: 0,
       controller: new AbortController(),
+      needsSourceDrawRefresh: true,
     };
     // 延后调用避免同步抛错/重入发生在 Map 注册前；同资源的并发调用共享同一任务。
     entry.promise = Promise.resolve().then(() => loader(entry.controller.signal))
@@ -209,6 +217,7 @@ export class SharedModelAssetCache {
       if (this.entries.get(key) === entry) this.entries.delete(key);
       this.disposeSourceEntry(entry);
     } else {
+      entry.needsSourceDrawRefresh = true;
       entry.idleOrder = ++this.idleOrder;
       this.trimIdleEntries();
     }

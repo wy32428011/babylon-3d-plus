@@ -179,7 +179,7 @@ try {
   runtime = new SceneRuntime(scene);
   runtime.sync(document);
   await waitFor(
-    () => runtime.models.get(TEMPLATE_ENTITY_ID)?.assetHandle,
+    () => runtime.assets.models.get(TEMPLATE_ENTITY_ID)?.assetHandle,
     '模板模型完成加载',
   );
 
@@ -191,12 +191,12 @@ try {
     { p: 'distance_x', v: 4.2 },
   ], { withSpawner: true });
   const spawnedModel = await waitFor(() => {
-    const model = runtime.spawnedDeviceModels.values().next().value;
+    const model = runtime.outputs.spawnedDeviceModels.values().next().value;
     return model?.meshes.length > 0 ? model : null;
   }, '动态实例完成生成与网格挂载');
-  assert.equal(runtime.spawnedDeviceModels.size, 1);
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 1);
   assert.equal(spawnedModel.assetCode, 'AGV-01', '实例资产编号必须来自 topic 段');
-  const templatePosition = runtime.models.get(TEMPLATE_ENTITY_ID).root.getAbsolutePosition();
+  const templatePosition = runtime.assets.models.get(TEMPLATE_ENTITY_ID).root.getAbsolutePosition();
   const spawnedPosition = spawnedModel.root.getAbsolutePosition();
   assert.ok(
     Math.abs(spawnedPosition.x - templatePosition.x) < 1e-6
@@ -264,37 +264,37 @@ try {
 
   // 2. 同资产编号再次收到消息（不带 s）：不重复生成，按 assetCode 反查保活
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-01', [{ p: 'distance_x', v: 9.9 }]);
-  assert.equal(runtime.spawnedDeviceModels.size, 1, '同一资产编号不得重复生成');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 1, '同一资产编号不得重复生成');
   assert.equal(deviceTelemetryStore.getSnapshot('AGV-01', 'conveyor', 'default')?.fields.distance_x, 9.9);
 
   // 2b. 未知资产编号且不带 s：只留快照，不生成实例
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-99', [{ p: 'distance_x', v: 1 }]);
-  assert.equal(runtime.spawnedDeviceModels.size, 1, '不带 s 的未知设备消息不得触发生成');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 1, '不带 s 的未知设备消息不得触发生成');
 
   // 2c. 静态实体已占用的资产编号：带 s 也不再生成（静态优先，冲突消解）
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'SPAWN-TEMPLATE-CODE', [{ p: 'distance_x', v: 1 }], { withSpawner: true });
-  assert.equal(runtime.spawnedDeviceModels.size, 1, '静态实体已占用的编号不得再生成动态实例');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 1, '静态实体已占用的编号不得再生成动态实例');
 
   // 3. 显式下线消息（不带 s）销毁实例
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-01', [{ p: 'status', v: 'offline' }]);
-  assert.equal(runtime.spawnedDeviceModels.size, 0, '收到 status=offline 必须销毁实例');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 0, '收到 status=offline 必须销毁实例');
 
   // 3b. 下线后不带 s 的消息不再重生
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-01', [{ p: 'distance_x', v: 1 }]);
-  assert.equal(runtime.spawnedDeviceModels.size, 0, '下线后不带 s 的消息不得重生实例');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 0, '下线后不带 s 的消息不得重生实例');
 
   // 4. 重新生成（必须再次携带 s）后，超时无消息由渲染帧统一销毁
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-02', [{ p: 'normal', v: true }], { withSpawner: true });
-  await waitFor(() => runtime.spawnedDeviceModels.size === 1, 'AGV-02 实例生成');
+  await waitFor(() => runtime.outputs.spawnedDeviceModels.size === 1, 'AGV-02 实例生成');
   await new Promise((resolve) => setTimeout(resolve, 1_200));
   scene.render();
-  assert.equal(runtime.spawnedDeviceModels.size, 0, '超过 timeoutSeconds 无消息必须销毁实例');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 0, '超过 timeoutSeconds 无消息必须销毁实例');
 
   // 5. 结束预览统一清理
   sendTelemetry(ingestDeviceTelemetryMessage, deviceTelemetryStore, 'AGV-03', [{ p: 'normal', v: true }], { withSpawner: true });
-  await waitFor(() => runtime.spawnedDeviceModels.size === 1, 'AGV-03 实例生成');
+  await waitFor(() => runtime.outputs.spawnedDeviceModels.size === 1, 'AGV-03 实例生成');
   runtime.endTelemetryPreview();
-  assert.equal(runtime.spawnedDeviceModels.size, 0, '结束预览必须销毁全部动态实例');
+  assert.equal(runtime.outputs.spawnedDeviceModels.size, 0, '结束预览必须销毁全部动态实例');
 
   console.log('设备产生器运行时冒烟通过：生成/位置/生成物点击/常规拾取隔离/快照/无s保活/无s不生成/静态优先/下线/带s重生/超时/退出清理');
 } finally {

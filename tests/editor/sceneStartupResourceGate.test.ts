@@ -3,16 +3,36 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-const storeSource = await readFile(new URL('../../src/editor/store/editorStore.ts', import.meta.url), 'utf8');
+import ts from 'typescript';
+import { shouldValidateSceneModelResources } from '../../src/editor/assets/sceneModelSyncTransaction.ts';
+// 从实际 Slice 提取动作，不依赖方法相邻或聚合门面的文本布局。
+const requiredActions = [
+  'finishLatestSceneResources', 'commitLatestSceneResources', 'finishSceneStartupResourcePreparation',
+  'beginLocalSceneResourceRecovery', 'setLocalSceneEnvironmentRecoveryChoice',
+  'acceptLocalSceneEnvironmentRecoveryChoice', 'commitRecoveredLocalSceneResources',
+  'loadScene', 'loadSceneFromFile',
+];
+const actionSources = new Map<string, string>();
+for (const file of ['sceneDocumentSlice', 'dataPlatformAndPublishSlice']) {
+  const source = await readFile(new URL(`../../src/editor/store/slices/${file}.ts`, import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAssignment(node) && requiredActions.includes(node.name.getText(parsed))
+      && ts.isArrowFunction(node.initializer)) {
+      const name = node.name.getText(parsed);
+      assert.ok(!actionSources.has(name), `动作重复：${name}`);
+      actionSources.set(name, node.getText(parsed));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+}
+assert.deepEqual([...actionSources.keys()].sort(), [...requiredActions].sort());
 function storeFixture() {
   let state: any = { sceneSessionId: '', runtimeMode: 'edit', logs: [], history: {}, sceneResourceIssues: [] };
   let session = 0;
   const observed: any[] = [];
-  const action = (name: string, next: string) => storeSource.slice(storeSource.indexOf(`  ${name}: (`, storeSource.indexOf('export const useEditorStore')),
-    storeSource.indexOf(`  ${next}:`, storeSource.indexOf(`  ${name}: (`, storeSource.indexOf('export const useEditorStore'))));
-  const loadStart = storeSource.indexOf('  loadScene: async (');
-  const loadEnd = storeSource.indexOf('  loadSceneFromContent:', loadStart);
-  const code = `({${action('finishLatestSceneResources', 'refreshModelInstancesFromAssets')}${storeSource.slice(loadStart, loadEnd)}})`;
+  const code = `({${requiredActions.map(name => actionSources.get(name)).join(',')}})`;
   const actions = runInNewContext(stripTypeScriptTypes(code), {
     set: (update: any) => { const next = typeof update === 'function' ? update(state) : update; state = { ...state, ...next }; observed.push(state); },
     get: () => state, isRuntimePreviewState: () => false,
@@ -149,11 +169,13 @@ test('97 个旧 SOURCE 模型不会在资源确认前触发 runtime.sync，释�
     const synced: unknown[] = [];
     const document = { entities: {}, entityIds: [] };
     runInNewContext(effect, {
-      useEffect: (run: () => void) => run(), runtimeRef: { current: { sync: (scene: unknown) => synced.push(scene) } },
+      useEffect: (run: () => void) => run(), runtimeRef: { current: { sync: (scene: unknown) => synced.push(scene),
+        beginSceneSession() {}, getModelStatistics: () => null } },
       gizmoRef: { current: { cancelActiveGroupDrag() {} } }, isRuntimePreview: false, runtimeModeRef: { current: 'edit' },
       sceneStartupResourceSessionId: deferred ? 'A' : null, sceneSessionId: 'A', sceneRuntimeStartupDeferred: deferred,
       modelParameterSyncEntityId: null, editRuntimeSceneDocument: document,
-      useEditorStore: { getState: () => ({ hierarchySelectionIds: [] }) },
+      statisticsSceneSessionRef: { current: null },
+      useEditorStore: { getState: () => ({ hierarchySelectionIds: [], setSceneModelStatistics() {} }) },
       attachCurrentSelectionGizmo() {}, publishSelectedInspectorSpatialInfo() {}, selectedEntityIdRef: { current: null },
     });
     assert.equal(synced.length, deferred ? 0 : 1);
@@ -197,7 +219,7 @@ test('确认资源前天空盒与环境都不启动，释放门控后在同一�
     runInNewContext(effect, {
       useEffect: (run: () => void) => run(),
       viewportRef: { current: { setViewDistance() {}, setSensitivity() {} } },
-      runtimeRef: { current: { syncShadows() {}, syncSkybox: () => events.push('skybox'), syncEnvironment: () => events.push('environment') } },
+      runtimeRef: { current: { syncDefaultCargoGenerator() {}, syncAppearance() {}, syncLighting() {}, syncSkybox: () => events.push('skybox'), syncEnvironment: () => events.push('environment') } },
       sceneDocument: { sceneSettings: { camera: {} } }, sceneRuntimeStartupDeferred: deferred,
       environmentApplyRequest: null, environmentAdjustmentActive: false, environmentRuntimeOverride: null,
       environmentStartupRelinkSessionId: null, sceneSessionId: 'A', resolveEnvironmentRuntimeSettings: () => null,
@@ -218,6 +240,7 @@ test('同来源同修订天空盒每轮资源准备完成后只重试一次，�
   const modelRetries: string[] = [];
   const preparationState = { assetRefreshId: 'refresh-1', modelSyncRunId: 'sync-1' };
   const context = { sceneSessionId: 'scene-A', preparationState, skyboxResourceRetryKeyRef, failedResourceRetrySessionRef,
+    shouldValidateSceneModelResources, sceneDocument: {},
     editRuntimeSceneDocument: {}, currentEditor: { hierarchySelectionIds: [] },
     useEditorStore: { getState: () => ({ sceneResourcePolicy: 'preserve-snapshot' }) },
     runtime: { retryFailedSceneResources: () => modelRetries.push(preparationState.assetRefreshId),

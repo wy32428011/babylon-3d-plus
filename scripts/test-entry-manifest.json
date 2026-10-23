@@ -3,7 +3,7 @@
   "entries": [
     {
       "name": "test:typescript-build",
-      "command": "node --test tests/buildTypeScript.test.mjs",
+      "command": "node --test tests/buildTypeScript.test.mjs tests/buildTypescriptLightingOutputs.test.mjs",
       "category": "build-required",
       "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
     },
@@ -21,15 +21,9 @@
     },
     {
       "name": "test:scene-theme",
-      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/sceneTheme.test.ts tests/editor/lightSettings.test.ts tests/editor/lightEditor.test.ts tests/editor/sceneTheme.integration.test.mjs tests/runtime/sceneThemeRuntime.test.mjs tests/runtime/sceneEnvironmentEffects.test.mjs tests/runtime/themeEnvironmentLighting.test.mjs",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/sceneTheme.test.ts tests/editor/lightSettings.test.ts tests/editor/lightEditor.test.ts tests/editor/lightingUnified.integration.test.mjs tests/runtime/sceneThemeRuntime.test.mjs tests/runtime/sceneEnvironmentEffects.test.mjs tests/runtime/canonicalEnvironmentLighting.test.mjs",
       "category": "legacy",
-      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
-    },
-    {
-      "name": "smoke:scene-theme",
-      "command": "node scripts/smoke-scene-theme.mjs",
-      "category": "legacy",
-      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+      "reason": "统一光照、旧文件迁移与显示效果的定向回归；独立执行，不加入默认core组。"
     },
     {
       "name": "test:light-editor",
@@ -45,7 +39,7 @@
     },
     {
       "name": "test:manual-roam",
-      "command": "node --experimental-strip-types --test tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts tests/runtime/manualRoamRiggedAssets.test.ts tests/runtime/manualRoamMotionQuality.test.ts tests/runtime/manualRoamUpperSkin.test.ts tests/runtime/manualRoamFlightSkin.test.ts tests/runtime/manualRoamTurnMotion.test.mjs tests/runtime/manualRoamContactCalibration.test.mjs",
       "category": "legacy",
       "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
     },
@@ -184,12 +178,6 @@
     {
       "name": "smoke:environment-shadows",
       "command": "node scripts/smoke-environment-shadows.mjs",
-      "category": "legacy",
-      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
-    },
-    {
-      "name": "smoke:static-shadows",
-      "command": "node scripts/smoke-static-shadow-settings.mjs && node scripts/smoke-static-shadows.mjs && node scripts/smoke-multilevel-static-shadows.mjs && node scripts/smoke-shadow-quality.mjs && node scripts/smoke-static-shadow-ui.mjs",
       "category": "legacy",
       "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
     },
@@ -420,6 +408,144 @@
       "command": "node --experimental-strip-types --test tests/devAssetPaths.test.ts",
       "category": "legacy",
       "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+    },
+    {
+      "name": "test:lighting-bake",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingBakeContract.test.ts tests/editor/lightingMobility.test.ts tests/editor/lightingBake.integration.test.mjs tests/runtime/lightingClassificationRuntime.test.ts tests/runtime/lightingClassificationReview.test.ts tests/runtime/lightingGeometry.test.ts tests/runtime/lightingMaterialExport.test.ts tests/runtime/lightingNativeInstances.test.ts tests/runtime/lightingProbes.test.ts tests/runtime/lightingBakeTask.test.ts tests/runtime/hybridShadows.test.ts tests/runtime/localLightShadows.test.ts tests/lightingBake/playerLightingRuntimeStatus.test.ts tests/lightingBake/lightingArrayInstances.test.mjs tests/lightingBake/sceneLightingRuntime.test.mjs tests/lightingBake/lightingBakeBackend.test.ts tests/lightingBake/lightingMaterialValidation.test.ts tests/lightingBake/lightingBakeResources.test.ts tests/lightingBake/lightingBakeRecovery.test.ts tests/lightingBake/lightingBakeRelocation.test.ts tests/lightingBake/lightingBakeRequirements.test.ts tests/lightingBake/lightingBakeSourcePackage.test.ts tests/lightingBake/lightingBakeDeployment.test.ts",
+      "category": "legacy",
+      "reason": "独立混合光照聚焦回归；Node/NullEngine/临时文件与Store构建，不需要Blender、真实浏览器或GPU，不加入默认core组。"
+    },
+    {
+      "name": "test:lighting-bake:cycles",
+      "command": "npm run build:electron && node tests/lightingBake/cycles.integration.mjs",
+      "category": "manual",
+      "reason": "需要本机Blender 4+，入口先检查引擎；缺少引擎返回非零，不计通过。真实Cycles单独运行，不加入默认core组。"
+    },
+    {
+      "name": "smoke:hybrid-shadows",
+      "command": "node scripts/smoke-hybrid-shadows.mjs",
+      "category": "manual",
+      "reason": "需要本机Chrome和WebGL，验证混合阴影像素及缓存刷新；单独执行，不加入默认core组。"
+    },
+    {
+      "name": "smoke:baked-lighting-material",
+      "command": "node scripts/smoke-baked-lighting-material.mjs",
+      "category": "manual",
+      "reason": "需要本机Chrome和WebGL，验证PBR/Standard材质与间接光叠加；单独执行，不加入默认core组。"
+    },
+    {
+      "name": "smoke:lighting-bake-electron",
+      "command": "npm run build:viewer && npm run build:electron && node scripts/smoke-lighting-bake-electron.mjs",
+      "category": "manual",
+      "reason": "需要Electron、Blender与实际GPU；使用临时工程和本地MQTT夹具验证编辑器闭环，单独执行，不加入默认core组。"
+    },
+    {
+      "name": "test:lighting-manager",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingPolicy.test.ts tests/editor/lightingManager.integration.test.mjs tests/editor/lightingBakeManagerModel.test.mjs tests/runtime/lightingPolicyRuntime.test.ts tests/lightingBake/lightingPolicyPersistence.test.ts",
+      "category": "legacy",
+      "reason": "独立集中光照管理回归；覆盖共享规则、草稿事务、UI数据、实际运行时来源和SOURCE/DIST临时文件，不需要Blender、浏览器或GPU，不加入默认core组。"
+    },
+    {
+      "name": "smoke:lighting-manager",
+      "command": "npm run build:viewer && npm run build:electron && node scripts/smoke-lighting-bake-electron.mjs --manager",
+      "category": "manual",
+      "reason": "需要本机Electron、Blender、Edge与硬件WebGL；通过临时工程和本地MQTT实测集中规则、实例继承、批量例外、烘焙、保存与正式Viewer导出，不执行线上发布。"
+    },
+    {
+      "name": "test:lighting-unified",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneFileVersion.test.ts tests/digitalTwin/sceneLightingConfig.test.ts tests/editor/lightingUnified.integration.test.mjs tests/runtime/canonicalLightingRuntime.test.ts tests/lightingBake/lightingUnifiedBackup.test.ts tests/lightingBake/lightingUnifiedPersistence.test.ts tests/runtime/canonicalEnvironmentLighting.test.mjs",
+      "category": "legacy",
+      "reason": "统一光照、旧文件迁移与显示效果的定向回归；独立执行，不加入默认core组。"
+    },
+    {
+      "name": "smoke:lighting-unified",
+      "command": "npm run build:viewer && npm run build:electron && node scripts/smoke-lighting-bake-electron.mjs --unified",
+      "category": "manual",
+      "reason": "需要本机Electron、Cycles、Edge与硬件WebGL；验证唯一光照方案、旧场景备份、规则、动作、保存和独立Viewer，不执行线上发布。"
+    },
+    {
+      "name": "test:optimization-p1",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/sourceJavaScriptArtifacts.test.mjs tests/telemetryTestRunner.test.mjs tests/runtime/babylonModuleCompatibility.test.mjs tests/runtime/sha256Compatibility.test.ts tests/runtime/modelScriptCompiler.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/deploymentPrecompiledScripts.test.ts tests/editor/lazyEditorDialog.test.mjs tests/editor/cadReferenceLazyLoading.test.mjs tests/editor/projectPanelAutoModelSync.test.ts && node scripts/telemetry-test.mjs mqttBrowserClientSuback.test.ts mqttConnectionTest.test.ts mqttLazyLoading.test.ts electronMqttClientGeneration.test.ts mqttRuntimeStatus.test.ts",
+      "category": "build-required",
+      "reason": "P1构建守卫、脚本预转译与来源校验、Babylon兼容、按需弹窗和MQTT生命周期回归。"
+    },
+    {
+      "name": "test:optimization-p2",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/modelScriptPersistentCache.test.ts tests/runtime/modelInitializationFrameScheduler.test.ts tests/dataPlatform/boundedAssetPipeline.test.ts tests/dataPlatform/modelIncrementalPipeline.test.ts tests/runtime/motionStaticBatch.test.ts tests/runtime/controlledEnvironmentTransforms.test.ts tests/runtime/transformGizmoPreviewIsolation.test.mjs tests/editor/transformPreviewStore.test.ts tests/runtime/lightingSourceCaching.test.ts tests/runtime/dataPlatformScreenOverlayPerformance.test.mjs tests/runtime/hybridShadows.test.ts tests/runtime/motionSelectionProxy.test.mjs",
+      "category": "build-required",
+      "reason": "P2 持久转译缓存、初始化帧调度、包依赖事务流水线、动静混合实例、受控冻结及隔离拖拽预览回归。"
+    },
+    {
+      "name": "test:contracts:editor",
+      "command": "node scripts/p4-test-domains.mjs editor",
+      "category": "legacy",
+      "reason": "P4 editor 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts:effects",
+      "command": "node scripts/p4-test-domains.mjs effects",
+      "category": "legacy",
+      "reason": "P4 effects 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts:motion",
+      "command": "node scripts/p4-test-domains.mjs motion",
+      "category": "legacy",
+      "reason": "P4 motion 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts:observability",
+      "command": "node scripts/p4-test-domains.mjs observability",
+      "category": "legacy",
+      "reason": "P4 observability 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts:opening",
+      "command": "node scripts/p4-test-domains.mjs opening",
+      "category": "legacy",
+      "reason": "P4 opening 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts:resources",
+      "command": "npm run build:electron && node scripts/p4-test-domains.mjs resources",
+      "category": "build-required",
+      "reason": "P4 resources 领域契约；保留原文件/断言与独立Node运行方式，不自动执行手动/GPU/外部环境候选。"
+    },
+    {
+      "name": "test:contracts",
+      "command": "npm run test:contracts:editor && npm run test:contracts:effects && npm run test:contracts:motion && npm run test:contracts:observability && npm run test:contracts:opening && npm run test:contracts:resources",
+      "category": "build-required",
+      "reason": "P4 六领域 Node 契约顺序聚合，原160候选对应159独立命令；保留文件隔离、构建前置及真实失败。"
+    },
+    {
+      "name": "test:optimization-p4",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/p4TestInventory.test.mjs tests/p4QualityGates.test.mjs tests/editor/p4EditorHookLifecycles.test.mjs",
+      "category": "legacy",
+      "reason": "P4 测试分类完整性/漂移与质量守卫回归；独立进程执行，不代表实际 GPU 或外部集成已通过。"
+    },
+    {
+      "name": "test:glb-standard-preview",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/glbStandardPreview.test.ts tests/editor/glbStandardPreviewManager.test.mjs tests/runtime/sandboxEnvironmentRuntime.test.mjs tests/runtime/sharedModelSourceRefresh.test.mjs tests/runtime/environmentCloneMemory.test.mjs",
+      "category": "legacy",
+      "reason": "GLB 标准预览、旧配置兼容、异步默认环境及真实 GLB 保存/SOURCE/DIST 离线验收；按前置独立执行。"
+    },
+    {
+      "name": "smoke:glb-standard-preview",
+      "command": "npm run build && npm run test:glb-standard-preview:webgl && node scripts/smoke-glb-standard-preview.mjs",
+      "category": "manual-gpu",
+      "reason": "GLB 标准预览、旧配置兼容、异步默认环境及真实 GLB 保存/SOURCE/DIST 离线验收；按前置独立执行。"
+    },
+    {
+      "name": "test:glb-standard-preview:webgl",
+      "command": "node tests/runtime/glbStandardPreview.webgl.mjs",
+      "category": "manual-gpu",
+      "reason": "真实GPU验证容器实例源的IBL/旧灯/冻结旋转，与原生PBR逐像素对照；需要本机Chrome硬件WebGL。"
+    },
+    {
+      "name": "test:optimization-p2-r0",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/scenePerformanceMonitor.test.mjs tests/runtime/frameTimingWindow.test.ts tests/runtime/p2R0Diagnostics.test.mjs tests/editor/editorPerformanceRunSession.test.ts tests/digitalTwin/playerPerformanceDiagnostics.test.ts",
+      "category": "legacy",
+      "reason": "P2-R0 真实监控计数器/墙钟窗口/缺失与零值传播校准；GPU及完整B0由隔离实机另验。"
     }
   ]
 }

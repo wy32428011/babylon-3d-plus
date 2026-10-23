@@ -135,7 +135,7 @@ export async function readDataPlatformSkyboxIndex(editorRoot: string): Promise<D
       parsed = JSON.parse(content) as unknown;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`天空盒索引 JSON 已损坏：${message}`);
+      throw new Error(`天空盒索引 JSON 已损坏：${message}`, { cause: error });
     }
     return normalizeDataPlatformSkyboxIndex(parsed);
   } catch (error) {

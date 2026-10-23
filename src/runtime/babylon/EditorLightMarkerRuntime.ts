@@ -1,15 +1,12 @@
-import {
-  Camera,
-  Color3,
-  Mesh,
-  MeshBuilder,
-  type Nullable,
-  type Observer,
-  Scene,
-  StandardMaterial,
-  TransformNode,
-  Vector3,
-} from '@babylonjs/core';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { Nullable, Observer } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { TransformComponent } from '../../editor/model/components';
 import { getLightEditorCapabilities, type LightEditorMarkerKind } from '../../editor/model/lightEditor';

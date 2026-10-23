@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -62,3 +62,24 @@ test('invalid config and unknown CLI option fail visibly', () => {
     assert.notEqual(result.status, 0); assert.match(result.stderr, /未知参数/);
   } finally { rmSync(root, { recursive: true }); }
 });
+
+test('src directory does not contain duplicate .js files shadowing .ts/.tsx sources', () => {
+  const srcRoot = path.resolve('src');
+  const duplicates = [];
+  function scan(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        scan(fullPath);
+      } else if (entry.name.endsWith('.js')) {
+        const base = fullPath.slice(0, -3);
+        if (existsSync(`${base}.ts`) || existsSync(`${base}.tsx`)) {
+          duplicates.push(path.relative(process.cwd(), fullPath).replaceAll('\\', '/'));
+        }
+      }
+    }
+  }
+  scan(srcRoot);
+  assert.deepEqual(duplicates, [], `src/ 下存在与 .ts/.tsx 重名的残留 .js 文件: ${duplicates.join(', ')}`);
+});
+

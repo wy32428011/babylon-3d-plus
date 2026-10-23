@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Matrix, Quaternion, Vector3 } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 const UPRIGHT_BASIS = Matrix.RotationX(Math.PI / 2);
 
@@ -21,14 +21,11 @@ function assertSameMatrix(actual, expected, message) {
 }
 
 test('图表立标坐标基准的旧场景兼容', async (t) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/model/SceneDocument.ts',
+    '/src/editor/model/chartMarker.ts',
+    '/src/editor/project/SceneSerializer.ts',
+  ]);
   t.after(() => server.close());
   const { createEmptySceneDocument } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
   const { createChartMarkerEntity, normalizeChartMarker, resolveChartMarker } = await server.ssrLoadModule('/src/editor/model/chartMarker.ts');

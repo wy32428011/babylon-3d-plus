@@ -232,7 +232,7 @@ function findVisibleModelArrayEntity(runtime, modelArrayBatch, entityId, sourceI
   for (const source of sources) {
     for (const batch of source.batches) {
       for (let thinInstanceIndex = 0; thinInstanceIndex < batch.mesh.thinInstanceCount; thinInstanceIndex += 1) {
-        if (runtime.readEntityIdFromMesh(batch.mesh, thinInstanceIndex) !== entityId) continue;
+        if (runtime.selection.readEntityIdFromMesh(batch.mesh, thinInstanceIndex) !== entityId) continue;
         return { batch, thinInstanceIndex };
       }
     }
@@ -398,12 +398,12 @@ async function waitForSceneRuntimeModelArrayParameterVariant(
   entityId,
   { modelAsset, telemetryBinding = null, expectedEntityIds = [entityId] },
 ) {
-  const expectedRenderSignature = runtime.createModelArrayRenderSignature(modelAsset, telemetryBinding);
+  const expectedRenderSignature = runtime.arrays.createModelArrayRenderSignature(modelAsset, telemetryBinding);
   let lastState = '尚未创建参数变体';
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
-    const variant = runtime.modelArrayParameterVariantByEntityId?.get(entityId);
+    const variant = runtime.variants.modelArrayParameterVariantByEntityId?.get(entityId);
     const mappedVariants = expectedEntityIds.map((expectedEntityId) => (
-      runtime.modelArrayParameterVariantByEntityId?.get(expectedEntityId)
+      runtime.variants.modelArrayParameterVariantByEntityId?.get(expectedEntityId)
     ));
     const sharedVariant = mappedVariants[0];
     const batchEntityIds = variant?.model?.modelArrayBatch?.getEntityIds() ?? [];
@@ -411,12 +411,12 @@ async function waitForSceneRuntimeModelArrayParameterVariant(
       variant
       && sharedVariant === variant
       && mappedVariants.every((mappedVariant) => mappedVariant === variant)
-      && runtime.modelArrayParameterVariants?.get(variant.key) === variant
+      && runtime.variants.modelArrayParameterVariants?.get(variant.key) === variant
       && variant.renderSignature === expectedRenderSignature
       && variant.model.measurementReady
       && !variant.model.externalScriptStarting
       && variant.model.modelArrayBatch
-      && runtime.isModelArrayBatchCurrent(variant.model, expectedRenderSignature)
+      && runtime.arrays.isModelArrayBatchCurrent(variant.model, expectedRenderSignature)
       && hasSameEntityIds(batchEntityIds, expectedEntityIds)
       && runtime.getModelMeasurement(entityId).status === 'ready'
     ) {
@@ -437,12 +437,12 @@ async function waitForSceneRuntimeModelArrayParameterVariant(
 /** 收集源批次及参数变体批次当前真正提交的逻辑实体覆盖。 */
 function collectSceneRuntimeModelArrayCoverage(runtime, sourceEntityId) {
   const entries = [];
-  const sourceModel = runtime.models?.get(sourceEntityId);
+  const sourceModel = runtime.assets.models?.get(sourceEntityId);
   const sourceBatch = sourceModel?.modelArrayBatch;
   if (sourceBatch) {
     entries.push({ kind: 'base', batch: sourceBatch, sourceSignature: sourceModel.modelArraySourceSignature });
   }
-  for (const variant of runtime.modelArrayParameterVariants?.values?.() ?? []) {
+  for (const variant of runtime.variants.modelArrayParameterVariants?.values?.() ?? []) {
     if (variant.sourceEntityId === sourceEntityId && variant.model.modelArrayBatch) {
       entries.push({
         kind: 'variant',
@@ -518,8 +518,8 @@ function collectSceneRuntimeModelArrayCoverage(runtime, sourceEntityId) {
     (activeMeshCollection?.data ?? []).slice(0, activeMeshCollection?.length ?? 0),
   );
   const hostModels = [
-    runtime.models?.get?.(sourceEntityId),
-    ...[...(runtime.modelArrayParameterVariants?.values?.() ?? [])]
+    runtime.assets.models?.get?.(sourceEntityId),
+    ...[...(runtime.variants.modelArrayParameterVariants?.values?.() ?? [])]
       .filter((variant) => variant.sourceEntityId === sourceEntityId)
       .map((variant) => variant.model),
   ].filter(Boolean);
@@ -808,8 +808,8 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       true,
       '已选中 Shelf 必须能够创建阵列预览',
     );
-    const previewClones = [...(runtime.entityArrayPreview?.clones ?? [])];
-    const previewMeshes = [...(runtime.entityArrayPreview?.matrixPreview?.meshes ?? [])];
+    const previewClones = [...(runtime.transforms.entityArrayPreview?.clones ?? [])];
+    const previewMeshes = [...(runtime.transforms.entityArrayPreview?.matrixPreview?.meshes ?? [])];
     assert.equal(previewClones.length, 0, 'Shelf 阵列预览不得按副本递归克隆完整节点树');
     assert.equal(previewMeshes.length, leftMeshes.length, 'Shelf 每个可渲染源 Mesh 只应创建一个矩阵批次');
     assert.ok(previewMeshes.every((mesh) => !mesh.isAnInstance && mesh.thinInstanceCount === 3), 'Shelf 矩阵批次必须按请求数量写入 thinInstance');
@@ -826,7 +826,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       true,
       'Shelf 最大阵列数量必须继续复用固定矩阵批次',
     );
-    assert.deepEqual(runtime.entityArrayPreview?.matrixPreview?.meshes, previewMeshes, '1000 个副本不得增加 Shelf 批次 Mesh 数量');
+    assert.deepEqual(runtime.transforms.entityArrayPreview?.matrixPreview?.meshes, previewMeshes, '1000 个副本不得增加 Shelf 批次 Mesh 数量');
     assert.ok(previewMeshes.every((mesh) => mesh.thinInstanceCount === 1000), 'Shelf 每个批次必须写入 1000 个矩阵实例');
     assert.equal(
       previewMeshes.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
@@ -841,14 +841,14 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       '更新 Shelf 阵列方向、数量和间距必须复用矩阵批次',
     );
     assert.deepEqual(
-      runtime.entityArrayPreview?.matrixPreview?.meshes,
+      runtime.transforms.entityArrayPreview?.matrixPreview?.meshes,
       previewMeshes,
       '减少 Shelf 阵列数量不得重建矩阵批次 Mesh',
     );
     assert.ok(previewMeshes.every((mesh) => mesh.thinInstanceCount === 1), '减少 Shelf 阵列数量必须收缩有效矩阵实例数');
     assert.doesNotThrow(() => integrationScene.render(), '更新 Shelf 矩阵阵列预览后仍必须保持可渲染');
     runtime.clearEntityArrayPreview();
-    assert.equal(runtime.entityArrayPreview, null, '取消 Shelf 阵列预览必须释放矩阵批次');
+    assert.equal(runtime.transforms.entityArrayPreview, null, '取消 Shelf 阵列预览必须释放矩阵批次');
     assert.ok(previewMeshes.every((mesh) => mesh.isDisposed()), '取消 Shelf 阵列预览必须释放全部矩阵批次 Mesh');
 
     let persistentEntities = Array.from({ length: 1000 }, (_, index) => (
@@ -858,13 +858,13 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     ));
     const meshCountBeforePersistentArray = integrationScene.meshes.length;
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], left.id));
-    const persistentBatch = runtime.models.get(left.id)?.modelArrayBatch;
+    const persistentBatch = runtime.assets.models.get(left.id)?.modelArrayBatch;
     const persistentMeshes = [...(persistentBatch?.meshes ?? [])];
     const persistentPrimaryBatches = persistentBatch?.sources.map((source) => source.batches[0]) ?? [];
     const persistentPrimaryMeshes = persistentPrimaryBatches.map((batch) => batch.mesh);
     assert.equal(loadCount, 1, '正式 Shelf 阵列不得触发任何额外模型加载');
-    assert.equal(runtime.models.size, 2, '1000 个 Shelf 阵列实体不得创建逐副本 ModelRuntimeEntry');
-    assert.equal(runtime.modelArrayInstanceEntities.size, 1000, 'SceneRuntime 必须保留 1000 个独立 Shelf 逻辑实体');
+    assert.equal(runtime.assets.models.size, 2, '1000 个 Shelf 阵列实体不得创建逐副本 ModelRuntimeEntry');
+    assert.equal(runtime.arrays.modelArrayInstanceEntities.size, 1000, 'SceneRuntime 必须保留 1000 个独立 Shelf 逻辑实体');
     assert.ok(
       persistentPrimaryMeshes.length > 0 && persistentPrimaryMeshes.length < leftMeshes.length,
       '正式 Shelf 阵列必须把同材质静态叶 Mesh 合并成更少的 Geometry 源',
@@ -876,7 +876,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       leftMeshes.reduce((total, mesh) => total + mesh.getTotalVertices(), 0),
       'Geometry 顶点乘保留的叶矩阵数必须完整覆盖 Shelf 原始视觉数据',
     );
-    const suspendedSourceMeshCount = runtime.models.get(left.id)?.modelArraySuspendedMeshes.size ?? 0;
+    const suspendedSourceMeshCount = runtime.assets.models.get(left.id)?.modelArraySuspendedMeshes.size ?? 0;
     assert.equal(
       integrationScene.meshes.length,
       meshCountBeforePersistentArray - suspendedSourceMeshCount + persistentMeshes.length,
@@ -886,7 +886,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       leftMeshes.every((mesh) => !integrationScene.meshes.includes(mesh)),
       '源 Shelf 的脚本宿主 Mesh 必须移出 scene.meshes，避免每帧重复遍历',
     );
-    assert.equal(runtime.models.get(left.id)?.root.isEnabled(), false, '源 Shelf 脚本宿主根节点必须暂停渲染');
+    assert.equal(runtime.assets.models.get(left.id)?.root.isEnabled(), false, '源 Shelf 脚本宿主根节点必须暂停渲染');
     assert.ok(persistentMeshes.every((mesh) => !mesh.isAnInstance), '正式 Shelf 阵列不得退回 InstancedMesh 节点');
     for (const source of persistentBatch.sources) {
       const sourceMatrixCount = source.sourceMeshes.reduce((total, sourceMesh) => (
@@ -956,7 +956,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       ...persistentEntities.slice(1),
     ];
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
-    assert.equal(runtime.models.get(left.id)?.modelArrayBatch, persistentBatch, '移动单个 Shelf 实体必须复用正式矩阵批次');
+    assert.equal(runtime.assets.models.get(left.id)?.modelArrayBatch, persistentBatch, '移动单个 Shelf 实体必须复用正式矩阵批次');
     assert.equal(persistentMatrixUpdateCount, 1, '移动一个 Shelf 实体只允许触发一次整批矩阵刷新');
     persistentBatch.sources.forEach((source, sourceIndex) => {
       for (const batch of source.batches) {
@@ -1014,9 +1014,9 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       }),
     ]);
     assert.notEqual(firstParameterVariant, secondParameterVariant, '不同参数值的阵列模型必须使用不同脚本宿主');
-    assert.equal(runtime.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 2, '两个不同参数组合只应创建两个脚本宿主');
     assert.equal(
-      runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
+      runtime.assets.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
       999,
       '修改两个阵列实体参数后，基础批次必须保留源实体和其余 998 个模型',
     );
@@ -1037,7 +1037,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     );
     assert.ok(firstVisibleParameterVariant, '参数变体当前视锥内必须保留可拾取 thinInstance');
     assert.equal(
-      runtime.readEntityIdFromMesh(firstVisibleParameterVariant.batch.mesh, firstVisibleParameterVariant.thinInstanceIndex),
+      runtime.selection.readEntityIdFromMesh(firstVisibleParameterVariant.batch.mesh, firstVisibleParameterVariant.thinInstanceIndex),
       persistentEntities[0].id,
       '参数变体 thinInstance 拾取必须映射回自己的逻辑模型',
     );
@@ -1124,7 +1124,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
       }),
     ]);
     assert.ok(sharedFirstVariant === sharedSecondVariant, '相同参数值的两个阵列模型必须合并复用一个脚本宿主');
-    assert.equal(runtime.modelArrayParameterVariants.size, 1, '参数组合合并后必须释放不再使用的脚本宿主');
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 1, '参数组合合并后必须释放不再使用的脚本宿主');
     assert.deepEqual(
       sharedFirstVariant.model.modelArrayBatch.getEntityIds(),
       [persistentEntities[0].id, persistentEntities[1].id],
@@ -1137,7 +1137,7 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
     );
     assert.ok(sharedSecondVisible, '合并参数组中的第二个逻辑模型必须在当前视锥保留可拾取 thinInstance');
     assert.equal(
-      runtime.readEntityIdFromMesh(sharedSecondVisible.batch.mesh, sharedSecondVisible.thinInstanceIndex),
+      runtime.selection.readEntityIdFromMesh(sharedSecondVisible.batch.mesh, sharedSecondVisible.thinInstanceIndex),
       persistentEntities[1].id,
       '合并参数组 thinInstance 必须映射到第二个逻辑模型',
     );
@@ -1153,9 +1153,9 @@ async function runSceneRuntimeIntegration({ SceneRuntime, glbBytes, scriptText, 
         : entity
     ));
     runtime.sync(createSceneRuntimeDocument([left, right, ...persistentEntities], persistentEntities[0].id));
-    assert.equal(runtime.modelArrayParameterVariants.size, 0, '恢复默认参数后必须释放全部额外脚本宿主');
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 0, '恢复默认参数后必须释放全部额外脚本宿主');
     assert.equal(
-      runtime.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
+      runtime.assets.models.get(left.id)?.modelArrayBatch?.getEntityIds().length,
       1001,
       '恢复默认参数后源实体和全部 1000 个逻辑模型必须重新合并到基础 thinInstance 批次',
     );
@@ -1257,18 +1257,18 @@ async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntim
     runtime.sync(createSceneRuntimeDocument([source], source.id));
     await waitForSceneRuntimeEntityMeshes(integrationScene, runtime, source.id);
     runtime.sync(createSceneRuntimeDocument([source, ...instances], source.id));
-    const sourceModel = runtime.models.get(source.id);
+    const sourceModel = runtime.assets.models.get(source.id);
     const initialBatch = sourceModel?.modelArrayBatch;
     assert.ok(sourceModel && initialBatch, '默认参数 Shelf 阵列必须先创建完整基础批次');
     const initialBatchMeshes = [...initialBatch.meshes];
-    const defaultRenderSignature = runtime.createModelArrayRenderSignature(
+    const defaultRenderSignature = runtime.arrays.createModelArrayRenderSignature(
       source.components.modelAsset,
       source.components.telemetryBinding,
     );
     const defaultExpectedRenderSignatures = new Map(
       expectedEntityIds.map((entityId) => [entityId, [defaultRenderSignature]]),
     );
-    assert.ok(runtime.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature), '默认参数基础批次必须使用默认渲染签名');
+    assert.ok(runtime.arrays.isModelArrayBatchCurrent(sourceModel, defaultRenderSignature), '默认参数基础批次必须使用默认渲染签名');
     assert.ok(hasSameEntityIds(initialBatch.getEntityIds(), expectedEntityIds), '默认参数基础批次必须覆盖源模型和全部阵列副本');
     assertSceneRuntimeModelArrayCoverageFrame(
       runtime,
@@ -1288,7 +1288,7 @@ async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntim
       },
     };
     const changedSource = createSceneRuntimeShelfEntity(source.id, 0, changedModelAsset);
-    const changedRenderSignature = runtime.createModelArrayRenderSignature(
+    const changedRenderSignature = runtime.arrays.createModelArrayRenderSignature(
       changedSource.components.modelAsset,
       changedSource.components.telemetryBinding,
     );
@@ -1298,7 +1298,7 @@ async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntim
     ]);
     runtime.sync(createSceneRuntimeDocument([changedSource, ...instances], changedSource.id));
     assert.ok(
-      runtime.models.get(source.id)?.modelArrayBatch === initialBatch,
+      runtime.assets.models.get(source.id)?.modelArrayBatch === initialBatch,
       '源模型从默认值改为非默认值时，新参数副本宿主 ready 前必须保留旧完整批次',
     );
     assert.ok(initialBatchMeshes.every((mesh) => !mesh.isDisposed()), '异步参数变体 ready 前不得提前释放旧完整批次 Mesh');
@@ -1318,29 +1318,29 @@ async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntim
       label: '源模型默认值切到非默认值',
       expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
       isSettled: () => {
-        const currentSourceModel = runtime.models.get(source.id);
+        const currentSourceModel = runtime.assets.models.get(source.id);
         const currentSourceBatch = currentSourceModel?.modelArrayBatch;
-        const copyVariant = runtime.modelArrayParameterVariantByEntityId?.get(instances[0].id);
+        const copyVariant = runtime.variants.modelArrayParameterVariantByEntityId?.get(instances[0].id);
         return Boolean(
           currentSourceModel
           && currentSourceBatch
           && currentSourceBatch !== initialBatch
-          && runtime.isModelArrayBatchCurrent(currentSourceModel, changedRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(currentSourceModel, changedRenderSignature)
           && hasSameEntityIds(currentSourceBatch.getEntityIds(), [source.id])
           && copyVariant
           && copyVariant.renderSignature === defaultRenderSignature
           && copyVariant.model.modelArrayBatch
-          && runtime.isModelArrayBatchCurrent(copyVariant.model, defaultRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(copyVariant.model, defaultRenderSignature)
           && hasSameEntityIds(copyVariant.model.modelArrayBatch.getEntityIds(), instances.map((entity) => entity.id))
-          && instances.every((entity) => runtime.modelArrayParameterVariantByEntityId?.get(entity.id) === copyVariant)
-          && runtime.modelArrayParameterVariants.size === 1
+          && instances.every((entity) => runtime.variants.modelArrayParameterVariantByEntityId?.get(entity.id) === copyVariant)
+          && runtime.variants.modelArrayParameterVariants.size === 1
         );
       },
     });
     assert.ok(initialBatchMeshes.every((mesh) => mesh.isDisposed()), '新源批次和默认参数变体均 ready 后必须释放旧完整批次');
 
-    const changedSourceBatch = runtime.models.get(source.id)?.modelArrayBatch;
-    const defaultVariant = runtime.modelArrayParameterVariantByEntityId?.get(instances[0].id);
+    const changedSourceBatch = runtime.assets.models.get(source.id)?.modelArrayBatch;
+    const defaultVariant = runtime.variants.modelArrayParameterVariantByEntityId?.get(instances[0].id);
     const defaultVariantBatch = defaultVariant?.model.modelArrayBatch;
     assert.ok(changedSourceBatch && defaultVariantBatch, '非默认源模型收敛后必须同时保留源批次和默认副本变体批次');
     const changedSourceBatchMeshes = [...changedSourceBatch.meshes];
@@ -1355,16 +1355,16 @@ async function runSceneRuntimeSourceParameterTransitionIntegration({ SceneRuntim
       label: '源模型非默认值恢复默认值',
       expectedRenderSignaturesByEntityId: transitionExpectedRenderSignatures,
       isSettled: () => {
-        const currentSourceModel = runtime.models.get(source.id);
+        const currentSourceModel = runtime.assets.models.get(source.id);
         const currentSourceBatch = currentSourceModel?.modelArrayBatch;
         return Boolean(
           currentSourceModel
           && currentSourceBatch
           && currentSourceBatch !== changedSourceBatch
-          && runtime.isModelArrayBatchCurrent(currentSourceModel, defaultRenderSignature)
+          && runtime.arrays.isModelArrayBatchCurrent(currentSourceModel, defaultRenderSignature)
           && hasSameEntityIds(currentSourceBatch.getEntityIds(), expectedEntityIds)
-          && runtime.modelArrayParameterVariants.size === 0
-          && instances.every((entity) => !runtime.modelArrayParameterVariantByEntityId?.has(entity.id))
+          && runtime.variants.modelArrayParameterVariants.size === 0
+          && instances.every((entity) => !runtime.variants.modelArrayParameterVariantByEntityId?.has(entity.id))
         );
       },
     });
@@ -1445,7 +1445,7 @@ async function runDenseSceneRuntimeArrayIntegration({ SceneRuntime, glbBytes, sc
       true,
       '20 个最大参数 Shelf 副本必须创建临时矩阵预览',
     );
-    const previewAt20 = runtime.entityArrayPreview?.matrixPreview;
+    const previewAt20 = runtime.transforms.entityArrayPreview?.matrixPreview;
     assert.ok(previewAt20, '20 个最大参数 Shelf 副本必须保留矩阵预览批次');
     const previewMeshesAt20 = [...previewAt20.meshes];
     assert.equal(
@@ -1458,7 +1458,7 @@ async function runDenseSceneRuntimeArrayIntegration({ SceneRuntime, glbBytes, sc
       true,
       '第 21 个最大参数 Shelf 副本不得触发预览批次失败',
     );
-    assert.ok(runtime.entityArrayPreview?.matrixPreview === previewAt20, '第 21 个 Shelf 预览必须复用已有批次');
+    assert.ok(runtime.transforms.entityArrayPreview?.matrixPreview === previewAt20, '第 21 个 Shelf 预览必须复用已有批次');
     assert.equal(
       previewMeshesAt20.reduce((total, mesh) => total + mesh.thinInstanceCount, 0),
       matrixSourceCount * 21,
@@ -1475,7 +1475,7 @@ async function runDenseSceneRuntimeArrayIntegration({ SceneRuntime, glbBytes, sc
       { modelArrayInstance: { sourceEntityId: source.id } },
     ));
     runtime.sync(createSceneRuntimeDocument([source, ...instances], source.id));
-    const batchAt20 = runtime.models.get(source.id)?.modelArrayBatch;
+    const batchAt20 = runtime.assets.models.get(source.id)?.modelArrayBatch;
     assert.ok(batchAt20, '20 个正式 Shelf 副本必须创建矩阵批次');
     assert.equal(batchAt20.getEntityIds().length, 21, '20 个正式副本加源 Shelf 必须保留 21 个逻辑实体');
     const completeAt20 = batchAt20.sources.reduce((total, matrixSource) => total + matrixSource.batches.reduce(
@@ -1491,7 +1491,7 @@ async function runDenseSceneRuntimeArrayIntegration({ SceneRuntime, glbBytes, sc
       }),
     ];
     runtime.sync(createSceneRuntimeDocument([source, ...instances], instances.at(-1).id));
-    const batchAt21 = runtime.models.get(source.id)?.modelArrayBatch;
+    const batchAt21 = runtime.assets.models.get(source.id)?.modelArrayBatch;
     assert.ok(batchAt21 === batchAt20, '增加第 21 个正式 Shelf 副本必须复用已有矩阵批次');
     assert.equal(batchAt21.getEntityIds().length, 22, '第 21 个副本提交后必须保留源和全部 21 个逻辑副本');
     const completeAt21 = batchAt21.sources.reduce((total, matrixSource) => total + matrixSource.batches.reduce(

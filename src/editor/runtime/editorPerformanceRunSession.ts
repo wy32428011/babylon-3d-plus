@@ -55,12 +55,12 @@ function selectSample(snapshot: EditorPerformanceSourceSnapshot, sampledAt: numb
   return {
     sampledAt: new Date(sampledAt).toISOString(),
     fps: finiteMetric(snapshot.fps),
-    frameTimeMs: finiteMetric(snapshot.frameTimeMs),
-    renderTimeMs: finiteMetric(snapshot.renderTimeMs),
-    activeMeshesEvaluationMs: finiteMetric(snapshot.activeMeshesEvaluationMs),
+    frameTimeMs: nullableMetric(snapshot.frameTimeMs),
+    renderTimeMs: nullableMetric(snapshot.renderTimeMs),
+    activeMeshesEvaluationMs: nullableMetric(snapshot.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(snapshot.gpuFrameTimeMs),
-    shaderCompilationMs: finiteMetric(snapshot.shaderCompilationMs),
-    drawCalls: finiteMetric(snapshot.drawCalls),
+    shaderCompilationMs: nullableMetric(snapshot.shaderCompilationMs),
+    drawCalls: nullableMetric(snapshot.drawCalls),
     activeMeshes: finiteMetric(snapshot.activeMeshes),
     totalMeshes: finiteMetric(snapshot.totalMeshes),
     totalVertices: finiteMetric(snapshot.totalVertices),
@@ -89,8 +89,9 @@ function telemetryDelta(
 }
 
 function summarize(samples: readonly EditorPerformanceSample[]) {
-  const frameTimes = samples.map((sample) => sample.frameTimeMs).sort((a, b) => a - b);
+  const frameTimes = samples.map((sample) => sample.frameTimeMs).filter((value): value is number => value !== null).sort((a, b) => a - b);
   const gpuTimes = samples.map((sample) => sample.gpuFrameTimeMs).filter((value): value is number => value !== null);
+  const drawCounts = samples.map((sample) => sample.drawCalls).filter((value): value is number => value !== null);
   return {
     sampleCount: samples.length,
     averageFps: samples.length ? samples.reduce((sum, sample) => sum + sample.fps, 0) / samples.length : null,
@@ -98,7 +99,7 @@ function summarize(samples: readonly EditorPerformanceSample[]) {
     p95SampleFrameTimeMs: frameTimes[Math.ceil(frameTimes.length * 0.95) - 1] ?? null,
     p99SampleFrameTimeMs: frameTimes[Math.ceil(frameTimes.length * 0.99) - 1] ?? null,
     maximumGpuFrameTimeMs: gpuTimes.length ? Math.max(...gpuTimes) : null,
-    maximumDrawCalls: samples.length ? Math.max(...samples.map((sample) => sample.drawCalls)) : null,
+    maximumDrawCalls: drawCounts.length ? Math.max(...drawCounts) : null,
     maximumActiveMeshes: samples.length ? Math.max(...samples.map((sample) => sample.activeMeshes)) : null,
     longTaskCount: samples.reduce((sum, sample) => sum + sample.longTaskCount, 0),
     longTaskDurationMs: samples.reduce((sum, sample) => sum + sample.longTaskDurationMs, 0),
@@ -167,7 +168,7 @@ export function createEditorPerformanceRunSession(
         warmupWindowMs: WARMUP_WINDOW_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
         recordedSampleCount,
-        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe 1 Hz samples, not individual frames. frameTiming separately reports completed-render-frame intervals. The first two seconds are excluded. GPU null means unavailable.',
+        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe 1 Hz samples, not individual frames. frameTiming separately reports completed-render-frame intervals. The first two seconds are excluded. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
         telemetrySemantics: 'Counter deltas and telemetry timing cover this performance run, including warmup. stages are exclusive subspans of the last telemetry frame and must not be added to its total. Callbacks outside the telemetry frame require a CPU profile. Scene timing samples retain the latest minute of this run; a stopped report stays frozen.',
         telemetry,
         summary: summarize(samples),

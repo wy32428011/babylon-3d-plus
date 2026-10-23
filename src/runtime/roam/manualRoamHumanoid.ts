@@ -1,4 +1,8 @@
-import { Animation, AnimationGroup, type AssetContainer, type TransformNode, Matrix, Quaternion, Vector3, VertexBuffer } from '@babylonjs/core';
+import { Animation } from '@babylonjs/core/Animations/animation.js';
+import { AnimationGroup } from '@babylonjs/core/Animations/animationGroup.js';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { AssetContainer, TransformNode } from '@babylonjs/core';
 import { identifyManualRoamHumanoid, MANUAL_ROAM_HUMANOID_PARENTS } from '../../../electron/shared/manualRoamHumanoid.ts';
 
 export type ManualRoamRigBinding={

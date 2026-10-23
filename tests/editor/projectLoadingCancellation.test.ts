@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
+import { stripTypeScriptTypes } from 'node:module';
 import { getRequiredEnvironmentResourceIds } from '../../electron/shared/sceneEnvironmentReferences.ts';
 import { cancelProjectLoading, createProjectOpenSession } from '../../src/editor/home/projectLoadingCancellation.ts';
 
@@ -24,7 +25,7 @@ test('取消与打开完成交错时，旧结果不能进入编辑器或覆盖�
 });
 
 test('真实store场景提交边界丢弃取消后的loadSceneFile结果及后续同步', async () => {
-  const source = await readFile(new URL('../../src/editor/store/editorStore.ts', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../../src/editor/store/slices/sceneDocumentSlice.ts', import.meta.url), 'utf8');
   const start = source.indexOf('  loadSceneFromFile: async');
   const end = source.indexOf('  loadSceneFromContent:', start);
   assert.ok(start >= 0 && end > start);
@@ -64,18 +65,18 @@ test('真实store场景提交边界丢弃取消后的loadSceneFile结果及后�
 });
 
 test('打开场景后的环境同步仅请求当前稳定ID，空场景不下载整个环境库', async () => {
-  const source = await readFile(new URL('../../src/editor/store/editorStore.ts', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../../src/editor/store/slices/sceneWorkspaceSync.ts', import.meta.url), 'utf8');
   const start = source.indexOf('async function syncDataPlatformEnvironmentsAfterWorkspaceOpen(');
   const end = source.indexOf('\n/**', start);
   assert.ok(start >= 0 && end > start);
   let environment: unknown = null;
   let request: { requiredResourceIds?: string[]; expectedSourceKey?: string } = {};
-  const method = source.slice(start, end).replace('(pushLog: (message: string) => void): Promise<void>', '(pushLog)');
-  const sync = runInNewContext(`(${method})`, {
+  const method = source.slice(start, end);
+  const syncWithState = runInNewContext(stripTypeScriptTypes(`(${method})`), {
     getRequiredEnvironmentResourceIds,
     window: { editorApi: { syncDataPlatformEnvironments: async (next: typeof request) => { request = next; return true; } } },
-    useEditorStore: { getState: () => ({ scene: { sceneSettings: { environment } } }) },
-  }) as (log: (message: string) => void) => Promise<void>;
+  }) as (getState: () => object, log: (message: string) => void) => Promise<void>;
+  const sync = (log: (message: string) => void) => syncWithState(() => ({ scene: { sceneSettings: { environment } } }), log);
   await sync(() => {});
   assert.equal(JSON.stringify(request.requiredResourceIds), '[]');
   environment = { source: 'data-platform', dataPlatformResourceId: '9007199254740993', dataPlatformSourceKey: 'platform' };

@@ -23,16 +23,19 @@ const { SceneRuntime } = await import(pathToFileURL(path.join(output, 'runtime.m
 function fixture() {
   const engine = new NullEngine();
   const scene = new Scene(engine);
-  const runtime = Object.create(SceneRuntime.prototype);
-  Object.assign(runtime, {
-    scene, models: new Map(), meshes: new Map(), locators: new Map(), cadReferences: new Map(),
-    modelGenerators: new Map(), deviceSpawnerMarkers: new Map(), lights: new Map(), syncedEntities: new Map(),
-    manualRoamSpawnRuntime: { getWorldBoundsMeshes: () => [] },
-    clickEventBindingRuntime: { getWorldBoundsMeshes: () => [] },
-    poiEffectRuntime: { getWorldBoundsMeshes: () => [], hasEntity: () => false },
-    modelArrayInstanceEntities: new Map(), modelArrayParameterVariantByEntityId: new Map(),
-    skyboxRuntime: { getMesh: () => null, hasEntity: () => false },
-  });
+  const runtime = new SceneRuntime(scene);
+  Object.assign(runtime, { scene });
+  Object.assign(runtime.assets, { models: new Map() });
+  Object.assign(runtime.presentation, { meshes: new Map(), lights: new Map() });
+  Object.assign(runtime.locators, { locators: new Map() });
+  Object.assign(runtime.cad, { cadReferences: new Map() });
+  Object.assign(runtime.outputs, { modelGenerators: new Map(), deviceSpawnerMarkers: new Map() });
+  Object.assign(runtime.document, { syncedEntities: new Map() });
+  Object.assign(runtime.patrol, { manualRoamSpawnRuntime: { getWorldBoundsMeshes: () => [] } });
+  Object.assign(runtime.effects, { clickEventBindingRuntime: { getWorldBoundsMeshes: () => [] }, poiEffectRuntime: { getWorldBoundsMeshes: () => [], hasEntity: () => false } });
+  Object.assign(runtime.arrays, { modelArrayInstanceEntities: new Map() });
+  Object.assign(runtime.variants, { modelArrayParameterVariantByEntityId: new Map() });
+  Object.assign(runtime.environment, { skyboxRuntime: { getMesh: () => null, hasEntity: () => false } });
   const root = new TransformNode('stacker-root', scene);
   const body = new TransformNode('body-group', scene);
   body.parent = root;
@@ -51,7 +54,7 @@ function fixture() {
     assetHandle: {}, stackerTelemetryReady: true, measurementReady: true, externalScriptStarting: false,
     telemetryBinding: { enabled: false },
   };
-  runtime.models.set('stacker', model);
+  runtime.assets.models.set('stacker', model);
   return { engine, scene, runtime, root, body, mast, base, rail, model, box,
     close: () => { scene.dispose(); engine.dispose(); } };
 }
@@ -90,7 +93,7 @@ test('普通模型和多选继续使用完整世界范围', () => {
     assert.deepEqual(f.runtime.getEntitiesFocusBounds(['stacker']), f.runtime.getEntitiesWorldBounds(['stacker']));
     f.model.stackerCapable = true;
     const other = f.box('other', 2, 2, -10, 1, f.root);
-    f.runtime.meshes.set('other', other);
+    f.runtime.presentation.meshes.set('other', other);
     assert.deepEqual(f.runtime.getEntitiesFocusBounds(['stacker', 'other']), f.runtime.getEntitiesWorldBounds(['stacker', 'other']));
   } finally { f.close(); }
 });

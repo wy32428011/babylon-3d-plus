@@ -1,0 +1,88 @@
+.lighting-bake {
+  min-inline-size: 0;
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 8px;
+  border: 1px solid #3c3c3c;
+  color: #d7d7d7;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.lighting-bake.collapsible-fieldset > legend { padding: 0; color: #eee; font-size: 12px; }
+.lighting-bake > .collapsible-fieldset-content { gap: 8px; }
+.lighting-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lighting-panel-heading strong { font-size: 12px; font-weight: 600; }
+.lighting-panel-heading > span { color: #aaa; font-size: 11px; }
+.lighting-status { padding: 1px 7px; border: 1px solid #35636a; border-radius: 3px; background: #1b353a; color: #9be1e7 !important; }
+.lighting-status-warning { border-color: #816b38; background: #373022; color: #f7d774 !important; }
+.lighting-note, .lighting-node-reason { margin: 0; color: #a4a4a4; font-size: 11px; overflow-wrap: anywhere; }
+.lighting-warning { margin: 0; color: #f0c875; font-size: 11px; overflow-wrap: anywhere; }
+.lighting-bake [role="alert"] { color: #ff9292; }
+.lighting-field { display: grid; grid-template-columns: 64px minmax(0, 1fr); align-items: center; gap: 6px; min-width: 0; }
+.lighting-bake input:not([type="checkbox"]), .lighting-bake select {
+  min-width: 0; width: 100%; height: 26px; padding: 0 5px; border: 1px solid #555;
+  border-radius: 2px; color: #ddd; background: #1e1e1e; font: inherit;
+}
+.lighting-bake input[type="checkbox"] { width: 14px; height: 14px; margin: 0; accent-color: #19c7d4; flex: 0 0 auto; }
+.lighting-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; }
+.lighting-unit-input { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; min-width: 0; }
+.lighting-unit-input > span { color: #999; font-size: 10px; white-space: nowrap; }
+.lighting-bake button { min-height: 26px; padding: 3px 6px; font-size: 11px; }
+.lighting-bake button:focus-visible, .lighting-bake input:focus-visible, .lighting-bake select:focus-visible, .lighting-bake summary:focus-visible {
+  outline: 2px solid #19c7d4; outline-offset: 2px;
+}
+.lighting-bake .lighting-primary { width: 100%; height: 30px; border-color: #167c86; color: #dffcff; background: #14535b; font-weight: 600; }
+.lighting-bake .lighting-primary:hover:not(:disabled) { border-color: #20dce9; background: #176b75; }
+.lighting-bake .lighting-secondary { width: 100%; }
+.lighting-bake button:disabled, .lighting-bake input:disabled, .lighting-bake select:disabled { opacity: 0.55; cursor: not-allowed; }
+.lighting-counts { display: flex; gap: 8px; flex-wrap: wrap; padding: 7px 0; border-block: 1px solid #383838; font-size: 11px; }
+.lighting-counts > span { display: inline-flex; align-items: center; gap: 4px; }
+.lighting-counts strong { color: #eee; font-weight: 600; }
+.lighting-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.lighting-dot-static { background: #3fb8c7; }
+.lighting-dot-dynamic { background: #e0ad58; }
+.lighting-dot-unmatched { background: #e97979; }
+.lighting-inline-actions { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.lighting-advanced summary, .lighting-parts summary { cursor: pointer; min-height: 26px; color: #ccc; }
+.lighting-advanced[open] { display: grid; gap: 7px; padding-block: 5px; border-block: 1px solid #383838; }
+.lighting-advanced .lighting-toggle { display: flex; margin-top: 6px; }
+.lighting-job { display: grid; gap: 6px; }
+.lighting-job progress { width: 100%; height: 5px; accent-color: #19c7d4; }
+.lighting-job p { margin: 0; color: #b7c8cb; font-size: 11px; overflow-wrap: anywhere; }
+.lighting-result { border-top: 1px solid #383838; padding-top: 8px; display: grid; gap: 6px; }
+.lighting-result dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; margin: 0; font-size: 11px; }
+.lighting-result dt { color: #aaa; }
+.lighting-result dd { margin: 0; color: #ddd; text-align: right; font-variant-numeric: tabular-nums; }
+.lighting-segment { display: flex; gap: 0; }
+.lighting-segment button { flex: 1 1 0; border-radius: 0; }
+.lighting-segment button:first-child { border-radius: 3px 0 0 3px; }
+.lighting-segment button:last-child { border-radius: 0 3px 3px 0; }
+.lighting-segment button + button { margin-left: -1px; }
+.lighting-segment button[aria-pressed="true"] { position: relative; border-color: #19c7d4; background: #14535b; color: #dffcff; }
+.lighting-checks { display: flex; flex-wrap: wrap; gap: 5px 9px; }
+.lighting-checks label { display: inline-flex; gap: 5px; align-items: center; font-size: 11px; }
+.lighting-parts { border-top: 1px solid #383838; padding-top: 6px; }
+.lighting-parts summary > span { color: #999; margin-left: 6px; font-variant-numeric: tabular-nums; }
+.lighting-parts-tools { display: grid; grid-template-columns: minmax(0, 1fr) 68px; gap: 5px; margin-bottom: 6px; }
+.lighting-node-list { list-style: none; padding: 0; margin: 0; max-height: 360px; overflow-y: auto; }
+.lighting-node { display: grid; gap: 5px; border-bottom: 1px solid #383838; padding: 7px 1px; }
+.lighting-node-top { display: flex; align-items: center; gap: 5px; }
+.lighting-bake .lighting-node-focus { flex: 1; padding: 0; min-height: 20px; min-width: 0; border: 0; text-align: left; color: #ddd; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lighting-bake .lighting-node-focus:hover:not(:disabled) { color: #69d9e2; text-decoration: underline; }
+.lighting-badge { flex: 0 0 auto; border-radius: 3px; padding: 1px 5px; font-size: 10px; }
+.lighting-badge-static { color: #8edee7; background: #193a3e; }
+.lighting-badge-dynamic { color: #eac483; background: #3d3322; }
+.lighting-node-unmatched .lighting-badge { color: #ffaaaa; background: #442727; }
+.lighting-node-mode { display: grid; grid-template-columns: minmax(0, 1fr) 85px; gap: 8px; align-items: center; font-size: 11px; color: #aaa; }
+.lighting-node-override { display: grid; grid-template-columns: minmax(0, 1fr) minmax(118px, 1.3fr); gap: 8px; align-items: center; font-size: 11px; color: #aaa; }
+.lighting-node-reset { justify-self: end; }
+.lighting-pagination { display: flex; justify-content: space-between; align-items: center; gap: 4px; padding-top: 6px; }
+.lighting-pagination span { font-size: 10px; color: #aaa; }
+@media (max-width: 1100px) {
+  .lighting-bake { padding: 6px; gap: 6px; }
+  .lighting-bake > .collapsible-fieldset-content { gap: 6px; }
+  .lighting-field { grid-template-columns: 54px minmax(0, 1fr); }
+  .lighting-unit-input { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .lighting-unit-input > span { text-align: right; }
+}

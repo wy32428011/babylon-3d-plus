@@ -1,102 +1,43 @@
+import { DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS, DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS, DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS, DATA_PLATFORM_CHART_SYNC_PHASE_LABELS, DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS } from './project-library/projectLibrarySyncContracts';
+import { type DataPlatformModelSyncProgress, type DataPlatformEnvironmentSyncProgress, type DataPlatformImageSyncProgress, type DataPlatformChartSyncProgress, getDataPlatformModelSyncApi, getDataPlatformEnvironmentSyncApi, getDataPlatformImageSyncApi, getDataPlatformChartSyncApi, getDataPlatformSkyboxSyncApi } from './project-library/projectLibrarySyncContracts';
+import { SkyboxLibraryTab } from './project-library/SkyboxLibraryTab';
+import { ChartLibraryTab } from './project-library/ChartLibraryTab';
+import { EnvironmentLibraryTab } from './project-library/EnvironmentLibraryTab';
+import { ModelLibraryTab, ModelLibraryTypeFilter } from './project-library/ModelLibraryTab';
+import { ImageLibraryTab } from './project-library/ImageLibraryTab';
 import { COMPOSITION_SELECTION_DRAG } from '../composition/composition';
 import { CompositionLibrary } from '../composition/CompositionLibrary';
 import { applyAvailableSceneModelUpdates } from '../assets/applySceneModelUpdates';
 import { runSceneModelSyncTransaction, getSceneModelPublishSession, subscribeSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react';
-import { LibrarySyncNotice } from '../loading/LibrarySyncNotice';
+import { useCallback, useEffectEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react';
+
 import syncNoticeStyles from '../loading/LibrarySyncNotice.module.css';
-import type { RemoteDownloadProgress } from '../../../electron/shared/remoteDownloadProgress';
-import { RemoteDownloadDetail } from '../loading/RemoteDownloadDetail';
+
+
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { findMatchingEnvironmentResource } from '../../../electron/shared/environmentResourceMatch';
 import { hasManagedEnvironmentCacheReference } from '../model/environmentRuntime';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
 import { environmentForSyncRun, findAuthoritativeEnvironmentAsset } from '../assets/environmentSyncAuthority';
-import { isRemoteDownloadVisible, remoteSyncLogKey, sceneRemoteDownloadStore } from '../loading/sceneRemoteDownloadProgress';
-import {
-  beginSceneModelAssetRefresh,
-  allowScenePreparationEditing,
-  beginScenePreparation,
-  getScenePreparationSnapshot,
-  subscribeScenePreparation,
-  isScenePreparationSettled,
-  isScenePreparationActive,
-  reportSceneModelSyncProgress,
-  settleSceneModelAssetRefresh,
-  settleSceneRuntimeWithWarning,
-  skipSceneModelSync,
-} from '../loading/scenePreparationProgress';
-import {
-  BUILT_IN_ASSET_DRAG_MIME_TYPE,
-  ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE,
-  IMAGE_ASSET_DRAG_MIME_TYPE,
-  SKYBOX_ASSET_DRAG_MIME_TYPE,
-  encodeBuiltInAssetDragPayload,
-  encodeImageAssetDragPayload,
-  encodeModelAssetDragPayload,
-  encodeSkyboxAssetDragPayload,
-  MODEL_ASSET_DRAG_MIME_TYPE,
-  type AssetEntry,
-  type ProjectModelAssetEntry,
-  type ProjectSkyboxAssetEntry,
-} from '../assets/AssetDatabase';
+import { remoteSyncLogKey, sceneRemoteDownloadStore } from '../loading/sceneRemoteDownloadProgress';
+import { beginSceneModelAssetRefresh, allowScenePreparationEditing, beginScenePreparation, getScenePreparationSnapshot, subscribeScenePreparation, isScenePreparationSettled, reportSceneModelSyncProgress, settleSceneModelAssetRefresh, settleSceneRuntimeWithWarning, skipSceneModelSync } from '../loading/scenePreparationProgress';
+import { BUILT_IN_ASSET_DRAG_MIME_TYPE, ENVIRONMENT_MODEL_ASSET_DRAG_MIME_TYPE, IMAGE_ASSET_DRAG_MIME_TYPE, SKYBOX_ASSET_DRAG_MIME_TYPE, encodeBuiltInAssetDragPayload, encodeImageAssetDragPayload, encodeModelAssetDragPayload, encodeSkyboxAssetDragPayload, MODEL_ASSET_DRAG_MIME_TYPE, type AssetEntry, type ProjectModelAssetEntry, type ProjectSkyboxAssetEntry } from '../assets/AssetDatabase';
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import { ensureVirtualConveyorAsset } from '../assets/virtualConveyorAsset';
 import { getSceneSkyboxSettings } from '../model/SceneDocument';
-import {
-  createSceneSkyboxFromAsset,
-  findOrphanedSkyboxForSettings,
-  findSkyboxAssetForSettings,
-  formatSkyboxSyncError,
-  formatSkyboxSyncProgressCount,
-  refreshCurrentSkyboxAfterProjectAssetsLoad,
-  type SkyboxSyncProgress,
-} from '../assets/skyboxAssets';
-import {
-  createSkyboxSyncController,
-  type SkyboxSyncApplyResult,
-  type SkyboxSyncController,
-  type SkyboxSyncControllerState,
-} from '../assets/skyboxSyncController';
+import { createSceneSkyboxFromAsset, findOrphanedSkyboxForSettings, findSkyboxAssetForSettings, formatSkyboxSyncError, formatSkyboxSyncProgressCount, refreshCurrentSkyboxAfterProjectAssetsLoad } from '../assets/skyboxAssets';
+import { createSkyboxSyncController, type SkyboxSyncApplyResult, type SkyboxSyncController, type SkyboxSyncControllerState } from '../assets/skyboxSyncController';
 import { createImportedAssetIndexes, findImportedAssetForPackagePath } from '../assets/modelAssetRelink';
-import {
-  filterProjectModelsForSyncRefresh,
-  createModelSyncRevisionTracker,
-} from '../assets/modelSyncRefreshPolicy';
-import {
-  BUILT_IN_MODEL_LIBRARY_ITEMS,
-  ENVIRONMENT_LIGHT_LIBRARY_ITEM,
-  PROJECT_LIBRARIES,
-  createImageLibraryItems,
-  createModelLibraryItems,
-  createSkyboxLibraryItems,
-  createSyncedImageLibraryItems,
-  getModelUnitTitle,
-  isBuiltInImageProjectLibraryItem,
-  isBuiltInProjectLibraryItem,
-  isImportedProjectLibraryItem,
-  isSyncedImageProjectLibraryItem,
-  isSceneThemeProjectLibraryItem,
-  isEnvironmentLightProjectLibraryItem,
-  type ProjectLibraryItem,
-  type ProjectLibraryKey,
-} from '../assets/projectLibrary';
-import {
-  createModelDeviceTypeOptions,
-  matchesModelDeviceType,
-} from '../assets/modelLibraryDeviceTypeFilter';
-import {
-  createDataPlatformChartLibraryItems,
-  isDataPlatformChartLibraryItem,
-  matchesDataPlatformChartLibrarySearch,
-  type DataPlatformChartAssetEntry,
-} from '../assets/dataPlatformChartLibrary';
+import { filterProjectModelsForSyncRefresh, createModelSyncRevisionTracker } from '../assets/modelSyncRefreshPolicy';
+import { BUILT_IN_MODEL_LIBRARY_ITEMS, ENVIRONMENT_LIGHT_LIBRARY_ITEM, PROJECT_LIBRARIES, createImageLibraryItems, createModelLibraryItems, createSkyboxLibraryItems, createSyncedImageLibraryItems, getModelUnitTitle, isBuiltInImageProjectLibraryItem, isBuiltInProjectLibraryItem, isImportedProjectLibraryItem, isSyncedImageProjectLibraryItem, isSceneThemeProjectLibraryItem, isEnvironmentLightProjectLibraryItem, type ProjectLibraryItem, type ProjectLibraryKey } from '../assets/projectLibrary';
+import { createModelDeviceTypeOptions, matchesModelDeviceType } from '../assets/modelLibraryDeviceTypeFilter';
+import { createDataPlatformChartLibraryItems, isDataPlatformChartLibraryItem, matchesDataPlatformChartLibrarySearch, type DataPlatformChartAssetEntry } from '../assets/dataPlatformChartLibrary';
 import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE } from '../assets/dataPlatformScreenDrag';
 import { setSyncedImageAssets } from '../../assets/syncedImageAssets';
 import { useEditorStore } from '../store/editorStore';
 import { ResourceCard } from '../ui/ResourceCard';
-import { isSceneThemeAdjusted, SCENE_THEME_DRAG_MIME_TYPE } from '../model/sceneTheme';
+import { SCENE_THEME_DRAG_MIME_TYPE } from '../model/sceneTheme';
 
 type LibraryStatus = {
   message: string;
@@ -123,164 +64,14 @@ type ProjectAssetsLoadOptions = {
   refreshSkybox?: boolean;
 };
 
-type DataPlatformModelSyncProgress = {
-  download?: RemoteDownloadProgress;
-  runId: string;
-  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
-  completed: number;
-  total: number;
-  message: string;
-  error: string | null;
-  libraryChanged?: boolean;
-  runtimeChangedResourceKeys?: string[];
-  changedResourceIds?: string[];
-  changedCount?: number;
-};
 
-type DataPlatformModelSyncApi = {
-  syncDataPlatformModels?: () => Promise<boolean>;
-  onDataPlatformModelSyncProgress?: (listener: (progress: DataPlatformModelSyncProgress) => void) => () => void;
-  retryDataPlatformModelSync?: () => Promise<boolean>;
-};
-
-type DataPlatformEnvironmentSyncProgress = {
-  download?: RemoteDownloadProgress;
-  runId: string;
-  contextKey: string;
-  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
-  completed: number;
-  total: number;
-  message: string;
-  error: string | null;
-};
-
-type DataPlatformEnvironmentSyncApi = {
-  syncDataPlatformEnvironments?: () => Promise<boolean>;
-  onDataPlatformEnvironmentSyncProgress?: (listener: (progress: DataPlatformEnvironmentSyncProgress) => void) => () => void;
-  retryDataPlatformEnvironmentSync?: () => Promise<boolean>;
-};
-
-type DataPlatformImageSyncProgress = {
-  runId: string;
-  phase: 'querying' | 'downloading' | 'validating' | 'promoting' | 'completed' | 'failed';
-  completed: number;
-  total: number;
-  message: string;
-  error: string | null;
-};
-
-type DataPlatformImageSyncApi = {
-  syncDataPlatformImages?: () => Promise<boolean>;
-  onDataPlatformImageSyncProgress?: (listener: (progress: DataPlatformImageSyncProgress) => void) => () => void;
-  retryDataPlatformImageSync?: () => Promise<boolean>;
-};
-
-type DataPlatformChartLibrarySnapshot = {
-  contextKey: string | null;
-  projectId: string | null;
-  projectName: string | null;
-  syncedAt: string | null;
-  charts: DataPlatformChartAssetEntry[];
-};
-
-type DataPlatformChartSyncProgress = {
-  runId: string;
-  contextKey: string;
-  phase: 'querying' | 'parsing' | 'promoting' | 'completed' | 'failed';
-  completed: number;
-  total: number;
-  message: string;
-  error: string | null;
-};
-
-type DataPlatformChartSyncApi = {
-  listDataPlatformCharts?: () => Promise<DataPlatformChartLibrarySnapshot>;
-  syncDataPlatformCharts?: () => Promise<boolean>;
-  retryDataPlatformChartSync?: () => Promise<boolean>;
-  onDataPlatformChartSyncProgress?: (listener: (progress: DataPlatformChartSyncProgress) => void) => () => void;
-};
-
-type DataPlatformSkyboxSyncProgress = SkyboxSyncProgress;
-
-type DataPlatformSkyboxSyncApi = {
-  syncDataPlatformSkyboxes?: () => Promise<boolean>;
-  retryDataPlatformSkyboxSync?: () => Promise<boolean>;
-  onDataPlatformSkyboxSyncProgress?: (listener: (progress: unknown) => void) => () => void;
-};
-
-const DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS: Record<DataPlatformModelSyncProgress['phase'], string> = {
-  querying: '查询模型',
-  downloading: '下载模型',
-  validating: '校验模型',
-  promoting: '写入资源库',
-  completed: '同步完成',
-  failed: '同步失败',
-};
-
-function getDataPlatformModelSyncApi(): DataPlatformModelSyncApi {
-  return (window.editorApi ?? {}) as DataPlatformModelSyncApi;
-}
-
-const DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS: Record<DataPlatformEnvironmentSyncProgress['phase'], string> = {
-  querying: '查询环境模型',
-  downloading: '下载环境模型',
-  validating: '校验环境模型',
-  promoting: '写入环境缓存',
-  completed: '环境同步完成',
-  failed: '环境同步失败',
-};
-
-function getDataPlatformEnvironmentSyncApi(): DataPlatformEnvironmentSyncApi {
-  return (window.editorApi ?? {}) as DataPlatformEnvironmentSyncApi;
-}
-
-const DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS: Record<DataPlatformImageSyncProgress['phase'], string> = {
-  querying: '查询图片',
-  downloading: '下载图片',
-  validating: '校验图片',
-  promoting: '写入图片库',
-  completed: '同步完成',
-  failed: '同步失败',
-};
-
-function getDataPlatformImageSyncApi(): DataPlatformImageSyncApi {
-  return (window.editorApi ?? {}) as DataPlatformImageSyncApi;
-}
-
-const DATA_PLATFORM_CHART_SYNC_PHASE_LABELS: Record<DataPlatformChartSyncProgress['phase'], string> = {
-  querying: '查询项目大屏',
-  parsing: '整理大屏资源',
-  promoting: '写入大屏资源',
-  completed: '大屏同步完成',
-  failed: '大屏同步失败',
-};
-
-function getDataPlatformChartSyncApi(): DataPlatformChartSyncApi {
-  return (window.editorApi ?? {}) as DataPlatformChartSyncApi;
-}
-
-const DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS: Record<DataPlatformSkyboxSyncProgress['phase'], string> = {
-  querying: '查询天空盒',
-  downloading: '下载天空盒',
-  validating: '校验天空盒',
-  promoting: '写入天空盒库',
-  completed: '同步完成',
-  failed: '同步失败',
-};
-
-function getDataPlatformSkyboxSyncApi(): DataPlatformSkyboxSyncApi {
-  return (window.editorApi ?? {}) as DataPlatformSkyboxSyncApi;
-}
 
 type ProjectPanelProps = {
   readOnly?: boolean;
 };
 
 export function ProjectPanel(props: ProjectPanelProps) {
-  const applySceneTheme = useEditorStore(state => state.applySceneTheme);
-  const runtimeMode = useEditorStore(state => state.runtimeMode);
-  const shadowBakePhase = useEditorStore(state => state.shadowBakeStatus.phase);
-  const environmentApplyPending = useEditorStore(state => Boolean(state.environmentApplyRequest));
+  const openLightingManager = useEditorStore(state => state.openLightingManager);
   const importModelAsset = useEditorStore((state) => state.importModelAsset);
   const refreshModelInstancesFromAssets = useEditorStore((state) => state.refreshModelInstancesFromAssets);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -297,7 +88,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const explicitSceneSyncRef = useRef<string | null>(null);
   const explicitSceneSyncHandlerRef = useRef<((syncLibrary?: boolean) => Promise<void>) | null>(null);
   const preparation = useSyncExternalStore(subscribeScenePreparation, getScenePreparationSnapshot, getScenePreparationSnapshot);
-  const scenePreparationActive = !preparation.completed && !preparation.editingAllowed;
   const autoLibrarySyncSessionRef = useRef<string | null>(null);
   const [isStartingLibrarySync, setIsStartingLibrarySync] = useState(false);
   const startingLibrarySyncSessionRef = useRef<string | null>(null);
@@ -870,7 +660,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
   explicitSceneSyncHandlerRef.current = startExplicitSceneModelSync;
 
-  const startModelLibrarySync = useCallback(async (_automatic = false): Promise<void> => {
+  const startModelLibrarySync = useCallback(async (automatic = false): Promise<void> => {
     const sessionId = sceneSessionIdRef.current;
     const state = getScenePreparationSnapshot();
     if (props.readOnly || getSceneModelPublishSession() === sessionId || localResourcePreparingRef.current || state.sceneSessionId !== sessionId
@@ -878,8 +668,19 @@ export function ProjectPanel(props: ProjectPanelProps) {
     startingLibrarySyncSessionRef.current = sessionId;
     setIsStartingLibrarySync(true);
     try {
+      if (automatic) {
+        // 普通本地工程的资源恢复不依赖中台；后台全库更新只在实际配置完成后启动。
+        const config = await window.editorApi.getDataPlatformConfig();
+        if (sceneSessionIdRef.current !== sessionId || startingLibrarySyncSessionRef.current !== sessionId || !config.baseUrl) return;
+      }
       // 自动和手动全库同步都等待资源完成，再以统一事务更新当前场景。
       await startExplicitSceneModelSync(true);
+    } catch (error) {
+      if (!automatic) throw error;
+      if (sceneSessionIdRef.current !== sessionId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setLibraryStatuses(current => ({ ...current, model: { kind: 'error', message } }));
+      pushLog('自动同步模型库配置检查失败：' + message);
     } finally {
       if (startingLibrarySyncSessionRef.current === sessionId) {
         startingLibrarySyncSessionRef.current = null;
@@ -1256,6 +1057,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
     };
   }, [loadProjectAssets, pushLog, sceneSessionId]);
 
+  // Controller 的创建由资源会话决定；只读和场景信息仍由后续独立 effect 更新。
+  const initializeSkyboxControllerContext = useEffectEvent((controller: SkyboxSyncController) => {
+    controller.setContext({
+      readOnly: Boolean(props.readOnly || localResourcePreparingRef.current || useEditorStore.getState().latestSceneResourceTransaction),
+      sceneId: sceneDocument.id,
+      contextKey: sceneSessionId,
+      syncContextKey: skyboxSyncContextKey,
+    });
+  });
+
   useEffect(() => {
     const controller = createSkyboxSyncController({
       startSync: async () => {
@@ -1294,12 +1105,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       progressThrottleMs: 225,
     });
     skyboxSyncControllerRef.current = controller;
-    controller.setContext({
-      readOnly: Boolean(props.readOnly || localResourcePreparingRef.current || useEditorStore.getState().latestSceneResourceTransaction),
-      sceneId: sceneDocument.id,
-      contextKey: sceneSessionId,
-      syncContextKey: skyboxSyncContextKey,
-    });
+    initializeSkyboxControllerContext(controller);
 
     const dataPlatformSkyboxSyncApi = getDataPlatformSkyboxSyncApi();
     const unsubscribe = dataPlatformSkyboxSyncApi.onDataPlatformSkyboxSyncProgress?.((progress) => {
@@ -1916,6 +1722,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   }
 
   function handleResourceCardClick(item: ProjectLibraryItem): void {
+    if (isSceneThemeProjectLibraryItem(item)) { openLightingManager({ tab: 'overview' }); return; }
     if (props.readOnly) return;
     if (isEnvironmentLightProjectLibraryItem(item)) {
       setActiveLibraryKey(item.openLibrary);
@@ -1923,15 +1730,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       setModelDeviceTypeFilter('');
       return;
     }
-    if (isSceneThemeProjectLibraryItem(item)) {
-      const state = useEditorStore.getState();
-      if (state.runtimeMode === 'edit' && state.shadowBakeStatus.phase !== 'baking' && !isScenePreparationActive()
-        && !state.environmentApplyRequest && state.environmentRuntimeSnapshot.phase !== 'loading') {
-        applySceneTheme(item.sceneThemePresetId);
-        state.selectEntity(null);
-      }
-      return;
-    }
+
     if (isDataPlatformChartLibraryItem(item)) return;
 
     if (isBuiltInProjectLibraryItem(item)) {
@@ -2018,9 +1817,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     if (isSceneThemeProjectLibraryItem(item)) {
-      const state = useEditorStore.getState();
-      if (state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking' || isScenePreparationActive()
-        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading') { event.preventDefault(); return; }
       event.dataTransfer.effectAllowed = 'copy';
       event.dataTransfer.setData(SCENE_THEME_DRAG_MIME_TYPE, item.sceneThemePresetId);
       event.dataTransfer.setData('text/plain', item.name);
@@ -2197,24 +1993,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
           type="text"
           value={libraryFilterText}
         />
-        {activeLibrary.key === 'model' ? (
-          <>
-            <label className="library-filter-label" htmlFor="project-library-model-type">
-              模型类型
-            </label>
-            <select
-              className="library-filter-select"
-              id="project-library-model-type"
-              onChange={(event) => setModelDeviceTypeFilter(event.target.value)}
-              value={modelDeviceTypeFilter}
-            >
-              <option value="">全部类型</option>
-              {modelDeviceTypes.map((deviceType) => (
-                <option key={deviceType} value={deviceType}>{deviceType}</option>
-              ))}
-            </select>
-          </>
-        ) : null}
+        <ModelLibraryTypeFilter activeLibraryKey={activeLibrary.key} {...{ setModelDeviceTypeFilter, modelDeviceTypeFilter, modelDeviceTypes }} />
         {supportsProjectImport ? (
           libraryStatus ? (
             <span className={`library-project-root library-status-${libraryStatus.kind}`} title={libraryStatus.message}>
@@ -2330,22 +2109,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
           const isSyncedChart = isDataPlatformChartLibraryItem(item);
           const isTheme = isSceneThemeProjectLibraryItem(item);
           const isEnvironmentLight = isEnvironmentLightProjectLibraryItem(item);
-          const currentTheme = sceneDocument.sceneSettings.theme;
-          const isCurrentTheme = isTheme && currentTheme?.presetId === item.sceneThemePresetId;
-          const themeStatus = isCurrentTheme && currentTheme
-            ? isSceneThemeAdjusted(currentTheme, sceneDocument.sceneSettings.shadows) ? '当前使用 · 已调整' : '当前使用'
-            : item.subtitle;
           const isActionableItem = ((!isEnvironmentLibrary && isBuiltInItem) || isBuiltInImage || isSyncedImage || isImportedAsset || isSyncedChart || isTheme || isEnvironmentLight);
-          const isCardDisabled = props.readOnly || !isActionableItem || (isTheme && (runtimeMode !== 'edit' || shadowBakePhase === 'baking'
-            || scenePreparationActive || environmentApplyPending || environmentRuntimeSnapshot.phase === 'loading'));
+          const isCardDisabled = (!isTheme && props.readOnly) || !isActionableItem;
 
           return (
             <ResourceCard
               className={isImportedAsset && item.asset.kind === 'skybox' ? 'skybox-resource-card' : undefined}
               disabled={isCardDisabled}
               draggable={!isCardDisabled && !isEnvironmentLight}
-              focused={item.id === focusedAssetId || isCurrentTheme}
-              item={isTheme ? { ...item, subtitle: themeStatus } : item}
+              focused={item.id === focusedAssetId}
+              item={isTheme ? { ...item, subtitle: '在光照管理器中选择预设' } : item}
               key={item.id}
               library={activeLibrary}
               onClick={() => handleResourceCardClick(item)}
@@ -2361,7 +2134,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
                 isEnvironmentLight
                   ? '点击进入天空盒库，导入或选择 HDR/EXR 环境贴图'
                   : isTheme
-                  ? `点击应用或拖入场景：${item.name}，应用后可在场景属性中微调`
+                  ? `点击或拖入场景以打开光照管理器：${item.name}，分别选择光照预设与显示预设`
                   : isBuiltInItem
                   ? `点击创建或拖拽到 Scene：${item.name}`
                   : isSyncedChart
@@ -2382,157 +2155,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
       </div>
 
       <div className={syncNoticeStyles.stack}>
-      {activeLibrary.key === 'skybox' && orphanedCurrentSkybox ? (
-        <div className="library-sync-status library-sync-status-warning" role="status" aria-live="polite">
-          <div className="library-sync-status-heading">
-            <strong>资源已从数据中台删除</strong>
-          </div>
-          <p title={`天空盒“${orphanedCurrentSkybox.displayName}”（数据中台资源 ID：${orphanedCurrentSkybox.dataPlatformResourceId}）已从数据中台删除。当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。`}>
-            天空盒“{orphanedCurrentSkybox.displayName}”（数据中台资源 ID：{orphanedCurrentSkybox.dataPlatformResourceId}）已从数据中台删除。
-            当前场景继续使用本地兼容缓存，但不能用于新场景；现有场景显示不受影响，重新选择天空盒时需使用仍在资源库中的资源。
-          </p>
-        </div>
-      ) : null}
+      <SkyboxLibraryTab {...{ activeLibraryKey: activeLibrary.key, orphanedCurrentSkybox, skyboxSyncProgress, skyboxSyncPhaseLabel, skyboxSyncCountLabel, skyboxSyncMessage, skyboxSyncReloadError, isReloadingSkyboxAssets, handleReloadSkyboxAssets, readOnly: props.readOnly, isRetryingSkyboxSync, handleRetryDataPlatformSkyboxSync, handleDismissDataPlatformSkyboxSyncFailure }} />
 
-      {activeLibrary.key === 'skybox' && skyboxSyncProgress ? (
-        <div className={`library-sync-status library-sync-status-${skyboxSyncProgress.phase}`} role="status" aria-live="polite">
-          <div className="library-sync-status-heading">
-            <strong>{skyboxSyncPhaseLabel}</strong>
-            {skyboxSyncCountLabel ? <span>{skyboxSyncCountLabel}</span> : null}
-          </div>
-          <p>{skyboxSyncMessage}</p>
-          {skyboxSyncProgress.phase === 'failed' ? (
-            <div className="library-sync-status-actions">
-              {skyboxSyncReloadError ? (
-                <button
-                  disabled={isReloadingSkyboxAssets}
-                  onClick={() => void handleReloadSkyboxAssets()}
-                  type="button"
-                >
-                  {isReloadingSkyboxAssets ? '重新加载中...' : '重新加载资源库'}
-                </button>
-              ) : null}
-              <button
-                disabled={props.readOnly || isRetryingSkyboxSync || isReloadingSkyboxAssets}
-                onClick={() => void handleRetryDataPlatformSkyboxSync()}
-                type="button"
-              >
-                {isRetryingSkyboxSync ? '重试中...' : '重试同步'}
-              </button>
-              <button
-                aria-label="关闭天空盒同步失败提示"
-                className="library-sync-status-close-button"
-                onClick={handleDismissDataPlatformSkyboxSyncFailure}
-                type="button"
-              >
-                关闭
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <ChartLibraryTab {...{ activeLibraryKey: activeLibrary.key, chartSyncProgress, chartSyncPhaseLabel, chartSyncCountLabel, chartSyncMessage, readOnly: props.readOnly, chartSyncContextKey, isRetryingChartSync, handleRetryDataPlatformChartSync, handleDismissDataPlatformChartSyncFailure }} />
 
-      {activeLibrary.key === 'chart' && chartSyncProgress ? (
-        <div className={`library-sync-status library-sync-status-${chartSyncProgress.phase}`} role="status" aria-live="polite">
-          <div className="library-sync-status-heading">
-            <strong>{chartSyncPhaseLabel}</strong>
-            {chartSyncCountLabel ? <span>{chartSyncCountLabel}</span> : null}
-          </div>
-          <p>{chartSyncMessage}</p>
-          {chartSyncProgress.phase === 'failed' ? (
-            <div className="library-sync-status-actions">
-              <button
-                disabled={props.readOnly || !chartSyncContextKey || isRetryingChartSync}
-                onClick={() => void handleRetryDataPlatformChartSync()}
-                type="button"
-              >
-                {isRetryingChartSync ? '重试中...' : '重试大屏同步'}
-              </button>
-              <button
-                aria-label="关闭大屏同步失败提示"
-                className="library-sync-status-close-button"
-                onClick={handleDismissDataPlatformChartSyncFailure}
-                type="button"
-              >
-                关闭
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <EnvironmentLibraryTab {...{ environmentSyncProgress, sceneSessionId, environmentSyncPhaseLabel, environmentSyncCountLabel, environmentSyncMessage, isRetryingEnvironmentSync, handleRetryDataPlatformEnvironmentSync }} />
 
-      {environmentSyncProgress ? (
-        <LibrarySyncNotice runId={`${sceneSessionId}:${environmentSyncProgress.runId}`}
-          phase={environmentSyncProgress.phase} label="环境模型同步">
-          <div className="library-sync-status-heading">
-            <strong>{environmentSyncPhaseLabel}</strong>
-            {environmentSyncCountLabel ? <span>{environmentSyncCountLabel}</span> : null}
-          </div>
-          <p>{environmentSyncMessage}</p>
-          {isRemoteDownloadVisible(environmentSyncProgress) && environmentSyncProgress.download
-            ? <RemoteDownloadDetail label="环境模型远程下载" download={environmentSyncProgress.download} /> : null}
-          {environmentSyncProgress.phase === 'failed' ? (
-            <div className="library-sync-status-actions">
-              <button disabled={isRetryingEnvironmentSync} onClick={() => void handleRetryDataPlatformEnvironmentSync()} type="button">
-                {isRetryingEnvironmentSync ? '重试中...' : '重试环境同步'}
-              </button>
-            </div>
-          ) : null}
-        </LibrarySyncNotice>
-      ) : null}
+      <ModelLibraryTab {...{ modelSyncProgress, sceneSessionId, modelSyncPhaseLabel, modelSyncCountLabel, modelSyncMessage, isRetryingModelSync, handleRetryDataPlatformModelSync }} />
 
-      {modelSyncProgress ? (
-        <LibrarySyncNotice runId={`${sceneSessionId}:${modelSyncProgress.runId}`}
-          phase={modelSyncProgress.phase} label="模型同步">
-          <div className="library-sync-status-heading">
-            <strong>{modelSyncPhaseLabel}</strong>
-            {modelSyncCountLabel ? <span>{modelSyncCountLabel}</span> : null}
-          </div>
-          <p>{modelSyncMessage}</p>
-          {isRemoteDownloadVisible(modelSyncProgress) && modelSyncProgress.download
-            ? <RemoteDownloadDetail label="模型远程下载" download={modelSyncProgress.download} /> : null}
-          {modelSyncProgress.phase === 'failed' ? (
-            <div className="library-sync-status-actions">
-              <button
-                disabled={isRetryingModelSync}
-                onClick={() => void handleRetryDataPlatformModelSync()}
-                type="button"
-              >
-                {isRetryingModelSync ? '重试中...' : '重试同步'}
-              </button>
-            </div>
-          ) : null}
-        </LibrarySyncNotice>
-      ) : null}
-
-      {imageSyncProgress ? (
-        <div className={`library-sync-status library-sync-status-${imageSyncProgress.phase}`} role="status" aria-live="polite">
-          <div className="library-sync-status-heading">
-            <strong>{imageSyncPhaseLabel}</strong>
-            {imageSyncCountLabel ? <span>{imageSyncCountLabel}</span> : null}
-          </div>
-          <p>{imageSyncMessage}</p>
-          {imageSyncProgress.phase === 'failed' ? (
-            <div className="library-sync-status-actions">
-              <button
-                disabled={isRetryingImageSync}
-                onClick={() => void handleRetryDataPlatformImageSync()}
-                type="button"
-              >
-                {isRetryingImageSync ? '重试中...' : '重试同步'}
-              </button>
-              <button
-                aria-label="关闭同步失败提示"
-                className="library-sync-status-close-button"
-                onClick={handleDismissDataPlatformImageSyncFailure}
-                type="button"
-              >
-                关闭
-              </button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+      <ImageLibraryTab {...{ imageSyncProgress, imageSyncPhaseLabel, imageSyncCountLabel, imageSyncMessage, isRetryingImageSync, handleRetryDataPlatformImageSync, handleDismissDataPlatformImageSyncFailure }} />
 
       </div>
       </>}

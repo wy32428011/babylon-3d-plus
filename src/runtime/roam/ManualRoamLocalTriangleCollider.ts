@@ -1,13 +1,9 @@
-import {
-  type AbstractMesh,
-  Color3,
-  type Geometry,
-  Mesh,
-  type Scene,
-  StandardMaterial,
-  VertexBuffer,
-  VertexData,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import type { AbstractMesh, Geometry, Scene } from '@babylonjs/core';
 import type { ManualRoamPoint } from './manualRoamCollisionBounds.ts';
 import { resolveManualRoamCollisionStyle } from './manualRoamCollisionPolicy.ts';
 import { acquireCollisionGeometryRevision } from './collisionGeometryRevision.ts';

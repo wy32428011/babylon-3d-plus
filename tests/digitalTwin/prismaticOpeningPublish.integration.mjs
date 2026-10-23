@@ -46,6 +46,8 @@ async function run() {
     await copyFile(path.join(output, 'warehouse.glb'), glb); authorizeAssetFile(glb);
     const assetUrl = 'editor-asset://local/' + encodeURIComponent(glb);
     const scene = api.createEmptySceneDocument('棱光创生发布验收');
+    // 仓库快照验证使用实时照明，保留产品对启用烘焙场景的发布校验。
+    scene.sceneSettings.lighting.bake.enabled = false;
     scene.sceneSettings.shadows = { ...scene.sceneSettings.shadows, mode: 'realtime' };
     scene.sceneSettings.openingAnimation = { enabled: true, template: 'package', allowSkip: true, motionPreference: 'normal', package: binding };
     binding.config.values.brandName = '发布仓储验收'; binding.config.values.accentGold = '#ffc866';

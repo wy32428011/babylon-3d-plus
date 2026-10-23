@@ -1,7 +1,15 @@
-import {
-  ArcRotateCamera, Color3, Color4, DefaultRenderingPipeline, Engine, Matrix, Mesh, MeshBuilder,
-  Scene, ShaderMaterial, StandardMaterial, TransformNode, Vector3, VertexBuffer,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3, Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { DefaultRenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
 import type { OpeningPackageStage, OpeningScalar } from '../../shared/opening/openingPackage';
 import type { OpeningControlledVisual, OpeningVisualControls, OpeningVisualRenderContext } from './TimelineOpeningVisual';

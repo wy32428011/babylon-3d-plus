@@ -39,7 +39,11 @@ writeFileSync(
         types: ['node'],
         typeRoots: [join(projectRoot, 'node_modules/@types')],
       },
-      include: [
+      // 聚焦回归只把被选测试作为根文件，业务依赖由 tsc 递归跟踪。
+      include: selectedTests.length ? [
+        normalizedProjectRoot + '/src/vite-env.d.ts',
+        ...selectedTests.map(name => normalizedProjectRoot + '/tests/telemetry/' + name),
+      ] : [
         normalizedProjectRoot + '/src/vite-env.d.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/deviceTelemetry.ts',
         normalizedProjectRoot + '/src/runtime/mqtt/MqttStackerTelemetryConfig.ts',

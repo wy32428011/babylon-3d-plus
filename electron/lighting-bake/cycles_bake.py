@@ -1,0 +1,942 @@
+"""受控的 Cycles 光照烘焙入口；仅接收主进程验证并暂存的 JSON 与纹理。"""
+from __future__ import annotations
+
+import argparse
+from array import array
+import json
+import math
+from pathlib import Path
+import sys
+import time
+from typing import Any
+
+import bpy
+from mathutils import Matrix, Vector
+
+
+COORDINATES = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
+REVERSE_COORDINATES = COORDINATES.inverted()
+PROGRESS_PREFIX = "LIGHTING_BAKE_PROGRESS "
+TEXTURE_IMAGES: dict[tuple[str, str], Any] = {}
+
+
+def progress(phase: str, completed: int, total: int, message: str) -> None:
+    print(PROGRESS_PREFIX + json.dumps(
+        {"phase": phase, "completed": completed, "total": total, "message": message},
+        ensure_ascii=False), flush=True)
+
+
+def write_json(file: Path, data: object) -> None:
+    with file.open("w", encoding="utf-8") as stream:
+        json.dump(data, stream, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def source_path(root: Path, name: str) -> str:
+    path = (root / name).resolve()
+    if path.parent != root.resolve() or not path.is_file():
+        raise ValueError("纹理路径超出任务目录或文件缺失。")
+    return str(path)
+
+
+def vector(values: list[float]) -> Vector:
+    return COORDINATES.to_3x3() @ Vector(values)
+
+
+def texture_nodes(material: Any, entry: dict, root: Path, color: bool) -> Any:
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    filename = source_path(root, entry["file"])
+    color_space = entry.get("colorSpace", "srgb") if color else "linear"
+    if color_space not in ("srgb", "linear"):
+        raise ValueError("不支持的材质纹理颜色空间。")
+    image_key = (filename, color_space)
+    image = TEXTURE_IMAGES.get(image_key)
+    if image is None:
+        image = bpy.data.images.load(filename, check_existing=False)
+        image.colorspace_settings.name = "sRGB" if color_space == "srgb" else "Non-Color"
+        TEXTURE_IMAGES[image_key] = image
+    # 原材质 RGB 与 alpha 分别参与颜色和透明度，禁止 Blender 按连接状态预乘颜色。
+    image.alpha_mode = "CHANNEL_PACKED"
+    node = nodes.new("ShaderNodeTexImage")
+    node.image = image
+    wrap_u, wrap_v = entry.get("wrapU", 1), entry.get("wrapV", 1)
+    if wrap_u != wrap_v:
+        raise ValueError("Cycles 暂不支持 U/V 不同的纹理寻址方式，请统一后再烘焙。")
+    node.extension = {0: "EXTEND", 1: "REPEAT", 2: "MIRROR"}.get(wrap_u, "REPEAT")
+    uv = nodes.new("ShaderNodeUVMap")
+    uv.uv_map = "SourceUV2" if entry["coordinatesIndex"] else "SourceUV"
+    mapping = nodes.new("ShaderNodeMapping")
+    mapping.vector_type = "POINT"
+    mapping.inputs["Scale"].default_value = (entry["uScale"], entry["vScale"], 1)
+    mapping.inputs["Rotation"].default_value[2] = entry["wAng"]
+    mapping.inputs["Location"].default_value = (entry["uOffset"], entry["vOffset"], 0)
+    center_u, center_v = entry.get("uRotationCenter", 0.5), entry.get("vRotationCenter", 0.5)
+    # Babylon 默认先缩放再绕指定中心旋转；显式节点避免默认为原点旋转。
+    if entry["wAng"]:
+        center = nodes.new("ShaderNodeVectorMath")
+        center.operation = "SUBTRACT"
+        center.inputs[1].default_value = (center_u, center_v, 0)
+        links.new(uv.outputs["UV"], center.inputs[0])
+        links.new(center.outputs[0], mapping.inputs["Vector"])
+        mapping.inputs["Location"].default_value = (
+            entry["uOffset"] + center_u * entry["uScale"], entry["vOffset"] + center_v * entry["vScale"], 0)
+    else:
+        links.new(uv.outputs["UV"], mapping.inputs["Vector"])
+    transformed = mapping.outputs["Vector"]
+    if "uvTransform" in entry:
+        coefficients = entry["uvTransform"]
+        split = nodes.new("ShaderNodeSeparateXYZ")
+        homogeneous = nodes.new("ShaderNodeCombineXYZ")
+        links.new(uv.outputs["UV"], split.inputs[0])
+        links.new(split.outputs["X"], homogeneous.inputs["X"])
+        links.new(split.outputs["Y"], homogeneous.inputs["Y"])
+        homogeneous.inputs["Z"].default_value = 1
+        combined = nodes.new("ShaderNodeCombineXYZ")
+        for axis, row in (("X", coefficients[:3]), ("Y", coefficients[3:])):
+            dot = nodes.new("ShaderNodeVectorMath")
+            dot.operation = "DOT_PRODUCT"
+            dot.inputs[1].default_value = row
+            links.new(homogeneous.outputs[0], dot.inputs[0])
+            links.new(dot.outputs["Value"], combined.inputs[axis])
+        transformed = combined.outputs[0]
+    if entry.get("invertY", False):
+        flip = nodes.new("ShaderNodeMapping")
+        flip.inputs["Scale"].default_value = (1, -1, 1)
+        flip.inputs["Location"].default_value = (0, 1, 0)
+        links.new(transformed, flip.inputs["Vector"])
+        links.new(flip.outputs["Vector"], node.inputs["Vector"])
+    else:
+        links.new(transformed, node.inputs["Vector"])
+    return node
+
+
+def configure_material_alpha(material: Any, data: dict) -> None:
+    """先汇总真实 alpha 因子再做 mask，编辑器 ghost opacity 不进入此契约。"""
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    shader = nodes.get("Principled BSDF")
+    mode = data.get("alphaMode", "blend" if data["alpha"] < 1 else "opaque")
+    if mode not in ("opaque", "mask", "blend", "mask-blend"):
+        raise ValueError("不支持的材质透明模式。")
+    shader.inputs["Alpha"].default_value = 1
+    base = nodes.new("ShaderNodeMath")
+    base.name = "LightingAlphaMesh"
+    base.operation = "MULTIPLY"
+    base.inputs[0].default_value = data["alpha"]
+    base.inputs[1].default_value = data.get("meshVisibility", 1)
+    texture = nodes.new("ShaderNodeMath")
+    texture.name = "LightingAlphaTexture"
+    texture.operation = "MULTIPLY"
+    texture.inputs[1].default_value = 1
+    links.new(base.outputs[0], texture.inputs[0])
+    vertex = nodes.new("ShaderNodeMath")
+    vertex.name = "LightingAlphaVertex"
+    vertex.operation = "MULTIPLY"
+    vertex.inputs[1].default_value = 1
+    links.new(texture.outputs[0], vertex.inputs[0])
+    if mode == "opaque":
+        return
+    result = vertex.outputs[0]
+    if mode in ("mask", "mask-blend"):
+        below = nodes.new("ShaderNodeMath")
+        below.operation = "LESS_THAN"
+        below.inputs[1].default_value = data.get("alphaCutoff", 0.5)
+        links.new(result, below.inputs[0])
+        keep = nodes.new("ShaderNodeMath")
+        keep.operation = "SUBTRACT"
+        keep.inputs[0].default_value = 1
+        links.new(below.outputs[0], keep.inputs[1])
+        if mode == "mask-blend":
+            retained = nodes.new("ShaderNodeMath")
+            retained.operation = "MULTIPLY"
+            links.new(result, retained.inputs[0])
+            links.new(keep.outputs[0], retained.inputs[1])
+            result = retained.outputs[0]
+        else:
+            result = keep.outputs[0]
+    links.new(result, shader.inputs["Alpha"])
+
+
+def make_material(data: dict, root: Path, name: str) -> Any:
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    shader = nodes.get("Principled BSDF")
+    shader.inputs["Base Color"].default_value = (*data["baseColor"], 1)
+    shader.inputs["Metallic"].default_value = data["metallic"]
+    shader.inputs["Roughness"].default_value = data["roughness"]
+    shader.inputs["Emission Color"].default_value = (*data["emissive"], 1)
+    shader.inputs["Emission Strength"].default_value = 1
+    configure_material_alpha(material, data)
+    for kind, entry in data.get("textures", {}).items():
+        tex = texture_nodes(material, entry, root, kind in ("baseColor", "emissive"))
+        if kind in ("baseColor", "emissive"):
+            multiply = nodes.new("ShaderNodeMixRGB")
+            multiply.blend_type = "MULTIPLY"
+            multiply.inputs[0].default_value = 1
+            multiply.inputs[2].default_value = (
+                *(value * entry["level"] for value in data["baseColor" if kind == "baseColor" else "emissive"]), 1)
+            links.new(tex.outputs["Color"], multiply.inputs[1])
+            links.new(multiply.outputs[0], shader.inputs["Base Color" if kind == "baseColor" else "Emission Color"])
+            if kind == "baseColor" and data.get("useTextureAlpha", False):
+                links.new(tex.outputs["Alpha"], nodes.get("LightingAlphaTexture").inputs[1])
+        elif kind == "metallicRoughness":
+            separate = nodes.new("ShaderNodeSeparateColor")
+            links.new(tex.outputs["Color"], separate.inputs[0])
+            for output, target, factor in (("Green", "Roughness", "roughness"), ("Blue", "Metallic", "metallic")):
+                multiply = nodes.new("ShaderNodeMath")
+                multiply.operation = "MULTIPLY"
+                multiply.inputs[1].default_value = data[factor] * entry["level"]
+                links.new(separate.outputs[output], multiply.inputs[0])
+                links.new(multiply.outputs[0], shader.inputs[target])
+        elif kind == "normal":
+            normal = nodes.new("ShaderNodeNormalMap")
+            normal.uv_map = "SourceUV2" if entry["coordinatesIndex"] else "SourceUV"
+            normal.inputs["Strength"].default_value = entry["level"]
+            source = tex.outputs["Color"]
+            if data.get("invertNormalMapX") or data.get("invertNormalMapY"):
+                split = nodes.new("ShaderNodeSeparateColor")
+                combine = nodes.new("ShaderNodeCombineColor")
+                links.new(source, split.inputs[0])
+                for channel, flag in (("Red", "invertNormalMapX"), ("Green", "invertNormalMapY"), ("Blue", "")):
+                    output = split.outputs[channel]
+                    if data.get(flag):
+                        inverse = nodes.new("ShaderNodeMath")
+                        inverse.operation = "SUBTRACT"
+                        inverse.inputs[0].default_value = 1
+                        links.new(output, inverse.inputs[1])
+                        output = inverse.outputs[0]
+                    links.new(output, combine.inputs[channel])
+                source = combine.outputs[0]
+            links.new(source, normal.inputs["Color"])
+            links.new(normal.outputs["Normal"], shader.inputs["Normal"])
+        elif kind == "occlusion":
+            # AO 是最终材质的局部遮蔽项；不再次乘进物理反弹，避免重复遮黑。
+            pass
+    if not data["doubleSided"]:
+        geometry = nodes.new("ShaderNodeNewGeometry")
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        mix = nodes.new("ShaderNodeMixShader")
+        links.new(geometry.outputs["Backfacing"], mix.inputs[0])
+        links.new(shader.outputs[0], mix.inputs[1])
+        links.new(transparent.outputs[0], mix.inputs[2])
+        links.new(mix.outputs[0], nodes.get("Material Output").inputs["Surface"])
+    return material
+
+
+def activate(objects: list[Any]) -> None:
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0]
+
+
+def apply_vertex_colors(obj: Any, source: dict) -> None:
+    colors = obj.data.color_attributes.new(name="SourceColors", type="FLOAT_COLOR", domain="POINT")
+    for index, entry in enumerate(colors.data):
+        entry.color = source["colors"][index * 4:index * 4 + 4]
+    material = obj.data.materials[0]
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    shader = nodes.get("Principled BSDF")
+    vertex = nodes.new("ShaderNodeVertexColor")
+    vertex.layer_name = "SourceColors"
+    multiply = nodes.new("ShaderNodeMixRGB")
+    multiply.blend_type = "MULTIPLY"
+    multiply.inputs[0].default_value = 1
+    base = shader.inputs["Base Color"]
+    if base.is_linked:
+        links.new(base.links[0].from_socket, multiply.inputs[1])
+    else:
+        multiply.inputs[1].default_value = base.default_value
+    links.new(vertex.outputs["Color"], multiply.inputs[2])
+    links.new(multiply.outputs[0], base)
+    if source["material"].get("useVertexAlpha", False):
+        # 顶点 alpha 必须在裁剪之前参与乘积；mask 存活后才恢复到完全不透明。
+        links.new(vertex.outputs["Alpha"], nodes.get("LightingAlphaVertex").inputs[1])
+
+
+def make_mesh(data: dict, root: Path, index: int) -> Any:
+    positions = data["positions"]
+    vertices = [vector(positions[i:i + 3]) for i in range(0, len(positions), 3)]
+    normals = [vector(data["normals"][i:i + 3]) for i in range(0, len(data["normals"]), 3)]
+    indices = data["indices"]
+    faces, flipped_faces = [], []
+    for offset in range(0, len(indices), 3):
+        first, second, third = indices[offset:offset + 3]
+        geometric_normal = (vertices[second] - vertices[first]).cross(vertices[third] - vertices[first])
+        authored_normal = normals[first] + normals[second] + normals[third]
+        # Babylon 左手绕序与 glTF/自定义几何的绕序可能不同。坐标反射之后按实际法线
+        # 确定 Cycles 的正面，不能再无条件翻转，否则单面材质会把整个模型当成背面。
+        flipped = geometric_normal.dot(authored_normal) < 0
+        faces.append((first, third, second) if flipped else (first, second, third))
+        flipped_faces.append(int(flipped))
+    mesh = bpy.data.meshes.new(f"Mesh-{index}")
+    mesh.from_pydata(vertices, [], faces)
+    mesh.update()
+    for source, name in (("uvs", "SourceUV"), ("uvs2", "SourceUV2")):
+        if source in data:
+            layer = mesh.uv_layers.new(name=name)
+            for loop in mesh.loops:
+                layer.data[loop.index].uv = data[source][loop.vertex_index * 2:loop.vertex_index * 2 + 2]
+    mesh.normals_split_custom_set_from_vertices(normals)
+    obj = bpy.data.objects.new(f"Object-{index}", mesh)
+    bpy.context.collection.objects.link(obj)
+    values = data["worldMatrix"]
+    matrix = Matrix(tuple(tuple(values[column * 4 + row] for column in range(4)) for row in range(4)))
+    obj.matrix_world = COORDINATES @ matrix @ REVERSE_COORDINATES
+    obj.data.materials.append(make_material(data["material"], root, f"Material-{index}"))
+    if "colors" in data:
+        apply_vertex_colors(obj, data)
+    obj["input_index"] = index
+    obj["source_winding_flipped"] = flipped_faces
+    activate([obj])
+    uv = mesh.uv_layers.new(name="LightmapUV")
+    mesh.uv_layers.active = uv
+    # 展开使用真实世界线性尺度；原始局部坐标与全部属性仍原样导出。
+    world_linear = obj.matrix_world.to_3x3()
+    for vertex, original in zip(mesh.vertices, vertices):
+        vertex.co = world_linear @ original
+    mesh.update()
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02, area_weight=1.0,
+                             correct_aspect=False, scale_to_bounds=False)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    for vertex, original in zip(mesh.vertices, vertices):
+        vertex.co = original
+    mesh.update()
+    mesh.normals_split_custom_set_from_vertices(normals)
+    return obj
+
+
+def world_area(obj: Any) -> float:
+    mesh = obj.data
+    transform = obj.matrix_world.to_3x3()
+    # 先求局部边向量再变换，避免远离世界原点时单精度平移抵消有效面积。
+    return sum(((transform @ (mesh.vertices[face.vertices[1]].co - mesh.vertices[face.vertices[0]].co)).cross(
+        transform @ (mesh.vertices[face.vertices[2]].co - mesh.vertices[face.vertices[0]].co))).length / 2
+        for face in mesh.polygons)
+
+
+def triangle_area(triangle: tuple[tuple[float, ...], ...]) -> float:
+    first, second, third = triangle
+    ab = tuple(second[axis] - first[axis] for axis in range(3))
+    ac = tuple(third[axis] - first[axis] for axis in range(3))
+    return math.sqrt(sum(value * value for value in (
+        ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0]))) / 2
+
+
+def clip_polygon(vertices: tuple[tuple[float, ...], ...], axis: int,
+                 plane: float, keep_low: bool) -> list[tuple[float, ...]]:
+    """裁切顶点携带世界坐标和全部原始属性；新角点始终做相同的线性插值。"""
+    result = []
+    previous = vertices[-1]
+    previous_inside = previous[axis] <= plane if keep_low else previous[axis] >= plane
+    for current in vertices:
+        current_inside = current[axis] <= plane if keep_low else current[axis] >= plane
+        if previous_inside != current_inside:
+            # 共享边的两种绕序必须使用相同运算顺序，避免舍入差异制造裂缝和额外 UV 岛。
+            first, second = sorted((previous, current))
+            amount = (plane - first[axis]) / (second[axis] - first[axis])
+            intersection = list(a + (b - a) * amount for a, b in zip(first, second))
+            intersection[axis] = plane
+            result.append(tuple(intersection))
+        if current_inside:
+            result.append(current)
+        previous, previous_inside = current, current_inside
+    return result
+
+
+def split_triangles(triangles: list[tuple[tuple[float, ...], ...]], axis: int,
+                    plane: float) -> tuple[list, list]:
+    halves: tuple[list, list] = ([], [])
+    for triangle in triangles:
+        low, high = min(vertex[axis] for vertex in triangle), max(vertex[axis] for vertex in triangle)
+        if high <= plane:
+            halves[0].append(triangle)
+        elif low >= plane:
+            halves[1].append(triangle)
+        elif triangle_area(triangle) == 0:
+            # 原始退化面仍保留一次；只有裁切新生成的零面积扇形可忽略。
+            halves[int(sum(vertex[axis] for vertex in triangle) / 3 > plane)].append(triangle)
+        else:
+            for side, keep_low in enumerate((True, False)):
+                polygon = clip_polygon(triangle, axis, plane, keep_low)
+                for index in range(1, len(polygon) - 1):
+                    face = (polygon[0], polygon[index], polygon[index + 1])
+                    if triangle_area(face) > 64 * math.ulp(triangle_area(triangle)):
+                        halves[side].append(face)
+    return halves
+
+
+def partition_receiver(source: dict, size: int, density: float, maximum_area: float | None = None) -> list[dict]:
+    """把超页接收面按世界空间裁成完整二叉叶集，不改原实体、材质或采样密度。"""
+    base_key, separator, parent_path = source["key"].rpartition("/tile:")
+    if not separator or not parent_path or not set(parent_path) <= {"0", "1"}:
+        base_key, parent_path = source["key"], ""
+    fields = [(name, width) for name, width in (
+        ("positions", 3), ("normals", 3), ("uvs", 2), ("uvs2", 2),
+        ("colors", 4), ("tangents", 4)) if name in source]
+    matrix = source["worldMatrix"]
+    vertices = []
+    for index in range(len(source["positions"]) // 3):
+        local = source["positions"][index * 3:index * 3 + 3]
+        world = tuple(sum(matrix[column * 4 + row] * local[column] for column in range(3))
+                      + matrix[12 + row] for row in range(3))
+        attributes = tuple(value for name, width in fields
+                           for value in source[name][index * width:index * width + width])
+        vertices.append(world + attributes)
+    triangles = [tuple(vertices[index] for index in source["indices"][start:start + 3])
+                 for start in range(0, len(source["indices"]), 3)]
+    original_area = sum(triangle_area(face) for face in triangles)
+    # Blender 顶点存储为单精度；预留微小数值余量，防止恰好满页在转换后超出一像素。
+    capacity = ((size - 8) / density) ** 2 * (1 - 1e-6)
+    if maximum_area is not None:
+        capacity = min(capacity, maximum_area)
+    if original_area <= capacity:
+        return [source]
+    leaves: list[tuple[str, list]] = []
+
+    def divide(faces: list, area: float, path: str) -> None:
+        if area <= capacity:
+            leaves.append((path, faces))
+            return
+        if len(path) + len(parent_path) >= 64:
+            raise ValueError(f"{source['name']} 空间切分超过安全深度；未丢弃几何或降低贴图密度。")
+        positive_vertices = [vertex for face in faces if triangle_area(face) > 0 for vertex in face]
+        bounds = [(min(vertex[axis] for vertex in positive_vertices),
+                   max(vertex[axis] for vertex in positive_vertices)) for axis in range(3)]
+        page_count = math.ceil(area / capacity)
+        left_pages = page_count // 2
+        target = area * left_pages / page_count
+        selected = None
+        for axis in sorted(range(3), key=lambda value: bounds[value][1] - bounds[value][0], reverse=True):
+            lower, upper = bounds[axis]
+            if upper <= lower:
+                continue
+            plane = lower + (upper - lower) * left_pages / page_count
+            for _ in range(24):
+                left, right = split_triangles(faces, axis, plane)
+                left_area, right_area = (sum(triangle_area(face) for face in half) for half in (left, right))
+                if left_area > 0 and right_area > 0:
+                    candidate = (left, right, left_area, right_area)
+                    if selected is None or abs(left_area - target) < abs(selected[2] - target):
+                        selected = candidate
+                    if math.ceil(left_area / capacity) + math.ceil(right_area / capacity) <= page_count:
+                        break
+                if left_area < target:
+                    lower = plane
+                else:
+                    upper = plane
+                updated = lower + (upper - lower) / 2
+                if updated == plane:
+                    break
+                plane = updated
+            if selected is not None:
+                break
+        if selected is None:
+            raise ValueError(f"{source['name']} 无法生成非空空间切片；未丢弃几何或降低贴图密度。")
+        left, right, left_area, right_area = selected
+        # 仅在两侧都有正面积时添加 0/1，确保服务端可验证完整二叉覆盖。
+        divide(left, left_area, path + "0")
+        divide(right, right_area, path + "1")
+
+    divide(triangles, original_area, "")
+    final_area = sum(triangle_area(face) for _, faces in leaves for face in faces)
+    if not math.isclose(final_area, original_area, rel_tol=1e-8, abs_tol=1e-8):
+        raise ValueError(f"{source['name']} 空间切分面积校验失败；未提交不完整几何。")
+    result = []
+    for path, faces in leaves:
+        key = base_key + "/tile:" + parent_path + path
+        item = {**source, "key": key, "indices": []}
+        for name, _ in fields:
+            item[name] = []
+        vertex_indices = {}
+        for face in faces:
+            for vertex in face:
+                attributes = vertex[3:]
+                if attributes not in vertex_indices:
+                    vertex_indices[attributes] = len(vertex_indices)
+                    offset = 0
+                    for name, width in fields:
+                        item[name].extend(attributes[offset:offset + width])
+                        offset += width
+                item["indices"].append(vertex_indices[attributes])
+        result.append(item)
+    return result
+
+
+def partition_receivers(meshes: list[dict], settings: dict) -> list[dict]:
+    size, density = settings["atlasSize"], settings["texelsPerMeter"]
+    budget = settings["maxTextureMiB"] * 1024 * 1024
+    receiver_area = 0.0
+    for source in meshes:
+        if not source.get("receiver", True):
+            continue
+        matrix, positions, indices = source["worldMatrix"], source["positions"], source["indices"]
+        for offset in range(0, len(indices), 3):
+            points = [positions[index * 3:index * 3 + 3] for index in indices[offset:offset + 3]]
+            edges = [tuple(sum(matrix[column * 4 + row] * (point[column] - points[0][column])
+                               for column in range(3)) for row in range(3)) for point in points[1:]]
+            receiver_area += triangle_area(((0, 0, 0), *edges))
+    if receiver_area * density * density * 4 > budget:
+        raise ValueError("光照图集超过纹理预算；没有丢弃对象或自动降低贴图密度。")
+    result = []
+    for source in meshes:
+        if source.get("receiver", True):
+            parts = partition_receiver(source, size, density)
+            result.extend(parts)
+        else:
+            result.append(source)
+    return result
+
+
+def lightmap_metrics(obj: Any, density: float) -> tuple[int, int, float, float, float]:
+    """按 UV→世界 Jacobian 最大奇异值保证任意方向的实际采样密度。"""
+    mesh, transform = obj.data, obj.matrix_world.to_3x3()
+    uv = mesh.uv_layers["LightmapUV"]
+    minimum_u = min(entry.uv.x for entry in uv.data)
+    minimum_v = min(entry.uv.y for entry in uv.data)
+    maximum_u = max(entry.uv.x for entry in uv.data)
+    maximum_v = max(entry.uv.y for entry in uv.data)
+    world_per_uv = 0.0
+    for face in mesh.polygons:
+        first, second, third = face.loop_indices
+        origin = mesh.vertices[mesh.loops[first].vertex_index].co
+        edges = [transform @ (mesh.vertices[mesh.loops[index].vertex_index].co - origin) for index in (second, third)]
+        a, b = (uv.data[index].uv - uv.data[first].uv for index in (second, third))
+        determinant = a.x * b.y - a.y * b.x
+        if edges[0].cross(edges[1]).length == 0:
+            continue
+        if abs(determinant) < 1e-20:
+            raise ValueError(f"{obj.name} 有正面积三角面未获得有效光照 UV。")
+        derivative_u = [(edges[0][axis] * b.y - edges[1][axis] * a.y) / determinant for axis in range(3)]
+        derivative_v = [(edges[1][axis] * a.x - edges[0][axis] * b.x) / determinant for axis in range(3)]
+        uu = sum(value * value for value in derivative_u)
+        vv = sum(value * value for value in derivative_v)
+        uv_dot = sum(left * right for left, right in zip(derivative_u, derivative_v))
+        largest_eigenvalue = (uu + vv + math.sqrt((uu - vv) ** 2 + 4 * uv_dot * uv_dot)) / 2
+        world_per_uv = max(world_per_uv, math.sqrt(largest_eigenvalue))
+    scale = world_per_uv * density * (1 + 1e-4)
+    return (max(16, math.ceil((maximum_u - minimum_u) * scale) + 8),
+            max(16, math.ceil((maximum_v - minimum_v) * scale) + 8), scale, minimum_u, minimum_v)
+
+
+def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list[dict], list[Any]]:
+    """对展开后仍超页的长条/多岛网格继续切分，直到真实密度能装入单页。"""
+    size, density = settings["atlasSize"], settings["texelsPerMeter"]
+    pending = list(reversed(partition_receivers(meshes, settings)))
+    sources, objects = [], []
+    while pending:
+        source = pending.pop()
+        obj = make_mesh(source, root, len(objects))
+        width, height, _, _, _ = lightmap_metrics(obj, density) if source.get("receiver", True) else (0, 0, 0, 0, 0)
+        if source.get("receiver", True) and max(width, height) > size:
+            maximum_area = world_area(obj) * ((size - 8) / (max(width, height) - 8)) ** 2 * 0.9
+            parts = partition_receiver(source, size, density, maximum_area)
+            if len(parts) < 2:
+                raise ValueError(f"{source['name']} 无法保持目标采样密度并完成空间切分。")
+            mesh, materials = obj.data, list(obj.data.materials)
+            bpy.data.objects.remove(obj, do_unlink=True)
+            bpy.data.meshes.remove(mesh)
+            for material in materials:
+                bpy.data.materials.remove(material)
+            pending.extend(reversed(parts))
+        else:
+            sources.append(source)
+            objects.append(obj)
+        progress("unwrap", len(sources), len(sources) + len(pending), "正在按世界尺度生成独立光照 UV")
+    return sources, objects
+
+
+def pack_atlases(objects: list[Any], size: int, density: float, budget: int) -> list[list[Any]]:
+    metrics = {obj.name: lightmap_metrics(obj, density) for obj in objects}
+    ordered = sorted(objects, key=lambda obj: metrics[obj.name][1], reverse=True)
+    pages: list[list[Any]] = []
+    placements = []
+    cursor_x = cursor_y = row_height = 0
+    for obj in ordered:
+        width, height, scale, minimum_u, minimum_v = metrics[obj.name]
+        if max(width, height) > size:
+            raise ValueError(f"{obj.name} 切分后仍需要 {width}×{height} 像素图块，超过图集 {size}；未降低贴图密度。")
+        if not pages or cursor_y + height > size:
+            pages.append([])
+            cursor_x = cursor_y = row_height = 0
+        if cursor_x + width > size:
+            cursor_x = 0
+            cursor_y += row_height
+            row_height = 0
+            if cursor_y + height > size:
+                pages.append([])
+                cursor_y = 0
+        placements.append((obj, cursor_x, cursor_y, scale, minimum_u, minimum_v, len(pages) - 1))
+        pages[-1].append(obj)
+        cursor_x += width
+        row_height = max(row_height, height)
+    required_bytes = len(pages) * size * size * 4
+    if required_bytes > budget:
+        raise ValueError(f"光照图集超过纹理预算：需要 {len(pages)} 张图集、{required_bytes / 1048576:.2f} MiB，"
+                         f"当前预算 {budget / 1048576:.2f} MiB；没有丢弃对象或自动降低贴图密度。")
+    for obj, x, y, scale, minimum_u, minimum_v, atlas in placements:
+        for entry in obj.data.uv_layers["LightmapUV"].data:
+            entry.uv = ((x + 4 + (entry.uv.x - minimum_u) * scale) / size,
+                        (y + 4 + (entry.uv.y - minimum_v) * scale) / size)
+        obj["atlas"] = atlas
+    return pages
+
+
+def configure_light_range(light: Any, distance: float, falloff: str = "gltf") -> None:
+    if falloff == "physical" or (distance <= 0 and falloff != "standard"):
+        return
+    light.use_nodes = True
+    nodes, links = light.node_tree.nodes, light.node_tree.links
+    if distance <= 0:
+        # Babylon 无界 standard 不随距离变暗，仍须抵消 Cycles 点光固有的平方反比。
+        constant = nodes.new("ShaderNodeLightFalloff")
+        constant.inputs["Strength"].default_value = 1
+        links.new(constant.outputs["Constant"], nodes.get("Emission").inputs["Strength"])
+        return
+    rays = nodes.new("ShaderNodeLightPath")
+    divide = nodes.new("ShaderNodeMath")
+    divide.operation = "DIVIDE"
+    divide.inputs[1].default_value = distance
+    links.new(rays.outputs["Ray Length"], divide.inputs[0])
+    value = divide.outputs[0]
+    if falloff != "standard":
+        power = nodes.new("ShaderNodeMath")
+        power.operation = "POWER"
+        power.inputs[1].default_value = 4
+        links.new(value, power.inputs[0])
+        value = power.outputs[0]
+    subtract = nodes.new("ShaderNodeMath")
+    subtract.operation = "SUBTRACT"
+    subtract.inputs[0].default_value = 1
+    links.new(value, subtract.inputs[1])
+    clamp = nodes.new("ShaderNodeMath")
+    clamp.operation = "MAXIMUM"
+    clamp.inputs[1].default_value = 0
+    links.new(subtract.outputs[0], clamp.inputs[0])
+    if falloff == "standard":
+        constant = nodes.new("ShaderNodeLightFalloff")
+        links.new(clamp.outputs[0], constant.inputs["Strength"])
+        links.new(constant.outputs["Constant"], nodes.get("Emission").inputs["Strength"])
+    else:
+        square = nodes.new("ShaderNodeMath")
+        square.operation = "MULTIPLY"
+        links.new(clamp.outputs[0], square.inputs[0])
+        links.new(clamp.outputs[0], square.inputs[1])
+        # glTF 窗函数与平方反比衰减相乘；编辑器 standard 使用线性距离并抵消平方反比。
+        links.new(square.outputs[0], nodes.get("Emission").inputs["Strength"])
+
+
+def configure_spot_distribution(light: Any, direction: Vector, entry: dict) -> None:
+    light.use_nodes = True
+    nodes, links = light.node_tree.nodes, light.node_tree.links
+
+    def math_node(operation: str, first: Any, second: Any = 0) -> Any:
+        node = nodes.new("ShaderNodeMath")
+        node.operation = operation
+        for index, value in enumerate((first, second)):
+            if isinstance(value, (int, float)):
+                node.inputs[index].default_value = value
+            else:
+                links.new(value, node.inputs[index])
+        return node.outputs[0]
+
+    geometry = nodes.new("ShaderNodeNewGeometry")
+    dot = nodes.new("ShaderNodeVectorMath")
+    dot.operation = "DOT_PRODUCT"
+    dot.inputs[1].default_value = direction.normalized()
+    links.new(geometry.outputs["Incoming"], dot.inputs[0])
+    cosine = dot.outputs["Value"]
+    outer_cosine = math.cos(entry.get("angle", math.pi / 3) / 2)
+    falloff = entry.get("falloff", "physical")
+    if falloff == "standard":
+        positive = math_node("MAXIMUM", cosine, 0)
+        power = math_node("POWER", positive, entry.get("exponent", 2))
+        angular = math_node("MULTIPLY", power, math_node("GREATER_THAN", cosine, outer_cosine))
+    elif falloff == "gltf":
+        scale = 1 / max(0.001, math.cos(entry.get("innerAngle", 0) / 2) - outer_cosine)
+        ramp = math_node("MULTIPLY_ADD", cosine, scale)
+        ramp.node.inputs[2].default_value = -outer_cosine * scale
+        bounded = math_node("MINIMUM", math_node("MAXIMUM", ramp, 0), 1)
+        angular = math_node("MULTIPLY", bounded, bounded)
+    else:
+        concentration = 6.64385618977 / max(0.000001, 1 - outer_cosine)
+        angular = math_node("POWER", 2, math_node("MULTIPLY", math_node("SUBTRACT", cosine, 1), concentration))
+    strength = nodes.get("Emission").inputs["Strength"]
+    previous = strength.links[0].from_socket if strength.is_linked else strength.default_value
+    links.new(math_node("MULTIPLY", previous, angular), strength)
+
+
+def setup_lights(data: dict, root: Path) -> list[Any]:
+    world = bpy.data.worlds.new("BakeEnvironment")
+    bpy.context.scene.world = world
+    world.use_nodes = True
+    background = world.node_tree.nodes.get("Background")
+    environment = data["environment"]
+    background.inputs["Color"].default_value = (*environment["color"], 1)
+    background.inputs["Strength"].default_value = environment["intensity"]
+    if environment.get("textureFile"):
+        texture = world.node_tree.nodes.new("ShaderNodeTexEnvironment")
+        texture.image = bpy.data.images.load(source_path(root, environment["textureFile"]))
+        # HDR 纹理与捕获的半球补光共同贡献环境；不能在接入 HDR 后丢掉补光基线。
+        combined = world.node_tree.nodes.new("ShaderNodeVectorMath")
+        combined.operation = "ADD"
+        combined.inputs[1].default_value = environment["color"]
+        world.node_tree.links.new(texture.outputs["Color"], combined.inputs[0])
+        world.node_tree.links.new(combined.outputs["Vector"], background.inputs["Color"])
+        if environment.get("rotation"):
+            coordinates = world.node_tree.nodes.new("ShaderNodeTexCoord")
+            mapping = world.node_tree.nodes.new("ShaderNodeMapping")
+            mapping.inputs["Rotation"].default_value[2] = -environment["rotation"]
+            world.node_tree.links.new(coordinates.outputs["Generated"], mapping.inputs["Vector"])
+            world.node_tree.links.new(mapping.outputs["Vector"], texture.inputs["Vector"])
+    lights = []
+    for index, entry in enumerate(data["lights"]):
+        kind = {"directional": "SUN", "point": "POINT", "spot": "SPOT", "area": "AREA"}[entry["kind"]]
+        # 用点光载体加显式角度函数，避免 Cycles 原生聚光软边再乘一次不同的衰减。
+        light = bpy.data.lights.new(f"Light-{index}", "POINT" if kind == "SPOT" else kind)
+        light.color = entry["color"]
+        # Babylon 默认物理点光强度为坎德拉，Cycles 点光功率为瓦特；4π 转换保留球面总能量。
+        light.energy = entry["intensity"] * (4 * math.pi if kind in ("POINT", "SPOT") else 1)
+        if kind in ("POINT", "SPOT") and (entry.get("range", 0) > 0 or entry.get("falloff") == "standard"):
+            configure_light_range(light, entry.get("range", 0), entry.get("falloff", "physical"))
+        if kind == "SPOT":
+            configure_spot_distribution(light, vector(entry["direction"]), entry)
+        if kind == "AREA":
+            light.shape = "RECTANGLE"
+            light.size = entry.get("width", 1)
+            light.size_y = entry.get("height", 1)
+        obj = bpy.data.objects.new(f"LightObject-{index}", light)
+        bpy.context.collection.objects.link(obj)
+        obj.location = vector(entry["position"])
+        direction = vector(entry["direction"])
+        if direction.length:
+            obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+        lights.append(obj)
+    return lights
+
+
+def attach_target(objects: list[Any], image: Any) -> None:
+    for obj in objects:
+        obj.data.uv_layers.active = obj.data.uv_layers["LightmapUV"]
+        obj.data.uv_layers["LightmapUV"].active_render = True
+        for material in obj.data.materials:
+            nodes = material.node_tree.nodes
+            target = nodes.get("BakeTarget") or nodes.new("ShaderNodeTexImage")
+            target.name = "BakeTarget"
+            target.image = image
+            nodes.active = target
+    activate(objects)
+
+
+def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str) -> array:
+    scene = bpy.context.scene
+    image = bpy.data.images.new(name, width=size, height=size, alpha=True, float_buffer=True)
+    image.colorspace_settings.name = "Non-Color"
+    attach_target(objects, image)
+    scene.render.bake.use_clear = True
+    scene.render.bake.margin = 3
+    # 不含表面颜色，运行时继续使用原材质基础色和金属度。
+    scene.render.bake.use_pass_color = False
+    scene.render.bake.use_pass_direct = False
+    scene.render.bake.use_pass_indirect = True
+    bpy.ops.object.bake(type="DIFFUSE")
+    pixels = array("f", [0]) * (size * size * 4)
+    image.pixels.foreach_get(pixels)
+    for light in lights:
+        light.hide_render = True
+    scene.render.bake.use_pass_direct = True
+    scene.render.bake.use_pass_indirect = False
+    bpy.ops.object.bake(type="DIFFUSE")
+    ambient = array("f", [0]) * len(pixels)
+    image.pixels.foreach_get(ambient)
+    for offset in range(0, len(pixels), 4):
+        for channel in range(3):
+            pixels[offset + channel] = max(0, pixels[offset + channel] + ambient[offset + channel])
+        pixels[offset + 3] = 1
+    for light in lights:
+        light.hide_render = False
+    bpy.data.images.remove(image)
+    return pixels
+
+
+def save_rgbm(pixels: array, size: int, destination: Path) -> float:
+    maximum = max((pixels[i] for i in range(len(pixels)) if i % 4 != 3), default=1)
+    dynamic_range = max(1, math.ceil(maximum))
+    encoded = array("f", [0]) * len(pixels)
+    for offset in range(0, len(pixels), 4):
+        rgb = pixels[offset:offset + 3]
+        multiplier = max(1 / 255, math.ceil(max(rgb) / dynamic_range * 255) / 255)
+        for channel in range(3):
+            encoded[offset + channel] = rgb[channel] / (multiplier * dynamic_range)
+        encoded[offset + 3] = multiplier
+    image = bpy.data.images.new(destination.stem, width=size, height=size, alpha=True)
+    image.colorspace_settings.name = "Non-Color"
+    image.alpha_mode = "CHANNEL_PACKED"
+    image.pixels.foreach_set(encoded)
+    image.filepath_raw = str(destination)
+    image.file_format = "PNG"
+    image.save()
+    bpy.data.images.remove(image)
+    return dynamic_range
+
+
+def export_geometry(obj: Any, source: dict, destination: Path) -> None:
+    mesh = obj.data
+    result: dict[str, Any] = {"version": 1, "key": source["key"], "positions": [], "normals": [],
+                             "indices": [], "uvs": [], "bakeUvs": []}
+    if "uvs2" in source:
+        result["uvs2"] = []
+    if "colors" in source:
+        result["colors"] = []
+    if "tangents" in source:
+        result["tangents"] = []
+    # 按三角角点展开，UV 岛边界不会覆盖相邻面的顶点 UV。
+    flipped_faces = obj["source_winding_flipped"]
+    for face in mesh.polygons:
+        loops = list(face.loop_indices)
+        # 恢复每个输入三角形自己的原始角点顺序；Cycles 修正只用于离线射线计算。
+        if flipped_faces[face.index]:
+            loops = [loops[0], loops[2], loops[1]]
+        for loop_index in loops:
+            loop = mesh.loops[loop_index]
+            vertex = loop.vertex_index
+            result["positions"].extend(source["positions"][vertex * 3:vertex * 3 + 3])
+            result["normals"].extend(source["normals"][vertex * 3:vertex * 3 + 3])
+            result["indices"].append(len(result["indices"]))
+            result["bakeUvs"].extend(mesh.uv_layers["LightmapUV"].data[loop_index].uv)
+            if "uvs" not in source:
+                result["uvs"].extend((0, 0))
+            for channel in ("uvs", "uvs2"):
+                if channel in source:
+                    result[channel].extend(source[channel][vertex * 2:vertex * 2 + 2])
+            if "colors" in source:
+                result["colors"].extend(source["colors"][vertex * 4:vertex * 4 + 4])
+            if "tangents" in source:
+                result["tangents"].extend(source["tangents"][vertex * 4:vertex * 4 + 4])
+    write_json(destination, result)
+
+
+def probe_positions(objects: list[Any], spacing: float) -> list[Vector]:
+    coordinates = [obj.matrix_world @ Vector(corner) for obj in objects for corner in obj.bound_box]
+    low = Vector(tuple(min(point[axis] for point in coordinates) for axis in range(3)))
+    high = Vector(tuple(max(point[axis] for point in coordinates) for axis in range(3)))
+    counts = [max(1, math.ceil((high[axis] - low[axis]) / spacing)) for axis in range(3)]
+    if math.prod(counts) > 4096:
+        raise ValueError("探针超过 4096 个安全预算；请增大探针间距。不会静默丢弃探针。")
+    return [Vector(tuple(low[axis] + (indices[axis] + 0.5) * max(high[axis] - low[axis], 0.1) / counts[axis]
+                         for axis in range(3)))
+            for x in range(counts[0]) for y in range(counts[1]) for z in range(counts[2])
+            for indices in [(x, y, z)]]
+
+
+def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Path) -> int:
+    positions = probe_positions(objects, spacing)
+    probes = []
+    # 每批 64 个探针、每面 4×4 像素，避免逐探针启动 Cycles；面法线按 Babylon 顺序记录。
+    for start in range(0, len(positions), 64):
+        batch = positions[start:start + 64]
+        vertices, faces, face_axes = [], [], []
+        axes = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+        for position in batch:
+            for axis in axes:
+                normal = vector(list(axis))
+                tangent = normal.cross(Vector((0, 0, 1)) if abs(normal.z) < 0.9 else Vector((0, 1, 0))).normalized()
+                bitangent = normal.cross(tangent)
+                center = position + normal * 0.001
+                offset = len(vertices)
+                vertices.extend([center + tangent * a * 0.001 + bitangent * b * 0.001
+                                 for a, b in [(-1, -1), (1, -1), (1, 1), (-1, 1)]])
+                faces.append(tuple(offset + index for index in range(4)))
+                face_axes.append(axis)
+        mesh = bpy.data.meshes.new("ProbeMesh")
+        mesh.from_pydata(vertices, [], faces)
+        mesh.update()
+        uv = mesh.uv_layers.new(name="LightmapUV")
+        size = 128
+        columns = size // 6
+        for face in mesh.polygons:
+            x, y = face.index % columns * 6, face.index // columns * 6
+            for loop_index, (u, v) in zip(face.loop_indices, [(0, 0), (1, 0), (1, 1), (0, 1)]):
+                uv.data[loop_index].uv = ((x + 1 + u * 4) / size, (y + 1 + v * 4) / size)
+        obj = bpy.data.objects.new("ProbeTargets", mesh)
+        bpy.context.collection.objects.link(obj)
+        material = bpy.data.materials.new("ProbeDiffuse")
+        material.use_nodes = True
+        material.node_tree.nodes.get("Principled BSDF").inputs["Base Color"].default_value = (1, 1, 1, 1)
+        obj.data.materials.append(material)
+        pixels = bake_irradiance([obj], lights, size, "ProbeBake")
+        for index, position in enumerate(batch):
+            irradiance = []
+            for face in range(6):
+                tile = index * 6 + face
+                x, y = tile % columns * 6 + 2, tile // columns * 6 + 2
+                for channel in range(3):
+                    irradiance.append(sum(pixels[((y + dy) * size + x + dx) * 4 + channel]
+                                          for dx in range(2) for dy in range(2)) / 4)
+            probes.append({"position": list(REVERSE_COORDINATES.to_3x3() @ position), "irradiance": irradiance})
+        bpy.data.objects.remove(obj, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
+        bpy.data.materials.remove(material)
+        progress("probes", min(start + 64, len(positions)), len(positions), "正在烘焙动态物体间接光探针")
+    write_json(root / "probes.json", {"version": 1, "encoding": "ambient-cube", "spacing": spacing, "probes": probes})
+    return len(probes)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    arguments = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
+    file = Path(arguments.input).resolve()
+    root = file.parent
+    with file.open(encoding="utf-8") as stream:
+        data = json.load(stream)
+    started = time.monotonic()
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    # CPU 是稳定默认值；不会借用用户当前 Blender 会话或改动其偏好配置。
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = {"preview": 16, "standard": 64, "high": 256}[data["settings"]["quality"]]
+    scene.cycles.use_denoising = False
+    scene.cycles.max_bounces = 8
+    scene.cycles.diffuse_bounces = 4
+    settings = data["settings"]
+    data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
+    lights = setup_lights(data, root)
+    size = settings["atlasSize"]
+    receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
+    pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024)
+    atlas_results = []
+    for index, page in enumerate(pages):
+        progress("baking", index, len(pages), "正在烘焙间接光与环境漫反射")
+        pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
+        name = f"lightmap-{index}.png"
+        dynamic_range = save_rgbm(pixels, size, root / name)
+        atlas_results.append({"file": name, "width": size, "height": size, "encoding": "rgbm", "rgbmRange": dynamic_range})
+    mesh_results = []
+    for obj in receivers:
+        index = obj["input_index"]
+        source = data["meshes"][index]
+        name = f"geometry-{index}.json"
+        export_geometry(obj, source, root / name)
+        mesh_results.append({"key": source["key"], "entityId": source["entityId"], "nodeKey": source["nodeKey"],
+                             "geometryFile": name, "atlasIndex": obj["atlas"]})
+    count = bake_probes(objects, lights, settings["probeSpacing"], root)
+    write_json(root / "result.json", {"version": 1, "signature": data["signature"], "engineVersion": bpy.app.version_string,
+                                    "atlases": atlas_results, "meshes": mesh_results, "probesFile": "probes.json",
+                                    "statistics": {"meshCount": len(objects), "triangleCount": sum(len(entry["indices"]) // 3 for entry in data["meshes"]),
+                                                   "atlasCount": len(pages), "probeCount": count,
+                                                   "durationMs": round((time.monotonic() - started) * 1000),
+                                                   "textureBytes": len(pages) * size * size * 4}})
+    progress("completed", 1, 1, "光照资源生成完成，正在校验")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print("LIGHTING_BAKE_ERROR " + str(error), file=sys.stderr, flush=True)
+        raise

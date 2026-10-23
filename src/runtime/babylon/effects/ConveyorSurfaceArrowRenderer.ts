@@ -1,6 +1,12 @@
-import {
-  AbstractMesh, Color3, Constants, Matrix, Mesh, MeshBuilder, ShaderMaterial, TransformNode, Vector3, type Scene,
-} from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { ConveyorSurfaceArrowsConfig } from '../../../editor/model/conveyorSurfaceArrows';
 import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { getModelTransformNodes, getNodeMeshes, isFiniteVector3 } from '../runtimeNodeGeometry';
@@ -220,7 +226,7 @@ function createSurfaceCache(model: ModelRuntimeEntry, signature: string, config:
   const host = model.telemetryProxySource ?? model;
   const travel = readConveyorCargoTravelConfig(model);
   const nodes = getModelTransformNodes(host, scene).filter(node => !isDecoration(node));
-  let selected: TransformNode[] = [];
+  let selected: TransformNode[];
   let diagnostic: string | null = null;
   let frame = host.root;
   if (config.surfaceNode) {

@@ -1,4 +1,5 @@
-import { TransformNode, type Scene } from '@babylonjs/core';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { CompositionDefinition, CompositionNode } from '../../../../electron/shared/compositionTypes';
 import type { MeshRendererComponent } from '../../../editor/model/components';
 import { isPlainRecord, sanitizeBabylonName } from '../runtimeValueUtils';

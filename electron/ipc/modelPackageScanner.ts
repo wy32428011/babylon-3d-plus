@@ -1,3 +1,5 @@
+import { trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharacters.ts';
+import { precompileModelScriptFile } from './modelScriptCompiler.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit, type ModelLengthUnitInfo } from '../modelUnits.js';
@@ -202,7 +204,7 @@ async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocume
         if (gltf) throw new Error('GLB 只能包含一个 JSON chunk。');
         if (chunkLength > MAX_GLB_JSON_CHUNK_BYTES) throw new Error('GLB JSON chunk 超过 64 MiB 上限。');
         const jsonBuffer = await readExactly(handle, chunkLength, dataOffset);
-        const jsonText = jsonBuffer.toString('utf8').replace(/[\u0000\u0020]+$/g, '');
+        const jsonText = trimTrailingNullAndSpaceCharacters(jsonBuffer.toString('utf8'));
         const parsed = JSON.parse(jsonText) as unknown;
         if (!isPlainObject(parsed)) throw new Error('GLB JSON 根节点必须是普通对象。');
         gltf = parsed;
@@ -603,11 +605,14 @@ async function readDefaultAssetCodeFromScripts(scriptPaths: string[]): Promise<s
   return undefined;
 }
 
-function createModelScriptAssets(scriptPaths: string[]): NonNullable<AssetEntry['scriptAssets']> {
-  return scriptPaths.map((scriptPath) => ({
-    path: scriptPath,
-    sourceUrl: encodeAssetUrl(scriptPath),
-    name: path.basename(scriptPath),
+async function createModelScriptAssets(scriptPaths: string[]): Promise<NonNullable<AssetEntry['scriptAssets']>> {
+  return Promise.all(scriptPaths.map(async (scriptPath) => {
+    await precompileModelScriptFile(scriptPath);
+    return {
+      path: scriptPath,
+      sourceUrl: encodeAssetUrl(scriptPath),
+      name: path.basename(scriptPath),
+    };
   }));
 }
 
@@ -629,7 +634,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
   const metadata = await readModelPackageMetadata(packagePath);
   const scriptPaths = findModelScripts(packagePath, fileNames, metadata.scriptFileNames);
   const defaultAssetCode = await readDefaultAssetCodeFromScripts(scriptPaths);
-  const scriptAssets = createModelScriptAssets(scriptPaths);
+  const scriptAssets = await createModelScriptAssets(scriptPaths);
   const modelFileName = path.basename(modelFilePath);
   const packageName = path.basename(packagePath);
   const modelFileStat = await fs.stat(modelFilePath);

@@ -1,4 +1,8 @@
-import { AbstractMesh, Matrix, Mesh, Quaternion, TransformNode, Vector3, type Scene } from '@babylonjs/core';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 
 /** 世界空间轴对齐包围盒。 */
 export type RuntimeWorldBounds = {

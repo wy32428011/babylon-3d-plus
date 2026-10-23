@@ -1,11 +1,19 @@
-import {
-  AbstractMesh, Color3, Color4, GlowLayer, InstancedMesh, Material, MaterialPluginBase,
-  Mesh, MultiMaterial, PBRBaseMaterial, PBRMaterial, StandardMaterial, TransformNode, Vector3,
-  type Scene, type UniformBuffer, type BaseTexture,
-} from '@babylonjs/core';
+import { GlowLayer } from '@babylonjs/core/Layers/glowLayer.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase.js';
+import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
+import { PBRBaseMaterial } from '@babylonjs/core/Materials/PBR/pbrBaseMaterial.js';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3, Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene, UniformBuffer, BaseTexture } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { ENVIRONMENT_EFFECT_TARGET_ID, isEnvironmentBuildingEffectKind } from '../../../editor/model/environmentBuildingEffect';
-import { EnvironmentShadowMaterialPlugin } from '../EnvironmentShadowMaterialPlugin';
 import { cloneEnvironmentMaterial } from '../cloneEnvironmentMaterial';
 import { cloneMaterialWithSharedTexturePixels } from '../cloneMaterialWithSharedTexturePixels';
 
@@ -442,10 +450,6 @@ export class TargetModelEffects {
     material.unfreeze();
     const kind = effect.component.effectKind;
     if (state.source.metadata?.editorEnvironmentMesh) {
-      // 环境阴影插件不参与材质序列化，给临时特效副本补回，保持当前阴影模式。
-      if (original?.pluginManager?.getPlugin('EnvironmentShadow') && (material instanceof PBRMaterial || material instanceof StandardMaterial)) {
-        new EnvironmentShadowMaterialPlugin(material);
-      }
       // PBR unlit 分支忽略 emissiveColor；副本保留灯光隔离，释放后仍恢复原 unlit 材质。
       if (kind === 'model-emissive' && material instanceof PBRMaterial) {
         material.unlit = false;

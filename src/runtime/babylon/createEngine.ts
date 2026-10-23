@@ -1,13 +1,11 @@
-import {
-  ArcRotateCamera,
-  Axis,
-  Camera,
-  Engine,
-  HemisphericLight,
-  Scene,
-  TmpVectors,
-  Vector3,
-} from '@babylonjs/core';
+import './babylonSideEffects.js';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
+import { Axis } from '@babylonjs/core/Maths/math.axis.js';
+import { TmpVectors, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
 import { warmupLocalBabylonDecoders } from './localDecoderConfiguration';
 import { ScenePreparationFrameBudget } from './scenePreparationFrameBudget';
@@ -421,7 +419,7 @@ export function createBabylonViewport(
     const guidance = requireHardwareAcceleration
       ? ' 请确认浏览器或桌面应用已启用硬件加速并重启，同时检查显卡驱动与系统图形策略是否允许当前程序使用 GPU。'
       : '';
-    throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance);
+    throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance, { cause: error });
   }
   const backgroundFrameRequester = options.keepRenderingInBackground
     ? createBackgroundFrameRequester()

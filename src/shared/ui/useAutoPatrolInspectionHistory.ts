@@ -38,6 +38,7 @@ const IDLE_REPLAY_SNAPSHOT: AutoPatrolInspectionReplaySnapshot = {
 export function useAutoPatrolInspectionHistory(
   options: UseAutoPatrolInspectionHistoryOptions,
 ): UseAutoPatrolInspectionHistoryResult {
+  const { recordStore, scopeId, applyCamera, onReplayStart, onError } = options;
   const replayRef = useRef<AutoPatrolInspectionReplayController | null>(null);
   const refreshGenerationRef = useRef(0);
   const selectedRecordRef = useRef<AutoPatrolInspectionRecord | null>(null);
@@ -48,7 +49,7 @@ export function useAutoPatrolInspectionHistory(
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
-    const store = options.recordStore;
+    const store = recordStore;
     if (!store) return;
     const generation = ++refreshGenerationRef.current;
     setLoading(true);
@@ -79,11 +80,11 @@ export function useAutoPatrolInspectionHistory(
       if (generation !== refreshGenerationRef.current) return;
       const message = `读取巡检历史失败：${getErrorMessage(reason)}`;
       setError(message);
-      options.onError?.(message);
+      onError?.(message);
     } finally {
       if (generation === refreshGenerationRef.current) setLoading(false);
     }
-  }, [options.onError, options.recordStore]);
+  }, [onError, recordStore]);
 
   useEffect(() => {
     refreshGenerationRef.current += 1;
@@ -95,13 +96,13 @@ export function useAutoPatrolInspectionHistory(
     setReplay(IDLE_REPLAY_SNAPSHOT);
     setError(null);
     setLoading(false);
-    if (!options.recordStore) return;
-    if (options.scopeId) options.recordStore.setScope(options.scopeId);
+    if (!recordStore) return;
+    if (scopeId) recordStore.setScope(scopeId);
 
     const controller = new AutoPatrolInspectionReplayController({
       now: readReplayTimestampMs,
       subscribeFrame: subscribeReplayFrame,
-      applyCamera: options.applyCamera,
+      applyCamera: applyCamera,
     });
     replayRef.current = controller;
     const unsubscribe = controller.subscribe(() => setReplay(controller.getSnapshot()));
@@ -112,7 +113,7 @@ export function useAutoPatrolInspectionHistory(
       controller.dispose();
       if (replayRef.current === controller) replayRef.current = null;
     };
-  }, [options.applyCamera, options.recordStore, options.scopeId, refresh]);
+  }, [applyCamera, recordStore, scopeId, refresh]);
 
   const pauseReplay = useCallback((): void => {
     replayRef.current?.pause();
@@ -137,7 +138,7 @@ export function useAutoPatrolInspectionHistory(
           result = { ok: false, error: '巡检历史记录不存在。' };
           break;
         }
-        options.onReplayStart?.();
+        onReplayStart?.();
         result = controller.load(record);
         if (result.ok) {
           selectedRecordRef.current = record;
@@ -146,34 +147,34 @@ export function useAutoPatrolInspectionHistory(
         break;
       }
       case 'play':
-        options.onReplayStart?.();
+        onReplayStart?.();
         result = controller.play();
         break;
       case 'pause':
         result = controller.pause();
         break;
       case 'seek':
-        options.onReplayStart?.();
+        onReplayStart?.();
         result = controller.seek(typeof payload === 'number' ? payload : Number.NaN);
         break;
       case 'set-rate':
         result = controller.setPlaybackRate(typeof payload === 'number' ? payload as 0.5 | 1 | 2 | 4 : 1);
         break;
       case 'jump-to-event':
-        options.onReplayStart?.();
+        onReplayStart?.();
         result = controller.jumpToEvent(typeof payload === 'string' ? payload : '');
         break;
     }
     if (result && !result.ok) {
       setError(result.error);
-      options.onError?.(result.error);
+      onError?.(result.error);
     } else if (result) {
       setError(null);
     }
-  }, [options, records, refresh]);
+  }, [onError, onReplayStart, records, refresh]);
 
   return {
-    history: options.recordStore ? { records, selectedRecord, replay, loading, error } : undefined,
+    history: recordStore ? { records, selectedRecord, replay, loading, error } : undefined,
     handleHistoryAction,
     pauseReplay,
   };

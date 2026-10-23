@@ -1,3 +1,4 @@
+export type { LightingBakeInput, LightingBakeProgress, LightingBakeEngineStatus, SceneLightingBakeSnapshot } from './shared/sceneLightingBakeContract.js';
 import type { OpeningPackageBinding } from './shared/openingPackage.js';
 
 export type OpeningPackageListResult = { projectRoot: string | null; packages: OpeningPackageBinding[]; warnings: string[] };

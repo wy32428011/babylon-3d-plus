@@ -75,6 +75,8 @@ try {
   } finally { electron.ipcMain.handle = oldHandle; electron.dialog.showOpenDialog = oldOpen; electron.dialog.showSaveDialog = oldSave; }
   const scenes = [a, a, b].map((binding, i) => {
     const scene = createEmptySceneDocument(`包场景 ${i + 1}`);
+    // 开场导出夹具只验证播放器，不依赖尚未生成的静态光照烘焙结果。
+    scene.sceneSettings.lighting.bake.enabled = false;
     scene.sceneSettings.openingAnimation = { ...scene.sceneSettings.openingAnimation, enabled: true, template: 'package', package: structuredClone(binding) };
     const own = scene.sceneSettings.openingAnimation.package;
     const mesh = createMeshEntity('cube', { x: 0, y: 1, z: 0 }); scene.entities[mesh.id] = mesh; scene.entityIds.push(mesh.id);

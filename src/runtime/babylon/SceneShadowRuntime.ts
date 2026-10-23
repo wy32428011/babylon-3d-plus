@@ -1,28 +1,24 @@
-import {
-  type AbstractMesh,
-  CascadedShadowGenerator,
-  Color3,
-  DirectionalLight,
-  HemisphericLight,
-  type Light,
-  LinesMesh,
-  Material,
-  Mesh,
-  MeshBuilder,
-  MultiMaterial,
-  PointLight,
-  RenderTargetTexture,
-  type Nullable,
-  type Observer,
-  type Scene,
-  ShadowGenerator,
-  SpotLight,
-  StandardMaterial,
-  type TransformNode,
-  Vector3,
-} from '@babylonjs/core';
+import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
+import { PointLight } from '@babylonjs/core/Lights/pointLight.js';
+import { CascadedShadowGenerator } from '@babylonjs/core/Lights/Shadows/cascadedShadowGenerator.js';
+import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator.js';
+import { SpotLight } from '@babylonjs/core/Lights/spotLight.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { RenderTargetTexture } from '@babylonjs/core/Materials/Textures/renderTargetTexture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import type { AbstractMesh, Light, Nullable, Observer, Scene, TransformNode } from '@babylonjs/core';
 import type { SceneShadowQuality, SceneShadowSettings } from '../../editor/model/SceneDocument';
-import { setEnvironmentLocalShadowGenerators, setEnvironmentShadowGenerator } from './EnvironmentShadowMaterialPlugin.ts';
+import {
+  HybridShadowCache, HybridShadowMeshState,
+  type HybridShadowMeshRole, type HybridShadowMetrics, type HybridShadowOptions,
+} from './HybridShadowCache.ts';
 
 export const SCENE_SHADOW_SUN_NAME = '__SceneShadowSun';
 export const SCENE_SHADOW_CATCHER_NAME = '__SceneShadowCatcher';
@@ -138,6 +134,8 @@ function collectMeshMaterials(mesh: AbstractMesh): Material[] {
 
 /** 写入 receiveShadows；环境等冻结材质必须先解冻，否则不会重编阴影采样。 */
 function applyReceiveShadows(mesh: AbstractMesh, enabled: boolean): void {
+  // Babylon 实例只读继承 sourceMesh；规则冲突的可见实例由独立影子代理绘制。
+  if (mesh instanceof InstancedMesh) return;
   if (mesh.receiveShadows === enabled) return;
   const frozenMaterials = collectMeshMaterials(mesh).filter((material) => material.isFrozen);
   for (const material of frozenMaterials) material.unfreeze();
@@ -169,19 +167,28 @@ export class SceneShadowRuntime {
   private readonly entityDirectionals = new Map<string, DirectionalLight>();
   private readonly localLights = new Map<string, PointLight | SpotLight>();
   private readonly localGenerators = new Map<string, ShadowGenerator>();
+  private readonly secondaryDirectionalGenerators = new Map<DirectionalLight, ShadowGenerator>();
+  private readonly hybridCaches = new Map<ShadowGenerator, HybridShadowCache>();
+  private readonly hybridMeshState = new HybridShadowMeshState();
+  private hybridMeshRoles = new Map<AbstractMesh, HybridShadowMeshRole>();
+  private hybridOptions: Required<HybridShadowOptions> = { cacheStaticShadows: true, dynamicShadows: true };
+  private readonly hybridMaterialLightLimits = new Map<PBRMaterial | StandardMaterial, number>();
+  private hybridValidationErrors: string[] = [];
+  private hybridValidationSignature = '';
+  private hybridLightingSignature = '';
+  private hybridMaterialsDirty = true;
+  private readonly hybridMaterialObservers = new Map<AbstractMesh, Observer<AbstractMesh>>();
+  private readonly retiredHybridMetrics = { staticRenders: 0, dynamicRenders: 0, cacheInvalidations: 0, cacheHits: 0 };
   private receiverLightBindings = new Map<Light, ShadowGenerator | null>();
   private readonly knownMeshes = new Set<AbstractMesh>();
+  private renderSuppressedMeshes = new Set<AbstractMesh>();
   private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
   private readonly catcher: Mesh;
-  private themeLight: DirectionalLight | null = null;
-  private autoSun: DirectionalLight | null = null;
+  private managedLight: DirectionalLight | null = null;
   private primaryLight: DirectionalLight | null = null;
   private primaryGenerator: ShadowGenerator | null = null;
   private meshCollectionSignature = '';
-  private originalEditorLightIntensity: number | null = null;
-  private originalEnvironmentIntensity: number | null = null;
-  private appliedEnvironmentIntensityLimit: number | null = null;
   private settings: SceneShadowSettings = { ...DEFAULT_SHADOW_SETTINGS };
   private disposed = false;
 
@@ -189,22 +196,99 @@ export class SceneShadowRuntime {
     this.scene = scene;
     this.catcher = this.createCatcher();
     this.refreshPrimary();
-    this.applyFillLightPolicy();
     this.syncSceneMeshes(true);
     this.meshSyncObserver = scene.onBeforeRenderObservable.add(() => {
-      if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
+      if (!this.usesRealtimeShadows()) {
+        if (this.isHybrid()) this.updateHybridMaterialLights();
+        return;
+      }
       this.syncSceneMeshes();
-      if (!this.isCachedProfile()) this.updateShadowDistance();
-      this.applyFillLightPolicy();
+      if (this.isHybrid()) {
+        this.syncSecondaryDirectionals();
+        this.updateHybridMaterialLights();
+      }
+      if (!this.isCachedProfile() || this.isHybrid()) this.updateShadowDistance();
     });
   }
 
-  prepareThemeChange(): void { this.restoreFillLightPolicy(); }
+  /** 注入完整业务角色集合；未标注网格按动态处理，避免把未来运动姿态冻结。 */
+  setHybridMeshRoles(
+    roles: ReadonlyMap<AbstractMesh, HybridShadowMeshRole>,
+    options: HybridShadowOptions = {},
+  ): void {
+    const nextOptions = { cacheStaticShadows: options.cacheStaticShadows ?? true, dynamicShadows: options.dynamicShadows ?? true };
+    const changed = roles.size !== this.hybridMeshRoles.size || [...roles].some(([mesh, role]) => {
+      const prior = this.hybridMeshRoles.get(mesh);
+      return !prior || role.mobility !== prior.mobility || role.castShadows !== prior.castShadows
+        || role.receiveShadows !== prior.receiveShadows;
+    }) || nextOptions.cacheStaticShadows !== this.hybridOptions.cacheStaticShadows
+      || nextOptions.dynamicShadows !== this.hybridOptions.dynamicShadows;
+    if (!changed) {
+      this.hybridMaterialsDirty = true;
+      return;
+    }
+    this.hybridMeshRoles = new Map([...roles].map(([mesh, role]) => [mesh, { ...role }]));
+    this.hybridOptions = nextOptions;
+    for (const cache of this.hybridCaches.values()) cache.setEnabled(nextOptions.cacheStaticShadows);
+    if (this.isHybrid() && this.settings.enabled) this.syncSceneMeshes(true);
+  }
 
-  setThemeLight(light: DirectionalLight | null): void {
-    if (this.themeLight === light) return;
-    this.themeLight = light;
+  /** 原件留在场景供业务脚本查询，但阴影仅绘制接管它的批次；不改原件受光标志。 */
+  setRenderSuppressedMeshes(meshes: Iterable<AbstractMesh>): void {
+    const next = new Set(meshes);
+    if (next.size === this.renderSuppressedMeshes.size && [...next].every(mesh => this.renderSuppressedMeshes.has(mesh))) return;
+    this.renderSuppressedMeshes = next;
+    this.syncSceneMeshes(true);
+    this.invalidateCachedShadow();
+  }
+
+  /** 只有本控制器拥有并维护 caster 列表的阴影目标可与渲染候选过滤共存。 */
+  getManagedRenderTargets(): ReadonlySet<RenderTargetTexture> {
+    const targets = new Set<RenderTargetTexture>();
+    const generators = [...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()];
+    if (this.primaryGenerator) generators.push(this.primaryGenerator);
+    for (const generator of generators) {
+      const map = generator.getShadowMap(), rendered = generator.getShadowMapForRendering();
+      if (map) targets.add(map);
+      if (rendered) targets.add(rendered);
+    }
+    return targets;
+  }
+
+  /** 计数按实际阴影面/级联渲染累加，退出 hybrid 后 GPU 字节数及 caster 数为零。 */
+  getHybridMetrics(): HybridShadowMetrics {
+    const metrics: HybridShadowMetrics = {
+      ...this.retiredHybridMetrics, staticCasterCount: 0, dynamicCasterCount: 0, textureBytes: 0,
+      cachedFaces: 0, unsupportedCacheReason: null, validationErrors: [...this.hybridValidationErrors],
+    };
+    for (const [generator, cache] of this.hybridCaches) {
+      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) {
+        metrics[key] += cache.metrics[key];
+      }
+      metrics.textureBytes += cache.textureBytes;
+      metrics.cachedFaces += cache.cachedFaces;
+      metrics.unsupportedCacheReason ??= cache.metrics.unsupportedCacheReason;
+      const map = generator.getShadowMap(), texture = map?.getInternalTexture();
+      if (map && texture) {
+        const faces = generator instanceof CascadedShadowGenerator ? generator.numCascades : generator.getLight().needCube() ? 6 : 1;
+        const components = texture.format === 6 ? 1 : 4;
+        const componentBytes = texture.type === 1 ? 4 : texture.type === 2 ? 2 : 1;
+        const size = map.getSize();
+        metrics.textureBytes += size.width * size.height * faces * (components * componentBytes + 4);
+      }
+    }
+    if (this.isHybrid() && this.settings.enabled) {
+      metrics.staticCasterCount = this.hybridMeshState.staticMeshes.size;
+      metrics.dynamicCasterCount = this.hybridOptions.dynamicShadows ? this.hybridMeshState.dynamicMeshes.size : 0;
+    }
+    return metrics;
+  }
+
+  /** 主光由独立光照管理器持有；阴影开关只影响投影资源。 */
+  setManagedLight(light: DirectionalLight | null): void {
+    this.managedLight = light;
     this.refreshPrimary();
+    this.syncSecondaryDirectionals();
     this.refreshReceiverLightDefines();
   }
 
@@ -223,6 +307,7 @@ export class SceneShadowRuntime {
 
     this.refreshPrimary();
     if (this.syncLocalGenerators()) this.syncSceneMeshes(true);
+    this.syncSecondaryDirectionals();
     this.refreshReceiverLightDefines();
     this.invalidateCachedShadow();
   }
@@ -232,19 +317,28 @@ export class SceneShadowRuntime {
     if (this.disposed) return;
     const qualityChanged = settings.quality !== this.settings.quality;
     const enabledChanged = settings.enabled !== this.settings.enabled;
+    const modeChanged = settings.mode !== this.settings.mode;
     this.settings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
-    if (!this.settings.enabled || this.settings.mode !== 'realtime') {
+    if (modeChanged) {
+      this.disposePrimaryGenerator();
+      this.disposeLocalGenerators();
+      this.disposeSecondaryDirectionals();
+      if (!this.isHybrid()) this.restoreHybridMaterialLights();
+    }
+    if (!this.usesRealtimeShadows()) {
       this.catcher.setEnabled(false);
       this.disposePrimaryGenerator();
       this.disposeLocalGenerators();
-      this.disposeAutoSun();
+      this.disposeSecondaryDirectionals();
+      this.restoreHybridMaterialLights();
       this.refreshReceiverLightDefines();
-      this.restoreFillLightPolicy();
       for (const [mesh, observer] of this.meshTransformObservers) mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
       this.meshTransformObservers.clear();
       for (const mesh of this.knownMeshes) applyReceiveShadows(mesh, false);
       this.knownMeshes.clear();
+      this.clearHybridMaterialObservers();
       this.meshCollectionSignature = '';
+      if (this.isHybrid()) { this.hybridMaterialsDirty = true; this.updateHybridMaterialLights(); }
       return;
     }
 
@@ -259,27 +353,29 @@ export class SceneShadowRuntime {
     }
 
     if (qualityChanged) this.disposeLocalGenerators();
+    if (qualityChanged) this.disposeSecondaryDirectionals();
     this.syncLocalGenerators();
+    this.syncSecondaryDirectionals();
     this.applyGeneratorTuning();
-    setEnvironmentShadowGenerator(this.scene, this.primaryGenerator);
+
     this.updateShadowDistance();
-    this.updateAutoSunPose();
     this.syncSceneMeshes(true);
     this.refreshReceiverLightDefines();
     this.invalidateCachedShadow();
-    this.applyFillLightPolicy();
   }
 
-  /** 方向光实体删除后回退到自动太阳光，保持场景始终有一盏主阴影光。 */
+  /** 方向光实体删除后选择剩余有效方向光，不创建替代光源。 */
   removeLight(entityId: string): void {
     if (this.disposed) return;
     this.entityDirectionals.delete(entityId);
     this.localLights.delete(entityId);
     const hadLocalGenerator = this.localGenerators.has(entityId);
-    this.localGenerators.get(entityId)?.dispose();
+    const localGenerator = this.localGenerators.get(entityId);
+    if (localGenerator) this.disposeGenerator(localGenerator);
     this.localGenerators.delete(entityId);
-    this.syncEnvironmentLocalShadows();
+
     this.refreshPrimary();
+    this.syncSecondaryDirectionals();
     if (hadLocalGenerator) this.syncSceneMeshes(true);
     this.refreshReceiverLightDefines();
   }
@@ -292,9 +388,10 @@ export class SceneShadowRuntime {
     }
     this.disposePrimaryGenerator();
     this.disposeLocalGenerators();
-    this.disposeAutoSun();
+    this.disposeSecondaryDirectionals();
+    this.restoreHybridMaterialLights();
+    this.hybridMeshState.dispose();
     this.refreshReceiverLightDefines();
-    this.restoreFillLightPolicy();
     this.catcher.material?.dispose();
     this.catcher.dispose();
     this.entityDirectionals.clear();
@@ -304,10 +401,16 @@ export class SceneShadowRuntime {
     }
     this.meshTransformObservers.clear();
     this.knownMeshes.clear();
+    this.renderSuppressedMeshes.clear();
+    this.clearHybridMaterialObservers();
   }
 
   /** 缓存档只在场景内容确实变化时重绘一帧阴影贴图。 */
   invalidateCachedShadow(): void {
+    if (this.isHybrid()) {
+      this.hybridMeshState.refresh();
+      return;
+    }
     if (!this.isCachedProfile()) return;
     this.primaryGenerator?.getShadowMap()?.resetRefreshCounter();
     for (const generator of this.localGenerators.values()) generator.getShadowMap()?.resetRefreshCounter();
@@ -319,7 +422,7 @@ export class SceneShadowRuntime {
    */
   private syncSceneMeshes(force = false): void {
     if (this.disposed) return;
-    if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
+    if (!this.usesRealtimeShadows()) return;
     const meshes = this.scene.meshes;
     const lastMeshId = meshes.length > 0 ? meshes[meshes.length - 1].uniqueId : 0;
     const signature = String(meshes.length) + ':' + lastMeshId;
@@ -331,26 +434,46 @@ export class SceneShadowRuntime {
       if (currentMeshes.has(knownMesh)) continue;
       this.primaryGenerator?.removeShadowCaster(knownMesh, false);
       for (const generator of this.localGenerators.values()) generator.removeShadowCaster(knownMesh, false);
+      for (const generator of this.secondaryDirectionalGenerators.values()) generator.removeShadowCaster(knownMesh, false);
       const observer = this.meshTransformObservers.get(knownMesh);
       if (observer) knownMesh.onAfterWorldMatrixUpdateObservable.remove(observer);
       this.meshTransformObservers.delete(knownMesh);
+      const materialObserver = this.hybridMaterialObservers.get(knownMesh);
+      if (materialObserver) knownMesh.onMaterialChangedObservable.remove(materialObserver);
+      this.hybridMaterialObservers.delete(knownMesh);
       this.knownMeshes.delete(knownMesh);
     }
 
+    if (this.isHybrid()) {
+      this.hybridMeshState.setMeshes(meshes.filter(mesh => !this.renderSuppressedMeshes.has(mesh) && isShadowCaster(mesh)), this.hybridMeshRoles);
+      this.hybridMeshState.refresh();
+    }
     for (const mesh of meshes) {
       this.knownMeshes.add(mesh);
       this.registerMesh(mesh);
     }
 
     this.updateCatcherBounds();
-    this.updateAutoSunPose();
     this.invalidateCachedShadow();
+    if (this.isHybrid()) { this.hybridMaterialsDirty = true; this.updateHybridMaterialLights(); }
   }
 
   /** 缓存主光只让环境/地面接收；存在局部投影时受光模型也必须采样局部阴影。 */
   private registerMesh(mesh: AbstractMesh): void {
-    applyReceiveShadows(mesh, isShadowReceiver(mesh, !this.isCachedProfile() || this.localGenerators.size > 0));
-    if (!this.isCachedProfile()) {
+    if (this.renderSuppressedMeshes.has(mesh)) {
+      const generators = [...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()];
+      if (this.primaryGenerator) generators.push(this.primaryGenerator);
+      for (const generator of generators) generator.removeShadowCaster(mesh, false);
+      return;
+    }
+    if (this.isHybrid() && !this.hybridMaterialObservers.has(mesh)) {
+      this.hybridMaterialObservers.set(mesh, mesh.onMaterialChangedObservable.add(() => { this.hybridMaterialsDirty = true; }));
+    }
+    const role = this.hybridMeshRoles.get(mesh);
+    applyReceiveShadows(mesh, this.isHybrid()
+      ? isShadowReceiver(mesh, true) && role?.receiveShadows !== false
+      : isShadowReceiver(mesh, !this.isCachedProfile() || this.localGenerators.size > 0));
+    if (!this.isCachedProfile() || this.isHybrid()) {
       const leftover = this.meshTransformObservers.get(mesh);
       if (leftover) {
         mesh.onAfterWorldMatrixUpdateObservable.remove(leftover);
@@ -364,10 +487,12 @@ export class SceneShadowRuntime {
       const observer = mesh.onAfterWorldMatrixUpdateObservable.add(() => this.invalidateCachedShadow());
       this.meshTransformObservers.set(mesh, observer);
     }
-    const generators = [...this.localGenerators.values()];
+    const generators = [...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()];
     if (this.primaryGenerator) generators.push(this.primaryGenerator);
     for (const generator of generators) {
-      if (isShadowCaster(mesh)) {
+      const cast = isShadowCaster(mesh) && (!this.isHybrid()
+        || (role?.castShadows !== false && (this.hybridOptions.dynamicShadows || this.hybridMeshState.isStatic(mesh))));
+      if (cast) {
         const renderList = generator.getShadowMap()?.renderList;
         if (!renderList?.includes(mesh)) generator.addShadowCaster(mesh, false);
       } else {
@@ -379,11 +504,11 @@ export class SceneShadowRuntime {
   /** 冻结材质会跳过灯光定义检查；只在灯光拓扑或生成器变更时重新开放一次编译。 */
   private refreshReceiverLightDefines(): void {
     const bindings = new Map<Light, ShadowGenerator | null>();
-    if (!this.disposed && this.settings.enabled && this.settings.mode === 'realtime') {
+    if (!this.disposed && this.usesRealtimeShadows()) {
       if (this.primaryLight) bindings.set(this.primaryLight, this.primaryGenerator);
       for (const light of this.entityDirectionals.values()) {
         if (!light.isDisposed() && light.isEnabled() && light.intensity > 0) {
-          bindings.set(light, light === this.primaryLight ? this.primaryGenerator : null);
+          bindings.set(light, light === this.primaryLight ? this.primaryGenerator : this.secondaryDirectionalGenerators.get(light) ?? null);
         }
       }
       for (const [id, light] of this.localLights) {
@@ -411,18 +536,18 @@ export class SceneShadowRuntime {
   }
 
   private syncLocalGenerators(): boolean {
-    const enabled = this.settings.enabled && this.settings.mode === 'realtime';
+    const enabled = this.usesRealtimeShadows();
     let changed = false;
     for (const [id, generator] of this.localGenerators) {
       const light = this.localLights.get(id);
       if (!enabled || !light || light.isDisposed() || !light.isEnabled() || light.intensity <= 0 || generator.getLight() !== light) {
-        generator.dispose();
+        this.disposeGenerator(generator);
         this.localGenerators.delete(id);
         changed = true;
       }
     }
     if (!enabled) {
-      this.syncEnvironmentLocalShadows();
+
       return changed;
     }
     const quality = SHADOW_QUALITY_CONFIG[this.settings.quality];
@@ -433,7 +558,7 @@ export class SceneShadowRuntime {
         ? this.settings.distanceMeters : this.resolveShadowDistance()));
       if (this.localGenerators.has(id)) continue;
       const generator = new ShadowGenerator(quality.mapSize, light);
-      generator.bias = this.settings.bias;
+      generator.bias = this.resolveGeneratorBias(light);
       generator.normalBias = this.settings.normalBias;
       generator.darkness = this.settings.darkness;
       // 立方阴影不能使用二维 PCF 比较采样，使用 Babylon 支持的 Poisson 过滤。
@@ -443,36 +568,31 @@ export class SceneShadowRuntime {
         generator.filteringQuality = quality.filteringQuality;
       }
       this.configureShadowMapRefresh(generator);
+      this.attachHybridCache(generator);
       this.localGenerators.set(id, generator);
       changed = true;
     }
-    this.syncEnvironmentLocalShadows();
+
     return changed;
   }
 
-  private syncEnvironmentLocalShadows(): void {
-    setEnvironmentLocalShadowGenerators(this.scene, [...this.localGenerators.values()]);
-  }
 
   private disposeLocalGenerators(): void {
-    setEnvironmentLocalShadowGenerators(this.scene, []);
-    for (const generator of this.localGenerators.values()) generator.dispose();
+
+    for (const generator of this.localGenerators.values()) this.disposeGenerator(generator);
     this.localGenerators.clear();
   }
 
   private refreshPrimary(): void {
     if (this.disposed) return;
-    if (!this.settings.enabled || this.settings.mode !== 'realtime') return;
-    const entityLight = this.themeLight && !this.themeLight.isDisposed() ? this.themeLight : this.firstEnabledDirectional();
+    if (!this.usesRealtimeShadows()) return;
+    const entityLight = this.managedLight && !this.managedLight.isDisposed() && this.managedLight.isEnabled() && this.managedLight.intensity > 0
+      ? this.managedLight : this.firstEnabledDirectional();
     if (entityLight) {
-      if (this.autoSun && this.autoSun !== entityLight) this.disposeAutoSun();
       this.bindPrimaryLight(entityLight);
-      this.applyFillLightPolicy();
       return;
     }
-
-    this.bindPrimaryLight(this.ensureAutoSun());
-    this.applyFillLightPolicy();
+    this.disposePrimaryGenerator();
   }
 
   private firstEnabledDirectional(): DirectionalLight | null {
@@ -485,10 +605,15 @@ export class SceneShadowRuntime {
   private bindPrimaryLight(light: DirectionalLight): void {
     if (this.primaryLight === light && this.primaryGenerator?.getLight() === light) return;
 
+    const formerSecondary = this.secondaryDirectionalGenerators.get(light);
+    if (formerSecondary) {
+      this.disposeGenerator(formerSecondary);
+      this.secondaryDirectionalGenerators.delete(light);
+    }
     this.disposePrimaryGenerator();
     this.primaryLight = light;
     this.primaryGenerator = this.createPrimaryGenerator(light);
-    setEnvironmentShadowGenerator(this.scene, this.primaryGenerator);
+
     this.syncSceneMeshes(true);
   }
 
@@ -523,6 +648,7 @@ export class SceneShadowRuntime {
     generator.filteringQuality = quality.filteringQuality;
     generator.shadowMaxZ = this.resolveShadowDistance();
     this.configureShadowMapRefresh(generator);
+    this.attachHybridCache(generator);
     return generator;
   }
 
@@ -539,13 +665,14 @@ export class SceneShadowRuntime {
     generator.filteringQuality = quality.filteringQuality;
     light.shadowMaxZ = this.resolveShadowDistance();
     this.configureShadowMapRefresh(generator);
+    this.attachHybridCache(generator);
     return generator;
   }
 
   private configureShadowMapRefresh(generator: ShadowGenerator): void {
     const shadowMap = generator.getShadowMap();
     if (!shadowMap) return;
-    shadowMap.refreshRate = this.isCachedProfile()
+    shadowMap.refreshRate = this.isCachedProfile() && !this.isHybrid()
       ? RenderTargetTexture.REFRESHRATE_RENDER_ONCE
       : RenderTargetTexture.REFRESHRATE_RENDER_ONEVERYFRAME;
   }
@@ -554,16 +681,117 @@ export class SceneShadowRuntime {
     return SHADOW_QUALITY_CONFIG[this.settings.quality].cached;
   }
 
-  private ensureAutoSun(): DirectionalLight {
-    if (this.autoSun && !this.autoSun.isDisposed()) return this.autoSun;
+  private isHybrid(): boolean { return this.settings.mode === 'hybrid'; }
 
-    const light = new DirectionalLight(SCENE_SHADOW_SUN_NAME, this.resolveAutoSunDirection(), this.scene);
-    light.intensity = this.settings.sunIntensity;
-    light.diffuse = Color3.FromHexString('#fff4e5');
-    light.specular = Color3.FromHexString('#efe4d2');
-    this.autoSun = light;
-    this.updateAutoSunPose();
-    return light;
+  private usesRealtimeShadows(): boolean {
+    return this.settings.enabled && (this.settings.mode === 'realtime' || this.isHybrid());
+  }
+
+  private attachHybridCache(generator: ShadowGenerator): void {
+    if (!this.isHybrid() || this.hybridCaches.has(generator)) return;
+    const cache = new HybridShadowCache(generator, this.hybridMeshState);
+    cache.setEnabled(this.hybridOptions.cacheStaticShadows);
+    this.hybridCaches.set(generator, cache);
+  }
+
+  private disposeGenerator(generator: ShadowGenerator): void {
+    const cache = this.hybridCaches.get(generator);
+    if (cache) {
+      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) {
+        this.retiredHybridMetrics[key] += cache.metrics[key];
+      }
+      cache.dispose();
+      this.hybridCaches.delete(generator);
+    }
+    generator.dispose();
+  }
+
+  /** hybrid 对全部方向灯生成阴影；旧模式继续保留单一主方向灯策略。 */
+  private syncSecondaryDirectionals(): void {
+    const desired = this.isHybrid() && this.settings.enabled
+      ? new Set([...this.entityDirectionals.values()].filter(light => light !== this.primaryLight
+        && !light.isDisposed() && light.isEnabled() && light.intensity > 0))
+      : new Set<DirectionalLight>();
+    let changed = false;
+    for (const [light, generator] of this.secondaryDirectionalGenerators) {
+      if (!desired.has(light)) {
+        this.disposeGenerator(generator);
+        this.secondaryDirectionalGenerators.delete(light);
+        changed = true;
+      }
+    }
+    for (const light of desired) {
+      if (this.secondaryDirectionalGenerators.has(light)) continue;
+      this.secondaryDirectionalGenerators.set(light, this.createBasicGenerator(light));
+      changed = true;
+    }
+    if (changed) { this.syncSceneMeshes(true); this.refreshReceiverLightDefines(); }
+  }
+
+  private disposeSecondaryDirectionals(): void {
+    for (const generator of this.secondaryDirectionalGenerators.values()) this.disposeGenerator(generator);
+    this.secondaryDirectionalGenerators.clear();
+  }
+
+  private updateHybridMaterialLights(): void {
+    const lights = this.scene.lights.filter(light => !light.isDisposed() && light.isEnabled() && light.intensity > 0);
+    const signature = lights.map(light => `${light.uniqueId}:${(light.getShadowGenerator(this.scene.activeCamera)
+      ?? light.getShadowGenerator())?.getShadowMap()?.uniqueId ?? ''}`).join(',');
+    if (!this.hybridMaterialsDirty && signature === this.hybridLightingSignature) return;
+    this.hybridMaterialsDirty = false;
+    this.hybridLightingSignature = signature;
+    const count = lights.length;
+    const samplerLimit = this.scene.getEngine().getCaps().maxTexturesImageUnits;
+    const errors = new Set<string>();
+    for (const mesh of this.scene.meshes) {
+      if (!this.hybridMaterialObservers.has(mesh)) {
+        this.hybridMaterialObservers.set(mesh, mesh.onMaterialChangedObservable.add(() => { this.hybridMaterialsDirty = true; }));
+      }
+      for (const material of collectMeshMaterials(mesh)) {
+        if (!(material instanceof PBRMaterial || material instanceof StandardMaterial)) continue;
+        const shadowSamplers = mesh.receiveShadows ? mesh.lightSources.filter(light => light.isEnabled() && light.intensity > 0
+          && (light.getShadowGenerator(this.scene.activeCamera) ?? light.getShadowGenerator())).length : 0;
+        const materialSamplers = material.getActiveTextures().length
+          + (material instanceof PBRMaterial && this.scene.environmentTexture && !material.reflectionTexture ? 1 : 0);
+        if (samplerLimit > 0 && shadowSamplers + materialSamplers > samplerLimit) {
+          errors.add(`混合阴影材质“${material.name}”至少需要 ${shadowSamplers + materialSamplers} 个片元采样器，`
+            + `当前显卡仅支持 ${samplerLimit} 个。无法保证全部灯光及贴图，请调整场景后重试。`);
+        }
+        if (!this.hybridMaterialLightLimits.has(material)) this.hybridMaterialLightLimits.set(material, material.maxSimultaneousLights);
+        const target = Math.max(count, this.hybridMaterialLightLimits.get(material)!);
+        if (material.maxSimultaneousLights === target) continue;
+        const frozen = material.isFrozen;
+        if (frozen) material.unfreeze();
+        material.maxSimultaneousLights = target;
+        material.markAsDirty(Material.LightDirtyFlag);
+        if (frozen) { material.freeze(); material.markDirty(true); }
+      }
+    }
+    this.hybridValidationErrors = [...errors];
+    const errorSignature = this.hybridValidationErrors.join('\n');
+    if (errorSignature && errorSignature !== this.hybridValidationSignature) console.error(errorSignature);
+    this.hybridValidationSignature = errorSignature;
+  }
+
+  private restoreHybridMaterialLights(): void {
+    for (const [material, count] of this.hybridMaterialLightLimits) {
+      const frozen = material.isFrozen;
+      if (frozen) material.unfreeze();
+      material.maxSimultaneousLights = count;
+      material.markAsDirty(Material.LightDirtyFlag);
+      if (frozen) { material.freeze(); material.markDirty(true); }
+    }
+    this.hybridMaterialLightLimits.clear();
+    this.hybridValidationErrors = [];
+    this.hybridValidationSignature = '';
+    this.hybridLightingSignature = '';
+    this.hybridMaterialsDirty = true;
+    this.clearHybridMaterialObservers();
+  }
+
+  private clearHybridMaterialObservers(): void {
+    for (const [mesh, observer] of this.hybridMaterialObservers) mesh.onMaterialChangedObservable.remove(observer);
+    this.hybridMaterialObservers.clear();
   }
 
   private createCatcher(): Mesh {
@@ -628,20 +856,6 @@ export class SceneShadowRuntime {
     this.catcher.scaling.set(size, 1, size);
   }
 
-  private updateAutoSunPose(): void {
-    if (!this.autoSun || this.autoSun.isDisposed()) return;
-    const center = this.catcher.position;
-    const radius = Math.max(this.catcher.scaling.x, this.catcher.scaling.z, CATCHER_MIN_SIZE_METERS) * 0.6;
-    const direction = this.resolveAutoSunDirection();
-    this.autoSun.direction.copyFrom(direction);
-    this.autoSun.intensity = this.settings.sunIntensity;
-    this.autoSun.position.set(
-      center.x - direction.x * radius,
-      Math.max(center.y - direction.y * radius, 20),
-      center.z - direction.z * radius,
-    );
-  }
-
   private resolveShadowDistance(): number {
     if (this.settings.distanceMeters > 0) return this.settings.distanceMeters;
 
@@ -656,25 +870,21 @@ export class SceneShadowRuntime {
     return Math.min(400, Math.max(50, distance));
   }
 
-  private resolveAutoSunDirection(): Vector3 {
-    const azimuth = this.settings.sunAzimuthDegrees * Math.PI / 180;
-    const elevation = this.settings.sunElevationDegrees * Math.PI / 180;
-    const horizontal = Math.cos(elevation);
-    return new Vector3(
-      -Math.sin(azimuth) * horizontal,
-      -Math.sin(elevation),
-      -Math.cos(azimuth) * horizontal,
-    );
-  }
-
   private applyGeneratorTuning(): void {
-    const generators = [...this.localGenerators.values()];
+    const generators = [...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()];
     if (this.primaryGenerator) generators.push(this.primaryGenerator);
     for (const generator of generators) {
       generator.darkness = this.settings.darkness;
-      generator.bias = this.settings.bias;
+      generator.bias = this.resolveGeneratorBias(generator.getLight());
       generator.normalBias = this.settings.normalBias;
     }
+  }
+
+  /** 透视深度在远离 near plane 后高度非线性，直接沿用方向光偏移会吞掉近米级投影。 */
+  private resolveGeneratorBias(light: Light): number {
+    return this.isHybrid() && light instanceof SpotLight
+      ? this.settings.bias * (light.shadowMinZ ?? 0.05)
+      : this.settings.bias;
   }
 
   private updateShadowDistance(): void {
@@ -686,74 +896,15 @@ export class SceneShadowRuntime {
     if (this.primaryLight) this.primaryLight.shadowMaxZ = distance;
   }
 
-  /** 压低不投影的半球补光和过强 IBL，让方向光阴影有足够对比。 */
-  private applyFillLightPolicy(): void {
-    if (this.themeLight) return;
-    if (this.disposed) return;
-    if (!this.settings.enabled || this.settings.mode !== 'realtime') {
-      this.restoreFillLightPolicy();
-      return;
-    }
-    const editorLight = this.scene.getLightByName(EDITOR_FILL_LIGHT_NAME);
-    if (editorLight instanceof HemisphericLight) {
-      if (this.originalEditorLightIntensity == null) {
-        this.originalEditorLightIntensity = editorLight.intensity;
-      }
-      editorLight.intensity = this.settings.fillIntensity;
-    }
-
-    if (this.scene.environmentTexture) {
-      const currentIntensity = this.scene.environmentIntensity;
-      const wasLimited = this.appliedEnvironmentIntensityLimit != null
-        && currentIntensity === this.appliedEnvironmentIntensityLimit;
-      const sourceIntensity = wasLimited && this.originalEnvironmentIntensity != null
-        ? this.originalEnvironmentIntensity
-        : currentIntensity;
-
-      if (sourceIntensity > this.settings.iblIntensityMax) {
-        this.originalEnvironmentIntensity = sourceIntensity;
-        this.appliedEnvironmentIntensityLimit = this.settings.iblIntensityMax;
-        this.scene.environmentIntensity = this.settings.iblIntensityMax;
-      } else {
-        this.scene.environmentIntensity = sourceIntensity;
-        this.originalEnvironmentIntensity = null;
-        this.appliedEnvironmentIntensityLimit = null;
-      }
-    }
-  }
-
-  private restoreFillLightPolicy(): void {
-    this.restoreEditorLightIntensity();
-    if (this.originalEnvironmentIntensity != null) {
-      this.scene.environmentIntensity = this.originalEnvironmentIntensity;
-    }
-    this.originalEnvironmentIntensity = null;
-    this.appliedEnvironmentIntensityLimit = null;
-  }
-
-  private restoreEditorLightIntensity(): void {
-    const editorLight = this.scene.getLightByName(EDITOR_FILL_LIGHT_NAME);
-    if (editorLight instanceof HemisphericLight && this.originalEditorLightIntensity != null) {
-      editorLight.intensity = this.originalEditorLightIntensity;
-    }
-    this.originalEditorLightIntensity = null;
-  }
-
   private disposePrimaryGenerator(): void {
-    setEnvironmentShadowGenerator(this.scene, null);
+
     if (!this.primaryGenerator) {
       this.primaryLight = null;
       return;
     }
-    this.primaryGenerator.dispose();
+    this.disposeGenerator(this.primaryGenerator);
     this.primaryGenerator = null;
     this.primaryLight = null;
   }
 
-  private disposeAutoSun(): void {
-    if (!this.autoSun) return;
-    if (this.primaryLight === this.autoSun) this.disposePrimaryGenerator();
-    if (!this.autoSun.isDisposed()) this.autoSun.dispose();
-    this.autoSun = null;
-  }
 }

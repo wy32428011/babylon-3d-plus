@@ -1,4 +1,5 @@
-import mqtt, { type IClientSubscribeOptions, type MqttClient } from 'mqtt';
+import type { IClientSubscribeOptions, MqttClient } from 'mqtt';
+import { loadBrowserMqtt, type MqttModuleLoader } from './browserMqttLoader';
 import {
   deviceTelemetryStore,
   ingestDeviceTelemetryMessage,
@@ -23,13 +24,13 @@ export class MqttTelemetryClient {
   private configSignature = '';
   private lastParseErrorAt = 0;
   private state: TelemetryConnectionState = 'disabled';
-  private activeSubscriptions: MqttSubscriptionConfig[] = [];
   private readonly activeSourceIds = new Set<string>();
   private connectionGeneration = 0;
 
   constructor(
     private readonly pushLog: MqttTelemetryLog,
     private readonly store: DeviceTelemetryStore = deviceTelemetryStore,
+    private readonly loadMqtt: MqttModuleLoader = loadBrowserMqtt,
   ) {}
 
   /** 返回当前 MQTT 遥测连接状态，供 UI 或调试面板读取。 */
@@ -49,7 +50,6 @@ export class MqttTelemetryClient {
 
     this.configSignature = signature;
     this.disconnect(true);
-    this.activeSubscriptions = normalizedSubscriptions;
     this.replaceActiveSourceIds(normalizedSubscriptions);
 
     if (!config.enabled) {
@@ -74,30 +74,43 @@ export class MqttTelemetryClient {
       return;
     }
 
-    this.connect(config.address, normalizedSubscriptions);
+    void this.connect(config.address, normalizedSubscriptions);
   }
 
   /** 关闭当前 MQTT 连接并清理运行时快照。 */
   dispose(): void {
     this.configSignature = '';
     this.disconnect(true);
-    this.activeSubscriptions = [];
     this.activeSourceIds.clear();
     this.state = 'disabled';
     mqttRuntimeStatusStore.update('disabled');
   }
 
   /** 建立 MQTT over WebSocket 连接并按订阅配置注册 topic。 */
-  private connect(address: string, subscriptions: MqttSubscriptionConfig[]): void {
-    this.connectionGeneration += 1;
+  private async connect(address: string, subscriptions: MqttSubscriptionConfig[]): Promise<void> {
+    const loadingGeneration = ++this.connectionGeneration;
     this.state = 'connecting';
     mqttRuntimeStatusStore.update('connecting');
-    const client = mqtt.connect(address, {
-      clean: true,
-      clientId: 'babylon-editor-' + crypto.randomUUID(),
-      connectTimeout: 8000,
-      reconnectPeriod: 3000,
-    });
+    let client: MqttClient;
+    try {
+      const mqtt = await this.loadMqtt();
+      // 模块下载期间可能切换配置、禁用或销毁；旧请求不能再建立物理连接。
+      if (this.connectionGeneration !== loadingGeneration) return;
+      client = mqtt.connect(address, {
+        clean: true,
+        clientId: 'babylon-editor-' + crypto.randomUUID(),
+        connectTimeout: 8000,
+        reconnectPeriod: 3000,
+      });
+    } catch (error) {
+      if (this.connectionGeneration !== loadingGeneration) return;
+      const message = error instanceof Error ? error.message : String(error);
+      this.configSignature = '';
+      this.state = 'error';
+      mqttRuntimeStatusStore.update('error', message);
+      this.pushLog('MQTT 连接失败：' + message);
+      return;
+    }
     this.client = client;
 
     client.on('connect', () => {

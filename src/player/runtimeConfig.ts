@@ -233,7 +233,7 @@ export function parseDigitalTwinProjectRuntimeConfig(value: unknown): DigitalTwi
       config = assertObject(parsed, '项目运行配置 configJson');
       assertNoSensitiveRuntimeConfig(config, '项目运行配置 configJson');
     } catch (error) {
-      throw new Error(`项目运行配置 configJson 无效：${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`项目运行配置 configJson 无效：${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   }
   return {

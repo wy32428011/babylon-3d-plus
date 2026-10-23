@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ArcRotateCamera, Camera, Matrix, NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 function createRoute(waypointCount) {
   return {
@@ -75,11 +75,9 @@ function assertPresentation(fixture) {
 }
 
 test('自动巡检编辑标记缩放使用真实运行类并保持动态变换', async context => {
-  const server = await createServer({
-    appType: 'custom', configFile: false, root: process.cwd(),
-    server: { middlewareMode: true, hmr: false, watch: null, ws: false },
-    optimizeDeps: { noDiscovery: true },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/EditorAutoPatrolRuntime.ts',
+  ]);
   try {
     const { EditorAutoPatrolRuntime } = await server.ssrLoadModule('/src/runtime/babylon/EditorAutoPatrolRuntime.ts');
 

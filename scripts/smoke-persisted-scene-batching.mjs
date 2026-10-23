@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { createServer } from 'vite';
 import ts from 'typescript';
 
@@ -7,13 +8,12 @@ const REAL_SCENE_PATH = process.env.ZENDING_SCENE_SOURCE
   ?? 'E:\\公司文件\\数字孪生\\场景\\珀莱雅一楼场景.scene.json';
 
 async function assertSerializationWiring() {
-  const storeSource = readFileSync('src/editor/store/editorStore.ts', 'utf8');
+  const storePath = 'src/editor/store/editorStore.ts';
+  const storeSource = readFileSync(storePath, 'utf8');
   const publishSource = readFileSync('src/editor/deployment/useDigitalTwinPublish.ts', 'utf8');
   const exportSource = readFileSync('src/editor/deployment/useDeploymentExport.ts', 'utf8');
   const publishServiceSource = readFileSync('electron/ipc/digitalTwinPublishService.ts', 'utf8');
 
-  assert.match(storeSource, /const content = serializeScene\(sceneSnapshot\);[\s\S]*?saveScene\(\{[\s\S]*?content,/,
-    '普通保存必须通过 serializeScene 生成持久化合批快照');
   const parse = (source) => ts.createSourceFile('wiring.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const publishAst = parse(publishSource);
   const serviceAst = parse(publishServiceSource);
@@ -28,6 +28,23 @@ async function assertSerializationWiring() {
     && (ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : node.expression.getText()) === name);
   const property = (object, name) => one(object, node => ts.isPropertyAssignment(node) && node.name.getText() === name).initializer;
   const text = node => node.getText().replace(/\s/g, '');
+  // 沿门面的真实 import 和 Zustand 聚合接线查保存动作，避免依赖重构前的单文件布局。
+  const storeAst = parse(storeSource);
+  const sliceImport = one(storeAst, node => ts.isImportDeclaration(node)
+    && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+    && node.importClause.namedBindings.elements.some(binding => (binding.propertyName ?? binding.name).text === 'createSceneDocumentSlice'));
+  const sliceBinding = sliceImport.importClause.namedBindings.elements.find(binding =>
+    (binding.propertyName ?? binding.name).text === 'createSceneDocumentSlice').name.text;
+  const storeEntry = one(storeAst, node => ts.isVariableDeclaration(node) && node.name.getText() === 'useEditorStore');
+  one(storeEntry, node => ts.isSpreadAssignment(node) && ts.isCallExpression(node.expression)
+    && ts.isIdentifier(node.expression.expression) && node.expression.expression.text === sliceBinding);
+  const slicePath = resolve(dirname(storePath), sliceImport.moduleSpecifier.text);
+  const sliceAst = parse(readFileSync(slicePath.endsWith('.ts') ? slicePath : `${slicePath}.ts`, 'utf8'));
+  const saveAction = one(sliceAst, node => ts.isPropertyAssignment(node)
+    && node.name.getText() === 'saveScene' && ts.isArrowFunction(node.initializer));
+  assert.match(saveAction.getText(), /const content = serializeScene\(sceneSnapshot\);[\s\S]*?saveScene\(\{[\s\S]*?content,/,
+    '普通保存必须通过 serializeScene 生成持久化合批快照');
+
   const entry = one(publishAst, node => ts.isVariableDeclaration(node) && node.name.getText() === 'entryContent');
   assert.equal(text(entry.initializer), 'serializeScene(useEditorStore.getState().scene)');
   const selection = one(publishAst, node => ts.isConditionalExpression(node) && text(node.condition) === 'item.isEntry');
@@ -59,7 +76,16 @@ async function assertSerializationWiring() {
     '独立部署导出必须通过 serializeScene 生成持久化合批快照');
   assert.equal(text(call(serviceAst, 'saveCurrentScene').arguments[2]), 'validated.sceneContent');
   const overlay = one(serviceAst, node => ts.isCallExpression(node) && text(node.expression) === 'prepared.overlays.set');
-  assert.deepEqual(overlay.arguments.map(text), ['savedScene.filePath', 'validated.sceneContent']);
+  // 保存会归一化光照资源；SOURCE overlay 必须复用真正原子写盘的内容。
+  assert.deepEqual(overlay.arguments.map(text), ['savedScene.filePath', 'savedScene.sceneContent']);
+  const saveCurrent = one(serviceAst, node => ts.isFunctionDeclaration(node) && node.name?.text === 'saveCurrentScene');
+  assert.equal(text(call(saveCurrent, 'prepareLightingSceneSave').arguments[0]), 'sceneContent');
+  const persisted = one(saveCurrent, node => ts.isVariableDeclaration(node) && node.name.getText() === 'persistedContent');
+  assert.equal(text(call(persisted.initializer, 'parse').arguments[0]), 'prepared.content');
+  assert.equal(text(call(saveCurrent, 'writeFile').arguments[1]), 'persistedContent');
+  const savedResult = one(saveCurrent, node => ts.isReturnStatement(node)
+    && node.expression && ts.isObjectLiteralExpression(node.expression));
+  assert.equal(text(property(savedResult.expression, 'sceneContent')), 'persistedContent');
   const sourcePayload = call(serviceAst, 'buildDigitalTwinSourcePackage').arguments[0];
   assert.equal(text(property(sourcePayload, 'entrySceneFilePath')), 'savedScene.filePath');
   assert.equal(text(property(sourcePayload, 'preparedSceneContents')), 'prepared?.overlays');

@@ -1,4 +1,5 @@
-import mqtt, { type IClientOptions } from 'mqtt';
+import type { IClientOptions } from 'mqtt';
+import { loadBrowserMqtt, type MqttModuleLoader } from './browserMqttLoader.ts';
 
 export type MqttConnectionTestSubscription = {
   topic: string;
@@ -39,7 +40,8 @@ export type ElectronMqttConnectionTestApi = {
 export type MqttConnectionTestTimeoutId = ReturnType<typeof globalThis.setTimeout>;
 
 export type MqttConnectionTestDependencies = {
-  connect: (address: string, options: IClientOptions) => MqttConnectionTestClient;
+  connect?: (address: string, options: IClientOptions) => MqttConnectionTestClient;
+  loadMqtt?: MqttModuleLoader;
   now: () => number;
   randomUUID: () => string;
   setTimeout: (handler: () => void, timeoutMs: number) => MqttConnectionTestTimeoutId;
@@ -125,21 +127,7 @@ function startBrowserConnectionTest(
   dependencies: MqttConnectionTestDependencies,
 ): MqttConnectionTestHandle {
   const startedAt = dependencies.now();
-  let client: MqttConnectionTestClient;
-  try {
-    client = dependencies.connect(request.address, {
-      clean: true,
-      clientId: 'babylon-editor-connection-test-' + dependencies.randomUUID(),
-      connectTimeout: request.timeoutMs,
-      reconnectPeriod: 0,
-    });
-  } catch (error) {
-    return createImmediateErrorHandle(
-      request.requestId,
-      'MQTT 连接失败：' + getErrorMessage(error),
-      dependencies.now,
-    );
-  }
+  let client: MqttConnectionTestClient | null = null;
   let settled = false;
   let subscribing = false;
   let finishPromise: Promise<void> | null = null;
@@ -166,7 +154,7 @@ function startBrowserConnectionTest(
       let finalStatus = status;
       let finalMessage = message;
       try {
-        await client.endAsync(true);
+        await client?.endAsync(true);
       } catch (error) {
         const cleanupMessage = '清理临时连接失败：' + getErrorMessage(error);
         finalStatus = status === 'canceled' ? 'canceled' : 'error';
@@ -188,43 +176,71 @@ function startBrowserConnectionTest(
     void finish('error', `连接测试超时（${formatTimeout(request.timeoutMs)}）。`);
   }, request.timeoutMs);
 
-  client.on('connect', () => {
-    if (settled || subscribing) return;
-    subscribing = true;
-    let completedCount = 0;
-
-    for (const subscription of request.subscriptions) {
-      let subscriptionSettled = false;
-      const completeSubscription = (error?: Error | null): void => {
-        if (settled || subscriptionSettled) return;
-        subscriptionSettled = true;
-        if (error) {
-          void finish('error', `订阅 ${subscription.topic} 失败：${getErrorMessage(error)}`);
-          return;
-        }
-
-        completedCount += 1;
-        if (completedCount === request.subscriptions.length) {
-          void finish('success', `连接成功，已确认 ${request.subscriptions.length} 个 Topic。`);
-        }
-      };
-
-      try {
-        client.subscribe(subscription.topic, { qos: subscription.qos }, completeSubscription);
-      } catch (error) {
-        completeSubscription(error instanceof Error ? error : new Error(String(error)));
-      }
-      if (settled) break;
+  /** 下载完成前若已取消或超时，禁止创建临时网络连接。 */
+  const connectClient = (connect: NonNullable<MqttConnectionTestDependencies['connect']>): void => {
+    if (settled) return;
+    let connectedClient: MqttConnectionTestClient;
+    try {
+      connectedClient = connect(request.address, {
+        clean: true,
+        clientId: 'babylon-editor-connection-test-' + dependencies.randomUUID(),
+        connectTimeout: request.timeoutMs,
+        reconnectPeriod: 0,
+      });
+      client = connectedClient;
+    } catch (error) {
+      void finish('error', 'MQTT 连接失败：' + getErrorMessage(error));
+      return;
     }
-  });
+    connectedClient.on('connect', () => {
+      if (settled || subscribing) return;
+      subscribing = true;
+      let completedCount = 0;
 
-  client.on('error', (error) => {
-    void finish('error', 'MQTT 连接失败：' + getErrorMessage(error));
-  });
+      for (const subscription of request.subscriptions) {
+        let subscriptionSettled = false;
+        const completeSubscription = (error?: Error | null): void => {
+          if (settled || subscriptionSettled) return;
+          subscriptionSettled = true;
+          if (error) {
+            void finish('error', `订阅 ${subscription.topic} 失败：${getErrorMessage(error)}`);
+            return;
+          }
 
-  client.on('close', () => {
-    void finish('error', 'MQTT 连接在测试完成前已关闭。');
-  });
+          completedCount += 1;
+          if (completedCount === request.subscriptions.length) {
+            void finish('success', `连接成功，已确认 ${request.subscriptions.length} 个 Topic。`);
+          }
+        };
+
+        try {
+          connectedClient.subscribe(subscription.topic, { qos: subscription.qos }, completeSubscription);
+        } catch (error) {
+          completeSubscription(error instanceof Error ? error : new Error(String(error)));
+        }
+        if (settled) break;
+      }
+    });
+
+    connectedClient.on('error', (error) => {
+      void finish('error', 'MQTT 连接失败：' + getErrorMessage(error));
+    });
+
+    connectedClient.on('close', () => {
+      void finish('error', 'MQTT 连接在测试完成前已关闭。');
+    });
+  };
+
+  if (dependencies.connect) {
+    connectClient(dependencies.connect);
+  } else {
+    void Promise.resolve().then(() => (dependencies.loadMqtt ?? loadBrowserMqtt)()).then(
+      (mqtt) => connectClient((address, options) => mqtt.connect(address, options)),
+      (error: unknown) => {
+        if (!settled) void finish('error', 'MQTT 模块加载失败：' + getErrorMessage(error));
+      },
+    );
+  }
 
   return {
     requestId: request.requestId,
@@ -309,7 +325,7 @@ function createImmediateErrorHandle(
 /** 创建默认依赖，同时避免 Node 单元测试访问不存在的 window。 */
 function createDefaultDependencies(): MqttConnectionTestDependencies {
   return {
-    connect: (address, options) => mqtt.connect(address, options),
+    loadMqtt: loadBrowserMqtt,
     now: () => Date.now(),
     randomUUID: () => crypto.randomUUID(),
     setTimeout: (handler, timeoutMs) => globalThis.setTimeout(handler, timeoutMs),

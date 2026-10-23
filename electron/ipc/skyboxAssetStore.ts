@@ -1,3 +1,4 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -44,9 +45,8 @@ async function pathExists(targetPath: string): Promise<boolean> {
 function toSafeSkyboxFileName(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
   const rawStem = path.basename(filePath, path.extname(filePath));
-  let stem = rawStem
-    .normalize('NFKC')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  let stem = replaceAsciiControlCharacters(rawStem
+    .normalize('NFKC'), '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/^[.]+/g, '_')
     .replace(/[. ]+$/g, '')
@@ -422,7 +422,7 @@ export async function importSkyboxFileIntoRoot(
     }
     if (rollbackErrors.length > 0) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}；天空盒导入回滚不完整：${rollbackErrors.join('；')}`);
+      throw new Error(`${message}；天空盒导入回滚不完整：${rollbackErrors.join('；')}`, { cause: error });
     }
     throw error;
   } finally {

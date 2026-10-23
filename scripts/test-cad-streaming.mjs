@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../tests/helpers/p4SsrTestModules.mjs';
 
 const pairs = (...groups) => `${groups.flat(Infinity).join('\n')}\n`;
 const document = (entities, blocks = [], header = []) => pairs(
@@ -54,8 +54,9 @@ async function check(name, test) {
   console.log(`ok ${passed} - ${name}`);
 }
 try {
-  server = await createServer({ configFile: false, root: process.cwd(), server: { middlewareMode: true, hmr: { port: 0 }, watch: null },
-    optimizeDeps: { noDiscovery: true }, ssr: { noExternal: ['@linkiez/dxf-renew'] } });
+  server = await createP4SsrTestModules([
+    '/src/editor/cad/cadReferenceLargeDxf.ts',
+  ]);
   const { parseLargeCadReferenceDxf, parseCadReferenceDxfStream } = await server.ssrLoadModule('/src/editor/cad/cadReferenceLargeDxf.ts');
   assert.equal(typeof parseCadReferenceDxfStream, 'function', '新增流式入口必须存在');
 

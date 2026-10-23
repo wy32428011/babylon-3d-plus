@@ -1,4 +1,6 @@
-import { TransformNode, Vector3, type AbstractMesh } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { AbstractMesh } from '@babylonjs/core';
 import type { Vector3Data } from '../../editor/model/math';
 
 export type ModelMeasurementStatus = 'loading' | 'ready' | 'unavailable';

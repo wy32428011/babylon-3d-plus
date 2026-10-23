@@ -1,4 +1,5 @@
-import { AbstractMesh, Mesh } from '@babylonjs/core';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import type { ManualRoamPoint } from './manualRoamCollisionBounds.ts';
 
 /** 低于该顶点数的网格保留椭球对三角碰撞，成本可接受。 */

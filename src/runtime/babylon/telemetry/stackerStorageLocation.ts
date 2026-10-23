@@ -1,4 +1,5 @@
-import { Vector3, type TransformNode } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { TransformNode } from '@babylonjs/core';
 import { transformWorldBounds, type RuntimeWorldBounds } from '../runtimeNodeGeometry';
 
 export type StackerStorageTargetOffsetInput = {

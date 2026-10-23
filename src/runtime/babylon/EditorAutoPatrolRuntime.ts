@@ -1,19 +1,15 @@
-import {
-  type AbstractMesh,
-  Camera,
-  Color3,
-  Curve3,
-  DynamicTexture,
-  LinesMesh,
-  Mesh,
-  MeshBuilder,
-  type Nullable,
-  type Observer,
-  Scene,
-  StandardMaterial,
-  TransformNode,
-  Vector3,
-} from '@babylonjs/core';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Curve3 } from '@babylonjs/core/Maths/math.path.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { AbstractMesh, Nullable, Observer } from '@babylonjs/core';
 import type { Entity } from '../../editor/model/Entity';
 import type { AutoPatrolTriggerRegion, AutoPatrolWaypoint, TransformComponent } from '../../editor/model/components';
 import {

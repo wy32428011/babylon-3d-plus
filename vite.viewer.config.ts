@@ -1,3 +1,4 @@
+import { babylonCodeSplitting } from './scripts/babylon-build-chunks';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +45,7 @@ export default defineConfig({
   publicDir: path.join(workspaceRoot, 'public'),
   plugins: [react(), viewerCapabilitiesPlugin(), ...buildAnalysisPlugins('viewer')],
   build: {
+    rolldownOptions: { output: { strictExecutionOrder: true, codeSplitting: babylonCodeSplitting() } },
     outDir: path.join(workspaceRoot, 'dist-viewer-template'),
     emptyOutDir: true,
   },

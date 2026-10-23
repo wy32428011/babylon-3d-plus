@@ -1,4 +1,7 @@
-import { ArcRotateCamera, Engine, Scene, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import { getRequiredEnvironmentResourceIds } from '../../../electron/shared/sceneEnvironmentReferences';
 import { SceneRuntime } from '../../runtime/babylon/SceneRuntime';
 import { waitForSceneRenderReady } from '../../runtime/babylon/sceneRenderReadiness';
@@ -6,7 +9,7 @@ import { applyAvailableSceneModelUpdates } from '../assets/applySceneModelUpdate
 import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import { countExpectedSceneBatchedEntities } from '../loading/scenePreparationProgress';
 import type { SceneDocument } from '../model/SceneDocument';
-import { getSceneShadowBakeError } from '../model/sceneShadowBake';
+import { getSceneLightingBakeError } from '../../../electron/shared/sceneLightingBakeContract';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import { waitForPublishCondition } from './publishOrchestration';
 import { preparePublishResources } from './preparePublishResources';
@@ -54,11 +57,12 @@ async function renderPublishSceneSnapshot(document: SceneDocument, assertCurrent
   let monitorFailure: unknown;
   let renderFailure: unknown;
   const startedAt = performance.now();
+  let preparingResources = true;
   const check = () => {
     assertCurrent();
     if (monitorFailure) throw monitorFailure;
     if (renderFailure) throw renderFailure;
-    if (performance.now() - startedAt > 600_000) throw new Error('其他场景的渲染或烘焙准备超时。');
+    if (preparingResources && performance.now() - startedAt > 180_000) throw new Error('其他场景的资源与首帧准备超时。');
   };
   const monitor = window.setInterval(() => {
     try { check(); } catch (error) { monitorFailure = error; controller.abort(); }
@@ -88,11 +92,12 @@ async function renderPublishSceneSnapshot(document: SceneDocument, assertCurrent
     } });
     await waitForSceneRenderReady(scene, controller.signal);
     check();
-    if (!getSceneShadowBakeError(document)) return document;
-    const bake = await runtime.bakeStaticShadows(document, controller.signal, pushLog);
+    preparingResources = false;
+    if (!getSceneLightingBakeError(document)) return document;
+    const result = await runtime.bakeLighting(document, controller.signal, pushLog);
     check();
-    const updated = { ...document, sceneSettings: { ...document.sceneSettings, shadows: { ...document.sceneSettings.shadows, bake } } };
-    const error = getSceneShadowBakeError(updated);
+    const updated = { ...document, sceneSettings: { ...document.sceneSettings, lighting: { ...document.sceneSettings.lighting, result } } };
+    const error = getSceneLightingBakeError(updated);
     if (error) throw new Error(error);
     return updated;
   } catch (error) {

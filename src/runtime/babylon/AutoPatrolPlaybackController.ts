@@ -1053,8 +1053,7 @@ export class AutoPatrolPlaybackController {
         console.warn('[AutoPatrol] 巡检截图采集失败。', error);
         return true;
       }
-      let captureTask!: Promise<void>;
-      captureTask = withTimeout(
+      const captureTask = withTimeout(
         Promise.resolve(screenshotResult),
         this.limits.screenshotCaptureTimeoutMs,
         '巡检截图采集超时。',
@@ -1359,7 +1358,7 @@ function normalizePlaybackLimit(value: number | undefined, fallback: number): nu
 }
 
 /** 按 Hierarchy 顺序收集场景中的巡检路线，供编辑预览和 Viewer 共用。 */
-export function collectAutoPatrolPlaybackRoutes(document: SceneDocument): AutoPatrolPlaybackRoute[] {
+export function collectAutoPatrolPlaybackRoutes(document: Pick<SceneDocument, 'entityIds' | 'entities'>): AutoPatrolPlaybackRoute[] {
   const routes: AutoPatrolPlaybackRoute[] = [];
   for (const entityId of document.entityIds) {
     const entity = document.entities[entityId];
