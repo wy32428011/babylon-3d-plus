@@ -117,14 +117,13 @@ export class EntityArrayThinInstanceBatch {
     return new EntityArrayThinInstanceBatch(sources, batches, interactive);
   }
 
-  /** 更新等距预览矩阵；相同数量时复用已有 Float32Array。 */
+  /** 更新等距预览矩阵；步长保留正负方向，相同数量时复用已有 Float32Array。 */
   update(copyCount: number, direction: Vector3Data, arrayStepMeters: number): boolean {
     if (
       !Number.isSafeInteger(copyCount)
       || copyCount < 1
       || !isFiniteVector3(direction)
       || !Number.isFinite(arrayStepMeters)
-      || arrayStepMeters < 0
     ) {
       return false;
     }

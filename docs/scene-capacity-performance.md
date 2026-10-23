@@ -343,3 +343,22 @@ npm run optimize:environment-glb -- "输入.glb" "输出.ktx2.glb" --mode ktx2
 验收通过后可在场景环境配置中使用输出副本。若要让发布 Viewer 使用优化资产，需要从更新后的场景重新导出/发布；旧部署包不会自动改变。
 
 KTX2 模式编码并发限制为 2，质量等级为 2，关闭 RDO，Zstd 等级为 5。为避免编码器自动重采样，尺寸不满足 4 像素块要求的图片保留原格式，报告列出跳过原因。文件大小与加载速度分别验收，不能把减少图片数量或文件体积直接当成提速证据。
+
+### 动画运行的节点过滤与光照摘要复用（2026-10-23）
+
+运动节点的原生父子过滤按候选引用建立 Set，并沿当前父级链检查，正常路径复杂度为 O(N × 层级深度)。保留节点引用与顺序，不缓存层级；脚本覆盖 isDescendantOf、parent 或底层父级访问器，以及循环父级链均回到原候选判断，保留原调用顺序与异常。
+
+阵列脚本更新仍执行原 onUpdate、宿主网格恢复/挂起、遥测驱动及全局真实变化通知。光照刷新继续检查实际数据；完整静态几何摘要跨刷新复用，position/normal/UV/UV2/color/tangent、indices 和 subMesh 原位变化仍当次重新生成原 geometry-v1 签名。来源姿态、显隐及分类标记仍使用原表达式。未通过可信读取检查的自定义数据走原路径。
+
+生产缓存的活跃不可变 CPU 快照 payload 上限为 16 MiB，共享 CPU 视图复用；超预算回到原精确计算。此上限不代表全部 JavaScript heap 或真实显存上限。Mesh 释放时回收其缓存，不新增 GPU buffer、纹理或降低画质/更新频率。
+
+定向验证命令：
+
+```powershell
+node scripts/telemetry-test.mjs runtimeNodeGeometry.test.ts
+node --experimental-transform-types --test tests/runtime/lightingGeometrySignatureCache.test.ts
+node --experimental-transform-types --test tests/lightingBake/sceneLightingRuntime.test.mjs
+node scripts/smoke-animation-frame-cost.mjs
+```
+
+硬件 smoke 固定修改前提交为参考，对当前源码检查过滤引用/顺序、几何签名与相同姿态像素，输出至 output/animation-frame-cost-20261023/。它证明构造场景的等价行为，不替代附件展会场景的约450ms调用栈和现场FPS复测。详细结果见 [本轮执行记录](tasks/2026-10-23-animation-frame-cost.md)。

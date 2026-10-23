@@ -15,12 +15,17 @@ const hooks = registerHooks({
     return next(specifier, context);
   },
   load(url, context, next) {
+    if (url.startsWith(project.href) && /\.(png|jpg|webp|bin)(\?.*)?$/.test(url)) return {
+      format: 'module', shortCircuit: true, source: 'export default ' + JSON.stringify(url) + ';',
+    };
     if (url.startsWith(project.href) && url.endsWith('.ts') && !url.includes('/node_modules/')) return { format: 'module', shortCircuit: true,
       source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
     return next(url, context);
   },
 });
 const { SceneLightingRuntime } = await import('../../src/runtime/babylon/SceneLightingRuntime.ts');
+const { ModelAssetRuntimeController } = await import('../../src/runtime/babylon/scene-runtime/ModelAssetRuntimeController.ts');
+const { SceneTriangleAndReadinessController } = await import('../../src/runtime/babylon/scene-runtime/SceneTriangleAndReadinessController.ts');
 const { LightingProbeSampler } = await import('../../src/runtime/babylon/lightingProbes.ts');
 const { captureLightingEnvironment, getLightingGeometrySignature } = await import('../../src/runtime/babylon/lightingRuntimeCapture.ts');
 const { validateLightingBakeInput } = await import('../../electron/ipc/lightingBakeValidation.ts');
@@ -935,4 +940,59 @@ test('loading geometry mismatch recovers with complete sources and dynamic motio
     assert.match(f.runtime.getError(), /静态对象.*姿态/);
     assert.equal(f.proxies().length, 0, '真实静态姿态改变仍必须撤下失效GI');
   } finally { f.dispose(); }
+});
+
+
+test('阵列宿主往返保留脚本可见性和真实失效，稳定几何不重复编码', async () => {
+  const f = fixture();
+  const root = new TransformNode('runtime-array-host', f.scene);
+  f.fixed.parent = root;
+  const model = { root, contentRoot: root, meshes: [f.fixed], modelArraySuspendedMeshes: new Set() };
+  const context = { scene: f.scene };
+  const environment = { lightingRuntime: f.runtime };
+  const readiness = new SceneTriangleAndReadinessController(context, {
+    environment, document: { disposed: false }, telemetry: { motionStaticBatchRuntime: { isTemporaryMeshEvent: () => false } },
+  });
+  readiness.initializeModelStatisticsMeshAddedObserver();
+  readiness.initializeModelStatisticsMeshRemovedObserver();
+  const assets = new ModelAssetRuntimeController(context, { environment, readiness });
+  const from = Array.from;
+  let encodedPositionArrays = 0, updates = 0;
+  try {
+    assets.suspendModelArrayHost(model);
+    await new Promise(resolve => setImmediate(resolve));
+    await f.runtime.applySnapshot(f.snapshot());
+    f.tick();
+    const positions = f.fixed.getVerticesData(VertexBuffer.PositionKind);
+    Array.from = function(value, ...args) {
+      if (value === positions) encodedPositionArrays++;
+      return Reflect.apply(from, this, [value, ...args]);
+    };
+    for (let frame = 0; frame < 3; frame++) {
+      assets.restoreModelArrayHostMeshes(model);
+      assert.ok(f.scene.meshes.includes(f.fixed), '脚本执行前仍恢复真实宿主');
+      updates++;
+      assets.refreshModelMeshes(model, { editorEntityId: f.staticEntity.id });
+      assets.suspendModelArrayHost(model);
+      assert.ok(!f.scene.meshes.includes(f.fixed), '更新后仍挂起宿主，批次继续负责绘制');
+      f.tick();
+      await new Promise(resolve => setImmediate(resolve));
+      f.tick();
+    }
+    assert.equal(updates, 3);
+    assert.equal(f.fixed.parent, root);
+    assert.equal(f.fixed.getVerticesData(VertexBuffer.PositionKind), positions);
+    assert.equal(f.runtime.getError(), null);
+    assert.equal(encodedPositionArrays, 0, '多次局部刷新仍检查输入，但不得重新 Array.from 编码相同几何');
+    const uvs = f.fixed.getVerticesData(VertexBuffer.UVKind);
+    uvs[0] += 0.125;
+    assets.refreshModelMeshes(model, { editorEntityId: f.staticEntity.id });
+    f.tick();
+    assert.match(f.runtime.getError(), /静态对象集合或实际几何/, '无通知原位 UV 变化仍当次使旧烘焙失效');
+  } finally {
+    Array.from = from;
+    f.scene.onNewMeshAddedObservable.remove(readiness.modelStatisticsMeshAddedObserver);
+    f.scene.onMeshRemovedObservable.remove(readiness.modelStatisticsMeshRemovedObserver);
+    f.dispose();
+  }
 });

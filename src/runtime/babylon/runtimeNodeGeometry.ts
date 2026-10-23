@@ -2,7 +2,11 @@ import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.j
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Node } from '@babylonjs/core/node.js';
 import type { Scene } from '@babylonjs/core';
+
+const nativeIsDescendantOf = Node.prototype.isDescendantOf;
+const nativeParentGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parent')?.get;
 
 /** 世界空间轴对齐包围盒。 */
 export type RuntimeWorldBounds = {
@@ -275,11 +279,49 @@ export function uniqueTransformNodes(nodes: TransformNode[]): TransformNode[] {
   return [...new Set(nodes)];
 }
 
+/** 只读取描述符，避免兼容性检查先执行脚本定义的访问器。 */
+function getNodePropertyDescriptor(node: Node, key: string): PropertyDescriptor | undefined {
+  let prototype: object | null = node;
+  while (prototype) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+    if (descriptor) return descriptor;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return undefined;
+}
+
+/** 原生方法、父级 getter 和普通父级字段同时有效，才允许省略原方法的重复求值。 */
+function hasNativeDescendantCheck(node: Node): boolean {
+  const descendant = getNodePropertyDescriptor(node, 'isDescendantOf');
+  const parent = getNodePropertyDescriptor(node, 'parent');
+  const backingParent = Object.getOwnPropertyDescriptor(node, '_parentNode');
+  return descendant?.value === nativeIsDescendantOf
+    && nativeParentGetter !== undefined && parent?.get === nativeParentGetter
+    && backingParent !== undefined && 'value' in backingParent;
+}
+
 /** 过滤同一运动分组中的子级节点，避免父子同时写入相同动作后产生双倍位移。 */
 export function filterTopLevelMotionNodes(nodes: TransformNode[]): TransformNode[] {
   const uniqueNodes = uniqueTransformNodes(nodes);
+  if (uniqueNodes.length <= 1) return uniqueNodes;
+  const candidates = new Set<Node>(uniqueNodes);
+  const visitedAncestors = new Set<Node>();
   return uniqueNodes.filter((node) => {
-    return !uniqueNodes.some((candidate) => candidate !== node && node.isDescendantOf?.(candidate));
+    // 原生判断只沿父级链查找，可由逐候选扫描改为 O(N × 层级深度)。
+    // 祖先方法也可能被脚本覆盖；即使已找到候选父级，也要先确认完整调用链。
+    let ancestor: Node | null = node;
+    let hasCandidateAncestor = false;
+    visitedAncestors.clear();
+    while (ancestor) {
+      // 环形链也回到原候选判断，保留直接父级命中的短路结果或原递归异常。
+      if (visitedAncestors.has(ancestor) || !hasNativeDescendantCheck(ancestor)) {
+        return !uniqueNodes.some((candidate) => candidate !== node && node.isDescendantOf?.(candidate));
+      }
+      visitedAncestors.add(ancestor);
+      if (ancestor !== node && candidates.has(ancestor)) hasCandidateAncestor = true;
+      ancestor = ancestor.parent;
+    }
+    return !hasCandidateAncestor;
   });
 }
 

@@ -12507,6 +12507,59 @@
           "text": "import { loadConveyorArrowModules } from '../helpers/conveyorSurfaceArrowModules.mjs';"
         }
       ]
+    },
+    {
+      "file": "tests/runtime/lightingGeometrySignatureCache.test.ts",
+      "disposition": "node-contract",
+      "domain": "effects",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/lightingGeometrySignatureCache.test.ts",
+      "purpose": "完整geometry-v1精确缓存、原位数据变更、脚本覆盖兼容、预算和GC释放",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖；独立进程；包含模块hook与全局方法覆盖，禁止共享测试进程",
+        "GC用例启动自有 --expose-gc 子进程，必须等待实际断言结束"
+      ],
+      "sha256": "f82cf67c1194af6bca968b8257b7330c5f85f58228a36e9728e419aebb83d0ed",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { spawnSync } from 'node:child_process';"
+        },
+        {
+          "line": 3,
+          "text": "import { existsSync } from 'node:fs';"
+        }
+      ]
+    },
+    {
+      "file": "scripts/smoke-animation-frame-cost.mjs",
+      "disposition": "browser-webgl",
+      "domain": null,
+      "command": "node scripts/smoke-animation-frame-cost.mjs",
+      "purpose": "运动过滤和光照签名与固定基线逐字等价，硬件WebGL相同姿态像素与可见运动检查",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖和本机 Playwright 兼容 Edge；必须为硬件WebGL，软件renderer失败",
+        "独立动态loopback Vite服务；结束关闭自有browser/server；不修改用户场景",
+        "固定基线81a78c1，输出构造场景等价证据，不作为附件现场FPS验收"
+      ],
+      "sha256": "0028c245995f11df30f6af68dc8b3fa35fbf5acc356e1bbf3db829978c396fd8",
+      "evidence": [
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 3,
+          "text": "import { execFileSync } from 'node:child_process';"
+        },
+        {
+          "line": 4,
+          "text": "import { createHash } from 'node:crypto';"
+        }
+      ]
     }
   ]
 }

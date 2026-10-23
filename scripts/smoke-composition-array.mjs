@@ -1,3 +1,4 @@
+/* global window, document, Image, requestAnimationFrame */
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -68,7 +69,10 @@ try {
     await page.keyboard.press('Escape');
     const before = await snapshot();
     const source = Object.values(before.entities).find(e => e.composition);
-    for (const direction of ['x', '-x', 'y', '-y', 'z', '-z']) {
+    for (const { direction, spacing } of [
+      ...['x', '-x', 'y', '-y', 'z', '-z'].map(direction => ({ direction, spacing: 0.5 })),
+      ...['x', '-x'].map(direction => ({ direction, spacing: -0.5 })),
+    ]) {
       await reset(); await openArray();
       const axis = direction.replace('-', ''), sign = direction.startsWith('-') ? -1 : 1;
       const span = await page.evaluate(({ ids, axis }) => {
@@ -77,7 +81,9 @@ try {
       }, { ids: source.childrenIds, axis });
       await dialog.getByLabel('副本数量', { exact: true }).fill('2');
       await dialog.getByRole('combobox').selectOption(direction);
-      await dialog.getByLabel('阵列净间距(m)', { exact: true }).fill('0.5');
+      await dialog.getByLabel('阵列净间距(m)', { exact: true }).fill(String(spacing));
+      assert.equal(await dialog.getByLabel('阵列净间距(m)', { exact: true }).evaluate(input => input.checkValidity()), true);
+      assert.equal(await dialog.getByRole('button', { name: '确认', exact: true }).isEnabled(), true);
       await dialog.getByRole('button', { name: '确认', exact: true }).click();
       await dialog.waitFor({ state: 'hidden' });
       const after = await snapshot(), roots = Object.values(after.entities).filter(e => e.composition);
@@ -87,21 +93,48 @@ try {
       assert.equal(new Set(codes).size, codes.length);
       for (const root of roots) assert.equal(root.childrenIds.length, 3);
       const copy = roots.find(e => e.id !== source.id);
-      const delta = copy.components.transform.position[axis] - source.components.transform.position[axis]; assert.ok(Math.abs(delta * sign - span - .5) < 1e-4, '整组实际跨度与净间距必须一致');
+      const delta = copy.components.transform.position[axis] - source.components.transform.position[axis]; assert.ok(Math.abs(delta * sign - span - spacing) < 1e-4, '整组实际跨度与净间距必须一致');
       for (let i = 0; i < source.childrenIds.length; i++) {
         const a = before.entities[source.childrenIds[i]], b = after.entities[copy.childrenIds[i]];
         for (const coordinate of ['x', 'y', 'z']) assert.ok(Math.abs(b.components.transform.position[coordinate] - a.components.transform.position[coordinate] - (coordinate === axis ? delta : 0)) < 1e-5);
       }
       await page.evaluate(() => window.compositionArrayHarness.store.getState().undo()); assert.deepEqual(await snapshot(), before);
       await page.evaluate(() => window.compositionArrayHarness.store.getState().redo()); assert.deepEqual(await snapshot(), after);
-      checks.push('menu-' + direction + '-undo-redo');
+      checks.push('menu-' + direction + '-gap-' + spacing + '-undo-redo');
     }
     await pixels('array-six-directions-final');
     const saved = await page.evaluate(() => window.compositionArrayHarness.save());
     await fs.writeFile(path.join(output, 'scene.scene.json'), saved, 'utf8');
     await page.evaluate(content => window.compositionArrayHarness.reopen(content), saved);
     await page.waitForFunction(() => window.compositionArrayHarness.ready());
-    assert.deepEqual(await snapshot(), { ...JSON.parse(saved).scene, selectedEntityId: null }); checks.push('save-reopen');
+    assert.deepEqual(await snapshot(), { ...JSON.parse(saved).scene, selectedEntityId: null }); checks.push('negative-spacing-save-reopen');
+    for (const sourceName of ['设备 A', '导入输送机']) {
+      await reset();
+      const original = await snapshot();
+      const entity = Object.values(original.entities).find(e => e.name === sourceName);
+      const span = await page.evaluate(id => {
+        const points = window.compositionArrayHarness.scene().meshes.filter(m => m.metadata?.editorEntityId === id && m.getTotalVertices() > 0 && m.isEnabled()).flatMap(m => { m.computeWorldMatrix(true); return m.getBoundingInfo().boundingBox.vectorsWorld.map(v => v.x); });
+        if (!points.length) throw Error('普通阵列源几何未加载');
+        return Math.max(...points) - Math.min(...points);
+      }, entity.id);
+      await page.getByText(sourceName, { exact: true }).first().click({ button: 'right' });
+      await page.getByRole('menuitem', { name: '模型阵列', exact: true }).click();
+      await dialog.waitFor();
+      await dialog.getByLabel('副本数量', { exact: true }).fill('2');
+      await dialog.getByLabel('阵列净间距(m)', { exact: true }).fill('-0.5');
+      assert.equal(await dialog.getByLabel('阵列净间距(m)', { exact: true }).evaluate(input => input.checkValidity()), true);
+      await dialog.getByRole('button', { name: '确认', exact: true }).click();
+      await dialog.waitFor({ state: 'hidden' });
+      const ordinary = await snapshot();
+      const copies = Object.values(ordinary.entities).filter(e => !original.entities[e.id]);
+      assert.equal(copies.length, 2);
+      for (const [index, copy] of copies.entries()) assert.ok(Math.abs(copy.components.transform.position.x - entity.components.transform.position.x - (span - 0.5) * (index + 1)) < 1e-4);
+      const content = await page.evaluate(() => window.compositionArrayHarness.save());
+      await page.evaluate(value => window.compositionArrayHarness.reopen(value), content);
+      await page.waitForFunction(() => window.compositionArrayHarness.ready());
+      assert.deepEqual(await snapshot(), { ...ordinary, selectedEntityId: null });
+      checks.push('ordinary-negative-spacing-' + sourceName + '-save-reopen');
+    }
     await reset(); await openArray(); await page.keyboard.press('Escape'); assert.deepEqual(await snapshot(), before); checks.push('cancel-atomic');
     const meshCount = await page.evaluate(() => window.compositionArrayHarness.scene().meshes.length);
     // 从真实 Babylon Gizmo 网格计算抓取位置，随后只用鼠标事件执行拖轴。
@@ -130,7 +163,11 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const nextDrag = await locateDrag();
     await page.keyboard.down('Shift'); await page.mouse.move(nextDrag.start.x, nextDrag.start.y); await page.mouse.down(); await page.mouse.move(nextDrag.end.x, nextDrag.end.y, { steps: 24 }); await page.mouse.up(); await page.keyboard.up('Shift'); await dialog.waitFor();
-    await dialog.getByLabel('副本数量', { exact: true }).fill('2'); await dialog.getByRole('button', { name: '确认', exact: true }).click();
+    await dialog.getByLabel('副本数量', { exact: true }).fill('2');
+    await dialog.getByLabel('阵列净间距(m)', { exact: true }).fill('-0.5');
+    await pixels('shift-negative-spacing-preview');
+    assert.deepEqual(await snapshot(), before, '修改负间距预览不得写入场景');
+    await dialog.getByRole('button', { name: '确认', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' }); assert.equal(Object.values((await snapshot()).entities).filter(e => e.composition).length, 3);
     checks.push('real-mouse-shift-drag'); assert.deepEqual(errors, []);
     await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'PASS', checks, errors, drag }, null, 2));

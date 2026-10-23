@@ -137,8 +137,12 @@ test('阵列数量和净间距必须满足共享提交边界', () => {
   assert.match(getEntityArrayParameterError(0, 0) ?? '', /1-1000/);
   assert.match(getEntityArrayParameterError(1001, 0) ?? '', /1-1000/);
   assert.match(getEntityArrayParameterError(1.5, 0) ?? '', /整数/);
-  assert.match(getEntityArrayParameterError(1, -0.1) ?? '', /大于等于 0/);
-  assert.match(getEntityArrayParameterError(1, Number.NaN) ?? '', /有限数值/);
+  for (const spacing of [-100, -1, -0.1, 0, 0.1, 100]) {
+    assert.equal(getEntityArrayParameterError(1, spacing), null, `净间距 ${spacing} 应合法`);
+  }
+  for (const spacing of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.match(getEntityArrayParameterError(1, spacing) ?? '', /有限数值/);
+  }
   assert.equal(getEntityArrayParameterError(1000, 0), null);
 });
 

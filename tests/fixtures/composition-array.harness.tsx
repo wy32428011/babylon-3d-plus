@@ -16,7 +16,9 @@ const sourcePath = (window as unknown as { compositionArrayAsset: string }).comp
 const sourceUrl = 'editor-asset://local/' + encodeURIComponent(sourcePath);
 installDeploymentAssetManifest({ [sourceUrl]: location.origin + '/builtin-model-packages/virtual-conveyor/virtual-conveyor.glb' });
 const documentModel = createEmptySceneDocument('组合阵列验收');
-documentModel.sceneSettings.shadows.enabled = false;
+// 沿用本夹具禁用阴影的设置，使用当前统一光照字段。
+documentModel.sceneSettings.lighting.shadows.enabled = false;
+documentModel.sceneSettings.lighting.bake.enabled = false;
 for (const x of [-2, 2]) {
   const entity = createMeshEntity('cube', { x, y: 1, z: 0 });
   entity.name = x < 0 ? '设备 A' : '设备 B';
@@ -36,7 +38,7 @@ const scene = () => EngineStore.Instances.flatMap(e => e.scenes).find(s => s.act
 const camera = () => { const c = scene()?.activeCamera as any; if (c?.setTarget) { c.setTarget(new Vector3(0, 1, 0)); c.radius = 28; c.alpha = -1.1; c.beta = 1.1; } };
 Object.assign(window, { compositionArrayHarness: {
   store: useEditorStore, rootId: grouped.selectedEntityId, seed, scene, camera,
-  ready: () => Boolean(scene()?.getFrameId()! > 3 && scene()?.getTransformNodeByName(imported.id + '_modelRoot')?.getChildMeshes().some(m => m.getTotalVertices() > 0 && m.isReady(true))),
+  ready: () => Boolean((scene()?.getFrameId() ?? 0) > 3 && scene()?.getTransformNodeByName(imported.id + '_modelRoot')?.getChildMeshes().some(m => m.getTotalVertices() > 0 && m.isReady(true))),
   save: () => serializeScene(useEditorStore.getState().scene),
   reopen: (content: string) => { useEditorStore.getState().loadSceneFromContent(content, 'reopened.scene.json'); useEditorStore.setState({ sceneResourcePolicy: 'preserve-snapshot' }); },
   project: (point: { x: number; y: number; z: number }, targetScene = scene()) => {
