@@ -61,12 +61,6 @@ import {
  */
 const SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND = 0.5;
 
-/**
- * 换层站台/提升机载货台上的竖直基准间隙（m）：小车以载货台面（cargoDeckNodes 顶面）对齐支撑位并再抬高该值，
- * 使提升机台面比小车载货台面低 1cm（托举有间隙、不共面闪烁）。普通货格仍让载货台面直接贴格底面。
- */
-const SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS = 0.01;
-
 /** 遥测解析出的目标货格：to_x/to_y 列层 + to_z 排号 + to_Depth 解码出的排深与支撑位世界坐标。 */
 type ShuttleTargetCell = {
   locator: LocatorRuntimeEntry;
@@ -858,18 +852,15 @@ export class ShuttleTelemetryDriver {
 
   /**
    * Y 层变换无动画：有目标格时每帧计算整车竖直闪现偏移。载货基准面（载货平面包围盒顶面，
-   * 环抱式机构中货物底面所在高度）对齐目标格支撑位；换层站台/提升机载货台再抬高
-   * `SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS`（提升机台面比小车载货台面低 1cm）。
-   * 不再按车体包围盒底面定位——车体相应沉到台面以下。无目标格回零（回待机层高位）。
+   * 环抱式机构中货物底面所在高度）对齐目标格支撑位，换层站台/提升机载货台同口径（小车载货台面与提升机台面齐平）。
+   * 不按车体包围盒底面定位——车体相应沉到台面以下。无目标格回零（回待机层高位）。
    */
   private resolveShuttleYFlashOffset(model: ModelRuntimeEntry, cell: ShuttleTargetCell | null): Vector3 {
     if (!cell) return Vector3.Zero();
     const upAxis = getModelAxis(model.root, 'y');
     const cargoBaseHomeY = this.getShuttleCargoBaseHomeY(model, upAxis);
     if (cargoBaseHomeY === null) return Vector3.Zero();
-    const supportY = Vector3.Dot(cell.supportPosition, upAxis)
-      + (cell.isLayerChangePlatform ? SHUTTLE_PLATFORM_DECK_CLEARANCE_METERS : 0);
-    return upAxis.scale(supportY - cargoBaseHomeY);
+    return upAxis.scale(Vector3.Dot(cell.supportPosition, upAxis) - cargoBaseHomeY);
   }
 
   /** 载货基准面在无 Y 偏移时的世界高度：首个目标格帧缓存（此时节点尚未施加 Y 偏移，避免自污染）。 */

@@ -998,18 +998,18 @@ test('进梯途中 x=-1 的 y=0 瞬时帧：保持最近有效层，不闪到 to
     const fork = h.scene.getMeshByName('huocha1')!;
 
     h.apply({ ...frame, x: -1, y: 1 }, 0.1, 1);
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `层 1 叉面应为 1.96（载货台面对齐 +1cm 间隙），实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `层 1 叉面应为 1.95（载货台面对齐支撑位），实际 ${fork.position.y}`);
 
     // 实测数据 line 3599：进梯瞬间 x=-1,y=0,to_y=3
     h.apply({ ...frame, x: -1, y: 0 }, 0.1, 1);
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `y=0 瞬时帧必须保持层 1，实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `y=0 瞬时帧必须保持层 1，实际 ${fork.position.y}`);
 
     // 实测数据 line 398：进梯过渡帧 x=255,y=0,to_y=3
     h.apply({ ...frame, x: 255, y: 0 }, 0.1, 1);
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `x=255 过渡帧必须保持层 1，实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `x=255 过渡帧必须保持层 1，实际 ${fork.position.y}`);
 
     h.apply({ ...frame, x: -2, y: 0 }, 0.1, 1);
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `进入提升机后仍保持层 1，实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `进入提升机后仍保持层 1，实际 ${fork.position.y}`);
   } finally {
     h.dispose();
   }
@@ -1024,14 +1024,14 @@ test('x=-2 进梯但提升机数据未发布：保持进梯前层，不闪到 to
       rootPosition: new Vector3(0, 2, 11),
     });
 
-    // 进梯前在层 1：载货基准面（未声明 cargoDeckNodes 时回退叉顶 0.30）对齐 2 + 1cm 间隙 → 叉面中心 0.25 + (2.01 - 0.30) = 1.96
+    // 进梯前在层 1：载货基准面（未声明 cargoDeckNodes 时回退叉顶 0.30）对齐支撑位 2 → 叉面中心 0.25 + (2 - 0.30) = 1.95
     h.apply({ x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 1);
     const fork = h.scene.getMeshByName('huocha1')!;
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `进梯前必须保持层 1（叉面 1.96），实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `进梯前必须保持层 1（叉面 1.95），实际 ${fork.position.y}`);
 
     // 进入提升机且 y=0、无 hclift 台面数据：不得按 to_y=3 闪现到层 3（叉面 4.05）
     h.apply({ x: -2, y: 0, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 }, 0.1, 1);
-    assert.ok(Math.abs(fork.position.y - 1.96) < 1e-6, `缺台面数据时必须保持进梯前层 1，实际 ${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 1.95) < 1e-6, `缺台面数据时必须保持进梯前层 1，实际 ${fork.position.y}`);
   } finally {
     h.dispose();
   }
@@ -1081,9 +1081,9 @@ test('x=-2 换层中 y 上报 0：回退 to_y 解析站台层，不冻结', () =
       true,
       '必须解析到换层站台货格',
     );
-    // 回退到 to_y=4：层 4 支撑位 y=5，载货基准面 0.30 对齐 5 + 1cm 间隙 → 叉面中心由 0.25 闪现到 4.96
+    // 回退到 to_y=4：层 4 支撑位 y=5，载货基准面 0.30 对齐支撑位 5 → 叉面中心由 0.25 闪现到 4.95
     const fork = h.scene.getMeshByName('huocha1')!;
-    assert.ok(Math.abs(fork.position.y - 4.96) < 1e-6, `必须按 to_y=4 闪现对齐，实际叉面中心 y=${fork.position.y}`);
+    assert.ok(Math.abs(fork.position.y - 4.95) < 1e-6, `必须按 to_y=4 闪现对齐，实际叉面中心 y=${fork.position.y}`);
   } finally {
     h.dispose();
   }
@@ -1172,7 +1172,7 @@ test('进出提升机载货台速度由数据驱动绑定覆盖（换层站台�
   }
 });
 
-test('换层站台/提升机以载货台面为竖直基准：提升机台面比载货台面低 1cm', () => {
+test('换层站台/提升机以载货台面为竖直基准：与提升机台面齐平', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h, false, true);
@@ -1191,8 +1191,8 @@ test('换层站台/提升机以载货台面为竖直基准：提升机台面比�
     const deck = h.scene.getMeshByName('对象020')!;
     const cargoDeckTopY = deck.position.y + 0.05;
     assert.ok(
-      Math.abs(cargoDeckTopY - (2.5 + 0.01)) < 1e-6,
-      `载货台面顶面必须比提升机台面高 1cm（2.51），实际 ${cargoDeckTopY}`,
+      Math.abs(cargoDeckTopY - 2.5) < 1e-6,
+      `载货台面顶面必须与提升机台面齐平（2.5），实际 ${cargoDeckTopY}`,
     );
   } finally {
     h.dispose();
