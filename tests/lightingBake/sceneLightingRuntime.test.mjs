@@ -29,7 +29,8 @@ const { SceneTriangleAndReadinessController } = await import('../../src/runtime/
 const { LightingProbeSampler } = await import('../../src/runtime/babylon/lightingProbes.ts');
 const { captureLightingEnvironment, getLightingGeometrySignature } = await import('../../src/runtime/babylon/lightingRuntimeCapture.ts');
 const { validateLightingBakeInput } = await import('../../electron/ipc/lightingBakeValidation.ts');
-const { validateLightingGeometry } = await import('../../src/runtime/babylon/lightingRuntimeResources.ts');
+const { validateLightingGeometry, loadLightingResources } = await import('../../src/runtime/babylon/lightingRuntimeResources.ts');
+const { LightingResourceError } = await import('../../src/runtime/babylon/lightingRuntimeDiagnostic.ts');
 const { getNativeLightingInstances } = await import('../../src/runtime/babylon/lightingNativeInstances.ts');
 const { EntityArrayThinInstanceBatch } = await import('../../src/runtime/babylon/EntityArrayThinInstanceBatch.ts');
 const { HybridShadowMeshState } = await import('../../src/runtime/babylon/HybridShadowCache.ts');
@@ -995,4 +996,83 @@ test('阵列宿主往返保留脚本可见性和真实失效，稳定几何不�
     f.scene.onMeshRemovedObservable.remove(readiness.modelStatisticsMeshRemovedObserver);
     f.dispose();
   }
+});
+
+test('temporary physical preview suppresses both static and dynamic GI without disposing resources and restores valid bindings', async () => {
+  const f = fixture();
+  try {
+    const snapshot = f.snapshot(); f.document.sceneSettings.lighting.result = snapshot;
+    await f.runtime.applySnapshot(snapshot);
+    const state = f.runtime.state, resources = state.resources, proxy = f.proxies()[0];
+    f.runtime.setTemporaryLightingPreview(true, true); f.hemi.intensity += 0.1; f.tick();
+    assert.equal(f.runtime.state, state); assert.equal(f.proxies()[0], proxy);
+    assert.ok(state.records.every(record => record.binding.enabled === false));
+    assert.equal(f.disposedResources, 0); assert.equal(f.runtime.getError(), null);
+    f.runtime.setPreview(false, false);
+    assert.ok(state.records.every(record => record.binding.enabled === false), '切换烘焙前后对比不能覆盖物理草稿的GI抑制');
+    f.hemi.intensity -= 0.1;
+    f.runtime.setTemporaryLightingPreview(false, false); f.tick();
+    assert.equal(f.runtime.state, state); assert.equal(f.runtime.state.resources, resources);
+    assert.ok(state.records.every(record => record.binding.enabled));
+    assert.equal(f.document.sceneSettings.lighting.result, snapshot); assert.equal(f.disposedResources, 0);
+    f.hemi.intensity += 0.2; f.tick();
+    assert.equal(f.runtime.state, null, '退出预览后真实灯光变化仍应使旧GI失效');
+  } finally { f.dispose(); }
+});
+
+test('temporary preview still invalidates changed static geometry and prepared bindings respect current suppression', async () => {
+  const f = fixture();
+  try {
+    f.runtime.setTemporaryLightingPreview(true, true);
+    await f.runtime.applySnapshot(f.snapshot());
+    assert.ok(f.runtime.state.records.every(record => record.binding.enabled === false));
+    f.fixed.position.x += 1; f.tick();
+    assert.equal(f.runtime.state, null); assert.match(f.runtime.getError(), /静态对象/);
+  } finally { f.dispose(); }
+});
+
+test('resource validation errors carry manifest identity and cause without parsing message text', async () => {
+  const f = fixture();
+  try {
+    const snapshot = f.snapshot(), geometryAsset = snapshot.assets.find(asset => asset.id === 'geometry');
+    const content = JSON.stringify({ version: 1, positions: [] });
+    geometryAsset.url = 'data:application/json,' + encodeURIComponent(content); geometryAsset.byteLength = Buffer.byteLength(content);
+    await assert.rejects(loadLightingResources(snapshot, f.scene), error => {
+      assert.ok(error instanceof LightingResourceError); assert.ok(error.cause instanceof Error);
+      assert.deepEqual(error.diagnostic, { kind: 'resource', message: error.message, assetId: 'geometry', entityId: 'fixed-entity', nodeKey: '$mesh' });
+      assert.equal(error.assetKind, 'geometry'); return true;
+    });
+  } finally { f.dispose(); }
+});
+
+test('runtime exposes resource diagnostic after failure and clears it together with error after recovery', async () => {
+  const f = fixture();
+  try {
+    const snapshot = f.snapshot(), loader = f.runtime.options.loadResources;
+    const resourceFailure = new LightingResourceError(new Error('没有包含身份的业务消息'), snapshot.assets[0], snapshot.surfaces[0]);
+    f.runtime.options.loadResources = async () => { throw resourceFailure; };
+    await assert.rejects(f.runtime.applySnapshot(snapshot), error => error === resourceFailure);
+    assert.equal(f.runtime.getDiagnostic().assetId, 'geometry'); assert.equal(f.runtime.getDiagnostic().entityId, 'fixed-entity');
+    assert.equal(f.runtime.getError(), resourceFailure.message);
+    f.runtime.options.loadResources = loader; await f.runtime.applySnapshot(snapshot);
+    assert.equal(f.runtime.getDiagnostic(), null); assert.equal(f.runtime.getError(), null);
+    f.fixed.position.x += 1; f.tick();
+    assert.equal(f.runtime.getDiagnostic().kind, 'runtime');
+    f.document.sceneSettings.lighting.bake.enabled = false; f.runtime.sync(f.document);
+    assert.equal(f.runtime.getDiagnostic(), null); assert.equal(f.runtime.getError(), null);
+  } finally { f.dispose(); }
+});
+
+test('unindexed static receivers with zero indexCount retain complete GI primitive coverage', async () => {
+  const f = fixture();
+  try {
+    f.fixed.setIndices([]); f.fixed.isUnIndexed = true; f.fixed.releaseSubMeshes();
+    new SubMesh(0, 0, f.fixed.getTotalVertices(), 0, 0, f.fixed);
+    f.geometry.indices = Array.from({ length: f.fixed.getTotalVertices() }, (_, index) => index);
+    const originalGeometry = f.fixed.geometry;
+    await f.runtime.applySnapshot(f.snapshot());
+    assert.equal(f.proxies().length, 1); assert.ok(f.runtime.state.records.find(record => !record.dynamic).binding.texture);
+    assert.equal(f.fixed.geometry, originalGeometry); assert.deepEqual(Array.from(f.fixed.getIndices()), []);
+    assert.equal(f.fixed.subMeshes[0].indexCount, 0); assert.equal(f.fixed.isUnIndexed, true);
+  } finally { f.dispose(); }
 });

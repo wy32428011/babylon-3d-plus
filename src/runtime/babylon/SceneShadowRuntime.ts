@@ -9,6 +9,7 @@ import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { RenderTargetTexture } from '@babylonjs/core/Materials/Textures/renderTargetTexture.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { LIGHTING_UV_ATTRIBUTE } from './BakedLightingMaterialPlugin.ts';
 import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
 import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
@@ -17,8 +18,9 @@ import type { AbstractMesh, Light, Nullable, Observer, Scene, TransformNode } fr
 import type { SceneShadowQuality, SceneShadowSettings } from '../../editor/model/SceneDocument';
 import {
   HybridShadowCache, HybridShadowMeshState,
-  type HybridShadowMeshRole, type HybridShadowMetrics, type HybridShadowOptions,
+  type HybridShadowMeshRole, type HybridShadowOptions,
 } from './HybridShadowCache.ts';
+import type { LightingSamplerDiagnostic, LightingShadowLightCost, LightingShadowMetrics } from './lightingShadowCosts.ts';
 
 export const SCENE_SHADOW_SUN_NAME = '__SceneShadowSun';
 export const SCENE_SHADOW_CATCHER_NAME = '__SceneShadowCatcher';
@@ -255,33 +257,93 @@ export class SceneShadowRuntime {
     return targets;
   }
 
-  /** 计数按实际阴影面/级联渲染累加，退出 hybrid 后 GPU 字节数及 caster 数为零。 */
-  getHybridMetrics(): HybridShadowMetrics {
-    const metrics: HybridShadowMetrics = {
+  /** 轻量读取已有验证结果；常驻错误轮询无需构建成本报表。 */
+  getValidationErrors(): readonly string[] { return this.hybridValidationErrors; }
+
+  /** 计数沿用现有监控；资源按实际面数估算，并区分阴影图和静态缓存。 */
+  getHybridMetrics(): LightingShadowMetrics {
+    const metrics: LightingShadowMetrics = {
       ...this.retiredHybridMetrics, staticCasterCount: 0, dynamicCasterCount: 0, textureBytes: 0,
       cachedFaces: 0, unsupportedCacheReason: null, validationErrors: [...this.hybridValidationErrors],
+      shadowMapBytes: 0, cacheBytes: 0, lights: [], samplerDiagnostics: this.getSamplerDiagnostics(),
     };
-    for (const [generator, cache] of this.hybridCaches) {
-      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) {
-        metrics[key] += cache.metrics[key];
-      }
-      metrics.textureBytes += cache.textureBytes;
+    const generators = new Set([...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()]);
+    if (this.primaryGenerator) generators.add(this.primaryGenerator);
+    for (const generator of generators) {
+      const cache = this.hybridCaches.get(generator), cost = this.getLightCost(generator);
+      metrics.lights.push(cost);
+      metrics.shadowMapBytes += cost.shadowMapBytes; metrics.cacheBytes += cost.cacheBytes;
+      if (!cache) continue;
+      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) metrics[key] += cache.metrics[key];
       metrics.cachedFaces += cache.cachedFaces;
       metrics.unsupportedCacheReason ??= cache.metrics.unsupportedCacheReason;
-      const map = generator.getShadowMap(), texture = map?.getInternalTexture();
-      if (map && texture) {
-        const faces = generator instanceof CascadedShadowGenerator ? generator.numCascades : generator.getLight().needCube() ? 6 : 1;
-        const components = texture.format === 6 ? 1 : 4;
-        const componentBytes = texture.type === 1 ? 4 : texture.type === 2 ? 2 : 1;
-        const size = map.getSize();
-        metrics.textureBytes += size.width * size.height * faces * (components * componentBytes + 4);
-      }
     }
+    metrics.textureBytes = metrics.shadowMapBytes + metrics.cacheBytes;
+    metrics.lights.sort((a, b) => b.shadowMapBytes + b.cacheBytes - a.shadowMapBytes - a.cacheBytes);
     if (this.isHybrid() && this.settings.enabled) {
       metrics.staticCasterCount = this.hybridMeshState.staticMeshes.size;
       metrics.dynamicCasterCount = this.hybridOptions.dynamicShadows ? this.hybridMeshState.dynamicMeshes.size : 0;
     }
     return metrics;
+  }
+
+  private getLightCost(generator: ShadowGenerator): LightingShadowLightCost {
+    const light = generator.getLight(), map = generator.getShadowMap(), cache = this.hybridCaches.get(generator);
+    const cascades = generator instanceof CascadedShadowGenerator ? generator.numCascades : light instanceof DirectionalLight ? 1 : 0;
+    const cubeFaces = light.needCube() ? 6 : 0, faces = cascades || cubeFaces || 1;
+    let shadowMapBytes = 0;
+    for (const target of new Set([map, generator.getShadowMapForRendering()])) {
+      const texture = target?.getInternalTexture(); if (!target || !texture) continue;
+      const components = texture.format === 6 ? 1 : 4;
+      const componentBytes = texture.type === 1 ? 4 : texture.type === 2 ? 2 : 1;
+      const size = target.getSize();
+      shadowMapBytes += size.width * size.height * faces * (components * componentBytes + 4);
+    }
+    const entityId = [...this.localLights, ...this.entityDirectionals].find(([, value]) => value === light)?.[0];
+    const size = map?.getSize();
+    return {
+      lightId: String(light.uniqueId), ...(entityId ? { entityId } : {}), name: light.name,
+      type: light instanceof DirectionalLight ? 'directional' : light instanceof PointLight ? 'point' : 'spot',
+      mapWidth: size?.width ?? 0, mapHeight: size?.height ?? 0, faces, cascades, cubeFaces,
+      shadowMapBytes, cacheBytes: cache?.textureBytes ?? 0, cachedFaces: cache?.cachedFaces ?? 0,
+      staticRenders: cache?.metrics.staticRenders ?? 0, dynamicRenders: cache?.metrics.dynamicRenders ?? 0, cacheHits: cache?.metrics.cacheHits ?? 0,
+    };
+  }
+
+  private getRequiredSamplerCount(mesh: AbstractMesh, material: PBRMaterial | StandardMaterial, shadowSamplers: number): number {
+    const textureSamplers = material.getActiveTextures().length
+      + (material instanceof PBRMaterial && this.scene.environmentTexture && !material.reflectionTexture ? 1 : 0);
+    const giSampler = material.pluginManager?.getPlugin('BakedIndirectLighting') && mesh.isVerticesDataPresent(LIGHTING_UV_ATTRIBUTE) ? 1 : 0;
+    // 已完成编译的effect还包含原生BRDF和其他材质插件的采样器，避免只统计业务贴图而漏报。
+    let compiledSamplers = 0;
+    for (const subMesh of mesh.subMeshes ?? []) if (subMesh.getMaterial() === material && subMesh.effect?.isReady()) {
+      compiledSamplers = Math.max(compiledSamplers, subMesh.effect.getSamplers().length);
+    }
+    return Math.max(shadowSamplers + textureSamplers + giSampler, compiledSamplers);
+  }
+
+  private getSamplerDiagnostics(): LightingSamplerDiagnostic[] {
+    const limit = this.scene.getEngine().getCaps().maxTexturesImageUnits;
+    if (limit <= 0 || this.disposed) return [];
+    const diagnostics = new Map<Material, LightingSamplerDiagnostic>();
+    for (const mesh of this.scene.meshes) {
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || mesh.visibility <= 0) continue;
+      const shadowSamplers = mesh.receiveShadows ? mesh.lightSources.filter(light => light.isEnabled() && light.intensity > 0
+        && (light.getShadowGenerator(this.scene.activeCamera) ?? light.getShadowGenerator())).length : 0;
+      for (const material of collectMeshMaterials(mesh)) {
+        if (!(material instanceof PBRMaterial || material instanceof StandardMaterial)) continue;
+        const requiredSamplers = this.getRequiredSamplerCount(mesh, material, shadowSamplers);
+        if (requiredSamplers < limit - 2) continue;
+        const prior = diagnostics.get(material);
+        const diag: LightingSamplerDiagnostic = prior ?? { materialId: String(material.uniqueId), materialName: material.name,
+          requiredSamplers, limit, severity: requiredSamplers > limit ? 'over-limit' : 'near-limit', meshNames: [] };
+        diag.requiredSamplers = Math.max(diag.requiredSamplers, requiredSamplers);
+        diag.severity = diag.requiredSamplers > limit ? 'over-limit' : 'near-limit';
+        if (!diag.meshNames.includes(mesh.name)) diag.meshNames.push(mesh.name);
+        diagnostics.set(material, diag);
+      }
+    }
+    return [...diagnostics.values()];
   }
 
   /** 主光由独立光照管理器持有；阴影开关只影响投影资源。 */
@@ -751,10 +813,9 @@ export class SceneShadowRuntime {
         if (!(material instanceof PBRMaterial || material instanceof StandardMaterial)) continue;
         const shadowSamplers = mesh.receiveShadows ? mesh.lightSources.filter(light => light.isEnabled() && light.intensity > 0
           && (light.getShadowGenerator(this.scene.activeCamera) ?? light.getShadowGenerator())).length : 0;
-        const materialSamplers = material.getActiveTextures().length
-          + (material instanceof PBRMaterial && this.scene.environmentTexture && !material.reflectionTexture ? 1 : 0);
-        if (samplerLimit > 0 && shadowSamplers + materialSamplers > samplerLimit) {
-          errors.add(`混合阴影材质“${material.name}”至少需要 ${shadowSamplers + materialSamplers} 个片元采样器，`
+        const requiredSamplers = this.getRequiredSamplerCount(mesh, material, shadowSamplers);
+        if (samplerLimit > 0 && requiredSamplers > samplerLimit) {
+          errors.add(`混合阴影材质“${material.name}”至少需要 ${requiredSamplers} 个片元采样器，`
             + `当前显卡仅支持 ${samplerLimit} 个。无法保证全部灯光及贴图，请调整场景后重试。`);
         }
         if (!this.hybridMaterialLightLimits.has(material)) this.hybridMaterialLightLimits.set(material, material.maxSimultaneousLights);

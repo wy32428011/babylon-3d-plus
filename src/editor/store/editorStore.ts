@@ -4,6 +4,7 @@ import { createSceneDocumentSlice } from './slices/sceneDocumentSlice';
 import { createSelectionAndViewportSlice } from './slices/selectionAndViewportSlice';
 import { createProjectAssetsSlice } from './slices/projectAssetsSlice';
 import { createDataPlatformAndPublishSlice } from './slices/dataPlatformAndPublishSlice';
+import { createLightingOperationsSlice } from './slices/lightingOperationsSlice';
 import { createLightingManagerSlice } from './slices/lightingManagerSlice';
 import { createRuntimePreviewAndTelemetrySlice } from './slices/runtimePreviewAndTelemetrySlice';
 
@@ -16,5 +17,6 @@ export const useEditorStore = create<EditorState>((...store) => ({
   ...createProjectAssetsSlice(...store),
   ...createDataPlatformAndPublishSlice(...store),
   ...createLightingManagerSlice(...store),
+  ...createLightingOperationsSlice(...store),
   ...createRuntimePreviewAndTelemetrySlice(...store),
 }));

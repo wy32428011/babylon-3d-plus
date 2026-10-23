@@ -1,13 +1,17 @@
+import type { ReactNode } from 'react';
+import type { LightingManagerDiagnostic } from './lightingBakeManagerModel';
+import { LightingBakeManagerDiagnostics, type LightingManagerDiagnosticActions } from './LightingBakeManagerDiagnostics';
 import type { SceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeContract';
 import { LightingManagerBadge, LightingManagerIcon, LIGHTING_MANAGER_PHASE_LABELS, formatLightingBytes } from './LightingBakeManagerWidgets';
 
 type TaskStatus = { phase: string; message: string | null; progress?: number; source?: 'runtime' };
-export function LightingBakeManagerResources({ result, status, resultLabel, busy, disabled, dirty, onCancel, onClear, issues }: {
+export function LightingBakeManagerResources({ result, status, resultLabel, busy, disabled, dirty, onCancel, onClear, issues, onInspect, onFocus, onRule, onRetry, children }: LightingManagerDiagnosticActions & {
   result: SceneLightingBakeSnapshot | null; status: TaskStatus; resultLabel: string; busy: boolean;
-  disabled: boolean; dirty: boolean; onCancel: () => void; onClear: () => void; issues: string[];
+  disabled: boolean; dirty: boolean; onCancel: () => void; onClear: () => void; issues: LightingManagerDiagnostic[]; children?: ReactNode;
 }) {
   const progress = Number.isFinite(status.progress) ? Math.max(0, Math.min(1, status.progress!)) : undefined;
   return <div className="lighting-manager-resources">
+    {children}
     <section className="lighting-manager-card lighting-manager-job" aria-labelledby="lighting-task-title">
       <div className="lighting-manager-card-heading"><h3 id="lighting-task-title">当前任务</h3>
         <LightingManagerBadge tone={busy ? 'dynamic' : status.phase === 'error' ? 'warning' : 'neutral'}>
@@ -42,7 +46,7 @@ export function LightingBakeManagerResources({ result, status, resultLabel, busy
     </section>
     <section className="lighting-manager-card" aria-labelledby="lighting-diagnostics-title">
       <h3 id="lighting-diagnostics-title">需要检查</h3>
-      {issues.length ? <ul className="lighting-manager-diagnostics">{issues.map((issue, index) => <li key={`${index}:${issue}`}><LightingManagerIcon name="warning" size={16} /><span>{issue}</span></li>)}</ul>
+      {issues.length ? <LightingBakeManagerDiagnostics issues={issues} onInspect={onInspect} onFocus={onFocus} onRule={onRule} onRetry={onRetry} />
         : <p className="lighting-manager-note with-icon"><LightingManagerIcon name="check" size={16} />当前没有报告光照错误或失配规则。</p>}
     </section>
   </div>;

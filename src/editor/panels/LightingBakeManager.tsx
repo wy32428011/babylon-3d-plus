@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getSceneLightingBakeSignature, requiresSceneLightingBake } from '../../../electron/shared/sceneLightingBakeContract';
+import { getSceneLightingBakeSignature, requiresSceneLightingBake, type LightingBakeEngineStatus } from '../../../electron/shared/sceneLightingBakeContract';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import { useEditorStore } from '../store/editorStore';
 import type { LightingManagerTab } from '../store/lightingManagementState';
@@ -7,9 +7,12 @@ import { LightingBakeManagerOverview } from './LightingBakeManagerOverview';
 import { LightingBakeManagerRules } from './LightingBakeManagerRules';
 import { LightingBakeManagerObjects } from './LightingBakeManagerObjects';
 import { LightingBakeManagerResources } from './LightingBakeManagerResources';
+import { LightingBakeManagerChanges } from './LightingBakeManagerChanges';
+import { LightingBakeEngineDialog } from './LightingBakeEngineDialog';
+import { LightingBakeManagerTaskTools } from './LightingBakeManagerTaskTools';
 import { GLB_STANDARD_PREVIEW_PRESET_ID } from '../../../electron/shared/glbStandardPreview';
 import {
-  applyLightingManagerPreset, buildLightingManagerRows, createLightingManagerDraft, getLightingManagerEntities, getLightingManagerImpact, getLightingManagerPolicy,
+  applyLightingManagerPreset, buildLightingManagerDiagnostics, createLightingManagerRowsSelector, createLightingManagerDraft, getLightingManagerChangeSummary, getLightingManagerEntities, getLightingManagerImpact, getLightingManagerPolicy,
   isLightingManagerDraftDirty, stageLightingManagerExceptions, type LightingManagerBulkValues, type LightingManagerSelection,
 } from './lightingBakeManagerModel';
 import { LightingManagerIcon, LIGHTING_MANAGER_PHASE_LABELS } from './LightingBakeManagerWidgets';
@@ -40,10 +43,22 @@ function LightingBakeManagerSession() {
   const runtimeMode = useEditorStore(state => state.runtimeMode);
   const debug = useEditorStore(state => state.lightingDebugVisible);
   const comparison = useEditorStore(state => state.lightingComparisonEnabled);
+  const draftPreview = useEditorStore(state => state.lightingDraftPreview);
+  const preflight = useEditorStore(state => state.lightingBakePreflight);
+  const costs = useEditorStore(state => state.lightingShadowCosts);
+  const taskHistory = useEditorStore(state => state.lightingBakeTaskHistory);
+  const taskHistoryError = useEditorStore(state => state.lightingBakeTaskHistoryError);
+  const runtimeDiagnostic = useEditorStore(state => state.lightingRuntimeDiagnostic);
   const [draft, setDraft] = useState(() => createLightingManagerDraft(scene, sessionId));
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeIsError, setNoticeIsError] = useState(false);
   const [confirmation, setConfirmation] = useState<'close' | 'reload' | null>(null);
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set<LightingManagerTab>([tab]));
+  const [engineStatus, setEngineStatus] = useState<LightingBakeEngineStatus | null>(null);
+  const [engineStatusLoading, setEngineStatusLoading] = useState(false);
+  const [engineConfigurationOpen, setEngineConfigurationOpen] = useState(false);
+  const engineStatusGeneration = useRef(0);
+  const [ruleFocus, setRuleFocus] = useState<{ ruleId: string; sequence: number }>();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const initialSession = useRef(sessionId);
   const initialPreview = useRef({ debug, comparison });
@@ -53,7 +68,9 @@ function LightingBakeManagerSession() {
   const staleDraft = scene !== draft.baseScene && dirty;
   const busy = Boolean(request);
   const editingDisabled = busy || runtimeMode === 'preview';
-  const rows = useMemo(() => buildLightingManagerRows(draft.baseScene, classification, draft), [draft, classification]);
+  const selectRows = useMemo(createLightingManagerRowsSelector, []);
+  const rows = selectRows(draft, classification);
+  const changes = useMemo(() => getLightingManagerChangeSummary(draft), [draft]);
   const impact = useMemo(() => getLightingManagerImpact(rows), [rows]);
   const policy = useMemo(() => getLightingManagerPolicy(draft.lighting.policy), [draft.lighting.policy]);
   const counts = useMemo(() => rows.reduce((value, row) => {
@@ -67,14 +84,17 @@ function LightingBakeManagerSession() {
   const resultStale = Boolean(result && result.signature !== signature);
   const resultLabel = busy ? LIGHTING_MANAGER_PHASE_LABELS[status.phase] : !requiresSceneLightingBake(scene) ? '无需静态烘焙'
     : resultStale ? '已过期' : status.phase === 'error' ? '更新失败' : result ? '可用' : '未烘焙';
-  const diagnostics = useMemo(() => [...new Set([
-    ...(status.phase === 'error' && status.message ? [status.message] : []),
-    ...rows.flatMap(row => [
-      ...(row.effective?.mismatches.map(issue => issue.message) ?? []),
-      ...(row.effective?.conflicts.map(issue => issue.reason) ?? []),
-      ...(row.entry.unmatchedOverride ? [`「${row.entityName} / ${row.name}」的旧部件例外未匹配当前资源。`] : []),
-    ]),
-  ])], [status, rows]);
+  const diagnostics = useMemo(() => {
+    const runtimeRow = runtimeDiagnostic?.entityId ? rows.find(row => row.entityId === runtimeDiagnostic.entityId && (!runtimeDiagnostic.nodeKey || row.nodeKey === runtimeDiagnostic.nodeKey)) : undefined;
+    return buildLightingManagerDiagnostics(rows, [
+      ...(runtimeDiagnostic ? [{ ...runtimeDiagnostic, id: 'runtime-resource:' + (runtimeDiagnostic.assetId ?? runtimeDiagnostic.kind), severity: 'warning' as const,
+        ownerEntityId: runtimeRow?.ownerEntityId, entityName: runtimeRow?.entityName, runtimeNodeKey: runtimeDiagnostic.nodeKey,
+        locatable: Boolean(runtimeRow && !runtimeRow.entry.unmatchedOverride), action: 'retry-preflight' as const }] : []),
+      ...(status.phase === 'error' && status.message && (status.source !== 'runtime' || !runtimeDiagnostic)
+        ? [{ id: 'current-task', kind: status.source === 'runtime' ? 'runtime' : 'task', severity: 'warning' as const, message: status.message, action: 'retry-preflight' as const }] : []),
+    ]);
+  }, [status, rows, runtimeDiagnostic]);
+  useEffect(() => { setVisitedTabs(previous => previous.has(tab) ? previous : new Set([...previous, tab])); }, [tab]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -102,7 +122,10 @@ function LightingBakeManagerSession() {
     // 没有草稿时可跟随后台任务提交；已有草稿始终保留，并要求用户处理版本冲突。
     if (!dirty && scene !== draft.baseScene) setDraft(createLightingManagerDraft(scene, sessionId));
   }, [scene, sessionId, dirty, draft.baseScene]);
-  function setTab(next: LightingManagerTab) { useEditorStore.getState().setLightingManagerTab(next); }
+  function setTab(next: LightingManagerTab) {
+    setVisitedTabs(previous => previous.has(next) ? previous : new Set([...previous, next]));
+    useEditorStore.getState().setLightingManagerTab(next);
+  }
   function reload() {
     const current = useEditorStore.getState();
     setDraft(createLightingManagerDraft(current.scene, current.sceneSessionId)); setNotice(null); setConfirmation(null);
@@ -123,12 +146,43 @@ function LightingBakeManagerSession() {
     return response.ok;
   }
   function bake() {
-    if (editingDisabled || (dirty && !apply())) return;
+    if (editingDisabled || draftPreview || (dirty && !apply())) return;
     const current = useEditorStore.getState();
     if (!requiresSceneLightingBake(current.scene)) { setNotice('当前没有静态接收表面，无需启动烘焙。'); setNoticeIsError(false); return; }
     current.requestLightingBake();
     setTab('resources');
   }
+  async function refreshDevices() {
+    const generation = ++engineStatusGeneration.current;
+    setEngineStatusLoading(true);
+    try {
+      if (!window.editorApi?.getLightingBakeEngineStatus) throw new Error('当前环境不支持检查烘焙引擎。');
+      const value = await window.editorApi.getLightingBakeEngineStatus();
+      if (generation === engineStatusGeneration.current) setEngineStatus(value);
+    } catch (error) { if (generation === engineStatusGeneration.current) setEngineStatus({ available: false, message: error instanceof Error ? error.message : String(error) }); }
+    finally { if (generation === engineStatusGeneration.current) setEngineStatusLoading(false); }
+  }
+  function invalidateEngineStatus() { engineStatusGeneration.current++; }
+  useEffect(() => { void refreshDevices(); return invalidateEngineStatus; }, []);
+  function check() {
+    if (editingDisabled || draftPreview || (dirty && !apply())) return;
+    void refreshDevices(); useEditorStore.getState().requestLightingBakePreflight(); setTab('resources');
+  }
+  function previewDraft() {
+    const current = useEditorStore.getState();
+    const response = current.setLightingDraftPreview(current.lightingDraftPreview ? null : draft);
+    setNotice(response.ok ? (current.lightingDraftPreview ? '已恢复当前应用配置。' : '临时预览照明与显示，关闭或恢复后归还原配置。') : response.message ?? '无法预览草稿。');
+    setNoticeIsError(!response.ok);
+    current.refreshLightingManagerPreview();
+  }
+  useEffect(() => {
+    const current = useEditorStore.getState();
+    if (current.lightingDraftPreview) {
+      const response = current.setLightingDraftPreview(draft);
+      if (!response.ok) { current.setLightingDraftPreview(null); setNotice(response.message ?? '草稿预览已结束。'); setNoticeIsError(true); }
+    }
+  }, [draft]);
+  useEffect(() => { if (tab === 'resources') void useEditorStore.getState().refreshLightingBakeTaskHistory(); }, [tab, status.phase]);
   function previewSetting(kind: 'debug' | 'comparison', value: boolean) {
     changingPreview.current = true;
     ownedPreview.current[kind] = value;
@@ -162,10 +216,11 @@ function LightingBakeManagerSession() {
     useEditorStore.getState().focusLightingNode(row.entityId, row.nodeKey);
     useEditorStore.getState().refreshLightingManagerPreview();
   }
-  const bakeDisabled = editingDisabled || staleDraft || !draft.lighting.bake.enabled || (!dirty && !requiresSceneLightingBake(scene));
+  const checkedBlocked = !dirty && preflight.phase === 'blocked' && preflight.signature === signature;
+  const bakeDisabled = editingDisabled || engineStatusLoading || engineStatus?.available === false || Boolean(draftPreview) || preflight.phase === 'checking' || checkedBlocked || staleDraft || !draft.lighting.bake.enabled || (!dirty && !requiresSceneLightingBake(scene));
   const applyLabel = tab === 'rules' ? '应用规则' : '应用配置';
   const footerWarning = dirty || Boolean(notice && noticeIsError) || status.phase === 'error';
-  return <dialog ref={dialogRef} className="lighting-manager" role="dialog" aria-labelledby="lighting-manager-title"
+  return <><dialog ref={dialogRef} className="lighting-manager" role="dialog" aria-labelledby="lighting-manager-title"
     onCancel={event => { event.preventDefault(); if (confirmation) setConfirmation(null); else close(); }}
     onKeyDown={event => event.stopPropagation()}>
     <header className="lighting-manager-header"><div><h2 id="lighting-manager-title">光照与烘焙管理器</h2><p>当前场景：<strong>{scene.name}</strong></p></div>
@@ -184,6 +239,7 @@ function LightingBakeManagerSession() {
     <div className="lighting-manager-content">
       {staleDraft && <div className="lighting-manager-conflict" role="alert"><span>场景已在其他操作中更新。当前草稿已保留，重新载入后才能应用。</span>
         <button type="button" onClick={() => setConfirmation('reload')}>重新载入当前配置</button></div>}
+      {dirty && <LightingBakeManagerChanges summary={changes} impact={impact} />}
       {editingDisabled && <p className="lighting-manager-banner"><LightingManagerIcon name="warning" size={18} />{runtimeMode === 'preview' ? '运行预览中，配置只读；可在总览停止预览。' : '烘焙任务正在进行，配置只读；可在任务页取消或查看进度。'}</p>}
       <section id="lighting-page-overview" role="tabpanel" aria-labelledby="lighting-tab-overview" hidden={tab !== 'overview'}>
         <div className="lighting-manager-metrics">
@@ -194,7 +250,7 @@ function LightingBakeManagerSession() {
             <div key={metric.label} className={metric.tone}><LightingManagerIcon name={metric.icon} size={35} /><span>{metric.label}<strong>{metric.value.toLocaleString()}</strong></span></div>)}
         </div>
         <LightingBakeManagerOverview scene={draft.baseScene} lighting={draft.lighting} appearance={draft.appearance} result={result} resultLabel={resultLabel}
-          disabled={editingDisabled} dirty={dirty} preview={preview} debug={debug} comparison={comparison} motionPreview={runtimeMode === 'preview'} busy={busy}
+          disabled={editingDisabled} dirty={dirty} engineStatus={engineStatus} engineStatusLoading={engineStatusLoading} onRefreshDevices={() => void refreshDevices()} onConfigureEngine={() => setEngineConfigurationOpen(true)} probeBounds={preflight.report?.bounds} previewDraftActive={Boolean(draftPreview)} previewDraftSuppressed={draftPreview?.suppressIndirect ?? false} previewDraftRules={changes.rulesChanged || changes.exceptionsChanged} preflightBusy={preflight.phase === 'checking'} onPreviewDraft={previewDraft} onCheck={check} preview={preview} debug={debug} comparison={comparison} motionPreview={runtimeMode === 'preview'} busy={busy}
           onLightingChange={lighting => { setDraft(previous => ({ ...previous, lighting })); setNotice(null); }}
           onAppearanceChange={appearance => { setDraft(previous => ({ ...previous, appearance })); setNotice(null); }}
           onPreset={(id, target) => { setDraft(previous => applyLightingManagerPreset(previous, id, target)); setNotice(id === GLB_STANDARD_PREVIEW_PRESET_ID ? 'GLB 标准预览已同时暂存照明与显示，应用配置后生效，可一次撤销。' : '预设已暂存，应用配置后生效。'); setNoticeIsError(false); }}
@@ -203,18 +259,28 @@ function LightingBakeManagerSession() {
         {previewError && <p className="lighting-manager-warning" role="status">{previewError}</p>}
       </section>
       <section id="lighting-page-rules" role="tabpanel" aria-labelledby="lighting-tab-rules" hidden={tab !== 'rules'}>
-        <LightingBakeManagerRules scene={draft.baseScene} policy={policy} rows={rows} disabled={editingDisabled}
+        {visitedTabs.has('rules') && <LightingBakeManagerRules active={tab === 'rules'} ruleFocus={ruleFocus} scene={draft.baseScene} policy={policy} rows={rows} disabled={editingDisabled}
           onChange={policy => { setDraft(previous => ({ ...previous, lighting: { ...previous.lighting, policy } })); setNotice(null); }}
-          onInspect={entityIds => useEditorStore.getState().openLightingManager({ tab: 'objects', entityIds })} />
+          onInspect={entityIds => useEditorStore.getState().openLightingManager({ tab: 'objects', entityIds })} />}
       </section>
       <section id="lighting-page-objects" role="tabpanel" aria-labelledby="lighting-tab-objects" hidden={tab !== 'objects'}>
-        <LightingBakeManagerObjects scene={draft.baseScene} rows={rows} focus={focus} disabled={editingDisabled} onStage={stage}
-          onFocus={focusSelection} onRules={() => setTab('rules')} />
+        {visitedTabs.has('objects') && <LightingBakeManagerObjects active={tab === 'objects'} scene={draft.baseScene} rows={rows} focus={focus} disabled={editingDisabled} onStage={stage}
+          onFocus={focusSelection} onRules={() => setTab('rules')} />}
       </section>
       <section id="lighting-page-resources" role="tabpanel" aria-labelledby="lighting-tab-resources" hidden={tab !== 'resources'}>
         <LightingBakeManagerResources result={result} status={status} resultLabel={resultLabel} busy={busy}
-          disabled={editingDisabled} dirty={dirty} onCancel={() => useEditorStore.getState().cancelLightingBake()}
-          onClear={() => { useEditorStore.getState().clearLightingBake(); reload(); }} issues={diagnostics} />
+          disabled={editingDisabled || Boolean(draftPreview)} dirty={dirty} onCancel={() => useEditorStore.getState().cancelLightingBake()}
+          onClear={() => { useEditorStore.getState().clearLightingBake(); reload(); }} issues={diagnostics}
+          onInspect={issue => { if (issue.entityId) useEditorStore.getState().openLightingManager({ tab: 'objects', entityIds: [issue.ownerEntityId ?? issue.entityId], ...(issue.locatable ? { nodeKey: issue.runtimeNodeKey ?? issue.nodeKey } : {}) }); }}
+          onFocus={issue => { if (issue.entityId) { useEditorStore.getState().focusLightingNode(issue.entityId, issue.runtimeNodeKey ?? issue.nodeKey ?? ''); useEditorStore.getState().refreshLightingManagerPreview(); setTab('overview'); } }}
+          onRule={issue => { if (issue.ruleId && policy.rules.some(rule => rule.id === issue.ruleId)) { setRuleFocus(previous => ({ ruleId: issue.ruleId!, sequence: (previous?.sequence ?? 0) + 1 })); setTab('rules'); } else { setNotice('该规则已不存在，请重新检查当前配置。'); setNoticeIsError(true); } }}
+          onRetry={check}>
+          {visitedTabs.has('resources') && <LightingBakeManagerTaskTools active={tab === 'resources'} preflight={preflight} currentSignature={signature}
+            costs={costs} history={taskHistory} historyError={taskHistoryError} disabled={editingDisabled || Boolean(draftPreview)} dirty={dirty}
+            onCheck={check} onRefreshHistory={() => useEditorStore.getState().refreshLightingBakeTaskHistory()}
+            onCleanup={ids => useEditorStore.getState().cleanupLightingBakeTasks(ids)}
+            onReadLog={async id => { if (!window.editorApi?.readLightingBakeTaskLog) throw new Error('当前环境不支持读取本机任务日志。'); return window.editorApi.readLightingBakeTaskLog(id); }} />}
+        </LightingBakeManagerResources>
       </section>
     </div>
     <footer className="lighting-manager-footer">
@@ -225,7 +291,7 @@ function LightingBakeManagerSession() {
         : <>
           <div className={`lighting-manager-footer-status${footerWarning ? ' is-warning' : ''}`} role={notice && noticeIsError ? 'alert' : 'status'}><LightingManagerIcon name={footerWarning ? 'warning' : 'check'} size={21} />
             <span>{notice ?? (dirty ? '有未应用更改' : `配置已应用 · ${resultLabel}`)}
-              <small>{dirty ? `影响 ${impact.affectedEntityCount} 个对象 / ${impact.affectedNodeCount} 个部件 · 保留 ${impact.preservedExceptionCount} 项例外`
+              <small>{dirty ? changes.categories.join(' · ')
                 : impact.pendingCount ? `${impact.pendingCount} 项正在等待完整分类事实` : '当前规则作用于已有及新增的匹配对象'}</small></span>
           </div>
           <div className="lighting-manager-footer-actions"><button type="button" onClick={close}>{dirty ? '取消' : '关闭'}</button>
@@ -236,5 +302,6 @@ function LightingBakeManagerSession() {
           </div>
         </>}
     </footer>
-  </dialog>;
+  </dialog><LightingBakeEngineDialog open={engineConfigurationOpen} disabled={busy} onClose={() => setEngineConfigurationOpen(false)}
+    onSaved={configuration => { invalidateEngineStatus(); setEngineStatus(configuration.engine); setEngineStatusLoading(false); }} /></>;
 }

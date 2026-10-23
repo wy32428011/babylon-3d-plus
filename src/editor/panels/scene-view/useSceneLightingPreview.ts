@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { type BabylonViewport } from '../../../runtime/babylon/createEngine';
 import { type SceneRuntime } from '../../../runtime/babylon/SceneRuntime';
 import { useEditorStore } from '../../store/editorStore';
@@ -25,6 +25,63 @@ type Options = {
 export function useSceneLightingPreview({
   lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument,
 }: Options) {
+  const preflightRequest = useEditorStore(state => state.lightingBakePreflightRequest);
+  const draftPreview = useEditorStore(state => state.lightingDraftPreview);
+  const managerTab = useEditorStore(state => state.lightingManagerTab);
+  const previewOwner = useRef<SceneRuntime | null>(null);
+  const previousSession = useRef(sceneSessionId);
+
+  useEffect(() => {
+    const state = useEditorStore.getState();
+    if (!state.lightingBakePreflightRequest || state.lightingBakePreflightRequest.scene !== sceneDocument) {
+      useEditorStore.setState({ lightingBakePreflightRequest: null, lightingBakePreflight: { phase: 'idle' } });
+    }
+    if (previousSession.current !== sceneSessionId) {
+      previousSession.current = sceneSessionId;
+      useEditorStore.setState({ lightingBakeTaskHistory: null, lightingBakeTaskHistoryError: null, lightingShadowCosts: null, lightingRuntimeDiagnostic: null });
+    }
+  }, [sceneDocument, sceneSessionId]);
+
+  useEffect(() => {
+    if (!preflightRequest) return;
+    if (preflightRequest.sceneSessionId !== sceneSessionId || preflightRequest.scene !== sceneDocument) {
+      useEditorStore.setState({ lightingBakePreflightRequest: null, lightingBakePreflight: { phase: 'idle' } }); return;
+    }
+    const runtime = runtimeRef.current, controller = new AbortController();
+    if (!runtime || isRuntimePreview) { useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, '请等待编辑场景就绪后检查。'); return; }
+    let active = true;
+    void runtime.preflightLightingBake(sceneDocument, controller.signal).then(report => {
+      if (active) useEditorStore.getState().completeLightingBakePreflight(preflightRequest.id, report);
+    }).catch(error => {
+      if (active) useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, error instanceof Error ? error.message : String(error));
+    });
+    return () => { active = false; controller.abort(); };
+  }, [preflightRequest, sceneDocument, sceneSessionId, isRuntimePreview, runtimeRef]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    if (draftPreview && (draftPreview.baseScene !== sceneDocument || draftPreview.sceneSessionId !== sceneSessionId || !lightingManagerOpen || isRuntimePreview)) {
+      useEditorStore.getState().setLightingDraftPreview(null); return;
+    }
+    if (!draftPreview && !previewOwner.current) return;
+    const readCurrentRuntime = () => runtimeRef.current;
+    let active = true;
+    previewOwner.current = draftPreview ? runtime : null;
+    void runtime.setLightingDraftPreview(draftPreview).then(() => {
+      if (active) useEditorStore.getState().refreshLightingManagerPreview();
+    }).catch(error => {
+      if (active) { useEditorStore.setState({ lightingManagerPreviewError: error instanceof Error ? error.message : String(error) });
+        useEditorStore.getState().setLightingDraftPreview(null); }
+    });
+    return () => {
+      active = false;
+      if (readCurrentRuntime() === runtime && previewOwner.current === runtime) {
+        previewOwner.current = null;
+        void runtime.setLightingDraftPreview(null).catch(error => useEditorStore.getState().pushLog('恢复临时光照预览失败：' + String(error)));
+      }
+    };
+  }, [draftPreview, sceneDocument, sceneSessionId, lightingManagerOpen, isRuntimePreview, runtimeRef]);
   useEffect(() => {
     if (!lightingBakeRequest) return;
     const runtime = runtimeRef.current;
@@ -62,7 +119,7 @@ export function useSceneLightingPreview({
   }, [lightingNodeFocusRequest, runtimeRef]);
 
   useEffect(() => {
-    if (!lightingManagerOpen) return;
+    if (!lightingManagerOpen || managerTab !== 'overview') return;
     const viewport = viewportRef.current;
     if (!viewport) return;
     const scene = viewport.scene, sourceCanvas = viewport.engine.getRenderingCanvas();
@@ -121,7 +178,7 @@ export function useSceneLightingPreview({
       if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
       previewCanvas.width = 0; previewCanvas.height = 0;
     };
-  }, [lightingManagerOpen, lightingManagerPreviewRequest, sceneSessionId, isRuntimePreview,
+  }, [lightingManagerOpen, managerTab, lightingManagerPreviewRequest, sceneSessionId, isRuntimePreview,
     lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, sceneDocument.sceneSettings, sceneDocument.entities, runtimeRef, viewportRef, statisticsSceneSessionRef]);
 
   useEffect(() => {
@@ -131,7 +188,10 @@ export function useSceneLightingPreview({
       if (!runtime) return;
       const entries = runtime.getLightingClassification();
       if (entries !== previous) { previous = entries; useEditorStore.getState().setLightingClassification(entries); }
-      useEditorStore.getState().setLightingBakeRuntimeError(runtime.getLightingBakeRuntimeError());
+      const state = useEditorStore.getState();
+      state.setLightingBakeRuntimeError(runtime.getLightingBakeRuntimeError());
+      state.setLightingRuntimeDiagnostic(runtime.getLightingRuntimeDiagnostic());
+      if (state.lightingManagerOpen && (state.lightingManagerTab === 'overview' || state.lightingManagerTab === 'resources')) state.setLightingShadowCosts(runtime.getHybridLightingMetrics());
     }, 400);
     return () => window.clearInterval(timer);
   }, [sceneSessionId, runtimeRef]);

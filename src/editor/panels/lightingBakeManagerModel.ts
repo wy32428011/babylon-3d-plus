@@ -3,7 +3,7 @@ import {
   type LightingModelReference, type LightingPolicyContext, type LightingPolicyField, type LightingPolicyValues,
   type ResolvedLightingPolicy, type SceneLightingPolicy,
 } from '../../../electron/shared/sceneLightingPolicy.ts';
-import { normalizeEntityLightingSettings, type EntityLightingSettings, type LightingClassificationEntry, type LightingNodeOverride } from '../../../electron/shared/sceneLightingBakeContract.ts';
+import { getSceneLightingBakeSignature, normalizeEntityLightingSettings, type EntityLightingSettings, type LightingClassificationEntry, type LightingNodeOverride } from '../../../electron/shared/sceneLightingBakeContract.ts';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import type { SceneDocument } from '../model/SceneDocument';
 import { getSceneAppearanceConfig, getSceneLightingConfig, normalizeSceneAppearanceConfig, normalizeSceneLightingConfig, type SceneAppearanceConfig, type SceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
@@ -254,4 +254,127 @@ export function stageLightingManagerExceptions(draft: LightingManagerDraft, rows
     next[id] = { ...settings, nodeOverrides };
   }
   return { ok: true, entityLighting: next };
+}
+
+
+export type LightingManagerChangeSummary = {
+  categories: string[];
+  rulesChanged: boolean;
+  exceptionsChanged: boolean;
+  giInputChanged: boolean;
+  giApplicationChanged: boolean;
+  giMessage: string;
+};
+
+/** 全局参数不能套用部件规则的影响计数；GI 过期判断始终复用正式输入合同。 */
+export function getLightingManagerChangeSummary(draft: LightingManagerDraft): LightingManagerChangeSummary {
+  const before = getSceneLightingConfig(draft.baseScene), after = normalizeSceneLightingConfig(draft.lighting);
+  const different = (left: unknown, right: unknown) => JSON.stringify(left) !== JSON.stringify(right);
+  const appearanceChanged = different(normalizeSceneAppearanceConfig(draft.appearance), getSceneAppearanceConfig(draft.baseScene));
+  const physical = (value: SceneLightingConfig) => ({ main: value.main, fill: value.fill, environment: value.environment,
+    environmentIntensity: value.environmentIntensity, disabledLightIds: value.disabledLightIds, allowDayNightCycle: value.allowDayNightCycle });
+  const physicalChanged = different(physical(before), physical(after));
+  const calculation = (value: SceneLightingConfig) => ({ quality: value.bake.quality, atlasSize: value.bake.atlasSize,
+    texelsPerMeter: value.bake.texelsPerMeter, probeSpacing: value.bake.probeSpacing, device: value.bake.device, probeVolumes: value.bake.probeVolumes, maxTextureMiB: value.bake.maxTextureMiB });
+  const calculationChanged = different(calculation(before), calculation(after));
+  const rulesChanged = different(getLightingManagerPolicy(before.policy), getLightingManagerPolicy(after.policy));
+  const exceptionsChanged = Object.entries(draft.entityLighting).some(([id, value]) => different(value ?? undefined, draft.baseScene.entities[id]?.components.lighting));
+  const shadowsChanged = different(before.shadows, after.shadows)
+    || before.bake.cacheStaticShadows !== after.bake.cacheStaticShadows || before.bake.dynamicShadows !== after.bake.dynamicShadows;
+  const giApplicationChanged = before.bake.enabled !== after.bake.enabled;
+  let giInputChanged = false;
+  if (physicalChanged || calculationChanged || rulesChanged || exceptionsChanged) {
+    const entities = { ...draft.baseScene.entities };
+    for (const [id, lighting] of Object.entries(draft.entityLighting)) {
+      const entity = entities[id];
+      if (!entity) continue;
+      const components = { ...entity.components };
+      if (lighting) components.lighting = lighting; else delete components.lighting;
+      entities[id] = { ...entity, components };
+    }
+    const proposed = { ...draft.baseScene, entities, sceneSettings: { ...draft.baseScene.sceneSettings, lighting: after } };
+    giInputChanged = getSceneLightingBakeSignature(proposed) !== getSceneLightingBakeSignature(draft.baseScene);
+  }
+  const categories = [appearanceChanged && '显示效果', physicalChanged && '物理照明', calculationChanged && '烘焙计算',
+    rulesChanged && '分类规则', exceptionsChanged && '对象例外', shadowsChanged && '实时阴影', giApplicationChanged && '间接光应用']
+    .filter((value): value is string => Boolean(value));
+  const giMessage = giInputChanged ? (before.result ? '应用后已有 GI 将过期，需要重新烘焙。' : 'GI 输入将更新，应用后可进行烘焙。')
+    : giApplicationChanged ? (after.bake.enabled ? '启用 GI 应用；已有结果仍需通过有效性检查。' : '暂停应用 GI，已有烘焙资产继续保留。')
+      : 'GI 输入保持不变；已有结果的有效性不受这些更改影响。';
+  return { categories, rulesChanged, exceptionsChanged, giInputChanged, giApplicationChanged, giMessage };
+}
+
+export type LightingManagerDiagnostic = {
+  id: string;
+  kind: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  entityId?: string;
+  entityName?: string;
+  ownerEntityId?: string;
+  nodeKey?: string;
+  runtimeNodeKey?: string;
+  ruleId?: string;
+  nodeRuleId?: string;
+  assetId?: string;
+  expectedResourceIdentity?: string;
+  actualResourceIdentity?: string;
+  locatable?: boolean;
+  action?: 'retry-assets' | 'retry-preflight';
+};
+
+/** 身份参与去重；相同错误文字出现在不同对象上时仍分别可定位。 */
+export function buildLightingManagerDiagnostics(rows: readonly LightingManagerRow[], extra: readonly LightingManagerDiagnostic[] = []): LightingManagerDiagnostic[] {
+  const diagnostics = new Map(extra.map(issue => [issue.id, issue]));
+  const add = (row: LightingManagerRow, value: Omit<LightingManagerDiagnostic, 'id'>) => {
+    const diagnostic = { entityId: row.entityId, ownerEntityId: row.ownerEntityId, entityName: row.entityName, runtimeNodeKey: row.nodeKey,
+      locatable: !row.entry.unmatchedOverride, ...value };
+    const id = JSON.stringify([diagnostic.entityId, diagnostic.kind, diagnostic.ruleId, diagnostic.nodeRuleId, diagnostic.nodeKey, diagnostic.message]);
+    diagnostics.set(id, { ...diagnostic, id });
+  };
+  for (const row of rows) {
+    for (const issue of row.effective?.mismatches ?? []) add(row, { ...issue, severity: 'warning',
+      ...(issue.kind === 'resource-identity' ? { locatable: false } : {}) });
+    for (const issue of row.effective?.conflicts ?? []) add(row, { kind: 'policy-conflict', severity: 'warning', message: issue.reason,
+      nodeKey: row.nodeKey, ruleId: issue.ruleId, nodeRuleId: issue.nodeRuleId });
+    if (row.entry.unmatchedOverride) add(row, { kind: 'legacy-override', severity: 'warning', nodeKey: row.nodeKey,
+      message: '「' + row.entityName + ' / ' + row.name + '」的旧部件例外未匹配当前资源。' });
+  }
+  return [...diagnostics.values()];
+}
+
+/** 只缓存当前管理器会话；照明、曝光、预算等编辑不触发全体部件规则解析。 */
+export function createLightingManagerRowsSelector() {
+  let previous: { scene: SceneDocument; entries: readonly LightingClassificationEntry[]; policy: SceneLightingConfig['policy'];
+    exceptions: LightingManagerDraft['entityLighting']; rows: LightingManagerRow[] } | undefined;
+  return (draft: LightingManagerDraft, entries: readonly LightingClassificationEntry[]) => {
+    if (previous?.scene === draft.baseScene && previous.entries === entries && previous.policy === draft.lighting.policy
+      && previous.exceptions === draft.entityLighting) return previous.rows;
+    const rows = buildLightingManagerRows(draft.baseScene, entries, draft);
+    previous = { scene: draft.baseScene, entries, policy: draft.lighting.policy, exceptions: draft.entityLighting, rows };
+    return rows;
+  };
+}
+
+
+/** 目录计数一次汇集，按宿主去重；不为每个分组重复扫描全部部件。 */
+export function getLightingManagerScopeCounts(scene: SceneDocument, rows: readonly LightingManagerRow[]): Map<string, number> {
+  const scopes = new Map<string, Set<string>>();
+  const add = (scope: string, owner: string) => { const owners = scopes.get(scope) ?? new Set<string>(); owners.add(owner); scopes.set(scope, owners); };
+  for (const row of rows) {
+    const owner = row.ownerEntityId;
+    if (row.entry.unmatchedOverride || row.effective?.mismatches.length || row.effective?.conflicts.length) add('issues', owner);
+    if (row.effective?.preservedExceptionFields.length) add('exceptions', owner);
+    if (row.context?.deviceType) add('type:' + row.context.deviceType, owner);
+    const ancestors = new Set(row.context?.ancestorIds ?? []);
+    const visited = new Set<string>();
+    for (let id = scene.entities[owner]?.parentId; id && !visited.has(id); id = scene.entities[id]?.parentId) { ancestors.add(id); visited.add(id); }
+    for (const id of ancestors) add('group:' + id, owner);
+  }
+  return new Map([...scopes].map(([scope, owners]) => [scope, owners.size]));
+}
+
+/** 隐藏页保留组件与本地状态，暂停父级快照或其它页草稿触发的计算。 */
+export function areLightingManagerPagePropsEqual<T extends { active?: boolean }>(previous: T, next: T): boolean {
+  return next.active === false || Object.keys(next).every(key => previous[key as keyof T] === next[key as keyof T]);
 }

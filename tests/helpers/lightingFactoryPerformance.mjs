@@ -1,6 +1,7 @@
 /* global window, document, requestAnimationFrame */
 import assert from 'node:assert/strict';
 import { migrateSceneLightingDocument } from '../../dist-electron/shared/sceneLightingConfig.js';
+import { assertLightingFactoryResumeEvidence, prepareLightingFactorySceneForPerformance } from './lightingFactoryGiPerformance.mjs';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -16,11 +17,11 @@ async function waitForFactoryReady(page) {
     const loadError = runtime.getInitialLoadSnapshot().error;
     if (loadError) throw new Error('真实工厂模型载入失败：' + loadError);
     if (window.lightingSmoke.preparation?.isScenePreparationActive()) return false;
-    const env = runtime.environmentRuntime.getSnapshot();
+    const env = runtime.environment.environmentRuntime.getSnapshot();
     if (env.phase === 'error') throw new Error('真实工厂环境载入失败：' + env.message);
     const settings = store.getState().scene.sceneSettings.environment;
     const expectsEnvironment = Boolean(settings?.packagePath && settings.visible !== false);
-    return (!expectsEnvironment || (env.phase === 'ready' && !env.error && runtime.environmentRuntime.getLightingSurfaces().length > 0))
+    return (!expectsEnvironment || (env.phase === 'ready' && !env.error && runtime.environment.environmentRuntime.getLightingSurfaces().length > 0))
       && runtime.scene.isReady();
   }, null, { timeout: 600_000 });
 }
@@ -29,7 +30,7 @@ async function waitForFactoryReady(page) {
 async function cacheDiagnostics(page) {
   return page.evaluate(async () => {
     const runtime = window.lightingSmoke.runtime;
-    const capture = () => [...runtime.shadowRuntime.hybridCaches.entries()].map(([generator, cache]) => ({
+    const capture = () => [...runtime.environment.shadowRuntime.hybridCaches.entries()].map(([generator, cache]) => ({
       light: generator.getLight().name, cacheRevision: cache.revision, stateRevision: cache.state.revision,
       metrics: { ...cache.metrics }, faces: [...cache.faces].map(([index, face]) => ({ index, signature: face.signature })),
       signatures: [...cache.state.signatures].map(([mesh, signature]) => ({ id: mesh.uniqueId, name: mesh.name, signature })),
@@ -74,13 +75,40 @@ async function readGpuProcessMemory(application) {
 }
 
 /** 原工程只读；临时副本保留实际模型/几何和视角，隔离外部服务后做 A/B/B/A 对照。 */
-export async function runLightingFactoryPerformance({ application, page, sourceScenePath, projectRoot, output, profile = false }) {
+export async function runLightingFactoryPerformance({ application, page, sourceScenePath, projectRoot, output, profile = false, measureGi, resumeScenePath = process.env.LIGHTING_FACTORY_GI_RESUME_SCENE || null }) {
   const originalBytes = await readFile(sourceScenePath);
   const sourceHash = createHash('sha256').update(originalBytes).digest('hex');
-  const content = JSON.parse(originalBytes.toString('utf8'));
+  const originalContent = JSON.parse(originalBytes.toString('utf8'));
+  const resumePath = resumeScenePath ? path.resolve(resumeScenePath) : null;
+  let loadedContent = originalContent, resumeEvidence = null, resumeBytes = null, resumeSource = null;
+  if (resumePath) {
+    assert.equal(typeof measureGi, 'function', '恢复已有GI只能使用GI专项性能验收');
+    resumeBytes = await readFile(resumePath); loadedContent = JSON.parse(resumeBytes.toString('utf8'));
+    const resumeProjectRoot = path.dirname(path.dirname(resumePath)), proofPath = path.join(resumeProjectRoot, 'replay-report.json');
+    const proofBytes = await readFile(proofPath); resumeEvidence = JSON.parse(proofBytes.toString('utf8'));
+    assertLightingFactoryResumeEvidence(resumeEvidence, loadedContent.scene?.sceneSettings?.lighting?.result, sourceHash);
+    assert.equal(path.resolve(resumeEvidence.bakedScenePath), resumePath, '恢复场景必须是重放报告实际产出的文件');
+    assert.deepEqual([...loadedContent.scene.entityIds].sort(), [...originalContent.scene.entityIds].sort(), '恢复GI不能增删原工厂实体');
+    resumeSource = { scenePath: resumePath, projectRoot: resumeProjectRoot,
+      sceneSha256: createHash('sha256').update(resumeBytes).digest('hex'), proofPath, proofSha256: createHash('sha256').update(proofBytes).digest('hex'),
+      inputSignature: resumeEvidence.inputSignature, geometrySignature: resumeEvidence.geometrySignature,
+      expectedStaticMeshCount: resumeEvidence.expectedStaticMeshCount, expectedReceiverCount: resumeEvidence.expectedReceiverCount,
+      expectedTriangleCount: resumeEvidence.expectedTriangleCount,
+      sourceFiles: {
+        original: { path: resumeEvidence.originalSourceScenePath ?? sourceScenePath,
+          sha256Before: resumeEvidence.originalSourceSceneSha256Before ?? resumeEvidence.sourceSceneSha256Before,
+          sha256After: resumeEvidence.originalSourceSceneSha256After ?? resumeEvidence.sourceSceneSha256After },
+        captured: { path: resumeEvidence.sourceScenePath, sha256Before: resumeEvidence.sourceSceneSha256Before, sha256After: resumeEvidence.sourceSceneSha256After },
+      },
+      physicalSignatures: { captured: resumeEvidence.sceneSignature, compiledCaptured: resumeEvidence.compiledSignature,
+        original: resumeEvidence.originalSceneSignature, compiledOriginal: resumeEvidence.originalCompiledSignature } };
+  } else {
+    loadedContent.scene = migrateSceneLightingDocument(loadedContent.scene); loadedContent.version = 6;
+  }
+  const content = prepareLightingFactorySceneForPerformance(loadedContent, { resume: Boolean(resumePath) });
   const sourceProjectRoot = path.dirname(path.dirname(sourceScenePath));
-  const result = { sourceScenePath, sourceSha256: sourceHash, sourceEntityCount: content.scene.entityIds.length,
-    scope: '实际工厂模型、固定视角；停用外部遥测并阻断远程业务大屏/HTTP，保留屏幕占位；仅放行Babylon固定版本解码依赖，全部模型就绪后才采样。GI关闭，仅比较实时与混合静态阴影缓存。Windows GPU进程内存包含该进程全部资源。', samples: [], externalRequestsBlocked: [], decoderRequestsAllowed: [] };
+  const result = { sourceScenePath, sourceSha256: sourceHash, sourceEntityCount: originalContent.scene.entityIds.length, ...(resumeSource ? { resumeSource } : {}),
+    scope: measureGi ? '实际完整工厂、固定视角；隔离外部遥测/HTTP，仅放行固定版本解码器。GI由正式engine全输入生成或经完整重放证据恢复，必须等待Runtime实际绑定后比较探针算法；Windows GPU内存是整个进程。' : '实际工厂模型、固定视角；停用外部遥测并阻断远程业务大屏/HTTP，保留屏幕占位；仅放行Babylon固定版本解码依赖，全部模型就绪后才采样。GI关闭，仅比较实时与混合静态阴影缓存。Windows GPU进程内存包含该进程全部资源。', samples: [], externalRequestsBlocked: [], decoderRequestsAllowed: [] };
   const externalHttp = /^https?:\/\//;
   const isolateExternalRequest = async route => {
     const url = new URL(route.request().url());
@@ -97,20 +125,13 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
     await route.abort('blockedbyclient');
   };
   await page.route(externalHttp, isolateExternalRequest);
-  content.scene.selectedEntityId = null;
-  content.scene.mqttConfig = { ...content.scene.mqttConfig, enabled: false };
-  content.scene.fetchConfig = { ...content.scene.fetchConfig, url: '', apiKey: '' };
-  content.scene.sceneSettings.openingAnimation = { ...content.scene.sceneSettings.openingAnimation, enabled: false };
-  content.scene = migrateSceneLightingDocument(content.scene);
-  content.version = 6;
-  const lighting = content.scene.sceneSettings.lighting;
-  lighting.shadows.enabled = true;
-  lighting.bake = { ...lighting.bake, enabled: false, quality: 'preview', atlasSize: 1024, texelsPerMeter: 8,
-    probeSpacing: 6, maxTextureMiB: 64, cacheStaticShadows: false, dynamicShadows: true };
-  lighting.result = null;
-  const sceneCopyPath = path.join(projectRoot, 'Scenes', 'factory-readonly-copy.scene.json');
-  await writeFile(sceneCopyPath, JSON.stringify(content), 'utf8');
-  await application.evaluate((_electron, root) => { globalThis.lightingSmokeMain.registry.authorizeAssetRoot(root); }, sourceProjectRoot);
+  const sceneCopyPath = resumePath ?? path.join(projectRoot, 'Scenes', 'factory-readonly-copy.scene.json');
+  result.sceneCopyPath = sceneCopyPath;
+  if (!resumePath) await writeFile(sceneCopyPath, JSON.stringify(content), 'utf8');
+  const authorizedRoots = [...new Set([sourceProjectRoot, ...(resumeSource ? [resumeSource.projectRoot] : [])])];
+  await application.evaluate((_electron, roots) => {
+    for (const root of roots) globalThis.lightingSmokeMain.registry.authorizeAssetRoot(root);
+  }, authorizedRoots);
   await page.evaluate(({ content, scenePath }) => {
     const store = window.lightingSmoke.store;
     store.getState().stopRuntimePreview();
@@ -127,8 +148,8 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
   result.loaded = await page.evaluate(() => {
     const { runtime } = window.lightingSmoke;
     const scene = runtime.scene;
-    return { initialLoad: runtime.getInitialLoadSnapshot(), environment: runtime.environmentRuntime.getSnapshot(),
-      environmentSurfaceCount: runtime.environmentRuntime.getLightingSurfaces().length,
+    return { initialLoad: runtime.getInitialLoadSnapshot(), environment: runtime.environment.environmentRuntime.getSnapshot(),
+      environmentSurfaceCount: runtime.environment.environmentRuntime.getLightingSurfaces().length,
       classification: runtime.getLightingClassification().reduce((a, e) => {
       a[e.mobility]++; return a;
     }, { static: 0, dynamic: 0 }), meshCount: scene.meshes.length, materialCount: scene.materials.length,
@@ -149,6 +170,23 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
     await page.bringToFront();
     return readWindowState();
   };
+  if (measureGi) {
+    try {
+      return await measureGi({ application, page, result, output, focusWindow, readWindowState,
+        readGpuMemory: () => readGpuProcessMemory(application), waitForReady: () => waitForFactoryReady(page), resumeScenePath: resumePath, resumeEvidence });
+    } finally {
+      try {
+        result.sourceUnchanged = createHash('sha256').update(await readFile(sourceScenePath)).digest('hex') === sourceHash;
+        if (resumeSource) result.resumeSourceUnchanged = createHash('sha256').update(await readFile(resumePath)).digest('hex') === resumeSource.sceneSha256;
+        await writeFile(path.join(output, 'factory-gi-performance.json'), JSON.stringify(result, null, 2));
+        assert.equal(result.sourceUnchanged, true, '原始工厂场景必须保持逐字节不变');
+        if (resumeSource) assert.equal(result.resumeSourceUnchanged, true, '恢复场景必须保持逐字节不变');
+      } finally {
+        await nativeWindow.evaluate((window, onTop) => window.setAlwaysOnTop(onTop), originalOnTop);
+        await page.unroute(externalHttp, isolateExternalRequest);
+      }
+    }
+  }
   if (profile) {
     const { runLightingFactoryProfile } = await import('./lightingFactoryProfile.mjs');
     try {
@@ -168,7 +206,7 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
         bake: { ...scene.sceneSettings.lighting.bake, cacheStaticShadows: mode === 'cached' } } } } });
       runtime.syncDocument(store.getState().scene);
       // 同一正式照明路径只切换静态深度缓存，保持材质与动态阴影一致。
-      await runtime.environmentRuntime.setLightingMode('scene');
+      await runtime.environment.environmentRuntime.setLightingMode('scene');
     }, mode);
     await waitForFactoryReady(page);
     nativeBefore = await focusWindow();
@@ -204,13 +242,13 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
         const sorted = [...times].sort((a, b) => a - b);
         const textures = scene.getEngine().getLoadedTexturesCache().map(t => ({ width: t.width, height: t.height,
           depth: t.depth, type: t.type, format: t.format, mipmaps: t.generateMipMaps, samples: t.samples }));
-        const environmentMaterials = runtime.environmentRuntime.getLightingSurfaces().map(surface => ({ key: surface.key,
+        const environmentMaterials = runtime.environment.environmentRuntime.getLightingSurfaces().map(surface => ({ key: surface.key,
           unlit: surface.mesh.material?.unlit, disableLighting: surface.mesh.material?.disableLighting,
           emissive: surface.mesh.material?.emissiveColor?.asArray() }));
         resolve({ frames: times.length, meanMs: times.reduce((a, b) => a + b, 0) / times.length,
           medianMs: sorted[Math.floor(times.length / 2)], p95Ms: sorted[Math.floor(times.length * 0.95)],
           cacheBefore: before, cacheAfter: runtime.getHybridLightingMetrics(), textures,
-          initialLoad: runtime.getInitialLoadSnapshot(), environmentLightingMode: runtime.environmentRuntime.lightingMode, environmentMaterials,
+          initialLoad: runtime.getInitialLoadSnapshot(), environmentLightingMode: runtime.environment.environmentRuntime.lightingMode, environmentMaterials,
           conditions, cameraBefore, cameraAfter: cameraState(), preparationBefore,
           preparationAfter: window.lightingSmoke.preparation.getScenePreparationSnapshot(),
           scheduling: { renderEvenInBackground: scene.getEngine().renderEvenInBackground,
@@ -222,7 +260,7 @@ export async function runLightingFactoryPerformance({ application, page, sourceS
     sample.nativeWindowBefore = nativeBefore;
     sample.nativeWindowAfter = await readWindowState();
     // 计时结束后记录名义分组与实际提交列表，区分隐藏载体和真正参与投影的组。
-    sample.shadowGroups = await page.evaluate(() => [...window.lightingSmoke.runtime.shadowRuntime.hybridCaches.entries()]
+    sample.shadowGroups = await page.evaluate(() => [...window.lightingSmoke.runtime.environment.shadowRuntime.hybridCaches.entries()]
       .map(([generator, cache]) => {
         const nominal = new Map();
         for (const mesh of generator.getShadowMap().renderList ?? []) {

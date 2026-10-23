@@ -1,4 +1,5 @@
 import type { LightingProbeData } from '../../../electron/shared/sceneLightingBakeContract.ts';
+import { validateLightingProbes } from '../../../electron/shared/sceneLightingBakeArtifacts.ts';
 
 type Position = readonly [number, number, number];
 type Probe = LightingProbeData['probes'][number];
@@ -8,14 +9,9 @@ export class LightingProbeSampler {
   readonly spacing: number;
 
   constructor(data: LightingProbeData) {
-    if (data.version !== 1 || data.encoding !== 'ambient-cube' || !Number.isFinite(data.spacing) || data.spacing <= 0 || !Array.isArray(data.probes)) {
-      throw new Error('间接光探针资源格式无效。');
-    }
+    validateLightingProbes(data);
     this.spacing = data.spacing;
     for (const probe of data.probes) {
-      if (!Array.isArray(probe.position) || probe.position.length !== 3 || !probe.position.every(Number.isFinite)
-        || !Array.isArray(probe.irradiance) || probe.irradiance.length !== 18
-        || !probe.irradiance.every(value => Number.isFinite(value) && value >= 0)) throw new Error('间接光探针包含无效方向或像素值。');
       const key = this.cell(probe.position);
       const list = this.cells.get(key) ?? []; list.push(probe); this.cells.set(key, list);
     }
@@ -36,7 +32,12 @@ export class LightingProbeSampler {
       }
     }
     nearby.sort((a, b) => a.distance - b.distance);
-    const selected = nearby.filter(({ probe }) => visible(probe.position)).slice(0, 8);
+    const selected: typeof nearby = [];
+    // 距离排序稳定；八个可见候选确定后，后续探针不再影响原有插值。
+    for (const candidate of nearby) {
+      if (visible(candidate.probe.position)) selected.push(candidate);
+      if (selected.length === 8) break;
+    }
     if (!selected.length) return null;
     const result = Array(18).fill(0) as number[];
     let total = 0;

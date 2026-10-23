@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import test from 'node:test';
 import ts from 'typescript';
 import { FreeCamera, Matrix, MeshBuilder, NullEngine, Scene, Vector3 } from '@babylonjs/core';
 
+const project = new URL('../../', import.meta.url);
 const hooks = registerHooks({
+  resolve(specifier, context, next) {
+    if (specifier.startsWith('.') && context.parentURL?.startsWith(project.href) && !context.parentURL.includes('/node_modules/')) {
+      const target = new URL(specifier.endsWith('.js') ? specifier.slice(0, -3) + '.ts' : specifier + '.ts', context.parentURL);
+      if (existsSync(target)) return next(target.href, context);
+    }
+    return next(specifier, context);
+  },
   load(url, context, next) {
     if (url.endsWith('/EntityArrayThinInstanceBatch.ts')) return { format: 'module', shortCircuit: true,
       source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };

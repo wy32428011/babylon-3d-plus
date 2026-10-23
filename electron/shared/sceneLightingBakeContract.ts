@@ -127,7 +127,10 @@ export type LightingBakeLightInput = {
   exponent?: number;
   innerAngle?: number;
 };
+export type LightingBakeCaptureMetrics = { durationMs: number | null; rendererHeapMaxObservedBytes: number | null; rendererHeapBasis: 'performance.memory.usedJSHeapSize' | 'unavailable' };
 export type LightingBakeInput = {
+  /** 执行诊断，不属于物理输入或场景持久化配置。 */
+  captureMetrics?: LightingBakeCaptureMetrics;
   version: 1;
   jobId: string;
   signature: string;
@@ -163,7 +166,7 @@ export type LightingBakeProgress = {
   progress: number;
   message: string;
 };
-export type LightingBakeEngineStatus = { available: boolean; path?: string; version?: string; message?: string };
+export type LightingBakeEngineStatus = { devices?: import('./sceneLightingBakeDevices.ts').LightingBakeDevice[]; available: boolean; path?: string; version?: string; message?: string };
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -299,7 +302,8 @@ export function getSceneLightingBakeSignature(value: unknown): string {
       ...(lighting.environment?.source === 'sandbox' ? { environmentLighting: { ...lighting.environment, resourceRevision: GLB_STANDARD_ENVIRONMENT_ID } } : {}),
       environmentIntensity: lighting.environmentIntensity, disabledLightIds: [...lighting.disabledLightIds].sort(), allowDayNightCycle: lighting.allowDayNightCycle,
       ...(lighting.allowDayNightCycle ? { dayNightSources: dayNightLightingSources(scene, entities) } : {}) },
-    bake: { quality: bake.quality, atlasSize: bake.atlasSize, texelsPerMeter: bake.texelsPerMeter, probeSpacing: bake.probeSpacing },
+    bake: { quality: bake.quality, atlasSize: bake.atlasSize, texelsPerMeter: bake.texelsPerMeter, probeSpacing: bake.probeSpacing,
+      ...(bake.probeVolumes?.some(volume => volume.enabled) ? { probeVolumes: bake.probeVolumes.filter(volume => volume.enabled).map(volume => ({ min: volume.min, max: volume.max })) } : {}) },
     ...(policyValue !== undefined ? { lightingPolicy: policyValue } : {}),
   })}`;
 }

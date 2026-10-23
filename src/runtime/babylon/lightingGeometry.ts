@@ -216,33 +216,54 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
   const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh;
   if (!(source instanceof Mesh)) throw new Error(`对象「${mesh.name}」不是支持烘焙的三角网格。`);
   if (source.skeleton || source.morphTargetManager?.numTargets) throw new Error(`对象「${mesh.name}」包含骨骼或形变，应设置为动态。`);
-  const positions = source.getVerticesData(VertexBuffer.PositionKind);
-  const indices = source.getIndices();
-  if (!positions || !indices || indices.length % 3) throw new Error(`对象「${mesh.name}」缺少有效三角网格。`);
+  const positions = source.getVerticesData(VertexBuffer.PositionKind), indices = source.getIndices();
+  const unindexed = source.isUnIndexed;
+  if (!positions?.length || positions.length % 3 || (!unindexed && (!indices?.length || indices.length % 3))) {
+    throw new Error(`对象「${mesh.name}」缺少有效三角网格。`);
+  }
+  const vertexCount = positions.length / 3;
+  const groups = source.subMeshes?.length ? source.subMeshes : [{ materialIndex: 0, indexStart: 0,
+    indexCount: indices?.length ?? 0, verticesStart: 0, verticesCount: vertexCount }];
+  const primitives: Array<{ index: number; indices: number[]; material: Material | null }> = [];
+  for (let index = 0; index < groups.length; index++) {
+    const group = groups[index], start = unindexed ? group.verticesStart : group.indexStart;
+    const count = unindexed ? group.verticesCount : group.indexCount;
+    if (count === 0) continue;
+    const material = source.material instanceof MultiMaterial ? source.material.subMaterials[group.materialIndex] : mesh.material;
+    if (unindexed && (material?.fillMode ?? Material.TriangleFillMode) !== Material.TriangleFillMode) {
+      throw new Error(`对象「${mesh.name}」的 primitive:${index} 不是无索引三角面拓扑，不能将线或点作为三角面烘焙。`);
+    }
+    const upperBound = unindexed ? vertexCount : indices!.length;
+    if (!Number.isInteger(start) || start < 0 || !Number.isInteger(count) || count < 0 || count % 3 || start + count > upperBound) {
+      throw new Error(`对象「${mesh.name}」的 primitive:${index} 缺少完整三角面或顶点范围越界。`);
+    }
+    // drawArrays 的实际绘制范围是 verticesStart/count；indexCount 可为零，不能据此静默丢失表面。
+    const primitiveIndices = unindexed ? Array.from({ length: count }, (_, offset) => start + offset)
+      : Array.from(indices!).slice(start, start + count);
+    if (primitiveIndices.some(value => !Number.isInteger(value) || value < 0 || value >= vertexCount)) {
+      throw new Error(`对象「${mesh.name}」的 primitive:${index} 三角面索引超出顶点范围。`);
+    }
+    primitives.push({ index, indices: primitiveIndices, material });
+  }
   let normals = source.getVerticesData(VertexBuffer.NormalKind);
   if (!normals) {
     const calculated: number[] = [];
-    VertexData.ComputeNormals(positions, indices, calculated);
+    VertexData.ComputeNormals(positions, unindexed ? primitives.flatMap(part => part.indices) : indices!, calculated);
     normals = calculated;
   }
   const uvs = source.getVerticesData(VertexBuffer.UVKind), uvs2 = source.getVerticesData(VertexBuffer.UV2Kind);
   const colors = source.useVertexColors ? source.getVerticesData(VertexBuffer.ColorKind) : null;
   const tangents = source.getVerticesData(VertexBuffer.TangentKind);
   const matrix = identity.worldMatrix ?? mesh.computeWorldMatrix(true);
-  const groups = source.subMeshes?.length ? source.subMeshes : [{ materialIndex: 0, indexStart: 0, indexCount: indices.length }];
   const result: LightingBakeMeshInput[] = [];
-  for (let i = 0; i < groups.length; i++) {
-    const group = groups[i];
-    if (!group.indexCount) continue;
-    const material = source.material instanceof MultiMaterial ? source.material.subMaterials[group.materialIndex] : mesh.material;
+  for (const primitive of primitives) {
     result.push({
-      key: `${identity.key}/primitive:${i}`, entityId: identity.entityId, nodeKey: identity.nodeKey,
-      name: mesh.name, positions: Array.from(positions), normals: Array.from(normals),
-      indices: Array.from(indices).slice(group.indexStart, group.indexStart + group.indexCount),
+      key: `${identity.key}/primitive:${primitive.index}`, entityId: identity.entityId, nodeKey: identity.nodeKey,
+      name: mesh.name, positions: Array.from(positions), normals: Array.from(normals), indices: primitive.indices,
       ...(uvs ? { uvs: Array.from(uvs) } : {}), ...(uvs2 ? { uvs2: Array.from(uvs2) } : {}),
       ...(colors ? { colors: Array.from(colors) } : {}), worldMatrix: Array.from(matrix.asArray()),
       ...(tangents ? { tangents: Array.from(tangents) } : {}),
-      material: await exportLightingMaterial(material, capture, mesh), receiver: identity.receiver,
+      material: await exportLightingMaterial(primitive.material, capture, mesh), receiver: identity.receiver,
     });
   }
   return result;

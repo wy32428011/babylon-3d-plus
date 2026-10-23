@@ -1,14 +1,14 @@
-import { useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   LIGHTING_POLICY_FIELDS, matchesLightingPolicyTarget, type LightingPolicyNodeRule, type LightingPolicyRule,
   type LightingPolicyValues, type SceneLightingPolicy,
 } from '../../../electron/shared/sceneLightingPolicy';
 import type { SceneDocument } from '../model/SceneDocument';
-import { getLightingManagerResources, LIGHTING_FIELD_LABELS, lightingDeviceTypeLabel, lightingModelReferenceKey, type LightingManagerRow } from './lightingBakeManagerModel';
+import { areLightingManagerPagePropsEqual, getLightingManagerResources, LIGHTING_FIELD_LABELS, lightingDeviceTypeLabel, lightingModelReferenceKey, type LightingManagerRow } from './lightingBakeManagerModel';
 import { LightingManagerIcon } from './LightingBakeManagerWidgets';
 
 type Props = {
-  scene: SceneDocument; policy: SceneLightingPolicy; rows: LightingManagerRow[]; disabled: boolean;
+  scene: SceneDocument; policy: SceneLightingPolicy; rows: LightingManagerRow[]; disabled: boolean; active?: boolean; ruleFocus?: { ruleId: string; sequence: number };
   onChange: (policy: SceneLightingPolicy) => void; onInspect: (entityIds: string[]) => void;
 };
 function valueSelect(value: LightingPolicyValues[keyof LightingPolicyValues] | undefined) {
@@ -40,9 +40,10 @@ export function LightingPolicyFields({ values, disabled, onChange, prefix, compa
 }
 
 /** 规则保存在场景中，排序和编辑只改变草稿，现有与后续实例共用同一份规则。 */
-export function LightingBakeManagerRules({ scene, policy, rows, disabled, onChange, onInspect }: Props) {
+function LightingBakeManagerRulesPage({ scene, policy, rows, disabled, onChange, onInspect, ruleFocus }: Props) {
   const [selectedId, setSelectedId] = useState<string>('defaults');
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  useEffect(() => { if (ruleFocus) setSelectedId(ruleFocus.ruleId); }, [ruleFocus]);
   const resources = useMemo(() => getLightingManagerResources(rows), [rows]);
   const deviceTypes = useMemo(() => [...new Set(rows.map(row => row.context?.deviceType).filter((value): value is string => Boolean(value)))].sort(), [rows]);
   const folders = scene.entityIds.map(id => scene.entities[id]).filter(entity => entity?.isFolder);
@@ -216,3 +217,5 @@ export function LightingBakeManagerRules({ scene, policy, rows, disabled, onChan
     </div>
   </div>;
 }
+
+export const LightingBakeManagerRules = memo(LightingBakeManagerRulesPage, areLightingManagerPagePropsEqual);

@@ -545,6 +545,10 @@ export class SceneRuntime {
 
   syncLighting(document: SceneDocument): void { return this.environment.syncLighting(document); }
 
+  preflightLightingBake(document: SceneDocument, signal?: AbortSignal) { return this.environment.preflightLightingBake(document, signal); }
+
+  setLightingDraftPreview(preview: import('../../editor/store/lightingManagementState').LightingDraftPreview | null) { return this.environment.setLightingDraftPreview(preview); }
+
   getLightingClassification(): LightingClassificationEntry[] { return this.environment.getLightingClassification(); }
 
   setLightingPreview(debugVisible: boolean, beforeBake: boolean): void { return this.environment.setLightingPreview(debugVisible, beforeBake); }
@@ -552,6 +556,8 @@ export class SceneRuntime {
   focusLightingNode(entityId: string, nodeKey: string): void { return this.environment.focusLightingNode(entityId, nodeKey); }
 
   getLightingBakeRuntimeError(): string | null { return this.environment.getLightingBakeRuntimeError(); }
+
+  getLightingRuntimeDiagnostic() { return this.environment.getLightingRuntimeDiagnostic(); }
 
   getHybridLightingMetrics() { return this.environment.getHybridLightingMetrics(); }
 

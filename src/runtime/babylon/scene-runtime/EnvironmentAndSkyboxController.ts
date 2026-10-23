@@ -1,3 +1,7 @@
+import { captureLightingInputWithMetrics } from '../lightingCaptureMetrics';
+import { encodeLightingBakeTransport } from '../../../../electron/shared/sceneLightingBakeBinary';
+import type { LightingDraftPreview } from '../../../editor/store/lightingManagementState';
+import type { LightingBakePreflight } from '../../../../electron/shared/sceneLightingBakePreflight';
 import { awaitLightingTaskStep } from '../lightingBakeTask';
 import { SceneLightingRuntime } from '../SceneLightingRuntime';
 import { appendGeneratedLightingSources, collectLightingRuntimeSources, type LightingBatchOwner, type LightingSourceOwner } from '../lightingClassificationRuntime';
@@ -147,6 +151,13 @@ export class EnvironmentAndSkyboxController {
   /** 统一光照是唯一参数来源；旧扁平字段仅在阴影算法边界临时派生。 */
   syncLighting(document: SceneDocument): void {
     this.dependencies.document.shadowDocument = document;
+    void this.syncLightingPresentation(document).catch(error => {
+      Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['环境光照显示失败：' + (error instanceof Error ? error.message : String(error))]);
+    });
+    this.lightingRuntime.sync(document);
+  }
+
+  private syncLightingPresentation(document: SceneDocument): Promise<void> {
     const lighting = getSceneLightingConfig(document);
     this.lightRigRuntime.sync(lighting);
     if (this.allowDayNightCycle !== lighting.allowDayNightCycle) {
@@ -162,10 +173,7 @@ export class EnvironmentAndSkyboxController {
     this.shadowRuntime.applySettings({ ...lighting.shadows, mode: 'hybrid', catcherEnabled: false,
       sunAzimuthDegrees: lighting.main.azimuthDegrees, sunElevationDegrees: lighting.main.elevationDegrees,
       sunIntensity: lighting.main.intensity, fillIntensity: lighting.fill.intensity, iblIntensityMax: lighting.environmentIntensity });
-    void this.environmentRuntime.syncLighting(lighting.shadows).catch(error => {
-      Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['环境光照显示失败：' + (error instanceof Error ? error.message : String(error))]);
-    });
-    this.lightingRuntime.sync(document);
+    return this.environmentRuntime.syncLighting(lighting.shadows);
   }
 
   getLightingClassification(): LightingClassificationEntry[] { return this.lightingRuntime.getClassification(); }
@@ -174,11 +182,58 @@ export class EnvironmentAndSkyboxController {
   getLightingBakeRuntimeError(): string | null {
     const error = this.lightingRuntime.getError();
     if (error) return error;
-    const errors = this.shadowRuntime.getHybridMetrics().validationErrors;
+    const errors = this.shadowRuntime.getValidationErrors();
     return errors?.length ? errors.join('；') : null;
   }
+  getLightingRuntimeDiagnostic() { return this.lightingRuntime.getDiagnostic(); }
   getHybridLightingMetrics() { return this.shadowRuntime.getHybridMetrics(); }
   waitForLightingReady(): Promise<void> { return this.lightingRuntime.whenReady(); }
+
+  private draftPreviewGeneration = 0;
+
+  async setLightingDraftPreview(preview: LightingDraftPreview | null): Promise<void> {
+    const document = this.dependencies.document.shadowDocument;
+    if (!document) return;
+    if (preview && this.dependencies.effects.poiEffectRuntime.isDayNightCycleActive()) throw new Error('昼夜周期正在改变照明，请先暂停周期，再临时预览草稿。');
+    const generation = ++this.draftPreviewGeneration;
+    try {
+      this.lightingRuntime.setTemporaryLightingPreview(preview ? preview.suppressIndirect : true, preview?.suppressIndirect ?? true);
+      const source = preview ? { ...document, sceneSettings: { ...document.sceneSettings,
+        lighting: { ...preview.lighting, allowDayNightCycle: document.sceneSettings.lighting.allowDayNightCycle },
+        appearance: preview.appearance } } : document;
+      this.appearanceSignature = ''; this.skyboxLightingSignature = '';
+      const synchronization = this.syncLightingPresentation(source);
+      this.syncAppearance(source);
+      await synchronization;
+      // 资源来源切换是异步的；原环境真正就绪后才重新启用原 GI。
+      if (!preview) {
+        const started = Date.now();
+        while (generation === this.draftPreviewGeneration && this.skyboxRuntime.getReadiness().phase === 'loading') {
+          if (Date.now() - started > 30_000) throw new Error('恢复原环境照明超时，请检查环境资源。');
+          await new Promise(resolve => setTimeout(resolve, 16));
+        }
+        const readiness = this.skyboxRuntime.getReadiness();
+        if (generation === this.draftPreviewGeneration && readiness.phase === 'error') throw new Error(readiness.message ?? '原环境照明恢复失败。');
+      }
+    } finally {
+      // 同步抛错、异步失败和超时都必须归还正常验证，不能永久跳过 GI 失效。
+      if (!preview && generation === this.draftPreviewGeneration) this.lightingRuntime.setTemporaryLightingPreview(false, false);
+    }
+  }
+
+  async preflightLightingBake(document: SceneDocument, signal?: AbortSignal): Promise<LightingBakePreflight> {
+    if (this.lightingBakeRunning) throw new Error('请等待当前烘焙任务结束，再检查预算。');
+    if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
+      || [...this.dependencies.assets.models.values()].some(model => model.externalScriptStarting || model.cancelLoad)) throw new Error('请等待全部模型与参数几何生成完成后再检查预算。');
+    const api = typeof window !== 'undefined' ? window.editorApi : undefined;
+    if (!api?.preflightLightingBake) throw new Error('烘焙前检查需要桌面编辑器。');
+    await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
+    // 环境提交可能晚于最后一个 mesh 事件；显式检查必须读取当前完整源目录。
+    this.lightingRuntime.markDirty();
+    const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(crypto.randomUUID(), signal), signal);
+    signal?.throwIfAborted();
+    return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input)), signal);
+  }
 
   /** 后台任务只读取稳定快照；结果仍匹配当前场景后才应用，文档提交由编辑器事务负责。 */
   async bakeLighting(document: SceneDocument, signal?: AbortSignal, progress?: (message: string, fraction?: number, phase?: string) => void): Promise<SceneLightingBakeSnapshot> {
@@ -208,9 +263,12 @@ export class EnvironmentAndSkyboxController {
       await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
       this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
       this.lightingRuntime.markDirty();
-      const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(jobId, signal, progress), signal);
+      const captured = await captureLightingInputWithMetrics(sample => this.lightingRuntime.captureBakeInput(jobId, signal, message => {
+        sample(); progress?.(message, 0, 'preparing');
+      }), signal);
+      const input = { ...captured.value, captureMetrics: captured.metrics };
       check();
-      const result = await awaitLightingTaskStep(api.startLightingBake(input), signal);
+      const result = await awaitLightingTaskStep(api.startLightingBake(encodeLightingBakeTransport(input)), signal);
       check();
       progress?.('光照已生成，正在应用材质并等待画面就绪…', 0.98, 'applying');
       await this.lightingRuntime.applySnapshot(result, signal, async () => {
@@ -341,6 +399,7 @@ export class EnvironmentAndSkyboxController {
       onSnapshot: snapshot => {
         this.context.notifyEnvironmentSnapshot(snapshot);
         this.dependencies.readiness.invalidateModelStatistics();
+        this.lightingRuntime?.markDirty();
       },
       pushLog: this.context.pushLog,
     });

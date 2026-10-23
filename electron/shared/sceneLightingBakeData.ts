@@ -1,6 +1,12 @@
+import { normalizeLightingProbeVolumes, type LightingProbeVolume } from './sceneLightingProbeVolumes.ts';
+
 /** 光照配置与烘焙合同共用的基础数据；不反向依赖配置、编辑器或运行时。 */
 export type SceneLightingBakeSettings = {
   enabled: boolean;
+  /** 缺省使用稳定 CPU 路径；执行设备不改变物理输入签名。 */
+  device?: 'cpu' | 'auto' | 'gpu';
+  /** 启用区域为空时沿用全场包围盒，旧场景无需迁移。 */
+  probeVolumes?: LightingProbeVolume[];
   quality: 'preview' | 'standard' | 'high';
   atlasSize: 1024 | 2048 | 4096;
   texelsPerMeter: number;
@@ -49,6 +55,8 @@ export function normalizeSceneLightingBakeSettings(value: unknown): SceneLightin
   const v = object(value), d = DEFAULT_LIGHTING_BAKE_SETTINGS;
   return {
     enabled: typeof v.enabled === 'boolean' ? v.enabled : d.enabled,
+    ...(['cpu', 'auto', 'gpu'].includes(String(v.device)) ? { device: v.device as 'cpu' | 'auto' | 'gpu' } : {}),
+    ...(v.probeVolumes === undefined ? {} : { probeVolumes: normalizeLightingProbeVolumes(v.probeVolumes) }),
     quality: v.quality === 'preview' || v.quality === 'high' ? v.quality : 'standard',
     atlasSize: v.atlasSize === 1024 || v.atlasSize === 4096 ? v.atlasSize : 2048,
     texelsPerMeter: finite(v.texelsPerMeter, d.texelsPerMeter, 4, 256),

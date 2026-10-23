@@ -1,7 +1,9 @@
-import type { SceneLightingBakeSettings, SceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeContract';
+import type { LightingBakeEngineStatus, SceneLightingBakeSettings, SceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeContract';
 import type { SceneAppearanceConfig, SceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { SceneDocument } from '../model/SceneDocument';
 import type { LightingManagerPresetId } from './lightingBakeManagerModel';
+import type { LightingProbeBounds } from '../../../electron/shared/sceneLightingProbeVolumes';
+import { LightingBakeManagerProbeVolumes } from './LightingBakeManagerProbeVolumes';
 import { LightingBakeManagerAppearance } from './LightingBakeManagerAppearance';
 import { LightingBakeManagerLighting } from './LightingBakeManagerLighting';
 import { LightingManagerBadge, LightingManagerIcon, LightingManagerNumberField, LightingManagerToggle, formatLightingBytes } from './LightingBakeManagerWidgets';
@@ -14,6 +16,17 @@ export type LightingBakeManagerOverviewProps = {
   resultLabel: string;
   disabled: boolean;
   dirty: boolean;
+  previewDraftActive: boolean;
+  previewDraftSuppressed: boolean;
+  previewDraftRules: boolean;
+  preflightBusy: boolean;
+  probeBounds?: LightingProbeBounds;
+  engineStatus: LightingBakeEngineStatus | null;
+  engineStatusLoading: boolean;
+  onRefreshDevices: () => void;
+  onConfigureEngine: () => void;
+  onPreviewDraft: () => void;
+  onCheck: () => void;
   preview: string | null;
   debug: boolean;
   comparison: boolean;
@@ -49,10 +62,22 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
       </section>
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-bake-title">
         <h3 id="lighting-overview-bake-title">烘焙参数</h3>
+        <div className="lighting-manager-engine-summary"><div><strong>本机烘焙引擎</strong><LightingManagerBadge tone={props.engineStatus?.available ? 'success' : 'warning'}>
+          {props.engineStatusLoading ? '正在检测…' : props.engineStatus?.available ? `Blender ${props.engineStatus.version ?? ''} · 已就绪` : '未找到可用 Blender'}
+        </LightingManagerBadge></div><button type="button" className="lighting-manager-primary" disabled={props.busy} onClick={props.onConfigureEngine}>配置引擎…</button></div>
         <label className="lighting-manager-field"><span>质量</span><select aria-label="烘焙质量" value={bake.quality} disabled={disabled}
           onChange={event => onBakeChange({ quality: event.target.value as SceneLightingBakeSettings['quality'] })}>
           <option value="preview">快速预览</option><option value="standard">标准</option><option value="high">高质量</option>
         </select></label>
+        <label className="lighting-manager-field"><span>计算设备</span><select aria-label="烘焙计算设备" value={bake.device ?? 'cpu'} disabled={disabled}
+          onChange={event => onBakeChange({ device: event.target.value as SceneLightingBakeSettings['device'] })}>
+          <option value="cpu">CPU（默认）</option><option value="auto">自动选择可用设备</option><option value="gpu">GPU（需要可用设备）</option>
+        </select></label>
+        <div className="lighting-manager-device-status"><p className="lighting-manager-note">{props.engineStatusLoading ? '正在检测烘焙引擎与设备…' : props.engineStatus?.available
+          ? (props.engineStatus.devices?.length ? props.engineStatus.devices.map(device => device.type + ' · ' + device.name + ' (' + device.backend + ')').join('；') : '引擎可用，尚未提供设备清单。')
+          : props.engineStatus?.message ?? '尚未检测本机烘焙设备。'}</p>
+          <button type="button" disabled={props.engineStatusLoading || props.busy} onClick={props.onRefreshDevices}>检测设备</button></div>
+        <p className="lighting-manager-note">设备选择不影响已有 GI 有效性；GPU 需要可用设备，自动模式可回退 CPU。实际设备及回退原因记录在任务日志中。</p>
         <label className="lighting-manager-field"><span>图集尺寸</span><select aria-label="图集尺寸" value={bake.atlasSize} disabled={disabled}
           onChange={event => onBakeChange({ atlasSize: Number(event.target.value) as SceneLightingBakeSettings['atlasSize'] })}>
           {[1024, 2048, 4096].map(value => <option key={value} value={value}>{value} × {value}</option>)}
@@ -63,6 +88,7 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
           onChange={probeSpacing => onBakeChange({ probeSpacing })} />
         <LightingManagerNumberField label="贴图预算" value={bake.maxTextureMiB} unit="MiB" min={16} max={4096} step={16} disabled={disabled}
           onChange={maxTextureMiB => onBakeChange({ maxTextureMiB })} />
+        <LightingBakeManagerProbeVolumes volumes={bake.probeVolumes} bounds={props.probeBounds} disabled={disabled} onChange={probeVolumes => onBakeChange({ probeVolumes })} />
         <details className="lighting-manager-advanced"><summary>高级阴影设置</summary>
           <label className="lighting-manager-field"><span>阴影质量</span><select aria-label="阴影质量" value={shadows.quality}
             disabled={disabled || !shadows.enabled} onChange={event => onShadowChange({ quality: event.target.value as SceneLightingConfig['shadows']['quality'] })}>
@@ -96,8 +122,9 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
           : <div className="lighting-manager-empty"><LightingManagerIcon name="cube" size={38} /><p>正在读取当前场景画面</p>
             <button type="button" onClick={props.onRefresh}>刷新场景预览</button></div>}
         <div className="lighting-manager-preview-actions">
+          <button type="button" disabled={props.busy || props.motionPreview || props.preflightBusy || (!props.dirty && !props.previewDraftActive)} aria-pressed={props.previewDraftActive} onClick={props.onPreviewDraft}>{props.previewDraftActive ? '恢复已应用配置' : '临时预览草稿'}</button>
           <button type="button" aria-label="刷新场景预览" title="刷新场景预览" onClick={props.onRefresh}><LightingManagerIcon name="refresh" size={16} /></button>
-          <button type="button" disabled={props.busy || (props.dirty && !props.motionPreview)} onClick={props.onMotion}>
+          <button type="button" disabled={props.busy || props.previewDraftActive || props.preflightBusy || (props.dirty && !props.motionPreview)} onClick={props.onMotion}>
             <LightingManagerIcon name="motion" size={15} />{props.motionPreview ? '停止运动预览' : '运动预览'}
           </button>
         </div>
@@ -107,10 +134,13 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
           {props.result ? <p>{props.result.statistics.atlasCount} 张图集<span>·</span>{props.result.statistics.probeCount} 个探针<span>·</span>{formatLightingBytes(props.result.statistics.textureBytes)}</p>
             : <p>尚无已保存的间接光结果</p>}
         </div>
-        <button type="button" aria-pressed={props.comparison} disabled={props.busy || !props.result || (props.resultLabel !== '可用' && !props.comparison)}
+        <button type="button" aria-pressed={props.comparison} disabled={props.busy || props.previewDraftActive || !props.result || (props.resultLabel !== '可用' && !props.comparison)}
           onClick={() => props.onComparison(!props.comparison)}>{props.comparison ? '恢复烘焙效果' : '查看烘焙前'}</button>
       </div>
-      <p className="lighting-manager-preview-caption">{props.dirty ? '画面为当前已应用配置；应用草稿后刷新。' : '当前场景真实画面'}{props.motionPreview ? ' · 运动预览中' : ''}</p>
+      <p className="lighting-manager-preview-caption">{props.previewDraftActive ? '正在临时预览照明与显示，尚未应用。' : props.dirty ? '画面为当前已应用配置；可临时预览或应用草稿。' : '当前场景真实画面'}{props.motionPreview ? ' · 运动预览中' : ''}</p>
+      {props.previewDraftActive && props.previewDraftSuppressed && <p className="lighting-manager-warning">草稿改变 GI 输入，临时预览期间停用旧间接光；恢复后重新校验已有结果。</p>}
+      {props.previewDraftActive && props.previewDraftRules && <p className="lighting-manager-note">分类规则和对象例外只在列表中推演；临时画面仅预览照明与显示。</p>}
+      <button type="button" disabled={props.disabled || props.previewDraftActive || props.preflightBusy} onClick={props.onCheck}>{props.preflightBusy ? '正在检查…' : props.dirty ? '应用并进行烘焙前检查' : '烘焙前检查'}</button>
     </section>
   </div>;
 }

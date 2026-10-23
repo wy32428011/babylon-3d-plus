@@ -56,7 +56,11 @@ export const createLightingManagerSlice: EditorSlice<
     } } : {}),
     lightingManagerPreviewRequest: state.lightingManagerPreviewRequest + 1,
   })),
-  closeLightingManager: () => set({ lightingManagerOpen: false, lightingManagerPreview: null, lightingManagerPreviewError: null }),
+  closeLightingManager: () => set(state => ({ lightingManagerOpen: false, lightingManagerPreview: null, lightingManagerPreviewError: null,
+    lightingDraftPreview: null, lightingBakePreflightRequest: null,
+    // 关闭会中止视口捕获；同步释放checking，避免同场景重开后永远禁用检查与烘焙。
+    ...(state.lightingBakePreflight.phase === 'checking' ? { lightingBakePreflight: { phase: 'idle' as const } } : {}),
+  })),
   setLightingManagerTab: tab => set({ lightingManagerTab: tab }),
   refreshLightingManagerPreview: () => set(state => ({ lightingManagerPreviewRequest: state.lightingManagerPreviewRequest + 1 })),
   applyLightingManagementDraft: draft => {
@@ -68,13 +72,13 @@ export const createLightingManagerSlice: EditorSlice<
     }
     const prepared = prepareLightingManagementDraft(state.scene, state.sceneSessionId, draft, state.lightingClassification);
     if (!prepared.ok || !prepared.scene) return prepared;
-    if (prepared.scene === state.scene) return { ok: true, message: '配置没有变化。' };
+    if (prepared.scene === state.scene) { set({ lightingDraftPreview: null }); return { ok: true, message: '配置没有变化。' }; }
     const nextScene = prepared.scene;
     set(current => {
       // 验证与写入保持同步；一条编辑命令同时记录规则、参数及集中例外。
       if (current.scene !== state.scene || current.sceneSessionId !== state.sceneSessionId) return current;
       const command = updateSceneDocumentCommand('应用集中光照配置', () => nextScene);
-      return { ...executeCommand(current.scene, current.history, command),
+      return { ...executeCommand(current.scene, current.history, command), lightingDraftPreview: null,
         lightingManagerPreviewRequest: current.lightingManagerPreviewRequest + 1,
         logs: prependLog(current.logs, '已应用集中光照配置；可统一撤销，受影响结果需重新烘焙。') };
     });
@@ -108,6 +112,7 @@ export const createLightingManagerSlice: EditorSlice<
     if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '烘焙材质与光照');
     if (state.lightingBakeRequest
       || ['preparing', 'baking', 'applying'].includes(state.lightingBakeStatus.phase)) return state;
+    if (state.lightingDraftPreview) return { lightingBakeStatus: { phase: 'error', message: '请先恢复已应用配置或应用草稿，再开始烘焙。' } };
     if (!requiresSceneLightingBake(state.scene)) return { lightingBakeStatus: { phase: 'idle', message: '当前没有静态接收表面，无需烘焙；动态对象继续使用实时阴影。' } };
     if (state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading' || state.cadImportProgress?.active) {
       return { lightingBakeStatus: { phase: 'error', message: '请等待场景资源加载完成，再开始烘焙。' } };

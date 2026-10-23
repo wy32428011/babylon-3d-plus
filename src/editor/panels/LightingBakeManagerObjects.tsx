@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { matchesLightingPolicyTarget, type LightingPolicyField } from '../../../electron/shared/sceneLightingPolicy';
 import type { SceneDocument } from '../model/SceneDocument';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import type { LightingManagerFocus } from '../store/lightingManagementState';
 import {
-  EMPTY_LIGHTING_BULK_VALUES, getLightingManagerEntities, getLightingManagerResources, LIGHTING_FIELD_LABELS,
+  areLightingManagerPagePropsEqual, EMPTY_LIGHTING_BULK_VALUES, getLightingManagerEntities, getLightingManagerResources, getLightingManagerScopeCounts, LIGHTING_FIELD_LABELS,
   lightingDeviceTypeLabel, type LightingManagerBulkValues, type LightingManagerRow, type LightingManagerSelection,
 } from './lightingBakeManagerModel';
 import { LightingManagerBadge, LightingManagerIcon } from './LightingBakeManagerWidgets';
 
 type Props = {
-  scene: SceneDocument; rows: LightingManagerRow[]; focus: LightingManagerFocus | null; disabled: boolean;
+  scene: SceneDocument; rows: LightingManagerRow[]; focus: LightingManagerFocus | null; disabled: boolean; active?: boolean;
   onStage: (selection: LightingManagerSelection[], values: LightingManagerBulkValues, reset: boolean) => { ok: boolean; message?: string };
   onFocus: (selection: LightingManagerSelection) => void; onRules: () => void;
 };
@@ -45,7 +45,7 @@ function fieldText(items: LightingManagerRow[], field: LightingPolicyField) {
 }
 
 /** 对象页只暂存显式例外；树列表展示纯解析器返回的有效值和来源。 */
-export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onStage, onFocus, onRules }: Props) {
+function LightingBakeManagerObjectsPage({ scene, rows, focus, disabled, onStage, onFocus, onRules }: Props) {
   const [scope, setScope] = useState('all');
   const [search, setSearch] = useState('');
   const [mobility, setMobility] = useState('all');
@@ -84,7 +84,8 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
   }, [focus, rows]);
   useEffect(() => { setPage(0); }, [scope, search, mobility, source, onlyIssues, pageSize]);
 
-  const belongsToFolder = (row: LightingManagerRow, folderId: string) => {
+  const scopeCounts = useMemo(() => getLightingManagerScopeCounts(scene, rows), [scene, rows]);
+  const belongsToFolder = useCallback((row: LightingManagerRow, folderId: string) => {
     if (row.context?.ancestorIds?.includes(folderId)) return true;
     const visited = new Set<string>();
     for (let id = scene.entities[row.ownerEntityId]?.parentId; id && !visited.has(id); id = scene.entities[id]?.parentId) {
@@ -92,7 +93,11 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
       visited.add(id);
     }
     return false;
-  };
+  }, [scene.entities]);
+  const query = search.trim().toLocaleLowerCase();
+  const filtering = scope !== 'all' || Boolean(query) || mobility !== 'all' || source !== 'all' || onlyIssues;
+  const matchingGroups = useMemo(() => {
+  const resourceOption = scope.startsWith('resource:') ? resources.find(resource => resource.key === scope.slice(9)) : undefined;
   const rowMatchesScope = (row: LightingManagerRow) => {
     if (scope === 'all') return true;
     if (scope === 'environment') return row.ownerEntityId === '$environment';
@@ -102,15 +107,13 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
     if (scope.startsWith('group:')) return belongsToFolder(row, scope.slice(6));
     if (scope.startsWith('type:')) return row.context?.deviceType === scope.slice(5);
     if (scope.startsWith('resource:')) {
-      const option = resources.find(resource => resource.key === scope.slice(9));
+      const option = resourceOption;
       if (!option) return false;
       return Boolean(row.context && matchesLightingPolicyTarget({ kind: 'resource', model: option.reference }, row.context));
     }
     return true;
   };
-  const query = search.trim().toLocaleLowerCase();
-  const filtering = scope !== 'all' || Boolean(query) || mobility !== 'all' || source !== 'all' || onlyIssues;
-  const matchingGroups = groups.map(group => {
+  return groups.map(group => {
     const filtered = group.rows.filter(row => {
       if (!rowMatchesScope(row) || (onlyIssues && !hasIssues(row))) return false;
       if (mobility !== 'all' && rowMobility(row) !== mobility) return false;
@@ -126,16 +129,17 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
     const unloadedMatches = !group.rows.length && scope === 'all' && mobility === 'all' && source === 'all' && !onlyIssues && (!query || group.name.toLocaleLowerCase().includes(query));
     return { group, filtered, visible: filtered.length > 0 || unloadedMatches };
   }).filter(item => item.visible);
-  const items: TableItem[] = matchingGroups.flatMap(({ group, filtered }) => [
+  }, [groups, scope, query, mobility, source, onlyIssues, focus, resources, belongsToFolder]);
+  const items: TableItem[] = useMemo(() => matchingGroups.flatMap(({ group, filtered }) => [
     { key: 'entity:' + group.id, group, selection: { kind: 'entity' as const, entityId: group.id } },
     ...((expanded.has(group.id) || filtering) ? filtered.map(row => ({ key: 'node:' + row.key, group, row, selection: { kind: 'node' as const, key: row.key } })) : []),
-  ]);
+  ]), [matchingGroups, expanded, filtering]);
   const lastPage = Math.max(0, Math.ceil(items.length / pageSize) - 1), currentPage = Math.min(page, lastPage);
   const shown = items.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
-  const selectionItems: TableItem[] = groups.flatMap(group => [
+  const selectionItems: TableItem[] = useMemo(() => groups.flatMap(group => [
     { key: 'entity:' + group.id, group, selection: { kind: 'entity' as const, entityId: group.id } },
     ...group.rows.map(row => ({ key: 'node:' + row.key, group, row, selection: { kind: 'node' as const, key: row.key } })),
-  ]).filter(item => selected.has(item.key));
+  ]).filter(item => selected.has(item.key)), [groups, selected]);
   const selectedNodes = selectionItems.filter(item => item.row).length, selectedEntities = selectionItems.length - selectedNodes;
   const selectedRows = selectionItems.flatMap(item => item.row ? [item.row] : item.group.rows);
   const canReset = selectionItems.length > 0 && !disabled && selectionItems.every(item => item.group.stored && !item.group.locked
@@ -155,7 +159,7 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
     const result = onStage(selectionItems.map(item => item.selection), values, reset);
     setMessage(result.ok ? `${selectionLabel} 已暂存${reset ? '恢复继承' : '例外设置'}，应用后生效。` : result.message ?? '无法更新所选对象。');
   }
-  function countScope(test: (row: LightingManagerRow) => boolean) { return new Set(rows.filter(test).map(row => row.ownerEntityId)).size; }
+  const countScope = (key: string) => scopeCounts.get(key) ?? 0;
 
   return <div className="lighting-manager-object-columns">
     <aside className="lighting-manager-card lighting-manager-scopes" aria-label="对象管理范围">
@@ -164,14 +168,14 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
       {rows.some(row => row.ownerEntityId === '$environment') && <button type="button" aria-pressed={scope === 'environment'} onClick={() => setScope('environment')}><LightingManagerIcon name="layers" /><span>场景环境</span><b>1</b></button>}
       {scope === 'focus' && <button type="button" aria-pressed onClick={() => setScope('focus')}><LightingManagerIcon name="focus" /><span>当前定位对象</span><b>{focus?.entityIds.length ?? 0}</b></button>}
       {folders.length > 0 && <details open><summary>场景分组</summary>{folders.map(folder => <button type="button" key={folder.id} aria-pressed={scope === 'group:' + folder.id} onClick={() => setScope('group:' + folder.id)}>
-        <LightingManagerIcon name="folder" size={17} /><span>{folder.name}</span><b>{countScope(row => belongsToFolder(row, folder.id))}</b></button>)}</details>}
+        <LightingManagerIcon name="folder" size={17} /><span>{folder.name}</span><b>{countScope('group:' + folder.id)}</b></button>)}</details>}
       {deviceTypes.length > 0 && <details open><summary>设备类型</summary>{deviceTypes.map(type => <button type="button" key={type} aria-pressed={scope === 'type:' + type} onClick={() => setScope('type:' + type)}>
-        <LightingManagerIcon name="motion" size={17} /><span>{lightingDeviceTypeLabel(type)}</span><b>{countScope(row => row.context?.deviceType === type)}</b></button>)}</details>}
+        <LightingManagerIcon name="motion" size={17} /><span>{lightingDeviceTypeLabel(type)}</span><b>{countScope('type:' + type)}</b></button>)}</details>}
       {resources.length > 0 && <details open={resources.length <= 8}><summary>模型资源</summary>{resources.map(resource => <button type="button" key={resource.key}
         aria-pressed={scope === 'resource:' + resource.key} onClick={() => setScope('resource:' + resource.key)}><LightingManagerIcon name="cube" size={17} /><span>{resource.name}</span><b>{resource.count}</b></button>)}</details>}
       <div className="lighting-manager-scope-shortcuts"><button type="button" aria-pressed={scope === 'exceptions'} onClick={() => setScope('exceptions')}>
-        <LightingManagerIcon name="rule" size={17} /><span>集中例外</span><b>{countScope(row => Boolean(row.effective?.preservedExceptionFields.length))}</b></button>
-        <button type="button" aria-pressed={scope === 'issues'} onClick={() => setScope('issues')}><LightingManagerIcon name="warning" size={17} /><span>需要检查</span><b>{countScope(hasIssues)}</b></button></div>
+        <LightingManagerIcon name="rule" size={17} /><span>集中例外</span><b>{countScope('exceptions')}</b></button>
+        <button type="button" aria-pressed={scope === 'issues'} onClick={() => setScope('issues')}><LightingManagerIcon name="warning" size={17} /><span>需要检查</span><b>{countScope('issues')}</b></button></div>
     </aside>
     <section className="lighting-manager-card lighting-manager-object-table">
       <div className="lighting-manager-object-filters">
@@ -246,3 +250,5 @@ export function LightingBakeManagerObjects({ scene, rows, focus, disabled, onSta
     </aside>
   </div>;
 }
+
+export const LightingBakeManagerObjects = memo(LightingBakeManagerObjectsPage, areLightingManagerPagePropsEqual);

@@ -100,9 +100,17 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 });
 
 contextBridge.exposeInMainWorld('editorApi', {
-  startLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput): Promise<import('./shared/sceneLightingBakeContract.js').SceneLightingBakeSnapshot> => ipcRenderer.invoke('lighting-bake:start', input),
+  startLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakeContract.js').SceneLightingBakeSnapshot> => ipcRenderer.invoke('lighting-bake:start', input),
+  preflightLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakePreflight.js').LightingBakePreflight> => ipcRenderer.invoke('lighting-bake:preflight', input),
+  readLightingBakeTaskLog: (taskId: string): Promise<string> => ipcRenderer.invoke('lighting-bake:log', taskId),
+  getLightingBakeHistory: (): Promise<import('./shared/sceneLightingBakeTasks.js').LightingBakeTaskHistory> => ipcRenderer.invoke('lighting-bake:history'),
+  cleanupLightingBakeTasks: (taskIds: string[]): Promise<{ removedTaskIds: string[]; removedBytes: number }> => ipcRenderer.invoke('lighting-bake:cleanup', taskIds),
   cancelLightingBake: (jobId: string): Promise<boolean> => ipcRenderer.invoke('lighting-bake:cancel', jobId),
   getLightingBakeEngineStatus: (): Promise<import('./shared/sceneLightingBakeContract.js').LightingBakeEngineStatus> => ipcRenderer.invoke('lighting-bake:engineStatus'),
+  getLightingBakeEngineConfiguration: (): Promise<import('./shared/lightingBakeEngineConfiguration.js').LightingBakeEngineConfiguration> => ipcRenderer.invoke('lighting-bake:engineConfiguration'),
+  chooseLightingBakeEnginePath: (): Promise<string | null> => ipcRenderer.invoke('lighting-bake:chooseEnginePath'),
+  detectLightingBakeEnginePath: (candidate: string): Promise<import('./shared/sceneLightingBakeContract.js').LightingBakeEngineStatus> => ipcRenderer.invoke('lighting-bake:detectEnginePath', candidate),
+  saveLightingBakeEngineConfiguration: (candidate: string | null): Promise<import('./shared/lightingBakeEngineConfiguration.js').LightingBakeEngineConfiguration> => ipcRenderer.invoke('lighting-bake:saveEngineConfiguration', candidate),
   onLightingBakeProgress: (handler: (progress: import('./shared/sceneLightingBakeContract.js').LightingBakeProgress) => void): (() => void) => {
     const listener = (_event: IpcRendererEvent, payload: import('./shared/sceneLightingBakeContract.js').LightingBakeProgress) => handler(payload);
     ipcRenderer.on('lighting-bake:progress', listener);

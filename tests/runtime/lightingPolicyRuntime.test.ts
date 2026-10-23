@@ -4,11 +4,11 @@ import { existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import test from 'node:test';
 import { Matrix, MeshBuilder, NullEngine, Scene, TransformNode, VertexBuffer } from '@babylonjs/core';
-import { appendGeneratedLightingSources, collectLightingRuntimeSources } from '../../src/runtime/babylon/lightingClassificationRuntime.ts';
-import { EntityArrayThinInstanceBatch } from '../../src/runtime/babylon/EntityArrayThinInstanceBatch.ts';
-import { getNativeLightingInstances } from '../../src/runtime/babylon/lightingNativeInstances.ts';
 
-type Context = Parameters<typeof collectLightingRuntimeSources>[0];
+import type { EntityArrayThinInstanceBatch as EntityArrayThinInstanceBatchType } from '../../src/runtime/babylon/EntityArrayThinInstanceBatch.ts';
+
+
+
 const project = new URL('../../', import.meta.url);
 const runtimeHooks = registerHooks({
   resolve(specifier, context, next) {
@@ -23,6 +23,11 @@ const runtimeHooks = registerHooks({
     return next(url, context);
   },
 });
+// 先注册解析器再加载实际源模块，避免静态依赖在 hook 注册前失败。
+const { appendGeneratedLightingSources, collectLightingRuntimeSources } = await import('../../src/runtime/babylon/lightingClassificationRuntime.ts');
+const { EntityArrayThinInstanceBatch } = await import('../../src/runtime/babylon/EntityArrayThinInstanceBatch.ts');
+const { getNativeLightingInstances } = await import('../../src/runtime/babylon/lightingNativeInstances.ts');
+type Context = Parameters<typeof collectLightingRuntimeSources>[0];
 const { SceneEnvironmentRuntime } = await import('../../src/runtime/babylon/SceneEnvironmentRuntime.ts');
 runtimeHooks.deregister();
 const sourceUrl = 'editor-asset://local/' + encodeURIComponent('C:/project/Assets/Models/lift/model.glb');
@@ -41,7 +46,7 @@ function fixture() {
   };
   const document = { entities, sceneSettings: { lighting: { ...normalizeSceneLightingConfig(undefined), policy: undefined as unknown } } };
   const models: Array<[string, any]> = [];
-  const batches: EntityArrayThinInstanceBatch[] = [];
+  const batches: EntityArrayThinInstanceBatchType[] = [];
   const context = { scene, document, models, primitiveMeshes: new Map(), environment: [], batches,
     getMotionTargets: () => ({ moving: [] as TransformNode[], fixed: [] as TransformNode[], known: false }),
     readEntityId: () => null };

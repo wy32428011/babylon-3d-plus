@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys as _binary_sys
 from array import array
 import json
 import math
@@ -20,7 +21,37 @@ PROGRESS_PREFIX = "LIGHTING_BAKE_PROGRESS "
 TEXTURE_IMAGES: dict[tuple[str, str], Any] = {}
 
 
+
+def process_peak_memory_bytes() -> int | None:
+    """记录本进程观察到的峰值 RSS；平台不支持时返回 null，不伪造零。"""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+                    (name, ctypes.c_size_t) for name in (
+                        "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+                        "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetCurrentProcess.restype = wintypes.HANDLE
+            api = ctypes.WinDLL("psapi", use_last_error=True).GetProcessMemoryInfo
+            api.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessMemoryCounters), wintypes.DWORD]
+            if not api(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+                return None
+            return int(counters.PeakWorkingSetSize)
+        import resource
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(value if sys.platform == "darwin" else value * 1024)
+    except (ImportError, OSError, AttributeError, ValueError):
+        return None
+
 def progress(phase: str, completed: int, total: int, message: str) -> None:
+    print("LIGHTING_BAKE_MEMORY " + json.dumps(process_peak_memory_bytes()), flush=True)
     print(PROGRESS_PREFIX + json.dumps(
         {"phase": phase, "completed": completed, "total": total, "message": message},
         ensure_ascii=False), flush=True)
@@ -37,6 +68,42 @@ def source_path(root: Path, name: str) -> str:
         raise ValueError("纹理路径超出任务目录或文件缺失。")
     return str(path)
 
+
+
+def load_binary_geometry(source: dict, root: Path) -> None:
+    """逐网格加载 Float64/Uint32 几何附件；旧版 JSON 数组仍可读取。"""
+    binary = source.pop("geometryBinary", None)
+    if binary is None:
+        return
+    if binary.get("version") != 1:
+        raise ValueError("二进制几何版本无效。")
+    file = Path(source_path(root, binary["file"]))
+    raw = file.read_bytes()
+    if len(raw) != binary.get("byteLength") or raw[:8] != b"BLGEO001":
+        raise ValueError("二进制几何长度或文件头无效。")
+    ranges = []
+    for field in ("positions", "normals", "indices", "uvs", "uvs2", "colors", "tangents"):
+        attribute = binary.get("attributes", {}).get(field)
+        if attribute is None:
+            continue
+        integer = field == "indices"
+        width, expected = (4, "uint32") if integer else (8, "float64")
+        start, length = attribute.get("byteOffset"), attribute.get("length")
+        if (attribute.get("type") != expected or not isinstance(start, int)
+                or not isinstance(length, int) or start < 8 or start % width or length < 0
+                or start + length * width > len(raw)
+                or any(start < end and start + length * width > begin for begin, end in ranges)):
+            raise ValueError("二进制几何属性范围无效。")
+        ranges.append((start, start + length * width))
+        values = array("I" if integer else "d")
+        if values.itemsize != width:
+            raise ValueError("当前 Python 数值类型不支持烘焙二进制合同。")
+        values.frombytes(memoryview(raw)[start:start + length * width])
+        if _binary_sys.byteorder != "little":
+            values.byteswap()
+        if not integer and any(not math.isfinite(value) for value in values):
+            raise ValueError("二进制几何包含非有限数值。")
+        source[field] = values
 
 def vector(values: list[float]) -> Vector:
     return COORDINATES.to_3x3() @ Vector(values)
@@ -490,35 +557,104 @@ def partition_receivers(meshes: list[dict], settings: dict) -> list[dict]:
     return result
 
 
-def lightmap_metrics(obj: Any, density: float) -> tuple[int, int, float, float, float]:
-    """按 UV→世界 Jacobian 最大奇异值保证任意方向的实际采样密度。"""
+class LightmapUvError(ValueError):
+    """真实正面积面缺少可逆 UV；只能修复 UV 后重新严格验证。"""
+
+
+def lightmap_face_world_per_uv(obj: Any, face: Any) -> float:
     mesh, transform = obj.data, obj.matrix_world.to_3x3()
     uv = mesh.uv_layers["LightmapUV"]
+    first, second, third = face.loop_indices
+    origin = mesh.vertices[mesh.loops[first].vertex_index].co
+    local_edges = [tuple(float(mesh.vertices[mesh.loops[index].vertex_index].co[axis]) - float(origin[axis])
+                         for axis in range(3)) for index in (second, third)]
+    # 仿射变换不会使严格共线面产生面积；局部双精度叉积避免单精度矩阵的伪面积。
+    u, v = local_edges
+    local_cross = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+    if all(value == 0 for value in local_cross):
+        return 0.0
+    edges = [transform @ Vector(edge) for edge in local_edges]
+    a, b = (uv.data[index].uv - uv.data[first].uv for index in (second, third))
+    determinant = a.x * b.y - a.y * b.x
+    if edges[0].cross(edges[1]).length == 0:
+        return 0.0
+    if abs(determinant) < 1e-20:
+        raise LightmapUvError(f"{obj.name} 有正面积三角面未获得有效光照 UV。")
+    derivative_u = [(edges[0][axis] * b.y - edges[1][axis] * a.y) / determinant for axis in range(3)]
+    derivative_v = [(edges[1][axis] * a.x - edges[0][axis] * b.x) / determinant for axis in range(3)]
+    uu = sum(value * value for value in derivative_u)
+    vv = sum(value * value for value in derivative_v)
+    uv_dot = sum(left * right for left, right in zip(derivative_u, derivative_v))
+    largest_eigenvalue = (uu + vv + math.sqrt((uu - vv) ** 2 + 4 * uv_dot * uv_dot)) / 2
+    return math.sqrt(largest_eigenvalue)
+
+
+def lightmap_metrics(obj: Any, density: float) -> tuple[int, int, float, float, float]:
+    """按 UV→世界 Jacobian 最大奇异值保证任意方向的实际采样密度。"""
+    uv = obj.data.uv_layers["LightmapUV"]
     minimum_u = min(entry.uv.x for entry in uv.data)
     minimum_v = min(entry.uv.y for entry in uv.data)
     maximum_u = max(entry.uv.x for entry in uv.data)
     maximum_v = max(entry.uv.y for entry in uv.data)
-    world_per_uv = 0.0
-    for face in mesh.polygons:
-        first, second, third = face.loop_indices
-        origin = mesh.vertices[mesh.loops[first].vertex_index].co
-        edges = [transform @ (mesh.vertices[mesh.loops[index].vertex_index].co - origin) for index in (second, third)]
-        a, b = (uv.data[index].uv - uv.data[first].uv for index in (second, third))
-        determinant = a.x * b.y - a.y * b.x
-        if edges[0].cross(edges[1]).length == 0:
-            continue
-        if abs(determinant) < 1e-20:
-            raise ValueError(f"{obj.name} 有正面积三角面未获得有效光照 UV。")
-        derivative_u = [(edges[0][axis] * b.y - edges[1][axis] * a.y) / determinant for axis in range(3)]
-        derivative_v = [(edges[1][axis] * a.x - edges[0][axis] * b.x) / determinant for axis in range(3)]
-        uu = sum(value * value for value in derivative_u)
-        vv = sum(value * value for value in derivative_v)
-        uv_dot = sum(left * right for left, right in zip(derivative_u, derivative_v))
-        largest_eigenvalue = (uu + vv + math.sqrt((uu - vv) ** 2 + 4 * uv_dot * uv_dot)) / 2
-        world_per_uv = max(world_per_uv, math.sqrt(largest_eigenvalue))
+    world_per_uv = max((lightmap_face_world_per_uv(obj, face) for face in obj.data.polygons), default=0)
     scale = world_per_uv * density * (1 + 1e-4)
     return (max(16, math.ceil((maximum_u - minimum_u) * scale) + 8),
             max(16, math.ceil((maximum_v - minimum_v) * scale) + 8), scale, minimum_u, minimum_v)
+
+
+def repair_lightmap_uvs(obj: Any, density: float) -> int:
+    """仅为 SmartProject 量化塌缩的正面积面增建独立图块，不改原几何或材质 UV。"""
+    mesh, transform = obj.data, obj.matrix_world.to_3x3()
+    uv = mesh.uv_layers["LightmapUV"]
+    invalid, world_per_uv = [], 0.0
+    for face in mesh.polygons:
+        try:
+            world_per_uv = max(world_per_uv, lightmap_face_world_per_uv(obj, face))
+        except LightmapUvError:
+            invalid.append(face)
+    if not invalid:
+        return 0
+    # 统一成世界米制 UV 后追加图块，原有效岛的采样密度和相对位置保持等价。
+    unit = world_per_uv if world_per_uv > 0 else 1.0
+    for entry in uv.data:
+        entry.uv = (entry.uv.x * unit, entry.uv.y * unit)
+    minimum_u = min(entry.uv.x for entry in uv.data)
+    maximum_u = max(entry.uv.x for entry in uv.data)
+    maximum_v = max(entry.uv.y for entry in uv.data)
+    precision = max(1.0, abs(minimum_u), abs(maximum_u), abs(maximum_v)) * 2 ** -20
+    minimum_height = max(1 / density, precision)
+    margin = max(2 / density, precision)
+    charts = []
+    for face in invalid:
+        loops = list(face.loop_indices)
+        origin = mesh.vertices[mesh.loops[loops[0]].vertex_index].co
+        points = [Vector((0, 0, 0))] + [transform @ (mesh.vertices[mesh.loops[index].vertex_index].co - origin)
+                                      for index in loops[1:]]
+        first, second = max(((0, 1), (0, 2), (1, 2)), key=lambda pair: (points[pair[1]] - points[pair[0]]).length_squared)
+        third = 3 - first - second
+        edge, offset = points[second] - points[first], points[third] - points[first]
+        length = edge.length
+        if length <= 0:
+            raise LightmapUvError(f"{obj.name} 无法为正面积细面建立稳定光照 UV。")
+        projection = offset.dot(edge) / length
+        height = max(edge.cross(offset).length / length, minimum_height)
+        coordinates = [None, None, None]
+        coordinates[first], coordinates[second], coordinates[third] = (0, 0), (length, 0), (projection, height)
+        low_u = min(value[0] for value in coordinates)
+        width = max(value[0] for value in coordinates) - low_u
+        charts.append((loops, coordinates, low_u, width, height))
+    row_width = max(maximum_u - minimum_u, max(chart[3] for chart in charts))
+    cursor_x, cursor_y, row_height = minimum_u, maximum_v + margin, 0.0
+    for loops, coordinates, low_u, width, height in charts:
+        if cursor_x > minimum_u and cursor_x + width > minimum_u + row_width:
+            cursor_x, cursor_y, row_height = minimum_u, cursor_y + row_height + margin, 0.0
+        for loop, coordinate in zip(loops, coordinates):
+            uv.data[loop].uv = (cursor_x + coordinate[0] - low_u, cursor_y + coordinate[1])
+        cursor_x += width + margin
+        row_height = max(row_height, height)
+    mesh.update()
+    obj["lighting_uv_repair_count"] = len(invalid)
+    return len(invalid)
 
 
 def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list[dict], list[Any]]:
@@ -529,7 +665,12 @@ def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list
     while pending:
         source = pending.pop()
         obj = make_mesh(source, root, len(objects))
-        width, height, _, _, _ = lightmap_metrics(obj, density) if source.get("receiver", True) else (0, 0, 0, 0, 0)
+        try:
+            width, height, _, _, _ = lightmap_metrics(obj, density) if source.get("receiver", True) else (0, 0, 0, 0, 0)
+        except LightmapUvError:
+            repair_lightmap_uvs(obj, density)
+            # 修复后仍执行相同严格校验；失败时不能跳面或降低目标密度。
+            width, height, _, _, _ = lightmap_metrics(obj, density)
         if source.get("receiver", True) and max(width, height) > size:
             maximum_area = world_area(obj) * ((size - 8) / (max(width, height) - 8)) ** 2 * 0.9
             parts = partition_receiver(source, size, density, maximum_area)
@@ -741,14 +882,14 @@ def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str)
     scene.render.bake.use_pass_color = False
     scene.render.bake.use_pass_direct = False
     scene.render.bake.use_pass_indirect = True
-    bpy.ops.object.bake(type="DIFFUSE")
+    bake_diffuse()
     pixels = array("f", [0]) * (size * size * 4)
     image.pixels.foreach_get(pixels)
     for light in lights:
         light.hide_render = True
     scene.render.bake.use_pass_direct = True
     scene.render.bake.use_pass_indirect = False
-    bpy.ops.object.bake(type="DIFFUSE")
+    bake_diffuse()
     ambient = array("f", [0]) * len(pixels)
     image.pixels.foreach_get(ambient)
     for offset in range(0, len(pixels), 4):
@@ -818,8 +959,52 @@ def export_geometry(obj: Any, source: dict, destination: Path) -> None:
     write_json(destination, result)
 
 
-def probe_positions(objects: list[Any], spacing: float) -> list[Vector]:
-    coordinates = [obj.matrix_world @ Vector(corner) for obj in objects for corner in obj.bound_box]
+
+def source_probe_bounds(meshes: list[dict]) -> dict:
+    """探针范围只取已验证物理输入，不读取 UV 临时缩放留下的依赖图缓存。"""
+    low, high = [math.inf] * 3, [-math.inf] * 3
+    for source in meshes:
+        local_low, local_high = [math.inf] * 3, [-math.inf] * 3
+        for index, value in enumerate(source["positions"]):
+            axis = index % 3
+            local_low[axis] = min(local_low[axis], value)
+            local_high[axis] = max(local_high[axis], value)
+        matrix = source["worldMatrix"]
+        for corner in range(8):
+            point = [local_high[axis] if corner & (1 << axis) else local_low[axis] for axis in range(3)]
+            for row in range(3):
+                value = sum(matrix[column * 4 + row] * point[column] for column in range(3)) + matrix[12 + row]
+                low[row] = min(low[row], value)
+                high[row] = max(high[row], value)
+    return {"min": low, "max": high}
+
+def probe_positions(objects: list[Any], spacing: float, volumes: list[dict] | None = None,
+                    input_bounds: dict | None = None) -> list[Vector]:
+    active = [volume for volume in (volumes or []) if volume.get("enabled", True)]
+    if active or input_bounds is not None:
+        positions, keys = [], set()
+        for volume in (active if active else [input_bounds]):
+            low, high = volume["min"], volume["max"]
+            extents = [high[axis] - low[axis] for axis in range(3)]
+            counts = [max(1, math.ceil(extent / spacing)) for extent in extents]
+            if not active and math.prod(counts) > 4096:
+                raise ValueError("探针超过 4096 个安全预算；请增大探针间距。不会静默丢弃探针。")
+            for x in range(counts[0]):
+                for y in range(counts[1]):
+                    for z in range(counts[2]):
+                        indices = (x, y, z)
+                        point = [low[axis] + (indices[axis] + 0.5) * (extents[axis] if active else max(extents[axis], 0.1)) / counts[axis]
+                                 for axis in range(3)]
+                        key = tuple(math.floor(value * 1e6 + 0.5) for value in point)
+                        if key in keys:
+                            continue
+                        keys.add(key)
+                        positions.append(vector(point))
+                        if len(positions) > 4096:
+                            raise ValueError("探针覆盖区域产生至少 4097 个独立探针，超过 4096 上限。")
+        return positions
+    # 兼容直接调用：按已恢复的实际顶点求范围，避免依赖缓存的 bound_box。
+    coordinates = [obj.matrix_world @ vertex.co for obj in objects for vertex in obj.data.vertices]
     low = Vector(tuple(min(point[axis] for point in coordinates) for axis in range(3)))
     high = Vector(tuple(max(point[axis] for point in coordinates) for axis in range(3)))
     counts = [max(1, math.ceil((high[axis] - low[axis]) / spacing)) for axis in range(3)]
@@ -831,8 +1016,9 @@ def probe_positions(objects: list[Any], spacing: float) -> list[Vector]:
             for indices in [(x, y, z)]]
 
 
-def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Path) -> int:
-    positions = probe_positions(objects, spacing)
+def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Path,
+                positions: list[Vector] | None = None) -> int:
+    positions = positions if positions is not None else probe_positions(objects, spacing)
     probes = []
     # 每批 64 个探针、每面 4×4 像素，避免逐探针启动 Cycles；面法线按 Babylon 顺序记录。
     for start in range(0, len(positions), 64):
@@ -884,31 +1070,108 @@ def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Pat
     return len(probes)
 
 
+
+def discover_bake_devices() -> list[dict]:
+    """只修改独立 factory-startup 进程内的设置，不保存用户偏好。"""
+    output = [{"id": "cpu", "name": "CPU", "backend": "CPU", "type": "CPU"}]
+    addon = bpy.context.preferences.addons.get("cycles")
+    if addon is None:
+        return output
+    preferences = addon.preferences
+    for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
+        try:
+            preferences.compute_device_type = backend
+            preferences.refresh_devices()
+            for device in preferences.devices:
+                if device.type != "CPU":
+                    output.append({"id": device.id, "name": device.name, "backend": backend, "type": "GPU"})
+        except (TypeError, ValueError, RuntimeError):
+            # 未编译的后端在设置枚举时会失败，其余后端继续独立探测。
+            continue
+    return output
+
+
+def configure_bake_device(preference: str) -> None:
+    requested = preference if preference in ("auto", "gpu") else "cpu"
+    selection = {"requested": requested, "actual": "CPU", "name": "CPU", "backend": "CPU"}
+    bpy.context.scene.cycles.device = "CPU"
+    if requested != "cpu":
+        devices = [device for device in discover_bake_devices() if device["type"] == "GPU"]
+        if devices:
+            selected = devices[0]
+            preferences = bpy.context.preferences.addons["cycles"].preferences
+            try:
+                preferences.compute_device_type = selected["backend"]
+                preferences.refresh_devices()
+                for device in preferences.devices:
+                    device.use = device.id == selected["id"] and device.type != "CPU"
+                bpy.context.scene.cycles.device = "GPU"
+                selection.update({"actual": "GPU", "name": selected["name"], "backend": selected["backend"]})
+            except (TypeError, ValueError, RuntimeError) as error:
+                selection["fallbackReason"] = f"GPU 配置不可用，已回退 CPU：{error}"
+        else:
+            selection["fallbackReason"] = "未发现可用 GPU，已使用 CPU。"
+    print("LIGHTING_BAKE_DEVICE " + json.dumps(selection, ensure_ascii=False), flush=True)
+
+
+def is_gpu_memory_error(error: Exception) -> bool:
+    text = str(error).lower()
+    return any(token in text for token in ("out of memory", "out of gpu memory", "out of device memory", "memory allocation",
+                                                "failed to allocate", "insufficient memory", "cuda_error_out_of_memory", "hiperroroutofmemory",
+                                                "cuda error", "hip error", "device lost", "invalid device", "no kernel image",
+                                                "failed to create cuda", "failed to create optix"))
+
+
+def bake_diffuse() -> None:
+    try:
+        bpy.ops.object.bake(type="DIFFUSE")
+    except RuntimeError as error:
+        if bpy.context.scene.cycles.device == "GPU" and is_gpu_memory_error(error):
+            print("LIGHTING_BAKE_GPU_FALLBACK " + str(error), file=sys.stderr, flush=True)
+        raise
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True)
+    parser.add_argument("--input")
+    parser.add_argument("--devices", action="store_true")
     arguments = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
+    if arguments.devices:
+        print("LIGHTING_BAKE_DEVICES " + json.dumps(discover_bake_devices(), ensure_ascii=False), flush=True)
+        return
+    if not arguments.input:
+        raise ValueError("缺少烘焙输入。")
     file = Path(arguments.input).resolve()
     root = file.parent
     with file.open(encoding="utf-8") as stream:
         data = json.load(stream)
+    for source in data["meshes"]:
+        load_binary_geometry(source, root)
     started = time.monotonic()
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     # CPU 是稳定默认值；不会借用用户当前 Blender 会话或改动其偏好配置。
-    scene.cycles.device = "CPU"
+    configure_bake_device(data["settings"].get("device", "cpu"))
     scene.cycles.samples = {"preview": 16, "standard": 64, "high": 256}[data["settings"]["quality"]]
     scene.cycles.use_denoising = False
     scene.cycles.max_bounces = 8
     scene.cycles.diffuse_bounces = 4
     settings = data["settings"]
+    input_bounds = source_probe_bounds(data["meshes"])
     data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
     lights = setup_lights(data, root)
     size = settings["atlasSize"]
     receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
     pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024)
+    # 先做全部可判定检查，避免全部图集完成后才发现探针超限。
+    # UV 展开曾临时改动局部顶点；在提前预检前统一刷新恢复后的物理几何。
+    bpy.context.view_layer.update()
+    positions = probe_positions(objects, settings["probeSpacing"], settings.get("probeVolumes"), input_bounds)
+    write_json(root / "preflight.json", {"version": 1, "atlasCount": len(pages),
+                                       "probeCount": len(positions), "textureBytes": len(pages) * size * size * 4,
+                                       "sourceBounds": input_bounds})
+    progress("preflight", 1, 1, f"预检通过：{len(pages)} 张图集，{len(positions)} 个探针")
     atlas_results = []
     for index, page in enumerate(pages):
         progress("baking", index, len(pages), "正在烘焙间接光与环境漫反射")
@@ -924,7 +1187,7 @@ def main() -> None:
         export_geometry(obj, source, root / name)
         mesh_results.append({"key": source["key"], "entityId": source["entityId"], "nodeKey": source["nodeKey"],
                              "geometryFile": name, "atlasIndex": obj["atlas"]})
-    count = bake_probes(objects, lights, settings["probeSpacing"], root)
+    count = bake_probes(objects, lights, settings["probeSpacing"], root, positions)
     write_json(root / "result.json", {"version": 1, "signature": data["signature"], "engineVersion": bpy.app.version_string,
                                     "atlases": atlas_results, "meshes": mesh_results, "probesFile": "probes.json",
                                     "statistics": {"meshCount": len(objects), "triangleCount": sum(len(entry["indices"]) // 3 for entry in data["meshes"]),

@@ -8,7 +8,9 @@ import { pathToFileURL } from 'node:url';
 import { _electron as electron } from 'playwright';
 import { createServer } from 'vite';
 import { createLiftBroker, createLiftFixture, liftId } from '../tests/helpers/liftMotionArrowFixture.mjs';
+import { runLightingOptimizationUiSmoke } from '../tests/helpers/lightingOptimizationUiSmoke.mjs';
 import { runLightingViewerSmoke } from '../tests/helpers/lightingViewerSmoke.mjs';
+import { runLightingFactoryGiPerformance } from '../tests/helpers/lightingFactoryGiPerformance.mjs';
 import { runLightingFactoryPerformance } from '../tests/helpers/lightingFactoryPerformance.mjs';
 import { runLightingManagerUiSmoke, lightingManagerSecondLiftId } from '../tests/helpers/lightingManagerUiSmoke.mjs';
 import { findLightingSmokePort } from '../tests/helpers/lightingSmokePort.mjs';
@@ -17,17 +19,19 @@ import { runUnifiedLightingControlsSmoke, runUnifiedLightingAppearanceSmoke, run
 // 仅替代文件选择器。真实 EditorLayout、IPC、Cycles、MQTT 驱动、材质和 GPU 使用正式实现。
 const workspace = path.resolve(import.meta.dirname, '..');
 const preflight = process.env.LIGHTING_SMOKE_STAGE === 'preflight';
-const unifiedSmoke = process.argv.includes('--unified') || process.argv.includes('--unified-ui-only');
+const optimizationSmoke = process.argv.includes('--optimization');
+const unifiedSmoke = optimizationSmoke || process.argv.includes('--unified') || process.argv.includes('--unified-ui-only');
 const skyboxUiSmoke = process.argv.includes('--skybox-ui-only');
 const managerUiOnly = process.argv.includes('--manager-ui-only') || process.argv.includes('--unified-ui-only');
 const managerSmoke = unifiedSmoke || managerUiOnly || process.argv.includes('--manager') || process.env.LIGHTING_SMOKE_STAGE === 'manager';
+const factoryGi = process.env.LIGHTING_SMOKE_STAGE === 'factory-gi';
 const factoryProfile = process.env.LIGHTING_SMOKE_STAGE === 'factory-profile';
-const factoryOnly = process.env.LIGHTING_SMOKE_STAGE === 'factory-only' || factoryProfile;
+const factoryOnly = process.env.LIGHTING_SMOKE_STAGE === 'factory-only' || factoryProfile || factoryGi;
 const reopen = process.env.LIGHTING_SMOKE_STAGE === 'reopen';
 const density = preflight || managerSmoke ? 8 : 128;
-const output = unifiedSmoke ? path.resolve('output/lighting-unified', managerUiOnly ? 'ui' : 'electron') : managerSmoke ? path.resolve('output/lighting-manager', managerUiOnly ? 'ui' : 'electron') : path.resolve('output/lighting-bake', preflight ? 'preflight' : factoryProfile ? 'factory-profile' : factoryOnly ? 'factory-only' : reopen ? 'reopen' : '.');
-const previous = reopen ? JSON.parse(await readFile(path.resolve('output/lighting-bake/electron-result.json'), 'utf8')) : null;
-const previousScenePath = previous ? path.join(previous.projectRoot, 'Scenes', 'hybrid.scene.json') : null;
+const output = reopen && process.env.LIGHTING_SMOKE_REOPEN_REPORT ? path.resolve(path.dirname(process.env.LIGHTING_SMOKE_REOPEN_REPORT), 'editor-reopen') : factoryGi ? path.resolve('output/lighting-optimization', 'factory-' + Date.now()) : optimizationSmoke ? path.resolve('output/lighting-optimization', 'electron-' + Date.now()) : unifiedSmoke ? path.resolve('output/lighting-unified', managerUiOnly ? 'ui' : 'electron') : managerSmoke ? path.resolve('output/lighting-manager', managerUiOnly ? 'ui' : 'electron') : path.resolve('output/lighting-bake', preflight ? 'preflight' : factoryProfile ? 'factory-profile' : factoryOnly ? 'factory-only' : reopen ? 'reopen' : '.');
+const previous = reopen ? JSON.parse(await readFile(path.resolve(process.env.LIGHTING_SMOKE_REOPEN_REPORT || 'output/lighting-bake/electron-result.json'), 'utf8')) : null;
+const previousScenePath = previous ? (process.env.LIGHTING_SMOKE_REOPEN_SCENE ? path.resolve(process.env.LIGHTING_SMOKE_REOPEN_SCENE) : path.join(previous.projectRoot, 'Scenes', 'hybrid.scene.json')) : null;
 const temporary = await mkdtemp(path.join(tmpdir(), 'lighting-bake-electron-'));
 const projectRoot = path.join(temporary, 'project');
 const scenePath = path.join(projectRoot, 'Scenes', 'hybrid.scene.json');
@@ -50,7 +54,8 @@ if (!factoryOnly) {
 fixture.scene.sceneSettings = {
   shadows: { enabled: true, mode: 'hybrid', quality: 'balanced', sunAzimuthDegrees: 225, sunElevationDegrees: 45 },
    lightingBake: { enabled: true, quality: 'preview', atlasSize: 1024, texelsPerMeter: density, probeSpacing: 6, maxTextureMiB: 128,
-    cacheStaticShadows: true, dynamicShadows: true },
+    cacheStaticShadows: true, dynamicShadows: true,
+    ...(optimizationSmoke ? { device: 'gpu', probeVolumes: [{ id: 'optimization-floor', name: '首层活动范围', enabled: true, min: [-8, -0.3, -5], max: [8, 10, 5] }] } : {}) },
 };
 const box = (id, color, position, scale) => ({ id, name: id, parentId: null, childrenIds: [], visible: true, locked: false,
   components: { transform: { position, rotation: { x: 0, y: 0, z: 0 }, scale }, meshRenderer: { meshKind: 'cube', materialColor: color } } });
@@ -158,8 +163,8 @@ try {
   if (factoryOnly) {
     assert.ok(process.env.LIGHTING_FACTORY_SCENE_PATH, '工厂专项需要明确的真实场景路径');
     report.factory = await runLightingFactoryPerformance({ application, page,
-      sourceScenePath: path.resolve(process.env.LIGHTING_FACTORY_SCENE_PATH), projectRoot, output, profile: factoryProfile });
-    check(factoryProfile ? '完成实际工厂性能诊断，此阶段不代表正式性能验收'
+      sourceScenePath: path.resolve(process.env.LIGHTING_FACTORY_SCENE_PATH), projectRoot, output, profile: factoryProfile, ...(factoryGi ? { measureGi: runLightingFactoryGiPerformance } : {}) });
+    check(factoryGi ? (process.env.LIGHTING_FACTORY_GI_PREFLIGHT_ONLY === '1' ? '实际完整工厂仅完成GI预检，尚未进行烘焙或性能采样' : '实际完整工厂GI开启并完成探针算法A/B/B/A对照') : factoryProfile ? '完成实际工厂性能诊断，此阶段不代表正式性能验收'
       : '实际工厂场景完成隔离A/B/B/A帧时间和Windows GPU进程内存采样');
   } else if (reopen) {
     await page.evaluate(() => window.lightingSmoke.runtime.waitForLightingReady());
@@ -234,6 +239,7 @@ try {
   check('真实UI调用IPC及Cycles并原子应用图集/UV/探针');
   await page.evaluate(() => window.lightingSmoke.runtime.waitForLightingReady());
   if (unifiedSmoke) await runUnifiedLightingAppearanceSmoke({ page, ui: managerUi, capture, check });
+  if (optimizationSmoke) report.optimization = await runLightingOptimizationUiSmoke({ page, ui: managerUi, capture, check });
   await managerUi.open('总览与烘焙');
   await sceneSettings.evaluate(node => node.scrollIntoView({ block: 'start' }));
   await capture('editor-baked');
