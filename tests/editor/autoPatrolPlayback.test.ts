@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 import type { AutoPatrolComponent, TransformComponent } from '../../src/editor/model/components.ts';
 import type { SceneCameraPose } from '../../src/editor/model/SceneDocument.ts';
 import {
@@ -15,13 +15,12 @@ import type {
   AutoPatrolPlaybackRoute,
 } from '../../src/runtime/babylon/AutoPatrolPlaybackController.ts';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-  ssr: { noExternal: ['@linkiez/dxf-renew'] },
+const viteServer = await createP4SsrTestModules([
+  '/src/runtime/babylon/AutoPatrolPlaybackController.ts',
+  '/src/editor/model/SceneDocument.ts',
+]);
+after(async () => {
+  await viteServer.close();
 });
 const {
   AutoPatrolPlaybackController,
@@ -33,9 +32,6 @@ const {
 const { createAutoPatrolEntity, createEmptySceneDocument } = await viteServer.ssrLoadModule(
   '/src/editor/model/SceneDocument.ts',
 ) as typeof import('../../src/editor/model/SceneDocument.ts');
-after(async () => {
-  await viteServer.close();
-});
 
 const IDENTITY_TRANSFORM: TransformComponent = {
   position: { x: 0, y: 0, z: 0 },

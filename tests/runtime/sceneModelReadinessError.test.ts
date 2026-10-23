@@ -30,18 +30,19 @@ after(() => { scene.dispose(); engine.dispose(); });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function runtimeFixture() {
-  const runtime = Object.create(SceneRuntime.prototype);
-  Object.assign(runtime, { scene, models: new Map(), modelReadinessErrors: new Map(), modelArrayParameterVariants: new Map(),
-    generatedOutputOwners: new Map(), spawnedDeviceModels: new Map(), selectedEntityIds: new Set(), modelLoadSequence: 0,
-    loadDiagnostics: new SceneLoadDiagnostics(),
-    modelEntranceRuntime: { getSnapshot: () => ({ status: 'idle', preparedBindingCount: 0, totalBindingCount: 0 }) },
-    applyTransform: () => {}, applyModelUnitScale: () => {}, applyModelSelection: () => {}, applyModelInteractivity: () => {},
-    restoreModelArrayHostMeshes: () => {}, syncModelScriptMetadata: () => {}, updateModelExternalScriptRuntimeContext: () => {},
-    endModelArrayHostRenderSuppression: () => {}, pushLog: () => {},
-    refreshModelEntityMeshes: () => {}, normalizeModelContentOrigin: () => {}, applyModelParameters: () => {},
-    syncConveyorTrajectory: () => {}, scheduleModelPresentationRefresh: () => {},
-    disposeModel: (id: string, model: any) => { runtime.models.delete(id); model.root.dispose(); },
-  });
+  const runtime = new SceneRuntime(scene);
+  Object.assign(runtime, { scene });
+  Object.assign(runtime.assets, { models: new Map(), modelLoadSequence: 0, applyModelInteractivity: () => {}, restoreModelArrayHostMeshes: () => {}, refreshModelEntityMeshes: () => {}, normalizeModelContentOrigin: () => {}, disposeModel: (id: string, model: any) => { runtime.assets.models.delete(id); model.root.dispose(); } });
+  Object.assign(runtime.readiness, { modelReadinessErrors: new Map(), loadDiagnostics: new SceneLoadDiagnostics(), scheduleModelPresentationRefresh: () => {} });
+  Object.assign(runtime.variants, { modelArrayParameterVariants: new Map() });
+  Object.assign(runtime.outputs, { generatedOutputOwners: new Map(), spawnedDeviceModels: new Map() });
+  Object.assign(runtime.selection, { selectedEntityIds: new Set(), applyModelSelection: () => {} });
+  Object.assign(runtime.effects, { modelEntranceRuntime: { getSnapshot: () => ({ status: 'idle', preparedBindingCount: 0, totalBindingCount: 0 }) } });
+  Object.assign(runtime.presentation, { applyTransform: () => {}, syncConveyorTrajectory: () => {} });
+  Object.assign(runtime.parameters, { applyModelUnitScale: () => {}, syncModelScriptMetadata: () => {}, applyModelParameters: () => {} });
+  Object.assign(runtime.telemetry, { updateModelExternalScriptRuntimeContext: () => {} });
+  Object.assign(runtime.arrays, { endModelArrayHostRenderSuppression: () => {} });
+  Object.assign(runtime.document.context, { pushLog: () => {} });
   return runtime;
 }
 function asset(revision = 'one') {
@@ -54,21 +55,21 @@ function modelFixture() {
     externalScriptStarting: false, measurementReady: false, modelArraySuspendedMeshes: new Set(),
     stackerTelemetry: telemetry.createStackerTelemetryState(root), conveyorTelemetry: telemetry.createConveyorTelemetryState(),
     rgvTelemetry: telemetry.createRgvTelemetryState(root), shuttleTelemetry: telemetry.createShuttleTelemetryState(root),
-    liftTelemetry: telemetry.createLiftTelemetryState(root) };
+    liftTelemetry: telemetry.createLiftTelemetryState(root), hcliftTelemetry: telemetry.createHcliftTelemetryState(root) };
 }
 
 test('script failure remains visible to strict readiness while local fallback stays usable; new script revision recovers', async () => {
   const runtime = runtimeFixture(), model = modelFixture();
-  runtime.models.set('entity', model);
+  runtime.assets.models.set('entity', model);
   const original = ExternalModelScriptRuntime.prototype.start;
   try {
     ExternalModelScriptRuntime.prototype.start = async () => { throw new Error('bad script'); };
-    runtime.syncModelAssetExternalScripts(asset(), model, () => {});
+    runtime.assets.syncModelAssetExternalScripts(asset(), model, () => {});
     await flush();
     assert.equal(runtime.isModelReady('entity'), true);
     assert.match(runtime.getModelReadinessError('entity'), /bad script/);
     ExternalModelScriptRuntime.prototype.start = async () => {};
-    runtime.syncModelAssetExternalScripts(asset('two'), model, () => {});
+    runtime.assets.syncModelAssetExternalScripts(asset('two'), model, () => {});
     await flush();
     assert.equal(runtime.getModelReadinessError('entity'), null);
     assert.equal(runtime.isModelReady('entity'), true);
@@ -77,30 +78,30 @@ test('script failure remains visible to strict readiness while local fallback st
 
 test('explicit recovery retries the same script signature on a fresh model host without changing source or parameters', async () => {
   const runtime = runtimeFixture();
-  runtime.syncedEntities = new Map(); runtime.modelArrayIdentityMode = 'render';
+  runtime.document.syncedEntities = new Map(); runtime.arrays.modelArrayIdentityMode = 'render';
   const modelAsset = { ...asset('unchanged'), parameterValues: { height: 12 } };
   const entity = { id: 'entity', name: 'Model', components: { modelAsset, transform: {} } };
   const document = { entities: { entity }, entityIds: ['entity'] };
   const serialized = JSON.stringify(document);
   let attempts = 0;
-  runtime.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
-  runtime.syncExternalModelScripts = (currentEntity: any, model: any) =>
-    runtime.syncModelAssetExternalScripts(currentEntity.components.modelAsset, model, () => {});
-  runtime.sync = () => runtime.syncModelEntity(entity, false);
-  runtime.disposeModel = (id: string, model: any) => {
-    model.externalScriptRuntime?.dispose(); model.root.dispose(); runtime.models.delete(id);
+  runtime.assets.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
+  runtime.assets.syncExternalModelScripts = (currentEntity: any, model: any) =>
+    runtime.assets.syncModelAssetExternalScripts(currentEntity.components.modelAsset, model, () => {});
+  runtime.document.sync = () => runtime.assets.syncModelEntity(entity, false);
+  runtime.assets.disposeModel = (id: string, model: any) => {
+    model.externalScriptRuntime?.dispose(); model.root.dispose(); runtime.assets.models.delete(id);
   };
   const original = ExternalModelScriptRuntime.prototype.start;
   try {
     ExternalModelScriptRuntime.prototype.start = async () => { if (++attempts === 1) throw new Error('temporary script read failure'); };
-    runtime.syncModelEntity(entity, false);
+    runtime.assets.syncModelEntity(entity, false);
     await flush(); await flush();
     assert.match(runtime.getModelReadinessError('entity'), /temporary script/);
-    const first = runtime.models.get('entity');
+    const first = runtime.assets.models.get('entity');
     assert.equal(runtime.retryFailedSceneResources(document, []), 1);
     await flush(); await flush();
     assert.equal(attempts, 2);
-    assert.notEqual(runtime.models.get('entity'), first);
+    assert.notEqual(runtime.assets.models.get('entity'), first);
     assert.equal(runtime.getModelReadinessError('entity'), null);
     assert.equal(runtime.isModelReady('entity'), true);
     assert.equal(JSON.stringify(document), serialized);
@@ -108,37 +109,37 @@ test('explicit recovery retries the same script signature on a fresh model host 
     assert.equal(attempts, 2);
   } finally {
     ExternalModelScriptRuntime.prototype.start = original;
-    for (const model of runtime.models.values()) { model.externalScriptRuntime?.dispose(); model.root.dispose(); }
+    for (const model of runtime.assets.models.values()) { model.externalScriptRuntime?.dispose(); model.root.dispose(); }
   }
 });
 
 test('failed model acquisition survives entry disposal and resets on the next version attempt', async () => {
   const runtime = runtimeFixture();
   const entity = { id: 'entity', name: 'Model', components: { modelAsset: { ...asset(), scriptAssets: [] }, transform: {} } };
-  runtime.loadModelRuntimeAssets = async () => { throw new Error('missing GLB'); };
-  runtime.syncModelEntity(entity, false);
+  runtime.assets.loadModelRuntimeAssets = async () => { throw new Error('missing GLB'); };
+  runtime.assets.syncModelEntity(entity, false);
   await flush();
   assert.equal(runtime.isModelReady('entity'), false);
   assert.match(runtime.getModelReadinessError('entity'), /missing GLB/);
-  runtime.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
-  runtime.syncExternalModelScripts = (_entity: unknown, model: any) => { model.measurementReady = true; };
+  runtime.assets.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
+  runtime.assets.syncExternalModelScripts = (_entity: unknown, model: any) => { model.measurementReady = true; };
   entity.components.modelAsset.assetRevision = 'two';
-  runtime.syncModelEntity(entity, false);
+  runtime.assets.syncModelEntity(entity, false);
   await flush();
   assert.equal(runtime.getModelReadinessError('entity'), null);
   assert.equal(runtime.isModelReady('entity'), true);
-  runtime.models.get('entity').root.dispose();
+  runtime.assets.models.get('entity').root.dispose();
 });
 
 test('stale script rejection cannot poison a newer model entry', async () => {
   const runtime = runtimeFixture(), old = modelFixture(), current = modelFixture();
-  runtime.models.set('entity', old);
+  runtime.assets.models.set('entity', old);
   const original = ExternalModelScriptRuntime.prototype.start;
   let reject!: (error: Error) => void;
   try {
     ExternalModelScriptRuntime.prototype.start = () => new Promise((_resolve: unknown, rejectPromise: typeof reject) => { reject = rejectPromise; });
-    runtime.syncModelAssetExternalScripts(asset(), old, () => {});
-    runtime.models.set('entity', current);
+    runtime.assets.syncModelAssetExternalScripts(asset(), old, () => {});
+    runtime.assets.models.set('entity', current);
     reject(new Error('stale'));
     await flush();
     assert.equal(runtime.getModelReadinessError('entity'), null);
@@ -147,13 +148,13 @@ test('stale script rejection cannot poison a newer model entry', async () => {
 
 test('generator and array variant script errors are observable from their owning scene entity', async () => {
   const runtime = runtimeFixture(), generated = modelFixture(), variant = modelFixture();
-  runtime.generatedOutputOwners.set('generated', { entityId: 'generated', editorEntityId: 'generator', output: { kind: 'model', model: generated } });
-  runtime.modelArrayParameterVariants.set('variant', { sourceEntityId: 'source', representativeEntityId: 'copy', entities: [{ id: 'copy' }], model: variant });
+  runtime.outputs.generatedOutputOwners.set('generated', { entityId: 'generated', editorEntityId: 'generator', output: { kind: 'model', model: generated } });
+  runtime.variants.modelArrayParameterVariants.set('variant', { sourceEntityId: 'source', representativeEntityId: 'copy', entities: [{ id: 'copy' }], model: variant });
   const original = ExternalModelScriptRuntime.prototype.start;
   try {
     ExternalModelScriptRuntime.prototype.start = async () => { throw new Error('template script'); };
-    runtime.syncModelAssetExternalScripts(asset(), generated, () => {});
-    runtime.syncModelAssetExternalScripts(asset(), variant, () => {});
+    runtime.assets.syncModelAssetExternalScripts(asset(), generated, () => {});
+    runtime.assets.syncModelAssetExternalScripts(asset(), variant, () => {});
     await flush();
     assert.match(runtime.getModelReadinessError('generator'), /template script/);
     assert.match(runtime.getModelReadinessError('source'), /template script/);
@@ -165,13 +166,13 @@ test('generator acquisition failure is exposed even after output disposal and cl
   const runtime = runtimeFixture();
   const owner = { entityId: 'generator', editorEntityId: null, entityName: 'Generator', output: null,
     loadToken: 0, failedTargetSignatures: new Set(), reportedLoadFailureKeys: new Set(), component: { defaultTarget: null } };
-  runtime.generatedOutputOwners.set('generator', owner);
-  runtime.applyGeneratedOutputPresentation = () => {};
-  runtime.disposeModelGeneratorOutput = () => {};
-  runtime.loadModelGeneratorModelOutput = () => {};
-  runtime.handleModelGeneratorLoadFailure(owner, 'old', { role: 'default' }, new Error('missing template'));
+  runtime.outputs.generatedOutputOwners.set('generator', owner);
+  runtime.outputs.applyGeneratedOutputPresentation = () => {};
+  runtime.outputs.disposeModelGeneratorOutput = () => {};
+  runtime.outputs.loadModelGeneratorModelOutput = () => {};
+  runtime.outputs.handleModelGeneratorLoadFailure(owner, 'old', { role: 'default' }, new Error('missing template'));
   assert.match(runtime.getModelReadinessError('generator'), /missing template/);
-  runtime.syncModelGeneratorResolvedTarget(owner, {
+  runtime.outputs.syncModelGeneratorResolvedTarget(owner, {
     target: { kind: 'model', assetId: 'new', displayName: 'New', modelAsset: asset('two') }, role: 'default', snapshot: null,
   });
   assert.equal(runtime.getModelReadinessError('generator'), null);
@@ -181,17 +182,17 @@ test('stale model acquisition rejection does not replace the current version err
   const runtime = runtimeFixture();
   const entity = { id: 'entity', name: 'Model', components: { modelAsset: { ...asset(), scriptAssets: [] }, transform: {} } };
   let reject!: (error: Error) => void;
-  runtime.loadModelRuntimeAssets = () => new Promise((_resolve: unknown, rejectPromise: typeof reject) => { reject = rejectPromise; });
-  runtime.syncModelEntity(entity, false);
-  runtime.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
-  runtime.syncExternalModelScripts = (_entity: unknown, model: any) => { model.measurementReady = true; };
+  runtime.assets.loadModelRuntimeAssets = () => new Promise((_resolve: unknown, rejectPromise: typeof reject) => { reject = rejectPromise; });
+  runtime.assets.syncModelEntity(entity, false);
+  runtime.assets.loadModelRuntimeAssets = async () => ({ kind: 'shared-instance', rootNodes: [], handle: { dispose() {} } });
+  runtime.assets.syncExternalModelScripts = (_entity: unknown, model: any) => { model.measurementReady = true; };
   entity.components.modelAsset.assetRevision = 'two';
-  runtime.syncModelEntity(entity, false);
+  runtime.assets.syncModelEntity(entity, false);
   reject(new Error('old download'));
   await flush();
   assert.equal(runtime.getModelReadinessError('entity'), null);
   assert.equal(runtime.isModelReady('entity'), true);
-  runtime.models.get('entity').root.dispose();
+  runtime.assets.models.get('entity').root.dispose();
 });
 
 test('real fetched scripts expose load, compile, onStart and onUpdate errors despite local warning fallback', async () => {
@@ -209,8 +210,8 @@ test('real fetched scripts expose load, compile, onStart and onUpdate errors des
     for (const [index, entry] of cases.entries()) {
       globalThis.fetch = async () => new Response(entry.source, { status: entry.status });
       const runtime = runtimeFixture(), model = modelFixture();
-      runtime.models.set('entity', model);
-      runtime.syncModelAssetExternalScripts(asset(`real-${index}`), model, () => {});
+      runtime.assets.models.set('entity', model);
+      runtime.assets.syncModelAssetExternalScripts(asset(`real-${index}`), model, () => {});
       for (let attempt = 0; attempt < 400 && model.externalScriptStarting; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -225,27 +226,27 @@ test('real fetched scripts expose load, compile, onStart and onUpdate errors des
 
 test('Viewer资源结算全部完成也必须报告模型、参数变体、生成器和环境错误', () => {
   const runtime = runtimeFixture();
-  runtime.activeModelLoadProgress = new Map();
-  runtime.computeModelLoadProgress = () => ({ loading: false, percent: 1, completedCount: 164, totalCount: 164 });
-  runtime.skyboxRuntime = { getReadiness: () => ({ phase: 'ready' }), getLoadDiagnostics: () => ({ stage: null, receivedBytes: 1, totalBytes: 1 }) };
-  runtime.environmentRuntime = { getSnapshot: () => ({ phase: 'ready' }) };
-  runtime.shadowDocument = { entities: { device: { name: '设备一' } } };
+  runtime.readiness.activeModelLoadProgress = new Map();
+  runtime.readiness.computeModelLoadProgress = () => ({ loading: false, percent: 1, completedCount: 164, totalCount: 164 });
+  runtime.environment.skyboxRuntime = { getReadiness: () => ({ phase: 'ready' }), getLoadDiagnostics: () => ({ stage: null, receivedBytes: 1, totalBytes: 1 }) };
+  runtime.environment.environmentRuntime = { getSnapshot: () => ({ phase: 'ready' }) };
+  runtime.document.shadowDocument = { entities: { device: { name: '设备一' } } };
   assert.equal(runtime.getInitialLoadSnapshot().error, null);
-  runtime.modelReadinessErrors.set('device', { entityIds: ['device'], error: 'HTTP 404' });
+  runtime.readiness.modelReadinessErrors.set('device', { entityIds: ['device'], error: 'HTTP 404' });
   assert.match(runtime.getInitialLoadSnapshot().error, /设备一.*HTTP 404/);
-  runtime.modelReadinessErrors.clear();
-  runtime.models.set('device', { externalScriptRuntime: { getInitializationError: () => 'script failed' } });
+  runtime.readiness.modelReadinessErrors.clear();
+  runtime.assets.models.set('device', { externalScriptRuntime: { getInitializationError: () => 'script failed' } });
   assert.match(runtime.getInitialLoadSnapshot().error, /script failed/);
-  runtime.models.clear();
-  runtime.modelArrayParameterVariants.set('v', { sourceEntityId: 'device', model: { readinessError: 'variant failed' } });
+  runtime.assets.models.clear();
+  runtime.variants.modelArrayParameterVariants.set('v', { sourceEntityId: 'device', model: { readinessError: 'variant failed' } });
   assert.match(runtime.getInitialLoadSnapshot().error, /variant failed/);
-  runtime.modelArrayParameterVariants.clear();
-  runtime.generatedOutputOwners.set('g', { entityId: 'device', readinessError: 'generator failed' });
+  runtime.variants.modelArrayParameterVariants.clear();
+  runtime.outputs.generatedOutputOwners.set('g', { entityId: 'device', readinessError: 'generator failed' });
   assert.match(runtime.getInitialLoadSnapshot().error, /generator failed/);
-  runtime.generatedOutputOwners.clear();
-  runtime.environmentRuntime.getSnapshot = () => ({ phase: 'error', message: 'environment failed' });
+  runtime.outputs.generatedOutputOwners.clear();
+  runtime.environment.environmentRuntime.getSnapshot = () => ({ phase: 'error', message: 'environment failed' });
   assert.match(runtime.getInitialLoadSnapshot().error, /environment failed/);
-  runtime.environmentRuntime.getSnapshot = () => ({ phase: 'ready' });
-  runtime.skyboxRuntime.getReadiness = () => ({ phase: 'error', message: 'decode failed' });
+  runtime.environment.environmentRuntime.getSnapshot = () => ({ phase: 'ready' });
+  runtime.environment.skyboxRuntime.getReadiness = () => ({ phase: 'error', message: 'decode failed' });
   assert.match(runtime.getInitialLoadSnapshot().error, /decode failed/);
 });

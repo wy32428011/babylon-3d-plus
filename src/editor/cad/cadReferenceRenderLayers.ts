@@ -1,4 +1,4 @@
-import type { CadReferenceGeometryLayer } from './cadReference';
+import type { CadReferenceGeometryLayer } from './cadReferenceCore';
 
 /**
  * Babylon 把 thinInstance 的 world0..3 属性写入 Geometry，多个 Mesh 共用它会覆盖矩阵。

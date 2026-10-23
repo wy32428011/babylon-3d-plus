@@ -5,12 +5,12 @@ export function createSoftwareRenderer(canvas,{images,atlas}){
  const tex=texCanvas.getContext('2d',{willReadFrequently:true});tex.drawImage(atlas,0,0,1536,768);
  const atlasPixels=tex.getImageData(0,0,1536,768).data;
  const sphereCanvas=document.createElement('canvas');const sphere=sphereCanvas.getContext('2d');
- let size={width:1600,height:900,dpr:1,scale:1,ox:0,oy:0},disposed=false,sphereSize=0,pixelMap=null,framePixels=null,lastPitch=NaN;
+ let size={width:1600,height:900,dpr:1,scale:1,ox:0,oy:0},disposed=false,pixelMap=null,framePixels=null,lastPitch=NaN;
  const nx=88,ny=44,vertices=[],triangles=[];
  for(let y=0;y<=ny;y++)for(let x=0;x<=nx;x++)vertices.push({u:x/nx,v:y/ny,x:0,y:0,z:0});
  for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const a=y*(nx+1)+x,b=a+1,c=a+nx+1,d=c+1;triangles.push({a,b:c,c:b,z:0},{a:b,b:c,c:d,z:0});}
  function buildPixelMap(pitch){
-  const n=Math.min(720,Math.max(280,Math.round(730*size.scale*size.dpr)));sphereSize=n;lastPitch=pitch;sphereCanvas.width=sphereCanvas.height=n;framePixels=sphere.createImageData(n,n);
+  const n=Math.min(720,Math.max(280,Math.round(730*size.scale*size.dpr)));lastPitch=pitch;sphereCanvas.width=sphereCanvas.height=n;framePixels=sphere.createImageData(n,n);
   pixelMap=[];const c=Math.cos(pitch),s=Math.sin(pitch);
   for(let y=0;y<n;y++)for(let x=0;x<n;x++){
    const xx=(x+.5)/n*2-1,yy=1-(y+.5)/n*2,q=1-xx*xx-yy*yy;if(q<=0)continue;

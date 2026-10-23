@@ -11,7 +11,8 @@ export function geographicPath(geometry: GeographicGeometry, project: TexturePro
       for (const ring of polygon) {
         let previousX: number | undefined;
         ring.forEach((point, index) => {
-          let [x, y] = project(point);
+          const [projectedX, y] = project(point);
+          let x = projectedX;
           if (wrapWidth && previousX !== undefined) {
             while (x - previousX > wrapWidth / 2) x -= wrapWidth;
             while (x - previousX < -wrapWidth / 2) x += wrapWidth;

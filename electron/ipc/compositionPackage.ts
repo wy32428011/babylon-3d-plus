@@ -201,7 +201,7 @@ export async function saveCompositionPackage(root: string, request: CompositionS
     return materialized;
     } catch (error) {
       const relative = path.relative(path.resolve(compositionRoot(root)), path.resolve(dir));
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('组合临时目录越界。');
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('组合临时目录越界。', { cause: error });
       await fs.rm(dir, { recursive: true, force: true });
       throw error;
     }

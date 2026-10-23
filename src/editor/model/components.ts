@@ -8,6 +8,7 @@ import type { BuiltInSlotBindingConfig, LayerChangePlatformBindingConfig, Locato
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
+import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -529,6 +530,8 @@ export type ChartMarkerComponent = {
 };
 
 export type EntityComponents = {
+  /** 实体默认动静与稳定模型节点覆盖；运行时分类结果不写入文档。 */
+  lighting?: EntityLightingSettings;
   transform: TransformComponent;
   meshRenderer?: MeshRendererComponent;
   dataPlatformScreen?: DataPlatformScreenComponent;

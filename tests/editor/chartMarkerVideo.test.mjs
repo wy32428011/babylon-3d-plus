@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NullEngine, RawTexture, Scene } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 test('视频立标配置、历史与运行内容路由', async t => {
-  const server = await createServer({ configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] } });
+  const server = await createP4SsrTestModules([
+    '/src/editor/model/chartMarker.ts',
+    '/src/editor/project/SceneSerializer.ts',
+    '/src/editor/store/editorStore.ts',
+    '/src/runtime/babylon/SceneRuntime.ts',
+  ]);
   t.after(() => server.close());
   const previousWindow = globalThis.window;
   globalThis.window = { location: { protocol: 'http:', href: 'http://localhost/' }, addEventListener() {}, removeEventListener() {} };
@@ -54,14 +57,14 @@ test('视频立标配置、历史与运行内容路由', async t => {
     try {
       const texture = RawTexture.CreateRGBATexture(new Uint8Array([255, 255, 255, 255]), 1, 1, scene);
       restored.entities[id].components.dataPlatformScreen.thumbnailUrl = 'https://screen.example.test/thumbnail.png';
-      runtime.dataPlatformScreenTextures.set(id, { url: restored.entities[id].components.dataPlatformScreen.thumbnailUrl, texture });
+      runtime.effects.dataPlatformScreenTextures.set(id, { url: restored.entities[id].components.dataPlatformScreen.thumbnailUrl, texture });
       runtime.sync(restored);
       const [item] = runtime.getDataPlatformScreenOverlayItems();
       assert.equal(item.screenUrl, video.videoUrl);
       assert.equal(item.screenId, undefined);
       assert.equal(item.projectId, undefined);
       assert.equal(item.name, restored.entities[id].name);
-      assert.equal(runtime.dataPlatformScreenTextures.has(id), false, '视频不保留旧大屏缩略图资源');
+      assert.equal(runtime.effects.dataPlatformScreenTextures.has(id), false, '视频不保留旧大屏缩略图资源');
       assert.equal(scene.textures.includes(texture), false);
       store.getState().updateChartMarker(id, { contentType: 'screen' });
       runtime.sync(store.getState().scene);

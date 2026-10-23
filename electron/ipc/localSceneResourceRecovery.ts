@@ -1,9 +1,13 @@
+import { containsAsciiControlCharacters, containsAsciiControlCharactersOr } from '../shared/asciiControlCharacters.ts';
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectPublishModelReferences } from '../shared/publishModelRecovery.js';
-import { captureSceneShadowBakeRelocation } from '../shared/sceneShadowBakeContract.js';
+import { collectSceneResourceReferences, collectLightingPolicyResourceModels, collectLocalSceneResourceFields, visitSceneResourceValues } from '../shared/sceneResourceTraversal.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
+import { validateSceneLightingBakeSnapshot } from '../shared/sceneLightingBakeContract.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import { createDataPlatformModelRuntimeRevision, readDataPlatformModelIndex, type DataPlatformModelIndex } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
@@ -21,7 +25,7 @@ export type RecoverLocalSceneResourcePathsOptions = {
   sourceKey?: string | null; signal?: AbortSignal; additionalMappings?: ReadonlyMap<string, string>;
   isOriginalPathAllowed?: (filePath: string) => boolean;
   /** 多阶段恢复由调用方针对原场景在最终提交前统一验证；中间副本保留原烘焙内容和签名。 */
-  shadowBakeRelocation?: 'defer';
+  lightingBakeRelocation?: 'defer';
 };
 export type LocalSceneResourceRecoveryResult = {
   sceneContent: string; resolvedFiles: string[]; restoredReferenceCount: number;
@@ -37,8 +41,6 @@ type Resolution = { file?: string; isFile?: boolean; supportingFiles?: string[];
 const SHA256 = /^[a-f\d]{64}$/i;
 const MAX_REFERENCES = 100_000;
 const MAX_PACKAGE_FILES = 4096;
-const PATH_KEYS = ['sourcePath', 'path', 'packagePath', 'metadataPath', 'thumbnailPath'] as const;
-const URL_KEYS = ['sourceUrl', 'activeVariantUrl', 'thumbnailUrl'] as const;
 const object = (value: unknown): JsonObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
 const identityKey = (value: string) => path.resolve(value).toLowerCase();
 const cancel = (signal?: AbortSignal) => { if (signal?.aborted) throw new Error('本地场景资源恢复已取消。'); };
@@ -50,10 +52,14 @@ const isInside = (root: string, target: string) => {
 /** 只恢复明确资源字段；先校验全部候选，再一次性改写内存副本，不写场景文件或共享缓存。 */
 export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneResourcePathsOptions): Promise<LocalSceneResourceRecoveryResult> {
   cancel(options.signal);
-  const parsed: unknown = JSON.parse(options.sceneContent);
-  const document = object(object(parsed)?.scene) ?? object(parsed);
-  if (!document || !object(document.entities)) throw new Error('本地场景缺少有效 entities 对象。');
-  const restoreBake = options.shadowBakeRelocation === 'defer' ? null : captureSceneShadowBakeRelocation(document);
+  const parsed: unknown = JSON.parse(options.sceneContent), envelope = object(parsed);
+  const originalDocument = object(envelope?.scene) ?? envelope;
+  if (!originalDocument || !object(originalDocument.entities)) throw new Error('本地场景缺少有效 entities 对象。');
+  const document = migrateSceneLightingDocument(originalDocument);
+  const envelopeUpgrade = object(envelope?.scene) && isSupportedSceneFileVersion(envelope?.version)
+    && envelope.version !== CURRENT_SCENE_FILE_VERSION;
+  const canonical = object(envelope?.scene) ? { ...envelope, ...(envelopeUpgrade ? { version: CURRENT_SCENE_FILE_VERSION } : {}), scene: document } : document;
+  const restoreLighting = options.lightingBakeRelocation === 'defer' ? null : captureSceneLightingBakeRelocation(document);
   const references = collectReferences(document, options.sceneFilePath);
   if (references.length > MAX_REFERENCES) throw new Error('本地场景资源引用数量超过 100000 项限制。');
   const groups = new Map<string, Reference[]>();
@@ -98,29 +104,26 @@ export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneR
       if (result.sourceKey && identity) identity.sourceKey = result.sourceKey;
     }
   }
-  if (restoreBake && !restoreBake(document)) throw new Error('本地资源恢复改变了已烘焙阴影的资源身份，已停止提交恢复结果。');
-  return { sceneContent: restoredReferenceCount ? JSON.stringify(parsed) : options.sceneContent,
+  if (restoreLighting && !restoreLighting(document)) throw new Error('本地资源恢复改变了光照烘焙的输入或产物身份，已停止提交恢复结果。');
+  return { sceneContent: restoredReferenceCount || document !== originalDocument || envelopeUpgrade ? JSON.stringify(canonical) : options.sceneContent,
     resolvedFiles: [...resolvedFiles], restoredReferenceCount, issues, missing };
 }
 
 function collectReferences(document: JsonObject, sceneFilePath?: string): Reference[] {
   const result: Reference[] = [], owners = new Set<JsonObject>();
   const paths = new WeakMap<object, string>();
-  const index = (value: unknown, location: string) => {
-    if (!value || typeof value !== 'object') return;
-    paths.set(value, location);
-    for (const [key, child] of Object.entries(value)) if (child && typeof child === 'object') index(child, `${location}.${key}`);
-  };
-  index(document, 'scene');
+  visitSceneResourceValues(document, (value, location) => {
+    if (value && typeof value === 'object') paths.set(value, location.path);
+  });
   const add = (value: JsonObject, kind: LocalSceneResourceKind) => {
     if (owners.has(value)) return; owners.add(value);
-    const source = [value.sourcePath, value.sourceUrl, value.packagePath, value.activeVariantUrl].find(item => typeof item === 'string') as string | undefined;
+    const source = [value.sourcePath, value.sourceUrl, value.packagePath, value.activeVariantUrl, value.url].find(item => typeof item === 'string') as string | undefined;
     const identity = object(value.dataPlatformModel);
     const inferred = source ? inferResourceIdentity(decodeLocalReference(source)?.file ?? source) : undefined;
     const owner: ResourceOwner = { value, kind: identity?.kind === 'combo' ? 'combo' : inferred?.kind ?? kind,
       resourceId: stringValue(identity?.resourceId) ?? stringValue(value.dataPlatformResourceId) ?? inferred?.resourceId,
       revision: stringValue(value.assetRevision) ?? stringValue(value.dataPlatformRevision), rootPath: stringValue(value.packagePath) };
-    const addField = (parent: JsonObject | unknown[], key: string | number, directory = false) => {
+    const addField = (parent: JsonObject | unknown[], key: string | number, directory: boolean, required: boolean) => {
       const value = (parent as JsonObject)[key]; if (typeof value !== 'string') return;
       const decoded = decodeLocalReference(value); if (!decoded) return;
       let sourcePath = decoded.file;
@@ -132,27 +135,22 @@ function collectReferences(document: JsonObject, sceneFilePath?: string): Refere
       }
       result.push({ owner, parent, key, jsonPath: `${paths.get(parent) ?? paths.get(owner.value)}.${key}`, value,
         sourcePath, suffix: decoded.suffix, url: decoded.url, directory, relative,
-        required: key !== 'thumbnailPath' && key !== 'thumbnailUrl' });
+        required });
     };
-    const addFields = (target: JsonObject, packageDirectory = true) => {
-      for (const key of PATH_KEYS) addField(target, key, key === 'packagePath' && packageDirectory);
-      for (const key of URL_KEYS) addField(target, key);
-      if (Array.isArray(target.scriptPaths)) target.scriptPaths.forEach((_, key) => addField(target.scriptPaths as unknown[], key));
-      if (Array.isArray(target.scriptAssets)) for (const script of target.scriptAssets) { const asset = object(script); if (asset) addFields(asset, false); }
-    };
-    addFields(value);
-    if (Array.isArray(value.variants)) for (const variant of value.variants) { const asset = object(variant); if (asset) addFields(asset, false); }
+    for (const field of collectLocalSceneResourceFields(value)) addField(field.parent, field.key, field.directory, field.required);
   };
-  const collected = collectPublishModelReferences(document);
-  for (const { asset } of collected.models) add(asset, 'model');
-  for (const asset of collected.devices) add(asset, 'model');
-  const environment = object(object(document.sceneSettings)?.environment); if (environment) add(environment, 'environment');
-  for (const entity of Object.values(object(document.entities) ?? {})) {
-    const components = object(object(entity)?.components);
-    for (const [key, kind] of [['skybox', 'skybox'], ['cadReference', 'other'], ['imageAsset', 'other']] as const) {
-      const value = object(components?.[key]); if (value) add(value, kind);
-    }
+  const lighting = object(object(document.sceneSettings)?.lighting);
+  const lightingResult = object(lighting?.result);
+  if (lightingResult && validateSceneLightingBakeSnapshot(lightingResult) && Array.isArray(lightingResult.assets)) {
+    for (const raw of lightingResult.assets) { const asset = object(raw); if (asset) add(asset, 'other'); }
   }
+  // 路径规则还要服务未来新增实例；完整身份规则的旧地址只是提示，不要求旧缓存继续存在。
+  for (const model of collectLightingPolicyResourceModels(document, false)) add(model, 'model');
+  const collected = collectSceneResourceReferences(document);
+  for (const { asset } of collected.models) add(asset, 'model');
+  for (const { deviceType } of collected.clickEventBindings) add(deviceType, 'model');
+  for (const { environment } of collected.environments) add(environment, 'environment');
+  for (const { value, kind } of collected.entityResources) add(value, kind);
   return result;
 }
 
@@ -225,7 +223,10 @@ class ResourceResolver {
 
   private validateSource(reference: Reference): void {
     const normalized = reference.sourcePath.replace(/\\/g, '/');
-    if (/[\x00-\x1f]/.test(normalized) || normalized.split('/').some(part => part === '..' || part === '.')) throw new Error('资源路径包含不安全的路径穿越或控制字符。');
+    if (containsAsciiControlCharacters(normalized) || normalized.split('/').some(part => part === '..' || part === '.')) throw new Error('资源路径包含不安全的路径穿越或控制字符。');
+    const bakeAsset = reference.owner.value;
+    if (['geometry', 'lightmap', 'probes'].includes(String(bakeAsset.kind)) && typeof bakeAsset.url === 'string'
+      && (!/(?:^|\/)Assets\/LightingBakes\/[^/]+\/.+/i.test(normalized) || path.extname(normalized).toLowerCase() !== (bakeAsset.kind === 'lightmap' ? '.png' : '.json'))) throw new Error('光照烘焙产物路径或类型无效。');
     const inferred = inferResourceIdentity(normalized);
     if (inferred && reference.owner.resourceId && (inferred.resourceId !== reference.owner.resourceId || inferred.kind !== reference.owner.kind)) throw new Error('资源身份与文件路径中的类型或 ID 不一致。');
     const identity = object(reference.owner.value.dataPlatformModel);
@@ -269,7 +270,7 @@ class ResourceResolver {
       }
     }
     if (this.project) {
-      const assets = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions)(?:\/.*|$))/i.exec(normalized);
+      const assets = /(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|LightingBakes)(?:\/.*|$))/i.exec(normalized);
       // 固定版本共享包只能按完整版本结构恢复，不能退回项目内同名的可变包。
       if (assets && !/\/(?:SharedResources|scene-model-versions)\//i.test(normalized)) add(path.join(this.project, ...assets[1].split('/')), this.project);
     }
@@ -344,6 +345,11 @@ class ResourceResolver {
       if (!checked) { checked = validateGlbModelFile(candidate.file).then(ok => { if (!ok) throw new Error('候选 GLB 模型文件结构无效。'); }); this.models.set(stat.real, checked); }
       await checked;
     }
+    const bakeAsset = reference.owner.value;
+    if (stat.isFile && ['geometry', 'lightmap', 'probes'].includes(String(bakeAsset.kind)) && typeof bakeAsset.url === 'string') {
+      if (bakeAsset.byteLength !== stat.size) throw new Error('候选光照烘焙资产大小与原结果不同。');
+      if (typeof bakeAsset.sha256 === 'string' && await this.hash(stat.real) !== bakeAsset.sha256.toLowerCase()) throw new Error('候选光照烘焙资产内容校验失败。');
+    }
     if (stat.isFile && reference.owner.kind === 'skybox' && reference.required) await this.verifySkyboxHeader(candidate.file, extension);
     if (stat.isFile && reference.owner.kind === 'environment' && reference.required && extension === '.glb'
       && typeof reference.owner.value.fileSizeBytes === 'number' && reference.owner.value.fileSizeBytes > 0
@@ -405,11 +411,11 @@ class ResourceResolver {
           const uri = object(entry)?.uri;
           if (typeof uri !== 'string' || /^data:/i.test(uri)) continue;
           let decoded: string; try { decoded = decodeURIComponent(uri); } catch { throw new Error(`glTF 依赖 URI 不安全：${uri}`); }
-          if (!decoded || /[\\\x00-\x1f?#]/.test(decoded) || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(decoded)) throw new Error(`glTF 依赖 URI 不安全：${uri}`);
+          if (!decoded || containsAsciiControlCharactersOr(decoded, "#?\\") || /^(?:[a-z][a-z\d+.-]*:|\/)/i.test(decoded)) throw new Error(`glTF 依赖 URI 不安全：${uri}`);
           const dependency = path.resolve(root, decoded);
           // 只在已验证的模型包边界内允许 ../；独立 glTF 仍以自身目录为边界，真实越界和 Junction 继续拒绝。
           try { await this.requireFile(boundary, dependency, false); }
-          catch (error) { throw new Error(`glTF 依赖文件不可用（${uri}）：${message(error)}`); }
+          catch (error) { throw new Error(`glTF 依赖文件不可用（${uri}）：${message(error)}`, { cause: error }); }
           dependencies.add(dependency);
         }
         return [...dependencies];

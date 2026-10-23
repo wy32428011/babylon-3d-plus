@@ -15,7 +15,7 @@ import {
   type CadReferencePoint2D,
   type DxfEntityRecord,
   type DxfInsertEntityRecord,
-} from './cadReference';
+} from './cadReferenceCore';
 import { createLegacyCadReferenceUnitInfo, resolveDxfUnitInfo } from './cadUnits';
 
 type Affine2D = readonly [a: number, b: number, c: number, d: number, tx: number, ty: number];

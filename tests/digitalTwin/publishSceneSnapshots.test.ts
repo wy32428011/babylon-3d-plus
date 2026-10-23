@@ -158,3 +158,54 @@ test('发布准备完整收集场景并使用暂存替换，拒绝遗漏、重�
     await assert.rejects(validatePreparedPublishScenes(snapshot, prepared, root, entry, signal), /变化/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('version 6 通过真实快照与准备结果入口，保留业务字段及统一光照且不改磁盘', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'publish-scenes-v6-'));
+  assert.equal(path.dirname(root), path.resolve(tmpdir()));
+  const signal = new AbortController().signal;
+  const previous = { version: 6, scene: { name: '六版场景', entityIds: ['a'], entities: { a: { id: 'a', components: {
+    modelAsset: { sourceUrl: 'old', assetCode: 'DEVICE-06', parameterConfig: { parameters: [{ key: 'height', type: 'number', defaultValue: 1 }] },
+      parameterValues: { height: 0 } }, telemetryBinding: { enabled: false, field: 'speed', alias: '' },
+    transform: { position: { x: 0, y: 2, z: -3 } }, visibility: { visible: false },
+  } } }, sceneSettings: { lighting: { version: 2, main: { source: 'scene', enabled: false, intensity: 0 },
+    disabledLightIds: ['a'], result: null }, appearance: { version: 1, exposure: 1.2, skyboxVisible: false } } } };
+  try {
+    await mkdir(path.join(root, 'Scenes'));
+    const entry = path.join(root, 'Scenes', 'main.scene.json'), other = path.join(root, 'Scenes', 'legacy.scene.json');
+    const diskContent = JSON.stringify(previous), legacyContent = content('五版旁场景');
+    await writeFile(entry, diskContent); await writeFile(other, legacyContent);
+    const current = structuredClone(previous); current.scene.name = '当前未保存的六版场景';
+    const snapshots = await capturePublishSceneSnapshots(root, entry, JSON.stringify(current), signal);
+    assert.equal(snapshots.length, 2);
+    const entrySnapshot = snapshots.find(snapshot => snapshot.isEntry)!;
+    assert.deepEqual(JSON.parse(entrySnapshot.sceneContent), current);
+    const next = structuredClone(current); next.scene.entities.a.components.modelAsset.sourceUrl = 'new';
+    const prepared = snapshots.map(snapshot => ({ sceneId: snapshot.sceneId,
+      sceneContent: snapshot.isEntry ? JSON.stringify(next) : snapshot.sceneContent }));
+    const overlays = await validatePreparedPublishScenes(snapshots, prepared, root, entry, signal);
+    assert.deepEqual(JSON.parse(overlays.get(entry)!), next);
+    assert.deepEqual(JSON.parse(overlays.get(entry)!).scene.sceneSettings, previous.scene.sceneSettings);
+    assert.deepEqual(JSON.parse(overlays.get(entry)!).scene.entities.a.components.telemetryBinding, previous.scene.entities.a.components.telemetryBinding);
+    assertPublishSceneParameterTemplates(entrySnapshot.sceneContent, JSON.stringify(next),
+      new Map([['new', { parameterConfig: next.scene.entities.a.components.modelAsset.parameterConfig }]]));
+    const changedBusiness = structuredClone(next); changedBusiness.scene.entities.a.components.telemetryBinding.enabled = true;
+    assert.throws(() => assertPublishSceneInstanceStatePreserved(entrySnapshot.sceneContent, JSON.stringify(changedBusiness)), /telemetryBinding/);
+    assert.equal(await readFile(entry, 'utf8'), diskContent); assert.equal(await readFile(other, 'utf8'), legacyContent);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+for (const version of [7, '6']) test(`发布快照与准备结果拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'publish-scenes-invalid-version-'));
+  assert.equal(path.dirname(root), path.resolve(tmpdir()));
+  const signal = new AbortController().signal, valid = content('有效五版场景');
+  const invalid = JSON.stringify({ ...JSON.parse(valid), version });
+  const entry = path.join(root, 'Scenes', 'main.scene.json');
+  try {
+    await mkdir(path.dirname(entry)); await writeFile(entry, valid);
+    await assert.rejects(capturePublishSceneSnapshots(root, entry, invalid, signal), /场景格式|版本/);
+    const snapshots = await capturePublishSceneSnapshots(root, entry, valid, signal);
+    await assert.rejects(validatePreparedPublishScenes(snapshots, [{ sceneId: snapshots[0].sceneId, sceneContent: invalid }],
+      root, entry, signal), /场景格式|版本/);
+    assert.equal(await readFile(entry, 'utf8'), valid);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

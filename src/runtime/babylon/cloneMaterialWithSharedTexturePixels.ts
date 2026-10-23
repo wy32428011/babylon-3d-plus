@@ -1,4 +1,6 @@
-import { type Material, RawTexture, SerializationHelper, type Texture } from '@babylonjs/core';
+import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture.js';
+import { SerializationHelper } from '@babylonjs/core/Misc/decorators.serialization.js';
+import type { Material, Texture } from '@babylonjs/core';
 import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard.ts';
 
 const safeRawTextureCloneMethods = new WeakSet<object>();

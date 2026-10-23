@@ -219,7 +219,7 @@ try {
 
   // 宿主输送线模型就绪后再进运行态
   await waitFor(() => {
-    const model = runtime.models.get(HOST_ENTITY_ID);
+    const model = runtime.assets.models.get(HOST_ENTITY_ID);
     return model?.assetHandle ? model : null;
   }, '宿主输送线模型完成加载');
   runtime.beginTelemetryPreview();

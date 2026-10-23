@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 const EPSILON = 1e-6;
 
@@ -24,12 +24,10 @@ function transform(positionX, rotation) {
 }
 
 test('群组 Inspector 绝对位置和旋转转换为现有群组事务使用的相对增量', async (context) => {
-  const server = await createServer({
-    appType: 'custom',
-    logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/model/groupSpatialInfo.ts',
+    '/src/runtime/babylon/EntityGroupRotationPreview.ts',
+  ]);
   context.after(async () => server.close());
 
   const [spatialModule, rotationModule, babylon] = await Promise.all([

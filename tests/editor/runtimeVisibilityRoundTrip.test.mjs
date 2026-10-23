@@ -1,7 +1,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 import { NullEngine, Scene, TransformNode, MeshBuilder, StandardMaterial } from '@babylonjs/core';
 
 function createSourceEntity(visible = true) {
@@ -62,18 +62,14 @@ function makeDocument(entities) {
 }
 
 test('完整 sync 路径下隐藏实例重新显示必须回到合批矩阵', async (context) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/SceneRuntime.ts',
+    '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
+  ]);
   context.after(async () => server.close());
 
   const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');
-  const { createConveyorTelemetryState, createRgvTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+  const { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
     '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
   );
   const engine = new NullEngine();
@@ -102,6 +98,7 @@ test('完整 sync 路径下隐藏实例重新显示必须回到合批矩阵', as
     stackerCapable: false,
     conveyorCapable: false,
     rgvCapable: false,
+    liftCapable: false,
     root,
     contentRoot,
     assetHandle: { kind: 'shared-instance', animationGroups: [], dispose: () => undefined },
@@ -123,10 +120,13 @@ test('完整 sync 路径下隐藏实例重新显示必须回到合批矩阵', as
     stackerTelemetry: createStackerTelemetryState(root),
     conveyorTelemetry: createConveyorTelemetryState(),
     rgvTelemetry: createRgvTelemetryState(root),
+    shuttleTelemetry: createShuttleTelemetryState(root),
+    liftTelemetry: createLiftTelemetryState(root),
+    hcliftTelemetry: createHcliftTelemetryState(root),
     stackerTelemetryReady: false,
     telemetryPreviewBaseline: null,
   };
-  runtime.models.set('B', sourceEntry);
+  runtime.assets.models.set('B', sourceEntry);
 
   // 重开场景：A 是持久化 modelArrayInstance 且隐藏
   const bEntity = createSourceEntity(true);
@@ -221,17 +221,13 @@ function makeFolderEntity(id, visible) {
 }
 
 async function setupRuntime(context) {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/SceneRuntime.ts',
+    '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
+  ]);
   context.after(async () => server.close());
   const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');
-  const { createConveyorTelemetryState, createRgvTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
+  const { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState } = await server.ssrLoadModule(
     '/src/runtime/babylon/telemetry/specialized/specializedModelAssets.ts',
   );
   const engine = new NullEngine();
@@ -257,6 +253,7 @@ async function setupRuntime(context) {
     stackerCapable: false,
     conveyorCapable: false,
     rgvCapable: false,
+    liftCapable: false,
     root, contentRoot,
     assetHandle: { kind: 'shared-instance', animationGroups: [], dispose: () => undefined },
     meshes: [mesh],
@@ -277,10 +274,13 @@ async function setupRuntime(context) {
     stackerTelemetry: createStackerTelemetryState(root),
     conveyorTelemetry: createConveyorTelemetryState(),
     rgvTelemetry: createRgvTelemetryState(root),
+    shuttleTelemetry: createShuttleTelemetryState(root),
+    liftTelemetry: createLiftTelemetryState(root),
+    hcliftTelemetry: createHcliftTelemetryState(root),
     stackerTelemetryReady: false,
     telemetryPreviewBaseline: null,
   };
-  runtime.models.set('B', sourceEntry);
+  runtime.assets.models.set('B', sourceEntry);
   return { server, runtime, sourceEntry, root, contentRoot, mesh };
 }
 

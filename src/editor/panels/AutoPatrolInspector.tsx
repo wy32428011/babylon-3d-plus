@@ -1,3 +1,4 @@
+import { replaceAsciiControlCharacters } from '../../../electron/shared/asciiControlCharacters.ts';
 import { useMemo, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import type {
   AutoPatrolCameraConfig,
@@ -65,7 +66,7 @@ function clampNumber(value: number, min: number, max: number, fallback: number):
 }
 
 function sanitizeFileName(value: string): string {
-  const sanitized = value.trim().replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/g, '');
+  const sanitized = replaceAsciiControlCharacters(value.trim(), '_').replace(/[<>:"/\\|?*]/g, '_').replace(/[. ]+$/g, '');
   return sanitized || 'auto-patrol-route';
 }
 

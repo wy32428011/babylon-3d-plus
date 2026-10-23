@@ -112,13 +112,13 @@ try {
   const meshRenderer = { materialColor: '#24557A' };
 
   try {
-    runtime.meshes.set('primitive-selection', primitive);
-    runtime.selectedEntityIds = new Set(['primitive-selection']);
-    runtime.applyPrimitiveMeshAppearance(primitive, meshRenderer, true);
-    runtime.rebuildModelSelectionOutline();
+    runtime.presentation.meshes.set('primitive-selection', primitive);
+    runtime.selection.selectedEntityIds = new Set(['primitive-selection']);
+    runtime.presentation.applyPrimitiveMeshAppearance(primitive, meshRenderer, true);
+    runtime.selection.rebuildModelSelectionOutline();
 
     assert.equal(
-      runtime.modelSelectionOutlineLayer.hasMesh(primitive),
+      runtime.selection.modelSelectionOutlineLayer.hasMesh(primitive),
       true,
       '基础 Mesh 也必须进入统一深红选择光晕层',
     );
@@ -134,7 +134,7 @@ try {
     );
 
 
-    const skyboxRuntime = runtime.skyboxRuntime;
+    const skyboxRuntime = runtime.environment.skyboxRuntime;
     const skyboxMesh = MeshBuilder.CreateSphere('selection-skybox', {}, runtimeScene);
     skyboxRuntime.syncSelectionHighlight(skyboxMesh, true);
     assert.equal(
@@ -150,7 +150,7 @@ try {
     assert.equal(skyboxRuntime.selectionHighlightLayer.shouldRender(), false);
     skyboxMesh.dispose();
   } finally {
-    runtime.meshes.clear();
+    runtime.presentation.meshes.clear();
     runtime.dispose();
     primitive.dispose();
     runtimeScene.dispose();

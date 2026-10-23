@@ -1,15 +1,12 @@
-import {
-  type AbstractEngine,
-  ArcRotateCamera,
-  Camera,
-  Color3,
-  Engine,
-  MeshBuilder,
-  type Observer,
-  Scene,
-  ShaderMaterial,
-  Vector2,
-} from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector2 } from '@babylonjs/core/Maths/math.vector.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { AbstractEngine, Observer } from '@babylonjs/core';
 import { SCENE_LENGTH_UNIT_SYMBOL } from '../../editor/model/sceneUnits';
 
 export type EditorGridCellSize = 1 | 2 | 5 | 10;

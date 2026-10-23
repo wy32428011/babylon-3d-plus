@@ -194,6 +194,9 @@ async function verifyDisposeRejectsQueuedTasks(AssetLoadScheduler) {
 /** 运行资产加载调度器 smoke 验证。 */
 async function main() {
   const server = await createServer({
+    // 纯调度器测试不需要项目插件或后台依赖扫描，关闭时避免取消无关原生扫描任务。
+    configFile: false,
+    optimizeDeps: { noDiscovery: true },
     appType: 'custom',
     logLevel: 'error',
     server: { middlewareMode: true, watch: null, ws: false },

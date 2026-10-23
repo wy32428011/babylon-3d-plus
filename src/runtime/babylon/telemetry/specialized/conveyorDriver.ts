@@ -1,5 +1,6 @@
 import type { Scene } from '@babylonjs/core';
-import { TransformNode, Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   clampNumber,
   computeRootRelativeWorldMatrix,
@@ -20,7 +21,6 @@ import { isMeasurableModelMesh } from '../../modelMeasurement';
 import {
   readBooleanField,
   readIntegerField,
-  readNumberField,
   readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
@@ -782,8 +782,9 @@ export class ConveyorTelemetryDriver {
     let cargoDetached = true;
     let holder = firstHolder;
     let target = firstTarget;
-    let task = firstTarget.link.task;
-    let direction = firstTarget.link.direction;
+    // 保留原初始字段读取的getter/异常时机；循环使用各跳最新值。
+    void firstTarget.link.task;
+    void firstTarget.link.direction;
     while (true) {
       if (!cargoDetached) {
         const detached = this.context.detachClaimedCargoByReference(cargo);
@@ -791,8 +792,8 @@ export class ConveyorTelemetryDriver {
         cargo = detached;
       }
       holder?.conveyorTelemetry?.downstreamLinks.delete(target.subscriber.assetCode);
-      task = target.link.task;
-      direction = target.link.direction;
+      const task = target.link.task;
+      const direction = target.link.direction;
       this.settleCargoTransfer(cargo, target.subscriber, task, target.link.hops, direction, false, holder);
       const next = this.findDeliveryTarget(target.subscriber, cargo);
       if (!next) {

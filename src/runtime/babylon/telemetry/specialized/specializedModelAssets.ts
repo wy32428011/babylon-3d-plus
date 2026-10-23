@@ -1,4 +1,4 @@
-import type { TransformNode, Vector3 } from '@babylonjs/core';
+import type { TransformNode } from '@babylonjs/core';
 import type { ModelAssetComponent } from '../../../../editor/model/components';
 import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';

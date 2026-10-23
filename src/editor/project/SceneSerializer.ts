@@ -1,3 +1,4 @@
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../../../electron/shared/sceneFileVersion.js';
 import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig } from '../model/sceneOpeningAnimation';
 import { isConveyorArrowEffectKind } from '../model/conveyorArrowEffect';
@@ -10,7 +11,8 @@ import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalT
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
 import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
-import { sanitizeSceneShadowBake } from '../model/sceneShadowBake';
+import { normalizeEntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
+import { migrateSceneLightingDocument, normalizeSceneLightingConfig, normalizeSceneAppearanceConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { Entity } from '../model/Entity';
 import { convertLegacyChartMarkerTransform, normalizeChartMarker } from '../model/chartMarker';
 import { createPersistedModelThinInstanceScene } from '../model/editModeModelThinInstances';
@@ -31,11 +33,9 @@ import {
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
-  sanitizeSceneShadowSettings,
   sanitizeSceneSkybox,
   sanitizeSceneViewDistance,
   isSceneCameraOrientation,
-  isSceneShadowQuality,
   SCENE_SENSITIVITY_DEFAULT,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
@@ -109,8 +109,9 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 type PlainObject = Record<string, unknown>;
 
 export function serializeScene(scene: SceneDocument): string {
-  const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(scene));
-  return JSON.stringify({ version: 5, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
+  const canonical = migrateSceneLightingDocument(scene) as SceneDocument;
+  const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(canonical));
+  return JSON.stringify({ version: CURRENT_SCENE_FILE_VERSION, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
 }
 
 /** 保存前只替换天空盒嵌套对象，保留其它场景引用并确保不修改输入。 */
@@ -165,16 +166,17 @@ export function deserializeScene(content: string): SceneDocument {
     if (sceneFile.version <= 4) {
       logSceneV4ToV5MigrationSummary(migrateSceneV4ToV5(rawScene));
     }
-    return normalizeSceneDocument(rawScene);
+    return normalizeSceneDocument(migrateSceneLightingDocument(rawScene));
   } catch (error) {
     if (error instanceof Error && (
       error.message === UNSUPPORTED_SCENE_FILE_ERROR
       || error.message === INVALID_SKYBOX_RESOURCE_ID_ERROR
+      || /^场景(?:光照|外观)配置版本不受支持/.test(error.message)
     )) {
       throw error;
     }
 
-    throw new Error(UNSUPPORTED_SCENE_FILE_ERROR);
+    throw new Error(UNSUPPORTED_SCENE_FILE_ERROR, { cause: error });
   }
 }
 
@@ -184,13 +186,7 @@ function assertSceneFileDocument(value: unknown): SceneFileDocument {
   const hasLegacyShape = keys.length === 2 && keys.includes('version') && keys.includes('scene');
   const hasUnitsShape = keys.length === 3 && keys.includes('version') && keys.includes('units') && keys.includes('scene');
 
-  if ((!hasLegacyShape && !hasUnitsShape) || (
-    document.version !== 1
-    && document.version !== 2
-    && document.version !== 3
-    && document.version !== 4
-    && document.version !== 5
-  )) {
+  if ((!hasLegacyShape && !hasUnitsShape) || !isSupportedSceneFileVersion(document.version)) {
     throwUnsupportedSceneFileError();
   }
 
@@ -259,6 +255,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   }
 
   return {
+    ...scene,
     id,
     name,
     entityIds: migratedSkybox.entityIds,
@@ -340,12 +337,14 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   if (value === undefined) return createDefaultSceneSettings();
 
   const settings = assertPlainObject(value);
-  const camera = assertPlainObject(settings.camera);
+  // 历史文件可缺少整组编辑设置；光照迁移补出 settings 后仍使用默认相机。
+  const camera = settings.camera === undefined ? createDefaultSceneSettings().camera : assertPlainObject(settings.camera);
   const sensitivity = settings.sensitivity === undefined ? undefined : assertPlainObject(settings.sensitivity);
-  const shadows = settings.shadows === undefined ? undefined : assertPlainObject(settings.shadows);
 
   return sanitizeSceneSettings({
-    theme: settings.theme as SceneSettings['theme'],
+    ...settings,
+    lighting: normalizeSceneLightingConfig(settings.lighting),
+    appearance: normalizeSceneAppearanceConfig(settings.appearance),
     // 统一校验器负责隔离坏项并报告；缺失字段兼容历史场景。
     regionViews: settings.regionViews as SceneSettings['regionViews'],
     openingAnimation: normalizeSceneOpeningConfig(settings.openingAnimation),
@@ -361,22 +360,6 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
       pan: typeof sensitivity?.pan === 'number' ? sensitivity.pan : SCENE_SENSITIVITY_DEFAULT,
       rotate: typeof sensitivity?.rotate === 'number' ? sensitivity.rotate : SCENE_SENSITIVITY_DEFAULT,
     },
-    shadows: sanitizeSceneShadowSettings(shadows ? {
-      enabled: typeof shadows.enabled === 'boolean' ? shadows.enabled : undefined,
-      mode: shadows.mode === 'realtime' ? 'realtime' : 'baked',
-      bake: sanitizeSceneShadowBake(shadows.bake),
-      quality: isSceneShadowQuality(shadows.quality) ? shadows.quality : undefined,
-      darkness: typeof shadows.darkness === 'number' ? shadows.darkness : undefined,
-      catcherEnabled: typeof shadows.catcherEnabled === 'boolean' ? shadows.catcherEnabled : undefined,
-      sunAzimuthDegrees: typeof shadows.sunAzimuthDegrees === 'number' ? shadows.sunAzimuthDegrees : undefined,
-      sunElevationDegrees: typeof shadows.sunElevationDegrees === 'number' ? shadows.sunElevationDegrees : undefined,
-      sunIntensity: typeof shadows.sunIntensity === 'number' ? shadows.sunIntensity : undefined,
-      distanceMeters: typeof shadows.distanceMeters === 'number' ? shadows.distanceMeters : undefined,
-      bias: typeof shadows.bias === 'number' ? shadows.bias : undefined,
-      normalBias: typeof shadows.normalBias === 'number' ? shadows.normalBias : undefined,
-      fillIntensity: typeof shadows.fillIntensity === 'number' ? shadows.fillIntensity : undefined,
-      iblIntensityMax: typeof shadows.iblIntensityMax === 'number' ? shadows.iblIntensityMax : undefined,
-    } : undefined),
     environment: normalizeSceneEnvironmentSettings(settings.environment),
     skybox: normalizeSceneSkyboxSettings(settings.skybox),
     // 旧场景文件没有该字段；宽松读取，缺失/非法一律 null，不阻断打开。
@@ -587,6 +570,8 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
   const normalized: EntityComponents = {
     transform: normalizeTransform(components.transform),
   };
+
+  if (components.lighting !== undefined) normalized.lighting = normalizeEntityLightingSettings(components.lighting);
 
   if ('meshRenderer' in components && components.meshRenderer !== undefined) {
     normalized.meshRenderer = normalizeMeshRenderer(components.meshRenderer);

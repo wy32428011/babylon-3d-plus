@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 function makeFolderEntity(id, visible = true, locked = false, childrenIds = []) {
   return {
@@ -43,12 +43,9 @@ function serializeSceneDocument(scene) {
 }
 
 test('隐藏文件夹后点击子模型“显示”必须真正显示模型，且保存重开后仍可显示', async (context) => {
-  const server = await createServer({
-    configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/store/editorStore.ts',
+  ]);
   context.after(async () => server.close());
 
   // 避免 store 内部 fire-and-forget 的环境同步访问 window 报错
@@ -92,12 +89,9 @@ test('隐藏文件夹后点击子模型“显示”必须真正显示模型，�
 });
 
 test('锁定文件夹后点击子模型“解锁”必须真正解锁，而不是把自身 locked 翻转为 true', async (context) => {
-  const server = await createServer({
-    configFile: false, root: process.cwd(), logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/editor/store/editorStore.ts',
+  ]);
   context.after(async () => server.close());
 
   globalThis.window = globalThis.window ?? {};

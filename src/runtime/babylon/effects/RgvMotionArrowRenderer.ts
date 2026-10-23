@@ -1,4 +1,10 @@
-import { Color3, Constants, Mesh, MeshBuilder, ShaderMaterial, TransformNode, type Scene } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { RgvMotionArrowChannel, RgvMotionArrowsConfig } from '../../../editor/model/rgvMotionArrows';
 import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { ARROW_STYLE_UNIFORMS, SURFACE_ARROW_FRAGMENT_SOURCE, SURFACE_ARROW_VERTEX_SOURCE } from './ConveyorSurfaceArrowRenderer';

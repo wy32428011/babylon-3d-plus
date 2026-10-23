@@ -1,14 +1,10 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-});
+const viteServer = await createP4SsrTestModules([
+  '/src/runtime/babylon/dataPlatformScreenBridge.ts',
+]);
 after(() => viteServer.close());
 
 const {

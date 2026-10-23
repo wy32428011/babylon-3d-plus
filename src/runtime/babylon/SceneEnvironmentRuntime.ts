@@ -1,28 +1,23 @@
-import {
-  AbstractMesh,
-  AssetContainer,
-  Color3,
-  InstancedMesh,
-  LinesMesh,
-  Material,
-  MultiMaterial,
-  Matrix,
-  Mesh,
-  MeshBuilder,
-  PBRMaterial,
-  Scene,
-  StandardMaterial,
-  Texture,
-  TransformNode,
-  Vector3,
-  VertexBuffer,
-} from '@babylonjs/core';
+import { registerLightingMaterialExportBaseline } from './lightingGeometry';
+import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 
 import {
   sanitizeSceneEnvironment,
   type SceneEnvironmentSettings,
   type SceneEnvironmentTransform,
-  type SceneShadowSettings,
 } from '../../editor/model/SceneDocument';
 import type {
   EnvironmentApplyResult,
@@ -31,11 +26,7 @@ import type {
   EnvironmentWorldBounds,
 } from '../../editor/model/environmentRuntime';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
-import { EnvironmentShadowMaterialPlugin } from './EnvironmentShadowMaterialPlugin';
-import { createBakedEnvironmentMaterial, type ShadowBakeSurface } from './EnvironmentShadowBake';
-import { applyGroundShadowUv } from './staticShadowReceivers';
-import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
-import { freezeEnvironmentTransforms } from './environmentTransformPreparation';
+import { ControlledEnvironmentTransforms } from './ControlledEnvironmentTransforms';
 import { countModelMeshTriangles } from './modelTriangleStatistics';
 import {
   calculateEnvironmentOriginLeftOffset,
@@ -49,6 +40,9 @@ import {
   type RuntimeWorldBounds,
 } from './runtimeNodeGeometry';
 import type { OpeningEnvironmentSnapshot } from '../../shared/opening/OpeningEnvironmentSnapshot';
+
+/** 已提交环境的真实几何表面，供统一光照分类和GI捕获读取。 */
+export type LightingEnvironmentSurface = { key: string; mesh: AbstractMesh; material: Material | null; useVertexColors?: boolean; sourceAlpha?: number };
 
 export type SceneEnvironmentApplyOptions = {
   requestId: string | null;
@@ -93,16 +87,12 @@ type EnvironmentRuntimeEntry = {
   contentRoot: TransformNode;
   container: AssetContainer;
   renderMeshes: AbstractMesh[];
-  transformNodes: TransformNode[];
+  controlledTransforms: ControlledEnvironmentTransforms;
   materialBaselines: EnvironmentMaterialBaseline[];
   legacyOffset: { x: number; y: number; z: number };
   statistics: EnvironmentModelStatistics;
   bounds: EnvironmentWorldBounds | null;
-  shadowSurfaces: Array<ShadowBakeSurface & { useVertexColors: boolean; originalShadowUv: ReturnType<AbstractMesh['getVerticesData']> }>;
-  shadowUvMeshes: Set<Mesh>;
-  shadowMaterials: Material[];
-  shadowMaterialBaselines: Map<Material, EnvironmentMaterialBaseline>;
-  shadowTextures: Texture[];
+  shadowSurfaces: Array<LightingEnvironmentSurface & { useVertexColors: boolean }>;
   shadowPresentationKey: string;
   disposed: boolean;
 };
@@ -171,10 +161,9 @@ export class SceneEnvironmentRuntime {
   private loadSequence = 0;
   private adjustmentActive = false;
   private adjustmentBounds: LinesMesh | null = null;
-  private shadowSettings: SceneShadowSettings | null = null;
+  private shadowsEnabled = true;
   private shadowSequence = 0;
   private shadowKey = 'original';
-  private lightingMode: 'original' | 'scene' = 'original';
   private snapshot: EnvironmentRuntimeSnapshot = {
     phase: 'idle',
     requestId: null,
@@ -189,7 +178,16 @@ export class SceneEnvironmentRuntime {
     private readonly options: SceneEnvironmentRuntimeOptions,
   ) {}
 
-  getShadowBakeSurfaces(): ShadowBakeSurface[] { return this.current?.shadowSurfaces ?? []; }
+  getLightingSurfaces(): LightingEnvironmentSurface[] { return this.current?.shadowSurfaces ?? []; }
+
+  /** 规则绑定已提交几何；候选加载/失败快照中的 URL 不能冒充当前环境来源。 */
+  getLightingSourceReference(): { sourceUrl: string; sourcePath: string; assetRevision: string | null } | null {
+    const entry = this.current;
+    if (!entry || entry.disposed) return null;
+    const variant = entry.settings.variants.find(item => item.sourceUrl === entry.sourceUrl);
+    return { sourceUrl: entry.sourceUrl, sourcePath: variant?.sourcePath ?? entry.sourceUrl,
+      assetRevision: entry.settings.dataPlatformRevision ?? null };
+  }
 
   /** 环境绑定独立于 Hierarchy 实体；隐藏仍返回根节点，保留特效动画进度。 */
   getBuildingEffectTarget(): TransformNode | null { return this.current?.contentRoot ?? null; }
@@ -256,48 +254,25 @@ export class SceneEnvironmentRuntime {
     else mutate();
   }
 
-  /** 切换环境工作材质的受光模式；保留原始材质基线，不重新加载模型。 */
-  async setLightingMode(mode: 'original' | 'scene'): Promise<void> {
-    if (this.lightingMode === mode && this.shadowKey !== '') return;
-    this.lightingMode = mode;
-    const sequence = ++this.shadowSequence;
-    this.shadowKey = '';
-    try {
-      if (this.current) await this.applyShadowPresentation(this.current, sequence);
-      if (sequence === this.shadowSequence) this.shadowKey = this.getShadowPresentationKey();
-    } catch (error) {
-      if (sequence === this.shadowSequence) this.shadowKey = '';
-      throw error;
-    }
-  }
+  private getShadowPresentationKey(): string { return 'scene'; }
 
-  private getShadowPresentationKey(): string {
-    const settings = this.shadowSettings;
-    const shadow = settings?.enabled && settings.mode === 'realtime' ? 'realtime'
-      : settings?.enabled && settings.bake ? `baked:${settings.bake.signature}:${settings.bake.createdAt}` : 'original';
-    return `${this.lightingMode}:${shadow}`;
-  }
-
-  private applyMaterialLighting(material: Material, baseline: EnvironmentMaterialBaseline | undefined,
-    mode: 'original' | 'scene'): void {
+  /** 环境统一接受物理照明；源材质只作为可恢复的资源基线。 */
+  private applyMaterialLighting(material: Material, baseline: EnvironmentMaterialBaseline | undefined): void {
     const lighting = baseline?.lighting;
     if (!lighting) return;
     material.unfreeze();
-    if (material instanceof PBRMaterial) {
-      material.unlit = mode === 'original';
-      material.disableLighting = mode === 'original';
-    } else if (material instanceof StandardMaterial) {
-      const isolated = mode === 'original' && !lighting.disableLighting;
-      material.disableLighting = mode === 'original';
-      material.emissiveColor.copyFrom(isolated ? material.diffuseColor : lighting.emissiveColor);
-      material.useEmissiveAsIllumination = isolated ? false : lighting.useEmissiveAsIllumination;
-      material.linkEmissiveWithDiffuse = isolated ? false : lighting.linkEmissiveWithDiffuse;
+    if (material instanceof PBRMaterial) { material.unlit = false; material.disableLighting = false; }
+    else if (material instanceof StandardMaterial) {
+      material.disableLighting = false;
+      material.emissiveColor.copyFrom(lighting.emissiveColor);
+      material.useEmissiveAsIllumination = lighting.useEmissiveAsIllumination;
+      material.linkEmissiveWithDiffuse = lighting.linkEmissiveWithDiffuse;
     }
   }
 
-  /** 静态结果换成普通原色纹理；稳定帧不注册材质插件或阴影绑定回调。 */
-  async syncShadows(settings: SceneShadowSettings): Promise<void> {
-    this.shadowSettings = settings;
+  /** 只同步原生投影开关；旧太阳阴影 PNG 不进入正式材质路径。 */
+  async syncLighting(settings: { enabled: boolean }): Promise<void> {
+    this.shadowsEnabled = settings.enabled;
     const key = this.getShadowPresentationKey();
     if (key === this.shadowKey) return;
     this.shadowKey = key;
@@ -307,150 +282,20 @@ export class SceneEnvironmentRuntime {
   }
 
   private async applyShadowPresentation(entry: EnvironmentRuntimeEntry, sequence: number): Promise<void> {
-    const settings = this.shadowSettings;
-    const lightingMode = this.lightingMode;
-    const realtime = settings?.enabled && settings.mode === 'realtime';
-    const bake = settings?.enabled && settings.mode !== 'realtime' ? settings.bake : null;
     const key = this.getShadowPresentationKey();
-    if (entry.shadowPresentationKey === key) return;
-    const materials: Material[] = [], textures: Texture[] = [];
-    const assignments = new Map<AbstractMesh, Material | null>();
-    const copies = new Map<Material, Material>();
-    const bakedSources = new Map<Material, NonNullable<SceneShadowSettings['bake']>['surfaces'][number]>();
-    const maskTextures = new Map<string, Texture>();
-    const maskCopies = new Map<Material, Map<Texture, Material>>();
-    const baselines = new Map<Material, EnvironmentMaterialBaseline>();
-    const recordBaseline = (material: Material, source: Material) => {
-      const baseline = entry.materialBaselines.find(item => item.material === source);
-      if (baseline) baselines.set(material, baseline);
-    };
-    const cloneRealtime = (source: Material): Material => {
-      const existing = copies.get(source); if (existing) return existing;
-      const material = source instanceof MultiMaterial
-        ? new MultiMaterial(`${source.name}-realtime-shadow`, this.scene)
-        : cloneEnvironmentMaterial(source, `${source.name}-realtime-shadow`);
-      if (!material) throw new Error(`不能克隆环境阴影材质「${source.name}」。`);
-      copies.set(source, material); materials.push(material);
-      recordBaseline(material, source);
-      if (source instanceof MultiMaterial && material instanceof MultiMaterial) {
-        material.subMaterials = source.subMaterials.map(child => child ? cloneRealtime(child) : null);
-      } else if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
-        this.applyMaterialLighting(material, baselines.get(material), lightingMode);
-        // 受光模式使用 Babylon 自身的光照与阴影，隔离模式才需要额外阴影采样。
-        if (lightingMode === 'original') new EnvironmentShadowMaterialPlugin(material);
-      }
-      return material;
-    };
-    const cloneMaskMaterial = (source: Material, texture: Texture): Material => {
-      const variants = maskCopies.get(source) ?? new Map<Texture, Material>();
-      const existing = variants.get(texture); if (existing) return existing;
-      const material = source instanceof MultiMaterial ? new MultiMaterial(`${source.name}-static-shadow`, this.scene) : cloneEnvironmentMaterial(source, `${source.name}-static-shadow`);
-      if (!material) throw new Error(`无法复制地面材质「${source.name}」。`);
-      variants.set(texture, material); maskCopies.set(source, variants);
-      materials.push(material); recordBaseline(material, source);
-      if (source instanceof MultiMaterial && material instanceof MultiMaterial) {
-        material.subMaterials = source.subMaterials.map(child => child ? cloneMaskMaterial(child, texture) : null);
-      } else if (material instanceof PBRMaterial || material instanceof StandardMaterial) {
-        if (material.lightmapTexture || material.getActiveTextures().some(item => item.coordinatesIndex === 2)) throw new Error(`地面材质「${source.name}」已使用光照贴图或第三套 UV，请先整理其纹理配置。`);
-        material.lightmapTexture = texture; material.useLightmapAsShadowmap = true;
-        this.applyMaterialLighting(material, baselines.get(material), lightingMode);
-      } else throw new Error(`地面材质「${source.name}」不支持静态阴影遮罩。`);
-      return material;
-    };
-    try {
-      const bakedByKey = new Map(bake?.surfaces.map(surface => [surface.key, surface]));
-      const surfaceKeys = new Set(entry.shadowSurfaces.map(surface => surface.key));
-      if (bake && [...bakedByKey.keys()].some(key => !surfaceKeys.has(key))) {
-        throw new Error('烘焙表面与当前环境不匹配，请重新更新阴影。');
-      }
+    if (entry.disposed || sequence !== this.shadowSequence || entry.shadowPresentationKey === key) return;
+    const commit = () => {
+      // 容器本身已是场景工作副本；保持材质身份，让特效和入场动画继续恢复同一原材质。
+      for (const baseline of entry.materialBaselines) this.applyMaterialLighting(baseline.material, baseline);
       for (const surface of entry.shadowSurfaces) {
-        let material = surface.material;
-        if (realtime && material) material = cloneRealtime(material);
-        const baked = bakedByKey.get(surface.key);
-        if (baked) {
-          if (baked.kind === 'shadow-mask') {
-            if (!surface.material) throw new Error(`地面「${surface.mesh.name}」缺少材质。`);
-            const dataUrl = baked.textureRef ? bakedByKey.get(baked.textureRef)?.dataUrl : baked.dataUrl;
-            if (!dataUrl) throw new Error('静态阴影遮罩引用无效，请重新更新阴影。');
-            let texture = maskTextures.get(dataUrl);
-            if (!texture) {
-              await new Promise<void>((resolve, reject) => {
-                texture = new Texture(dataUrl, this.scene, false, false, Texture.TRILINEAR_SAMPLINGMODE,
-                  () => resolve(), message => reject(new Error(`静态阴影遮罩加载失败：${message}`)));
-                textures.push(texture);
-              });
-              texture!.gammaSpace = false; texture!.coordinatesIndex = 2;
-              texture!.anisotropicFilteringLevel = Math.min(16, this.scene.getEngine().getCaps().maxAnisotropy);
-              texture!.wrapU = Texture.CLAMP_ADDRESSMODE; texture!.wrapV = Texture.CLAMP_ADDRESSMODE;
-              maskTextures.set(dataUrl, texture!);
-            }
-            assignments.set(surface.mesh, cloneMaskMaterial(surface.material, texture!));
-            continue;
-          }
-          if (!(surface.material instanceof PBRMaterial || surface.material instanceof StandardMaterial)) throw new Error(`环境「${surface.mesh.name}」材质已变化，请重新烘焙。`);
-          const previous = bakedSources.get(surface.material);
-          if (previous) {
-            if (previous.dataUrl !== baked.dataUrl || previous.uvBounds.some((value, index) => value !== baked.uvBounds[index])) {
-              throw new Error('共享环境材质的烘焙纹理不一致，请重新更新阴影。');
-            }
-            assignments.set(surface.mesh, copies.get(surface.material)!);
-            continue;
-          }
-          const sourceTexture = surface.material instanceof PBRMaterial ? surface.material.albedoTexture : surface.material.diffuseTexture;
-          let texture!: Texture;
-          await new Promise<void>((resolve, reject) => {
-            texture = new Texture(baked.dataUrl, this.scene, sourceTexture instanceof Texture ? sourceTexture.noMipmap : false,
-              false, sourceTexture?.samplingMode ?? Texture.TRILINEAR_SAMPLINGMODE,
-              () => resolve(), message => reject(new Error(`烘焙纹理加载失败：${message}`)));
-            textures.push(texture);
-          });
-          const [minU, minV, maxU, maxV] = baked.uvBounds;
-          texture.uScale = 1 / (maxU - minU); texture.vScale = 1 / (maxV - minV);
-          texture.uOffset = -minU * texture.uScale; texture.vOffset = -minV * texture.vScale;
-          texture.wrapU = Texture.CLAMP_ADDRESSMODE; texture.wrapV = Texture.CLAMP_ADDRESSMODE;
-          texture.anisotropicFilteringLevel = sourceTexture?.anisotropicFilteringLevel ?? 4;
-          const bakedMaterial = createBakedEnvironmentMaterial(surface.material, texture);
-          if (lightingMode === 'scene') {
-            // 旧颜色烘焙已合入阴影与自发光，继续作为底色接受新灯光，避免丢失旧阴影。
-            bakedMaterial.disableLighting = false;
-            if (bakedMaterial instanceof PBRMaterial) bakedMaterial.unlit = false;
-            bakedMaterial.emissiveColor = Color3.Black();
-          }
-          material = bakedMaterial;
-          materials.push(material);
-          recordBaseline(material, surface.material);
-          copies.set(surface.material, material); bakedSources.set(surface.material, baked);
-        }
-        assignments.set(surface.mesh, material);
+        surface.mesh.material = surface.material;
+        surface.mesh.useVertexColors = surface.useVertexColors;
+        surface.mesh.receiveShadows = this.shadowsEnabled;
       }
-      if (entry.disposed || sequence !== this.shadowSequence) return;
-      const commit = () => {
-        for (const baseline of entry.materialBaselines) this.applyMaterialLighting(baseline.material, baseline, lightingMode);
-        for (const surface of entry.shadowSurfaces) {
-          const baked = bakedByKey.get(surface.key);
-          if (baked?.kind === 'shadow-mask') {
-            applyGroundShadowUv(surface.mesh, baked.uvBounds); entry.shadowUvMeshes.add(surface.mesh as Mesh);
-          } else if (surface.mesh instanceof Mesh && entry.shadowUvMeshes.delete(surface.mesh)) {
-            if (surface.originalShadowUv) surface.mesh.setVerticesData(VertexBuffer.UV3Kind, surface.originalShadowUv, false, 2);
-            else surface.mesh.removeVerticesData(VertexBuffer.UV3Kind);
-          }
-          surface.mesh.material = assignments.get(surface.mesh) ?? null;
-          surface.mesh.useVertexColors = baked && baked.kind !== 'shadow-mask' ? false : surface.useVertexColors;
-          surface.mesh.receiveShadows = Boolean(realtime);
-        }
-        for (const material of entry.shadowMaterials) material.dispose(false, false);
-        for (const texture of entry.shadowTextures) texture.dispose();
-        entry.shadowMaterials = materials.splice(0); entry.shadowTextures = textures.splice(0);
-        entry.shadowMaterialBaselines = baselines;
-        entry.shadowPresentationKey = key;
-        this.applyEntryMaterialOpacity(entry, entry.settings.opacity);
-      };
-      if (entry === this.current) this.withBuildingEffectMutation(commit);
-      else commit();
-    } finally {
-      for (const material of materials) material.dispose(false, false);
-      for (const texture of textures) texture.dispose();
-    }
+      entry.shadowPresentationKey = key;
+      this.applyEntryMaterialOpacity(entry, entry.settings.opacity);
+    };
+    if (entry === this.current) this.withBuildingEffectMutation(commit); else commit();
   }
 
   private async applyLatestShadowPresentation(entry: EnvironmentRuntimeEntry, signal: AbortSignal): Promise<void> {
@@ -499,6 +344,13 @@ export class SceneEnvironmentRuntime {
       return;
     }
 
+    // 显式场景重同步也会让父链/动态声明失效；相同配置的 apply 快路径本身只负责请求去重。
+    const normalized = sanitizeSceneEnvironment(environment);
+    if (this.current && normalized && !this.adjustmentActive
+      && createLoadKey(this.current.settings, false) === createLoadKey(normalized, false)) {
+      this.freezeEntry(this.current);
+      this.current.bounds = this.collectEntryBounds(this.current);
+    }
     void this.apply(environment, { requestId: null, autoAlign: false }).catch((error) => {
       if (isAbortError(error)) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -616,7 +468,6 @@ export class SceneEnvironmentRuntime {
       this.applyEntryPresentation(candidate, resolvedEnvironment);
       candidate.bounds = this.collectEntryBounds(candidate);
       candidate.statistics = this.collectStatistics(candidate, resolvedEnvironment.fileSizeBytes ?? null);
-      this.freezeEntry(candidate);
 
       await this.applyLatestShadowPresentation(candidate, signal);
 
@@ -625,6 +476,7 @@ export class SceneEnvironmentRuntime {
       if (sequence !== this.loadSequence) throw createAbortError();
       await this.applyLatestShadowPresentation(candidate, signal);
       if (sequence !== this.loadSequence) throw createAbortError();
+      this.freezeEntry(candidate);
       const previous = this.current;
       const next = candidate;
       this.withBuildingEffectMutation(() => {
@@ -681,6 +533,8 @@ export class SceneEnvironmentRuntime {
       ]);
       for (const node of allImportedNodes) {
         if (!node.parent || !allImportedNodes.has(node.parent as TransformNode)) node.parent = contentRoot;
+        // 加载源可能带有导出的冻结标记；重挂父级后必须从当前父链重新求值。
+        if (node.isWorldMatrixFrozen) node.unfreezeWorldMatrix();
       }
 
       const renderMeshes = container.meshes.filter((mesh) => mesh.getTotalVertices() > 0);
@@ -691,8 +545,7 @@ export class SceneEnvironmentRuntime {
           : {};
         mesh.metadata = { ...metadata, editorEnvironmentMesh: true };
       }
-      const transformNodes = [...new Set<TransformNode>([root, contentRoot, ...allImportedNodes])];
-      // 在隔离修改之前记录工作容器基线，使主题切换能恢复原始自发光配置。
+      // 记录资源材质基线，使统一受光副本保留原始自发光与透明度。
       const materialBaselines = container.materials.map((material) => ({
         material,
         alpha: material.alpha,
@@ -707,6 +560,7 @@ export class SceneEnvironmentRuntime {
           linkEmissiveWithDiffuse: material instanceof StandardMaterial && material.linkEmissiveWithDiffuse,
         } : null,
       }));
+      for (const baseline of materialBaselines) registerLightingMaterialExportBaseline(baseline.material, baseline);
 
       return {
         sourceUrl: environment.activeVariantUrl,
@@ -716,15 +570,14 @@ export class SceneEnvironmentRuntime {
         contentRoot,
         container,
         renderMeshes,
-        transformNodes,
+        controlledTransforms: new ControlledEnvironmentTransforms(container),
         materialBaselines,
         legacyOffset: { x: 0, y: 0, z: 0 },
         statistics: this.collectStatisticsFromAssets(container, renderMeshes, environment.fileSizeBytes ?? null),
         bounds: null,
         shadowSurfaces: renderMeshes.map((mesh, index) => ({ key: `${index}:${mesh.name}`, mesh, material: mesh.material,
-          useVertexColors: mesh.useVertexColors, sourceAlpha: mesh.material?.alpha ?? 1, originalShadowUv: mesh.getVerticesData(VertexBuffer.UV3Kind) })),
-        shadowUvMeshes: new Set(),
-        shadowMaterials: [], shadowMaterialBaselines: new Map(), shadowTextures: [], shadowPresentationKey: '', disposed: false,
+          useVertexColors: mesh.useVertexColors, sourceAlpha: mesh.material?.alpha ?? 1 })),
+        shadowPresentationKey: '', disposed: false,
       };
     } catch (error) {
       if (!root.isDisposed()) root.dispose(false, false);
@@ -853,16 +706,6 @@ export class SceneEnvironmentRuntime {
       // 重新冻结后强制刷新材质 UBO，避免透明度继续使用上一次的 GPU 数据。
       baseline.material.markDirty(true);
     }
-    for (const material of entry.shadowMaterials) {
-      const baseline = entry.shadowMaterialBaselines.get(material);
-      material.unfreeze();
-      material.alpha = (baseline?.alpha ?? 1) * opacity;
-      material.transparencyMode = ghostMode ? Material.MATERIAL_ALPHABLEND : (baseline?.transparencyMode ?? Material.MATERIAL_OPAQUE);
-      material.disableDepthWrite = ghostMode || (baseline?.disableDepthWrite ?? false);
-      material.forceDepthWrite = !ghostMode && (baseline?.forceDepthWrite ?? false);
-      material.needDepthPrePass = !ghostMode && (baseline?.needDepthPrePass ?? false);
-      material.freeze(); material.markDirty(true);
-    }
   }
 
   private applyEntryEnabledState(entry: EnvironmentRuntimeEntry): void {
@@ -949,14 +792,12 @@ export class SceneEnvironmentRuntime {
 
   private freezeEntry(entry: EnvironmentRuntimeEntry | null): void {
     if (!entry || this.adjustmentActive) return;
-    freezeEnvironmentTransforms(entry.transformNodes);
+    entry.controlledTransforms.freeze();
   }
 
   private unfreezeEntry(entry: EnvironmentRuntimeEntry | null): void {
     if (!entry) return;
-    for (const node of entry.transformNodes) {
-      if (!node.isDisposed()) node.unfreezeWorldMatrix();
-    }
+    entry.controlledTransforms.unfreeze();
   }
 
   private refreshAdjustmentBounds(): void {
@@ -1008,8 +849,7 @@ export class SceneEnvironmentRuntime {
   private disposeEntry(entry: EnvironmentRuntimeEntry | null): void {
     if (!entry) return;
     entry.disposed = true;
-    for (const material of entry.shadowMaterials) material.dispose(false, false);
-    for (const texture of entry.shadowTextures) texture.dispose();
+    entry.controlledTransforms.unfreeze();
     entry.container.dispose();
     if (!entry.root.isDisposed()) entry.root.dispose(false, false);
   }

@@ -119,7 +119,7 @@ export async function loadSourceEnvironmentCacheIndexes(
   try {
     parsed = JSON.parse(await readUtf8File(indexPath, '数字孪生 SOURCE 环境资源索引')) as unknown;
   } catch (error) {
-    if (error instanceof SyntaxError) throw new Error('环境模型 Sidecar 索引不是有效 JSON。');
+    if (error instanceof SyntaxError) throw new Error('环境模型 Sidecar 索引不是有效 JSON。', { cause: error });
     throw error;
   }
   throwIfAborted(signal);

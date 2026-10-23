@@ -1,4 +1,3 @@
-import { SCENE_LENGTH_UNIT_SYMBOL } from '../model/sceneUnits';
 import type { LocatorComponent } from '../model/components';
 import { useEditorStore } from '../store/editorStore';
 import { SearchableSelect } from '../ui/SearchableSelect';

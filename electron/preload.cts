@@ -67,9 +67,7 @@ import type {
   DataPlatformChartSyncProgress,
 } from './ipc/dataPlatformChartSync.js';
 
-import type { IpcRendererEvent } from 'electron';
-
-const { contextBridge, ipcRenderer } = require('electron');
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 
 /** sandbox preload 不能加载相对模块，因此实时优先 gate 必须在入口内联。 */
 function createRealtimeFirstProgressGate<T>(handler: (payload: T) => void) {
@@ -102,6 +100,14 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 });
 
 contextBridge.exposeInMainWorld('editorApi', {
+  startLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput): Promise<import('./shared/sceneLightingBakeContract.js').SceneLightingBakeSnapshot> => ipcRenderer.invoke('lighting-bake:start', input),
+  cancelLightingBake: (jobId: string): Promise<boolean> => ipcRenderer.invoke('lighting-bake:cancel', jobId),
+  getLightingBakeEngineStatus: (): Promise<import('./shared/sceneLightingBakeContract.js').LightingBakeEngineStatus> => ipcRenderer.invoke('lighting-bake:engineStatus'),
+  onLightingBakeProgress: (handler: (progress: import('./shared/sceneLightingBakeContract.js').LightingBakeProgress) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: import('./shared/sceneLightingBakeContract.js').LightingBakeProgress) => handler(payload);
+    ipcRenderer.on('lighting-bake:progress', listener);
+    return () => ipcRenderer.removeListener('lighting-bake:progress', listener);
+  },
   importCompositionPackage: () => ipcRenderer.invoke('composition:import'),
   exportCompositionPackage: (id: string) => ipcRenderer.invoke('composition:export', id),
   loadComposition: (id: string, revision?: string) => ipcRenderer.invoke('composition:load', id, revision),

@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../../electron/shared/asciiControlCharacters.ts';
 export type PublishedReleaseFile = {
   path: string;
   url: string;
@@ -37,10 +38,10 @@ export function parsePublishedReleaseManifest(value: unknown, baseUrl: string, r
   const files = source.files.map((item: unknown): PublishedReleaseFile => {
     if (!item || typeof item !== 'object') throw new Error('发布缓存条目无效。');
     const entry = item as Record<string, unknown>;
-    if (typeof entry.path !== 'string' || !entry.path || /[\\?#\u0000-\u001f]/.test(entry.path)) throw new Error('发布缓存文件路径无效。');
+    if (typeof entry.path !== 'string' || !entry.path || containsAsciiControlCharactersOr(entry.path, "\\?#")) throw new Error('发布缓存文件路径无效。');
     const parts = entry.path.split('/');
     const decoded = parts.map(part => decodeURIComponent(part));
-    if (decoded.some(part => !part || part === '.' || part === '..' || /[\\/:\u0000-\u001f]/.test(part))) throw new Error('发布缓存文件路径越界。');
+    if (decoded.some(part => !part || part === '.' || part === '..' || containsAsciiControlCharactersOr(part, "\\/:"))) throw new Error('发布缓存文件路径越界。');
     const relative = decoded.join('/');
     if (CONTROL_FILES.has(relative)) throw new Error('实时配置和缓存控制文件不可进入发布缓存。');
     const url = new URL(entry.path, base);

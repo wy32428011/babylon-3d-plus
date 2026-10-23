@@ -1,4 +1,14 @@
-import { AbstractMesh, Color3, DynamicTexture, Material, Matrix, Mesh, MeshBuilder, Scene, StandardMaterial, Texture, TransformNode, Vector3 } from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { createDefaultDigitalTwinEffectConfig } from '../../../editor/model/digitalTwinEffect';
 import { SpatialEffects } from './SpatialEffects';

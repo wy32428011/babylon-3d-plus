@@ -1,8 +1,19 @@
-import {
-  AbstractMesh, Color3, InstancedMesh, Material, MaterialDefines, MaterialPluginBase, Mesh,
-  MultiMaterial, PBRBaseMaterial, ShaderMaterial, StandardMaterial, TransformNode, Vector3,
-  Vector4, VertexBuffer, VertexData, type BaseTexture, type Scene, type UniformBuffer,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { MaterialDefines } from '@babylonjs/core/Materials/materialDefines.js';
+import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase.js';
+import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
+import { PBRBaseMaterial } from '@babylonjs/core/Materials/PBR/pbrBaseMaterial.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3, Vector4 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { BaseTexture, Scene, UniformBuffer } from '@babylonjs/core';
 import type { SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
 import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard';

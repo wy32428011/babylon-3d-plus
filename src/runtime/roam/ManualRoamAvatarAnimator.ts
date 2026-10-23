@@ -1,6 +1,7 @@
-import { type AssetContainer, type Scene, type TransformNode, type AnimationGroup, LoadAssetContainerAsync } from '@babylonjs/core';
+import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader.js';
+import type { AssetContainer, Scene, TransformNode, AnimationGroup } from '@babylonjs/core';
 import { AnimatorAvatar } from '@babylonjs/core/Animations/animatorAvatar.js';
-import '@babylonjs/loaders/glTF/index.js';
+import '../babylon/babylonGltfLoader.js';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { MANUAL_ROAM_RIG_PROFILE, MANUAL_ROAM_RIG_PROFILE_V2, getManualRoamRigProfile, prepareManualRoamReferencePose, validateManualRoamAvatarRig, validateManualRoamRigNodes, validateManualRoamRestCompatibility } from './manualRoamAvatarRig.ts';
 import { MANUAL_ROAM_CLIPS, MANUAL_ROAM_TURN_CLIPS, createManualRoamAnimationState, stepManualRoamAnimationState, type ManualRoamClip, type ManualRoamAnimationFrame, type ManualRoamGaitTiming } from './manualRoamAnimationState.ts';

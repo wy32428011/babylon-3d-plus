@@ -28,12 +28,14 @@ writeFileSync(
         resolveJsonModule: true,
         isolatedModules: true,
         noEmit: false,
+        rewriteRelativeImportExtensions: true,
         outDir,
         rootDir: projectRoot,
         types: ['node'],
         typeRoots: [join(projectRoot, 'node_modules/@types')],
       },
       include: [
+        normalizedProjectRoot + '/src/vite-env.d.ts',
         assetTypesPath.replaceAll(String.fromCharCode(92), '/'),
         normalizedProjectRoot + '/src/editor/assets/modelAssetRelink.ts',
         normalizedProjectRoot + '/tests/editor/modelAssetRelink.test.ts',
@@ -45,16 +47,23 @@ writeFileSync(
 );
 
 try {
-  run('node', ['node_modules/typescript/bin/tsc', '-p', tsconfigPath], projectRoot);
-  rewriteRelativeImports(outDir);
-  run('node', ['--test', join(outDir, 'tests/editor/modelAssetRelink.test.js')], projectRoot);
+  if (run(['node_modules/typescript/bin/tsc', '-p', tsconfigPath], projectRoot)) {
+    rewriteRelativeImports(outDir);
+    run(['--test', join(outDir, 'tests/editor/modelAssetRelink.test.js')], projectRoot);
+  }
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }
 
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+function run(args, cwd) {
+  const result = spawnSync(process.execPath, args, { cwd, stdio: 'inherit' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    // 保留子进程退出码并经过 finally，失败时也释放本测试独有的临时编译目录。
+    process.exitCode = result.status ?? 1;
+    return false;
+  }
+  return true;
 }
 
 function rewriteRelativeImports(directory) {

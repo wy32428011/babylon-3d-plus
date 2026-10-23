@@ -24,6 +24,7 @@ type EntityArrayDialogProps = {
 
 /** Hierarchy 菜单和 Shift+Gizmo 阵列共用的参数弹框。 */
 export function EntityArrayDialog(props: EntityArrayDialogProps) {
+  const { onCancel } = props;
   const parameterError = getEntityArrayParameterError(props.value.copyCount, props.value.spacingMeters);
   const ruleError = getArrayAssetNumberRuleError(props.value.assetNumberRule);
   const hasUnavailableAssetNumberRule = Boolean(
@@ -40,12 +41,12 @@ export function EntityArrayDialog(props: EntityArrayDialogProps) {
     function handleWindowKeyDown(event: KeyboardEvent): void {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      props.onCancel();
+      onCancel();
     }
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
-  }, [props.onCancel]);
+  }, [onCancel]);
 
   return (
     <div

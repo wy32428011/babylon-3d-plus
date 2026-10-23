@@ -1,4 +1,6 @@
-import { type AssetContainer, type TransformNode, Matrix, Vector3, Quaternion, VertexBuffer } from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Matrix, Vector3, Quaternion } from '@babylonjs/core/Maths/math.vector.js';
+import type { AssetContainer, TransformNode } from '@babylonjs/core';
 
 export const MANUAL_ROAM_RIG_PROFILE = 'mixamo-humanoid-v1';
 export const MANUAL_ROAM_RIG_PROFILE_V2 = 'mixamo-humanoid-v2';

@@ -1,0 +1,378 @@
+import { awaitLightingTaskStep } from '../lightingBakeTask';
+import { SceneLightingRuntime } from '../SceneLightingRuntime';
+import { appendGeneratedLightingSources, collectLightingRuntimeSources, type LightingBatchOwner, type LightingSourceOwner } from '../lightingClassificationRuntime';
+import { getSceneLightingBakeSignature, type SceneLightingBakeSnapshot, type LightingClassificationEntry } from '../../../../electron/shared/sceneLightingBakeContract';
+import { SceneAppearanceRuntime } from '../SceneAppearanceRuntime';
+import { SceneLightRigRuntime } from '../SceneLightRigRuntime';
+import { getSceneLightingConfig, getSceneAppearanceConfig } from '../../../../electron/shared/sceneLightingConfig.ts';
+import { ENVIRONMENT_EFFECT_TARGET_ID } from '../../../editor/model/environmentBuildingEffect';
+import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { ISceneLoaderProgressEvent } from '@babylonjs/core';
+import type { Entity } from '../../../editor/model/Entity';
+import { createSceneSkyboxSettingsFromEntity, getSceneSkyboxEntity, getSceneSkyboxSettings, type SceneDocument, type SceneEnvironmentSettings } from '../../../editor/model/SceneDocument';
+import { SceneSkyboxRuntime } from '../SceneSkyboxRuntime';
+import { SceneShadowRuntime } from '../SceneShadowRuntime';
+import { SceneEnvironmentRuntime, type SceneEnvironmentApplyOptions } from '../SceneEnvironmentRuntime';
+import { waitForSceneRenderReady } from '../sceneRenderReadiness';
+import type { EnvironmentApplyResult, EnvironmentWorldBounds } from '../../../editor/model/environmentRuntime';
+import { AssetLoadScheduler } from '../AssetLoadScheduler';
+import { EnvironmentAssetContainerCache } from '../environmentAssetContainerCache';
+import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
+import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import type { ScenePickingAndSelectionController } from './ScenePickingAndSelectionController';
+import type { SceneDocumentController } from './SceneDocumentController';
+import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
+import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
+import type { ScenePoiAndEffectsController } from './ScenePoiAndEffectsController';
+import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
+import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
+import type { SceneTelemetryController } from './SceneTelemetryController';
+import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
+import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
+import { type ModelRuntimeEntry, readRuntimeTimestampMs } from './sceneRuntimeTypes';
+
+/** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
+type Dependencies = {
+  readonly selection: Pick<ScenePickingAndSelectionController, 'resolveSelectedEntityIds' | 'readEntityIdFromMesh' | 'rebuildModelSelectionOutline'>;
+  readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable' | 'shadowDocument'>;
+  readonly readiness: Pick<SceneTriangleAndReadinessController, 'modelStatisticsEnvironmentSourceUrl' | 'invalidateModelStatistics' | 'activeModelLoadProgress' | 'beginModelLoadProgressUnit' | 'loadDiagnostics' | 'updateModelLoadProgressUnit' | 'settleModelLoadProgressUnit' | 'notifyModelLoadProgressChanged'>;
+  readonly outputs: Pick<GeneratedModelOutputController, 'defaultCargoGeneratorId' | 'spawnedDeviceModels' | 'generatedOutputOwners'>;
+  readonly effects: Pick<ScenePoiAndEffectsController, 'poiEffectRuntime' | 'modelEntranceIncludesEnvironment' | 'modelEntranceRuntime' | 'cancelModelEntrance'>;
+  readonly presentation: Pick<SceneMeshPresentationController, 'lights' | 'meshes'>;
+  readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
+  readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime' | 'specializedTelemetryRuntime'>;
+  readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId'>;
+};
+
+
+/** EnvironmentAndSkyboxController 的资源、状态及取消/释放操作在同一领域内维护。 */
+export class EnvironmentAndSkyboxController {
+  constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
+
+  public readonly environmentLoadScheduler = new AssetLoadScheduler(1);
+  public readonly environmentAssetCache = new EnvironmentAssetContainerCache();
+  public appearanceRuntime!: SceneAppearanceRuntime;
+  public lightRigRuntime!: SceneLightRigRuntime;
+  public appearanceSignature = '';
+  public skyboxLightingSignature = '';
+  public allowDayNightCycle: boolean | null = null;
+  public shadowRuntime!: SceneShadowRuntime;
+  public lightingRuntime!: SceneLightingRuntime;
+  public lightingBakeRunning = false;
+  public skyboxRuntime!: SceneSkyboxRuntime;
+  public environmentRuntime!: SceneEnvironmentRuntime;
+  /** 环境容器必须等加入场景并完成首帧渲染后，才能结算对应的统一进度单元。 */
+  public readonly environmentLoadProgressUnits = new WeakMap<AssetContainer, number>();
+
+
+  /** 同步球形天空盒实体；没有实体时兼容旧 sceneSettings.skybox。 */
+  syncSkybox(document: SceneDocument): void {
+    const entity = getSceneSkyboxEntity(document);
+    if (entity?.components.skybox) {
+      this.syncSkyboxEntity(entity, this.dependencies.selection.resolveSelectedEntityIds(document).has(entity.id));
+      return;
+    }
+
+    const skybox = getSceneSkyboxSettings(document);
+    if (!skybox) {
+      this.skyboxRuntime.sync(null);
+      return;
+    }
+    this.skyboxRuntime.sync({
+      entityId: null,
+      skybox,
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: skybox.rotationDegrees * Math.PI / 180, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      visible: true,
+      pickable: false,
+      selected: false,
+    });
+  }
+
+  /** 将天空盒实体的 Transform、层级显隐、锁定与选中态同步到球体运行时。 */
+  public syncSkyboxEntity(entity: Entity, selected: boolean): void {
+    const skybox = createSceneSkyboxSettingsFromEntity(entity);
+    if (!skybox) {
+      this.skyboxRuntime.sync(null);
+      return;
+    }
+    this.skyboxRuntime.sync({
+      entityId: entity.id,
+      skybox,
+      transform: entity.components.transform,
+      visible: this.dependencies.document.isEntityVisible(entity.id),
+      pickable: this.dependencies.document.isEntityScenePickable(entity.id),
+      selected,
+    });
+  }
+
+  /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
+  syncEnvironment(environment: SceneEnvironmentSettings | null): void {
+    this.dependencies.readiness.modelStatisticsEnvironmentSourceUrl = environment?.activeVariantUrl ?? null;
+    this.environmentRuntime.sync(environment);
+    this.dependencies.readiness.invalidateModelStatistics();
+  }
+
+  /** 单独同步场景级默认模型生成器：该设置只改 sceneSettings，不触发实体全量同步，须由编辑器显式推送。 */
+  syncDefaultCargoGenerator(defaultCargoGeneratorId: string | null): void {
+    this.dependencies.outputs.defaultCargoGeneratorId = defaultCargoGeneratorId ?? null;
+  }
+
+  /** 纯外观独立于光照签名；改变曝光、雾、光晕不重建灯光。 */
+  syncAppearance(document: SceneDocument): void {
+    const appearance = getSceneAppearanceConfig(document), signature = JSON.stringify(appearance);
+    if (signature === this.appearanceSignature) return;
+    this.appearanceSignature = signature;
+    this.appearanceRuntime.sync(appearance);
+    this.dependencies.effects.poiEffectRuntime.setAppearance(appearance);
+    this.syncSkyboxLighting(document);
+  }
+
+  public syncSkyboxLighting(document: SceneDocument): void {
+    const appearance = getSceneAppearanceConfig(document), lighting = getSceneLightingConfig(document);
+    const signature = JSON.stringify([appearance.skyboxVisible, lighting.environmentIntensity, lighting.environment]);
+    if (signature === this.skyboxLightingSignature) return;
+    this.skyboxLightingSignature = signature;
+    this.skyboxRuntime.setLightingOverrides({ visible: appearance.skyboxVisible, intensity: lighting.environmentIntensity,
+      source: lighting.environment?.source ?? 'scene', rotationDegrees: lighting.environment?.rotationDegrees ?? 0 });
+  }
+
+  /** 统一光照是唯一参数来源；旧扁平字段仅在阴影算法边界临时派生。 */
+  syncLighting(document: SceneDocument): void {
+    this.dependencies.document.shadowDocument = document;
+    const lighting = getSceneLightingConfig(document);
+    this.lightRigRuntime.sync(lighting);
+    if (this.allowDayNightCycle !== lighting.allowDayNightCycle) {
+      this.allowDayNightCycle = lighting.allowDayNightCycle;
+      this.dependencies.effects.poiEffectRuntime.setGlobalLightingControl(lighting.allowDayNightCycle);
+    }
+    this.shadowRuntime.setManagedLight(this.lightRigRuntime.mainLight);
+    for (const [id, light] of this.dependencies.presentation.lights) {
+      this.lightRigRuntime.syncEntityLight(id, light, this.dependencies.document.isEntityVisible(id));
+      this.shadowRuntime.syncLight(id, light);
+    }
+    this.syncSkyboxLighting(document);
+    this.shadowRuntime.applySettings({ ...lighting.shadows, mode: 'hybrid', catcherEnabled: false,
+      sunAzimuthDegrees: lighting.main.azimuthDegrees, sunElevationDegrees: lighting.main.elevationDegrees,
+      sunIntensity: lighting.main.intensity, fillIntensity: lighting.fill.intensity, iblIntensityMax: lighting.environmentIntensity });
+    void this.environmentRuntime.syncLighting(lighting.shadows).catch(error => {
+      Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['环境光照显示失败：' + (error instanceof Error ? error.message : String(error))]);
+    });
+    this.lightingRuntime.sync(document);
+  }
+
+  getLightingClassification(): LightingClassificationEntry[] { return this.lightingRuntime.getClassification(); }
+  setLightingPreview(debugVisible: boolean, beforeBake: boolean): void { this.lightingRuntime.setPreview(debugVisible, beforeBake); }
+  focusLightingNode(entityId: string, nodeKey: string): void { this.lightingRuntime.focusNode(entityId, nodeKey); }
+  getLightingBakeRuntimeError(): string | null {
+    const error = this.lightingRuntime.getError();
+    if (error) return error;
+    const errors = this.shadowRuntime.getHybridMetrics().validationErrors;
+    return errors?.length ? errors.join('；') : null;
+  }
+  getHybridLightingMetrics() { return this.shadowRuntime.getHybridMetrics(); }
+  waitForLightingReady(): Promise<void> { return this.lightingRuntime.whenReady(); }
+
+  /** 后台任务只读取稳定快照；结果仍匹配当前场景后才应用，文档提交由编辑器事务负责。 */
+  async bakeLighting(document: SceneDocument, signal?: AbortSignal, progress?: (message: string, fraction?: number, phase?: string) => void): Promise<SceneLightingBakeSnapshot> {
+    if (this.lightingBakeRunning) throw new Error('已有光照烘焙正在进行。');
+    if (this.dependencies.effects.poiEffectRuntime.isDayNightCycleActive()) throw new Error('昼夜周期正在改变照明，请先停用昼夜组件或关闭允许昼夜周期，再烘焙间接光。');
+    if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
+      || [...this.dependencies.assets.models.values()].some(model => model.externalScriptStarting || model.cancelLoad)) {
+      throw new Error('请等待全部模型与参数几何生成完成后再烘焙。');
+    }
+    const api = typeof window !== 'undefined' ? window.editorApi : undefined;
+    if (!api?.startLightingBake) throw new Error('材质烘焙需要在桌面编辑器中调用本机 Blender；Viewer 仅使用已生成资源。');
+    const jobId = crypto.randomUUID();
+    const signature = getSceneLightingBakeSignature(document);
+    const check = () => {
+      signal?.throwIfAborted();
+      if (getSceneLightingBakeSignature(this.dependencies.document.shadowDocument ?? document) !== signature) throw new Error('烘焙期间静态场景已变化，候选结果未提交。');
+    };
+    const cancel = () => { void api.cancelLightingBake(jobId).catch(error => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['取消后台烘焙失败：' + String(error)])); };
+    const unsubscribe = api.onLightingBakeProgress(event => { if (event.jobId === jobId) progress?.(event.message, event.progress, event.phase); });
+    signal?.addEventListener('abort', cancel, { once: true });
+    this.lightingBakeRunning = true;
+    let applied = false;
+    try {
+      check();
+      await awaitLightingTaskStep(this.environmentRuntime.syncLighting(getSceneLightingConfig(document).shadows), signal);
+      this.lightingRuntime.sync(document);
+      await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
+      this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
+      this.lightingRuntime.markDirty();
+      const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(jobId, signal, progress), signal);
+      check();
+      const result = await awaitLightingTaskStep(api.startLightingBake(input), signal);
+      check();
+      progress?.('光照已生成，正在应用材质并等待画面就绪…', 0.98, 'applying');
+      await this.lightingRuntime.applySnapshot(result, signal, async () => {
+        await waitForSceneRenderReady(this.context.scene, signal);
+        check();
+        const validationErrors = this.shadowRuntime.getHybridMetrics().validationErrors;
+        if (validationErrors?.length) throw new Error(validationErrors.join('；'));
+      });
+      applied = true;
+      return result;
+    } finally {
+      signal?.removeEventListener('abort', cancel); unsubscribe(); this.lightingBakeRunning = false;
+      if (!applied) this.lightingRuntime.sync(this.dependencies.document.shadowDocument ?? document);
+    }
+  }
+
+  /** 事务式加载候选环境；成功前保留当前有效环境。 */
+  applyEnvironment(
+    environment: SceneEnvironmentSettings,
+    options: SceneEnvironmentApplyOptions,
+  ): Promise<EnvironmentApplyResult> {
+    this.dependencies.readiness.modelStatisticsEnvironmentSourceUrl = environment.activeVariantUrl;
+    this.dependencies.readiness.invalidateModelStatistics();
+    return this.environmentRuntime.apply(environment, options);
+  }
+
+  /** 返回环境根节点供临时 Gizmo 调整；旧版摆放环境不开放该入口。 */
+  getEnvironmentGizmoTarget(): TransformNode | null {
+    return this.environmentRuntime.getGizmoTarget();
+  }
+
+  /** 返回当前环境的世界包围盒，供聚焦与 Inspector 摘要使用。 */
+  getEnvironmentWorldBounds(): EnvironmentWorldBounds | null {
+    return this.environmentRuntime.getWorldBounds();
+  }
+
+  getOpeningEnvironmentSnapshot() {
+    return this.environmentRuntime.getOpeningEnvironmentSnapshot();
+  }
+
+  /** 切换环境调整态的静态矩阵冻结与辅助包围框。 */
+  setEnvironmentAdjustmentActive(active: boolean): void {
+    this.environmentRuntime.setAdjustmentActive(active);
+  }
+
+  /**
+   * 环境 GLB 使用独立并发窗口和会话级源缓存。
+   * 避免 20 MB 厂区底座与设备模型抢同一条 4 路队列，同场景再次打开时不再重复 Draco/PNG 解析。
+   */
+  public async loadEnvironmentAssetContainer(
+    rootUrl: string,
+    fileName: string,
+    loadSignal?: AbortSignal,
+    onProgress?: (event: ISceneLoaderProgressEvent) => void,
+  ): Promise<AssetContainer> {
+    const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
+    const queuedAt = readRuntimeTimestampMs();
+    try {
+      const container = await this.environmentLoadScheduler.run(
+        () => {
+          this.dependencies.readiness.loadDiagnostics.record('environmentQueue', readRuntimeTimestampMs() - queuedAt);
+          return this.environmentAssetCache.acquireWorkingContainer({
+          cacheKey: `${rootUrl}${fileName}`,
+          scene: this.context.scene,
+          loadSource: () => this.dependencies.readiness.loadDiagnostics.measureAsync('environmentReadDecode', () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, (event) => {
+            this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
+            onProgress?.(event);
+          }), fileName),
+          onClone: (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('environmentClone', ms, failed, fileName),
+        });
+        },
+        loadSignal,
+      );
+      this.environmentLoadProgressUnits.set(container, loadSequence);
+      return container;
+    } catch (error) {
+      this.dependencies.readiness.settleModelLoadProgressUnit(loadSequence);
+      throw error;
+    }
+  }
+
+  /** 等待环境材质/纹理就绪，并确认环境已实际进入一帧场景渲染。 */
+  public waitForEnvironmentRenderReady(loadSignal?: AbortSignal): Promise<void> {
+    return this.dependencies.readiness.loadDiagnostics.measureAsync('environmentRenderReady', () => waitForSceneRenderReady(this.context.scene, loadSignal));
+  }
+
+  /** 成功、失败或取消都只结算一次环境加载单元。 */
+  public settleEnvironmentAssetContainerLoad(container: AssetContainer): void {
+    const loadSequence = this.environmentLoadProgressUnits.get(container);
+    if (loadSequence === undefined) return;
+    this.environmentLoadProgressUnits.delete(container);
+    this.dependencies.readiness.settleModelLoadProgressUnit(loadSequence);
+  }
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeShadowRuntime(): void {
+    this.shadowRuntime = new SceneShadowRuntime(this.context.scene);
+  }
+
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeAppearanceRuntime(): void {
+    this.appearanceRuntime = new SceneAppearanceRuntime(this.context.scene);
+  }
+
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeLightRigRuntime(): void {
+    this.lightRigRuntime = new SceneLightRigRuntime(this.context.scene);
+  }
+
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeSkyboxRuntime(): void {
+    this.skyboxRuntime = new SceneSkyboxRuntime(this.context.scene, this.context.pushLog, () => this.dependencies.readiness.notifyModelLoadProgressChanged());
+  }
+
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeEnvironmentRuntime(): void {
+    this.environmentRuntime = new SceneEnvironmentRuntime(this.context.scene, {
+      withBuildingEffectMutation: mutate => {
+        // 环境切换材质、阴影或透明度前释放入场覆盖，避免保留旧外观或旧材质引用。
+        if (this.dependencies.effects.modelEntranceIncludesEnvironment && this.dependencies.effects.modelEntranceRuntime.isActive) this.dependencies.effects.cancelModelEntrance();
+        this.dependencies.effects.poiEffectRuntime.withTargetMutation(ENVIRONMENT_EFFECT_TARGET_ID, mutate);
+      },
+      // 环境底座模型与场景模型并行加载，作为独立进度单元合并进同一份加载快照。
+      loadAssetContainer: (rootUrl, fileName, signal) => {
+        return this.loadEnvironmentAssetContainer(rootUrl, fileName, signal);
+      },
+      waitForRenderReady: (signal) => this.waitForEnvironmentRenderReady(signal),
+      onAssetContainerSettled: (container) => this.settleEnvironmentAssetContainerLoad(container),
+      onSnapshot: snapshot => {
+        this.context.notifyEnvironmentSnapshot(snapshot);
+        this.dependencies.readiness.invalidateModelStatistics();
+      },
+      pushLog: this.context.pushLog,
+    });
+  }
+
+  /** 按原构造顺序连接此领域的资源与回调。 */
+  initializeLightingRuntime(): void {
+    this.lightingRuntime = new SceneLightingRuntime(this.context.scene, {
+      getSources: () => {
+        const document = this.dependencies.document.shadowDocument;
+        if (!document) return [];
+        const models: Array<[string, ModelRuntimeEntry]> = [...this.dependencies.assets.models];
+        for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) models.push([variant.representativeEntityId, variant.model]);
+        for (const entry of this.dependencies.outputs.spawnedDeviceModels) models.push(entry);
+        const primitiveMeshes = new Map<string, AbstractMesh>(this.dependencies.presentation.meshes);
+        const batches = new Set(this.dependencies.arrays.modelArrayBatchByMeshUniqueId.values());
+        const sourceOwners = new Map<string, LightingSourceOwner>();
+        const batchOwners = new Map<EntityArrayThinInstanceBatch, LightingBatchOwner>();
+        appendGeneratedLightingSources(document, this.dependencies.outputs.generatedOutputOwners, { models, primitiveMeshes, batches, sourceOwners, batchOwners });
+        return collectLightingRuntimeSources({ scene: this.context.scene, document, models, primitiveMeshes,
+          environment: this.environmentRuntime.getLightingSurfaces(), environmentSource: this.environmentRuntime.getLightingSourceReference(),
+          batches, sourceOwners, batchOwners,
+          resolveBatchSource: (batch, id, source) => this.dependencies.telemetry.motionStaticBatchRuntime.getSourceMeshForEntity(batch, id) ?? source,
+          isModelMeshRenderSuppressed: mesh => this.dependencies.telemetry.motionStaticBatchRuntime.isSuspended(mesh),
+          getMotionTargets: model => this.dependencies.telemetry.specializedTelemetryRuntime.getLightingMotionNodes(model),
+          readEntityId: mesh => this.dependencies.selection.readEntityIdFromMesh(mesh),
+        });
+      },
+      setShadowRoles: (roles, settings) => this.shadowRuntime.setHybridMeshRoles(roles, settings),
+      onBindingsChanged: () => this.dependencies.selection.rebuildModelSelectionOutline(),
+      pushLog: this.context.pushLog,
+    });
+  }
+
+}

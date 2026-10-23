@@ -1,3 +1,4 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { BrowserWindow } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -587,7 +588,7 @@ async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> 
   } catch (error) {
     if (!isNodeError(error) || error.code !== 'ENOENT') {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}” meta.json 无效：${message}`);
+      throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}” meta.json 无效：${message}`, { cause: error });
     }
   }
 
@@ -618,7 +619,7 @@ async function validateModelFile(filePath: string): Promise<void> {
     if (!isPlainObject(parsed) || !isPlainObject(parsed.asset)) throw new Error('缺少 glTF asset 节点。');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`glTF 文件无效：${path.basename(filePath)}（${message}）`);
+    throw new Error(`glTF 文件无效：${path.basename(filePath)}（${message}）`, { cause: error });
   }
 }
 
@@ -806,8 +807,7 @@ function fileNameFromUrl(value: string): string {
 
 function sanitizeFileName(value: string): string {
   const baseName = path.posix.basename(value.replace(/\\/g, '/'));
-  const normalized = baseName
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const normalized = replaceAsciiControlCharacters(baseName, '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 180);
@@ -815,8 +815,7 @@ function sanitizeFileName(value: string): string {
 }
 
 function sanitizePathSegment(value: string): string {
-  const normalized = value
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const normalized = replaceAsciiControlCharacters(value, '_').replace(/[<>:"/\\|?*]/g, '_')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[. ]+$/g, '')

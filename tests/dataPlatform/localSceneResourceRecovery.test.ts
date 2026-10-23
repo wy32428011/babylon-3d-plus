@@ -3,14 +3,19 @@ import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import test from 'node:test';
+import test, { after } from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
-import { getSceneShadowBakeSignatureContract } from '../../electron/shared/sceneShadowBakeContract.ts';
+import { getSceneLightingBakeSignature } from '../../electron/shared/sceneLightingBakeContract.ts';
+import { normalizeSceneAppearanceConfig, normalizeSceneLightingConfig } from '../../electron/shared/sceneLightingConfig.ts';
 
+// 模型扫描会按需加载 TS 编译器；临时依赖必须保留到所有恢复用例结束。
+let cleanupModules: (() => void) | undefined;
+after(() => cleanupModules?.());
 const [{ recoverLocalSceneResourcePaths }, { createDataPlatformModelRuntimeRevision }, { assertRecoveryPathInsideRoot }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/localSceneResourceRecovery'), typeof import('../../electron/ipc/dataPlatformModelIndex'),
   typeof import('../../electron/shared/recoveryPathBoundary'),
-]>(['electron/ipc/localSceneResourceRecovery.ts', 'electron/ipc/dataPlatformModelIndex.ts', 'electron/shared/recoveryPathBoundary.ts']);
+]>(['electron/ipc/localSceneResourceRecovery.ts', 'electron/ipc/dataPlatformModelIndex.ts', 'electron/shared/recoveryPathBoundary.ts'],
+  { deferCleanup: cleanup => { cleanupModules = cleanup; } });
 const oldKey = 'a'.repeat(64), newKey = 'b'.repeat(64);
 const url = (value: string) => `editor-asset://local/${encodeURIComponent(value)}`;
 const glb = () => {
@@ -29,6 +34,20 @@ async function fixture(t: Parameters<Parameters<typeof test>[1]>[0]) {
   return { root, workspace, write };
 }
 const scene = (asset: object) => ({ version: 1, scene: { entities: { one: { id: 'one', components: { modelAsset: asset, transform: { x: 2 } } } } } });
+
+async function attachLightingResult(f: Awaited<ReturnType<typeof fixture>>, document: ReturnType<typeof scene>) {
+  const lighting = normalizeSceneLightingConfig({ version: 2 });
+  (document.scene as any).sceneSettings = { lighting, appearance: normalizeSceneAppearanceConfig({}) };
+  const assets = [];
+  for (const [id, kind, name] of [['g', 'geometry', 'mesh.json'], ['l', 'lightmap', 'map.png'], ['p', 'probes', 'probes.json']]) {
+    const content = Buffer.from('fixture-' + kind), file = await f.write('Projects/456/Assets/LightingBakes/job/' + name, content);
+    assets.push({ id, kind, url: url(file), byteLength: content.length, sha256: createHash('sha256').update(content).digest('hex') });
+  }
+  lighting.result = { version: 1, signature: getSceneLightingBakeSignature(document.scene), createdAt: '2026-10-21T00:00:00Z', engineVersion: 'fixture',
+    assets: assets as NonNullable<typeof lighting.result>['assets'], surfaces: [{ key: 'one/root', entityId: 'one', nodeKey: 'root', geometryAssetId: 'g', lightmapAssetId: 'l' }], probeAssetId: 'p',
+    statistics: { meshCount: 1, triangleCount: 1, atlasCount: 1, probeCount: 1, textureBytes: 16, durationMs: 1 } };
+  return lighting.result;
+}
 
 test('来源隔离工程迁移保留 Platforms 目录并避开旧同 ID 工程', async t => {
   const f = await fixture(t); const tail = 'Projects/123/Assets/Models/Model-456/model.glb';
@@ -116,7 +135,11 @@ test('远程 API 地址和非资源文本不列入文件预检', async t => {
   const f = await fixture(t); const document = scene({ sourceUrl: 'https://example.invalid/model.glb', parameterValues: { path: 'Z:/private/file.txt' } });
   (document.scene as any).dataSources = [{ url: 'https://example.invalid/api/query', sourcePath: 'Z:/private/another.txt' }];
   const result = await recoverLocalSceneResourcePaths({ sceneContent: JSON.stringify(document), workspaceRoot: f.workspace });
-  assert.deepEqual(JSON.parse(result.sceneContent), document); assert.deepEqual(result.issues, []); assert.deepEqual(result.missing, []);
+  const recovered = JSON.parse(result.sceneContent), settings = recovered.scene.sceneSettings;
+  assert.equal(settings.lighting.version, 2); assert.equal(settings.appearance.version, 1);
+  delete recovered.scene.sceneSettings;
+  assert.equal(recovered.version, 6);
+  assert.deepEqual(recovered, { ...document, version: 6 }); assert.deepEqual(result.issues, []); assert.deepEqual(result.missing, []);
 });
 
 test('网络补齐映射仍校验文件且保留查询参数，取消不产生部分提交', async t => {
@@ -187,20 +210,16 @@ test('共享索引中同一 runtimeRevision 的可变包可以离线恢复固定
   assert.equal(invalid.restoredReferenceCount, 0); assert.match(invalid.issues[0].message, /版本|结构/);
 });
 
-test('仅位置迁移保留已有阴影内容并更新其有效签名', async t => {
+test('仅位置迁移保留已有GI内容并更新其有效v2签名', async t => {
   const f = await fixture(t), relative = 'Projects/456/Assets/Models/Model-123-x/model.glb'; await f.write(relative);
   const document = scene({ sourcePath: `Z:/old/${relative}`, sourceUrl: url(`Z:/old/${relative}`), parameterValues: { size: 4 } });
-  const shadows = { enabled: true, mode: 'static-baked', bake: undefined as any };
-  (document.scene as any).sceneSettings = { shadows };
-  shadows.bake = { version: 1, signature: getSceneShadowBakeSignatureContract(document.scene), createdAt: '2026-09-09T00:00:00Z', surfaces: [
-    { key: 'floor', kind: 'shadow-mask', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5i8AAAAASUVORK5CYII=', width: 1, height: 1, uvBounds: [0, 0, 1, 1] },
-  ] };
+  const bake = await attachLightingResult(f, document);
   const result = await recoverLocalSceneResourcePaths({ sceneContent: JSON.stringify(document), workspaceRoot: f.workspace });
   const restored = JSON.parse(result.sceneContent).scene;
-  assert.deepEqual(restored.sceneSettings.shadows.bake.surfaces, shadows.bake.surfaces);
-  assert.equal(restored.sceneSettings.shadows.bake.createdAt, shadows.bake.createdAt);
-  assert.equal(restored.sceneSettings.shadows.bake.signature, getSceneShadowBakeSignatureContract(restored));
-  assert.notEqual(restored.sceneSettings.shadows.bake.signature, shadows.bake.signature);
+  assert.deepEqual(restored.sceneSettings.lighting.result.surfaces, bake.surfaces);
+  assert.equal(restored.sceneSettings.lighting.result.createdAt, bake.createdAt);
+  assert.equal(restored.sceneSettings.lighting.result.signature, getSceneLightingBakeSignature(restored));
+  assert.notEqual(restored.sceneSettings.lighting.result.signature, bake.signature);
 });
 
 test('glTF 依赖文件参与校验和授权清单，缺失依赖与越界 URI 明确失败', async t => {
@@ -227,7 +246,7 @@ test('相对资产路径在规范化前拒绝穿越，非 local 资产协议报�
   assert.equal(result.missing.length, 2); assert.match(result.issues.map(item => item.message).join(' '), /安全/);
 });
 
-test('事务可延迟阴影迁移，默认仍拒绝不兼容的位置改写', async t => {
+test('事务可延迟GI迁移，默认仍拒绝不兼容的位置改写', async t => {
   const f = await fixture(t), relative = 'Assets/Models/Model-123-x';
   const modelPath = await f.write(`SharedResources/${relative}/model.glb`);
   const metadataPath = await f.write(`SharedResources/${relative}/meta.json`, '{}');
@@ -238,16 +257,12 @@ test('事务可延迟阴影迁移，默认仍拒绝不兼容的位置改写', as
   }] }));
   const old = `Z:/old/SharedResources/.babylon-editor/scene-model-versions/${oldKey}/${revision.runtimeRevision}/Assets/Models/Model-123-x-aaaaaaaaaaaa/model.glb`;
   const document = scene({ sourcePath: old, assetRevision: revision.runtimeRevision });
-  (document.scene as any).sceneSettings = { shadows: { bake: { version: 1, signature: '', createdAt: '2026-09-09T00:00:00Z', surfaces: [
-    { key: 'floor', width: 1, height: 1, uvBounds: [0, 0, 1, 1], dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5i8AAAAASUVORK5CYII=' },
-  ] } } };
-  const bake = (document.scene as any).sceneSettings.shadows.bake;
-  bake.signature = getSceneShadowBakeSignatureContract(document.scene);
+  const bake = await attachLightingResult(f, document);
   const options = { sceneContent: JSON.stringify(document), workspaceRoot: f.workspace, sourceKey: newKey };
-  await assert.rejects(recoverLocalSceneResourcePaths(options), /阴影/);
-  const deferred = await recoverLocalSceneResourcePaths({ ...options, shadowBakeRelocation: 'defer' });
+  await assert.rejects(recoverLocalSceneResourcePaths(options), /光照烘焙/);
+  const deferred = await recoverLocalSceneResourcePaths({ ...options, lightingBakeRelocation: 'defer' });
   assert.equal(deferred.restoredReferenceCount, 1);
-  assert.deepEqual(JSON.parse(deferred.sceneContent).scene.sceneSettings.shadows.bake, bake);
+  assert.deepEqual(JSON.parse(deferred.sceneContent).scene.sceneSettings.lighting.result, bake);
 });
 
 test('写入边界允许不存在目标，拒绝已存在祖先junction逃逸', async t => {

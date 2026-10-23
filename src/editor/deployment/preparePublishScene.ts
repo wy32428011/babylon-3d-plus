@@ -4,7 +4,7 @@ import { loadEnvironmentFromAsset } from '../assets/environmentAssets';
 import { runSceneModelSyncTransaction } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { beginSceneModelAssetRefresh, getScenePreparationSnapshot, reportSceneModelSyncProgress, settleSceneModelAssetRefresh } from '../loading/scenePreparationProgress';
-import { getSceneShadowBakeError } from '../model/sceneShadowBake';
+import { getSceneLightingBakeError } from '../../../electron/shared/sceneLightingBakeContract';
 import { serializeScene } from '../project/SceneSerializer';
 import { useEditorStore } from '../store/editorStore';
 import { waitForPublishCondition } from './publishOrchestration';
@@ -94,22 +94,25 @@ export async function waitForPublishRuntime(sceneSessionId: string, assertCurren
   } });
 }
 
-export async function preparePublishShadowBake(assertCurrent: () => void): Promise<void> {
+/** 完整 GI 任务按实际进度和取消信号等待，不套用旧地面阴影的十分钟时限。 */
+export async function preparePublishLightingBake(assertCurrent: () => void): Promise<void> {
   assertCurrent();
-  if (!getSceneShadowBakeError(useEditorStore.getState().scene)) return;
-  const existingRequestId = useEditorStore.getState().shadowBakeRequest?.id;
-  useEditorStore.getState().requestShadowBake();
-  const requestId = useEditorStore.getState().shadowBakeRequest?.id;
+  if (!getSceneLightingBakeError(useEditorStore.getState().scene)) return;
+  const existingRequestId = useEditorStore.getState().lightingBakeRequest?.id;
+  useEditorStore.getState().requestLightingBake();
+  const requestId = useEditorStore.getState().lightingBakeRequest?.id;
+  if (!requestId) throw new Error(useEditorStore.getState().lightingBakeStatus.message ?? '无法开始材质与光照烘焙。');
   try {
-    await waitForPublishCondition({ assertCurrent, timeoutMs: 600_000, ready: () => {
+    await waitForPublishCondition({ assertCurrent, timeoutMs: Number.POSITIVE_INFINITY, ready: () => {
       const state = useEditorStore.getState();
-      if (state.shadowBakeStatus.phase === 'error') throw new Error(state.shadowBakeStatus.message ?? '静态阴影生成失败。');
-      return !state.shadowBakeRequest;
+      if (state.lightingBakeStatus.phase === 'error' || state.lightingBakeStatus.phase === 'cancelled') throw new Error(state.lightingBakeStatus.message ?? '材质与光照烘焙已停止。');
+      if (state.lightingBakeRequest && state.lightingBakeRequest.id !== requestId) throw new Error('光照烘焙任务已被替换，请重新开始发布。');
+      return state.lightingBakeRequest === null;
     } });
-    const error = getSceneShadowBakeError(useEditorStore.getState().scene);
+    const error = getSceneLightingBakeError(useEditorStore.getState().scene);
     if (error) throw new Error(error);
   } catch (error) {
-    if (requestId && !existingRequestId) useEditorStore.getState().failShadowBake(requestId, '发布准备已停止，静态阴影任务已取消。');
+    if (!existingRequestId && useEditorStore.getState().lightingBakeRequest?.id === requestId) useEditorStore.getState().cancelLightingBake();
     throw error;
   }
 }

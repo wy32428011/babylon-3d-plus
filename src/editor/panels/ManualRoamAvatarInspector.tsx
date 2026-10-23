@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ProjectModelAssetEntry } from '../assets/AssetDatabase';
 import type { ManualRoamSpawnComponent } from '../model/components';
 import { useEditorStore } from '../store/editorStore';
+import { LazyEditorDialog } from '../ui/LazyEditorDialog';
 
-const ManualRoamAvatarPreviewDialog = lazy(() => import('./ManualRoamAvatarPreviewDialog').then(module => ({ default: module.ManualRoamAvatarPreviewDialog })));
+const loadManualRoamAvatarPreviewDialog = () => import('./ManualRoamAvatarPreviewDialog').then(module => ({ default: module.ManualRoamAvatarPreviewDialog }));
 type AvatarReference = NonNullable<ManualRoamSpawnComponent['avatar']>;
 
 export function ManualRoamAvatarInspector(props: {
@@ -84,14 +85,14 @@ export function ManualRoamAvatarInspector(props: {
       <p className="muted">上传后可预览并应用人物。不能适配时会说明原因，保留模型自带动画或静态姿态；无骨骼模型不会自动绑骨。</p>
       {error ? <p role="alert">{error}</p> : null}
     </fieldset>
-    {preview && preview.sessionId === sceneSessionId && runtimeMode === 'edit' ? <Suspense fallback={<p role="status">正在打开人物预览…</p>}>
-      <ManualRoamAvatarPreviewDialog name={preview.avatar?.name ?? '默认人物'} sourceUrl={preview.avatar?.sourceUrl}
-        onClose={() => setPreview(null)} onApply={preview.pending ? () => {
+    {preview && preview.sessionId === sceneSessionId && runtimeMode === 'edit' ? <LazyEditorDialog
+      load={loadManualRoamAvatarPreviewDialog} title="人物预览" open keepMounted={false} onClose={() => setPreview(null)}
+      dialogProps={{ name: preview.avatar?.name ?? '默认人物', sourceUrl: preview.avatar?.sourceUrl,
+        onClose: () => setPreview(null), onApply: preview.pending ? () => {
           if (props.disabled || useEditorStore.getState().sceneSessionId !== preview.sessionId) return;
           setAvatar(props.entityId, preview.avatar);
           setPreview(null);
-        } : undefined} />
-    </Suspense> : null}
+        } : undefined }} /> : null}
     </>
   );
 }

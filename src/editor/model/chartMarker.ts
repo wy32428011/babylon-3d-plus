@@ -201,7 +201,7 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
       normalized.clickEvents = normalizeClickEvents(field);
       continue;
     }
-    let valid = false;
+    let valid: boolean;
     if (key in STRING_LIMITS) {
       valid = typeof field === 'string' && field.length <= STRING_LIMITS[key as keyof typeof STRING_LIMITS];
     } else if (key in NUMBER_LIMITS) {

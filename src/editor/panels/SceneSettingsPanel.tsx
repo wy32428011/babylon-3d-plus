@@ -2,9 +2,8 @@ import { SceneModelEntrancePanel } from './SceneModelEntrancePanel';
 import { SceneModelStatisticsPanel } from './SceneModelStatisticsPanel';
 import { SceneOpeningAnimationPanel } from './SceneOpeningAnimationPanel';
 import { EnvironmentBuildingEffectPanel } from './EnvironmentBuildingEffectPanel';
-import { getSceneShadowBakeSignature } from '../model/sceneShadowBake';
+import { LightingBakeSettingsPanel } from './LightingBakeSettingsPanel';
 import { RegionViewsPanel } from './RegionViewsPanel';
-import { SceneThemePanel } from './SceneThemePanel';
 import {
   useEffect,
   useMemo,
@@ -39,39 +38,14 @@ import {
   SCENE_ENVIRONMENT_SCALE_MIN,
   SCENE_SENSITIVITY_MAX,
   SCENE_SENSITIVITY_MIN,
-  SCENE_SHADOW_BIAS_MAX,
-  SCENE_SHADOW_BIAS_MIN,
-  SCENE_SHADOW_CONCENTRATION_PERCENT_MAX,
-  SCENE_SHADOW_CONCENTRATION_PERCENT_MIN,
-  SCENE_SHADOW_DISTANCE_MAX,
-  SCENE_SHADOW_DISTANCE_MIN,
-  SCENE_SHADOW_FILL_INTENSITY_MAX,
-  SCENE_SHADOW_FILL_INTENSITY_MIN,
-  SCENE_SHADOW_IBL_INTENSITY_MAX_MAX,
-  SCENE_SHADOW_IBL_INTENSITY_MAX_MIN,
-  SCENE_SHADOW_NORMAL_BIAS_MAX,
-  SCENE_SHADOW_NORMAL_BIAS_MIN,
-  SCENE_SHADOW_QUALITIES,
-  SCENE_SHADOW_SUN_AZIMUTH_MAX,
-  SCENE_SHADOW_SUN_AZIMUTH_MIN,
-  SCENE_SHADOW_SUN_ELEVATION_MAX,
-  SCENE_SHADOW_SUN_ELEVATION_MIN,
-  SCENE_SHADOW_SUN_INTENSITY_MAX,
-  SCENE_SHADOW_SUN_INTENSITY_MIN,
-  SCENE_SKYBOX_INTENSITY_MAX,
-  SCENE_SKYBOX_INTENSITY_MIN,
   SCENE_SKYBOX_RESOLUTIONS,
   SCENE_SKYBOX_ROTATION_MAX,
   SCENE_SKYBOX_ROTATION_MIN,
   SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
-  sceneShadowConcentrationPercentToDarkness,
-  sceneShadowDarknessToConcentrationPercent,
   type SceneEnvironmentTransform,
   type SceneEnvironmentVariant,
-  type SceneShadowQuality,
-  type SceneShadowSettings,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import {
@@ -105,30 +79,6 @@ const SENSITIVITY_ROWS: Array<{ key: SceneSensitivitySettingKey; label: string }
   { key: 'pan', label: '移动灵敏度' },
   { key: 'rotate', label: '旋转灵敏度' },
 ];
-
-type SceneShadowSliderKey = Extract<keyof SceneShadowSettings, 'sunAzimuthDegrees' | 'sunElevationDegrees' | 'sunIntensity' | 'distanceMeters' | 'bias' | 'normalBias' | 'fillIntensity' | 'iblIntensityMax'>;
-
-const SHADOW_SLIDER_ROWS: Array<{
-  key: SceneShadowSliderKey;
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  title: string;
-}> = [
-  { key: 'sunAzimuthDegrees', label: '太阳方位', min: SCENE_SHADOW_SUN_AZIMUTH_MIN, max: SCENE_SHADOW_SUN_AZIMUTH_MAX, step: 1, title: '自动太阳光方位角，0 为正北，顺时针增加' },
-  { key: 'sunElevationDegrees', label: '太阳高度', min: SCENE_SHADOW_SUN_ELEVATION_MIN, max: SCENE_SHADOW_SUN_ELEVATION_MAX, step: 1, title: '自动太阳光高度角，数值越大光线越接近垂直' },
-  { key: 'sunIntensity', label: '太阳强度', min: SCENE_SHADOW_SUN_INTENSITY_MIN, max: SCENE_SHADOW_SUN_INTENSITY_MAX, step: 0.05, title: '自动太阳光强度；场景中有可见方向光时由该灯光接管' },
-  { key: 'distanceMeters', label: '阴影距离', min: SCENE_SHADOW_DISTANCE_MIN, max: SCENE_SHADOW_DISTANCE_MAX, step: 10, title: '主阴影覆盖距离，0 表示按相机自动计算' },
-  { key: 'bias', label: '阴影偏移', min: SCENE_SHADOW_BIAS_MIN, max: SCENE_SHADOW_BIAS_MAX, step: 0.001, title: '减小阴影痤疮；过大时影子会脱离模型' },
-  { key: 'normalBias', label: '法线偏移', min: SCENE_SHADOW_NORMAL_BIAS_MIN, max: SCENE_SHADOW_NORMAL_BIAS_MAX, step: 0.001, title: '按法线再偏移阴影，适合厂房尺度模型' },
-  { key: 'fillIntensity', label: '补光强度', min: SCENE_SHADOW_FILL_INTENSITY_MIN, max: SCENE_SHADOW_FILL_INTENSITY_MAX, step: 0.05, title: '阴影开启时压低编辑器半球补光，让方向光阴影更清楚' },
-  { key: 'iblIntensityMax', label: '环境上限', min: SCENE_SHADOW_IBL_INTENSITY_MAX_MIN, max: SCENE_SHADOW_IBL_INTENSITY_MAX_MAX, step: 0.05, title: '阴影开启时限制天空盒环境光强度上限' },
-];
-
-const THEME_LIGHTING_SLIDER_KEYS = new Set<SceneShadowSliderKey>([
-  'sunAzimuthDegrees', 'sunElevationDegrees', 'sunIntensity', 'fillIntensity', 'iblIntensityMax',
-]);
 
 function parseFiniteNumber(rawValue: string): number | null {
   if (rawValue === '') return null;
@@ -208,10 +158,6 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const requestCameraPoseSave = useEditorStore((state) => state.requestCameraPoseSave);
   const setCameraViewDistance = useEditorStore((state) => state.setCameraViewDistance);
   const updateSensitivitySetting = useEditorStore((state) => state.updateSensitivitySetting);
-  const updateShadowSettings = useEditorStore((state) => state.updateShadowSettings);
-  const requestShadowBake = useEditorStore((state) => state.requestShadowBake);
-  const shadowBakeStatus = useEditorStore((state) => state.shadowBakeStatus);
-  const runtimeMode = useEditorStore((state) => state.runtimeMode);
   const updateEnvironmentConfig = useEditorStore((state) => state.updateEnvironmentConfig);
   const setDefaultCargoGenerator = useEditorStore((state) => state.setDefaultCargoGenerator);
   const requestEnvironmentApply = useEditorStore((state) => state.requestEnvironmentApply);
@@ -223,6 +169,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const environmentRuntimeSnapshot = useEditorStore((state) => state.environmentRuntimeSnapshot);
   const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
   const updateSkyboxConfig = useEditorStore((state) => state.updateSkyboxConfig);
+  const openLightingManager = useEditorStore((state) => state.openLightingManager);
   const setEnvironmentActiveVariant = useEditorStore((state) => state.setEnvironmentActiveVariant);
   const [sceneNameDraft, setSceneNameDraft] = useState(scene.name);
   const [environmentAssets, setEnvironmentAssets] = useState<ProjectModelAssetEntry[]>([]);
@@ -235,14 +182,6 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const [skyboxDropActive, setSkyboxDropActive] = useState(false);
 
   const environment = scene.sceneSettings.environment;
-  const shadows = scene.sceneSettings.shadows;
-  const bakedMode = shadows.mode !== 'realtime';
-  const shadowBakeSignature = useMemo(() => getSceneShadowBakeSignature(scene), [scene.entities,
-    scene.sceneSettings.environment, shadows.sunAzimuthDegrees, shadows.sunElevationDegrees,
-    shadows.darkness, shadows.bias, shadows.normalBias]);
-  const shadowBakeLabel = !shadows.bake ? '未烘焙'
-    : shadows.bake.signature === shadowBakeSignature ? '可用' : '已过期';
-  const shadowConcentration = sceneShadowDarknessToConcentrationPercent(shadows.darkness);
   const skybox = getSceneSkyboxSettings(scene);
   const cargoGeneratorOptions = scene.entityIds
     .map((entityId) => scene.entities[entityId])
@@ -359,25 +298,6 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
     updateSensitivitySetting(key, nextValue);
   }
 
-  function handleShadowConcentrationChange(rawValue: string): void {
-    if (props.readOnly) return;
-    const nextValue = parseFiniteNumber(rawValue);
-    if (nextValue === null) return;
-    updateShadowSettings({ darkness: sceneShadowConcentrationPercentToDarkness(nextValue) });
-  }
-
-  function handleShadowQualityChange(value: string): void {
-    if (props.readOnly || !SCENE_SHADOW_QUALITIES.includes(value as SceneShadowQuality)) return;
-    updateShadowSettings({ quality: value as SceneShadowQuality });
-  }
-
-  function handleShadowSliderChange(key: SceneShadowSliderKey, rawValue: string): void {
-    if (props.readOnly) return;
-    const nextValue = parseFiniteNumber(rawValue);
-    if (nextValue === null) return;
-    updateShadowSettings({ [key]: nextValue });
-  }
-
   async function handleSelectEnvironmentAsset(asset: ProjectModelAssetEntry): Promise<void> {
     if (props.readOnly) return;
     if (asset.libraryKind !== 'environment') return;
@@ -478,7 +398,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   }
 
   function updateSkyboxNumber(
-    key: 'rotationDegrees' | 'intensity',
+    key: 'rotationDegrees',
     rawValue: string,
   ): void {
     if (props.readOnly || !skybox) return;
@@ -652,8 +572,6 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
       <SceneModelEntrancePanel readOnly={props.readOnly} />
 
-      <SceneThemePanel readOnly={props.readOnly} />
-
       <CollapsibleFieldset title="相机运动幅度（统一标准）">
         <p className="muted">
           保留原有右键拖拽旋转、中键拖拽移动、Ctrl+左键平移、左键短点击选择和滚轮缩放。以下数值只调整运动幅度。
@@ -683,104 +601,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         ))}
       </CollapsibleFieldset>
 
-      <CollapsibleFieldset title="阴影" disabled={shadowBakeStatus.phase === 'baking' || runtimeMode === 'preview'}>
-        <label className="inspector-row environment-visible-row">
-          <span>启用阴影</span>
-          <input
-            type="checkbox"
-            disabled={props.readOnly}
-            checked={shadows.enabled}
-            onChange={(event) => updateShadowSettings({ enabled: event.target.checked })}
-          />
-        </label>
-        <label className="inspector-row">
-          <span>阴影模式</span>
-          <select value={shadows.mode ?? 'baked'} disabled={props.readOnly || runtimeMode === 'preview'}
-            onChange={(event) => updateShadowSettings({ mode: event.target.value === 'realtime' ? 'realtime' : 'baked' })}>
-            <option value="baked">静态烘焙（FPS 优先）</option>
-            <option value="realtime">实时阴影（高级）</option>
-          </select>
-        </label>
-        {bakedMode && <>
-          <div className="inspector-row"><span>烘焙状态</span><span role="status">{shadowBakeStatus.phase === 'baking' ? '正在烘焙' : shadowBakeStatus.phase === 'error' ? '更新失败' : shadowBakeLabel}</span></div>
-          <button type="button" disabled={props.readOnly || runtimeMode === 'preview' || !shadows.enabled
-            || !environment || shadowBakeStatus.phase === 'baking'} onClick={requestShadowBake}>
-            {shadowBakeStatus.phase === 'baking' ? '正在更新阴影…' : '更新阴影'}
-          </button>
-          <p className="muted" role={shadowBakeStatus.phase === 'error' ? 'alert' : undefined}
-            style={shadowBakeStatus.phase === 'error' ? { color: '#ff6b6b' } : undefined}>
-            {!environment ? '请先添加环境模型作为阴影接收面。' : shadowBakeStatus.message}</p>
-          <p className="muted">所有可见实体模型（包括脚本、参数和遥测设备）均按点击更新时的姿态烘焙。保留地面平铺纹理，运行时使用已生成的阴影贴图；模型移动、参数或太阳方向变化后需重新更新阴影。点光源与聚光灯的投影请切换到实时阴影模式。</p>
-        </>}
-        {!bakedMode && <label className="inspector-row">
-          <span>阴影质量</span>
-          <select
-            disabled={props.readOnly || !shadows.enabled}
-            value={shadows.quality}
-            onChange={(event) => handleShadowQualityChange(event.target.value)}
-          >
-            <option value="performance">性能（缓存地面）</option>
-            <option value="balanced">均衡（缓存地面）</option>
-            <option value="quality">高质量（实时）</option>
-          </select>
-        </label>}
-        <label className="scene-slider-row">
-          <span>阴影浓度</span>
-          <input
-            min={SCENE_SHADOW_CONCENTRATION_PERCENT_MIN}
-            max={SCENE_SHADOW_CONCENTRATION_PERCENT_MAX}
-            step="1"
-            type="range"
-            disabled={props.readOnly || !shadows.enabled}
-            value={shadowConcentration}
-            onChange={(event) => handleShadowConcentrationChange(event.target.value)}
-          />
-          <input
-            min={SCENE_SHADOW_CONCENTRATION_PERCENT_MIN}
-            max={SCENE_SHADOW_CONCENTRATION_PERCENT_MAX}
-            step="1"
-            type="number"
-            disabled={props.readOnly || !shadows.enabled}
-            value={shadowConcentration}
-            onChange={(event) => handleShadowConcentrationChange(event.target.value)}
-          />
-        </label>
-        {!bakedMode && <label className="inspector-row environment-visible-row">
-          <span>阴影地面</span>
-          <input
-            type="checkbox"
-            disabled={props.readOnly || !shadows.enabled}
-            checked={shadows.catcherEnabled}
-            onChange={(event) => updateShadowSettings({ catcherEnabled: event.target.checked })}
-          />
-        </label>}
-        {SHADOW_SLIDER_ROWS.filter((row) => !bakedMode || row.key === 'sunAzimuthDegrees' || row.key === 'sunElevationDegrees'
-          || (Boolean(scene.sceneSettings.theme) && THEME_LIGHTING_SLIDER_KEYS.has(row.key))).map((row) => (
-          <label className="scene-slider-row" key={row.key} title={row.title}>
-            <span>{row.label}</span>
-            <input
-              min={row.min}
-              max={row.max}
-              step={row.step}
-              type="range"
-              disabled={props.readOnly || (!shadows.enabled && !(scene.sceneSettings.theme && THEME_LIGHTING_SLIDER_KEYS.has(row.key)))}
-              value={shadows[row.key]}
-              onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
-            />
-            <input
-              min={row.min}
-              max={row.max}
-              step={row.step}
-              type="number"
-              disabled={props.readOnly || (!shadows.enabled && !(scene.sceneSettings.theme && THEME_LIGHTING_SLIDER_KEYS.has(row.key)))}
-              value={shadows[row.key]}
-              onChange={(event) => handleShadowSliderChange(row.key, event.target.value)}
-              title={row.title}
-            />
-          </label>
-        ))}
-        {!bakedMode && <p className="muted">实时阴影会增加 CPU/GPU 开销。方向光在性能/均衡档缓存阴影贴图，环境与阴影地面接收投影，运动设备触发更新；高质量档使用实时级联阴影，普通模型也接收投影。没有可见方向光时使用自动太阳光。点光源和聚光灯额外生成局部实时投影；点光源使用六面阴影贴图，开销较高。半球光和矩形面光不投影，HDR/EXR 环境光不会自动生成投影。</p>}
-      </CollapsibleFieldset>
+      <LightingBakeSettingsPanel readOnly={props.readOnly} />
 
       <CollapsibleFieldset title="球形天空盒">
         <label
@@ -843,27 +664,11 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
                 title="天空盒水平旋转角度（度）"
               />
             </label>
-            <label className="scene-slider-row">
-              <span>环境强度</span>
-              <input
-                min={SCENE_SKYBOX_INTENSITY_MIN}
-                max={SCENE_SKYBOX_INTENSITY_MAX}
-                step="0.1"
-                type="range"
-                disabled={props.readOnly}
-                value={skybox.intensity}
-                onChange={(event) => updateSkyboxNumber('intensity', event.target.value)}
-              />
-              <input
-                min={SCENE_SKYBOX_INTENSITY_MIN}
-                max={SCENE_SKYBOX_INTENSITY_MAX}
-                step="0.1"
-                type="number"
-                disabled={props.readOnly}
-                value={skybox.intensity}
-                onChange={(event) => updateSkyboxNumber('intensity', event.target.value)}
-              />
-            </label>
+            <div className="inspector-row">
+              <span>环境反射强度</span>
+              <output aria-label="环境反射强度">{scene.sceneSettings.lighting.environmentIntensity}</output>
+            </div>
+            <button type="button" onClick={() => openLightingManager({ tab: 'overview' })}>在管理器中调整</button>
             <label className="inspector-row skybox-resolution-row">
               <span>立方体分辨率</span>
               <select

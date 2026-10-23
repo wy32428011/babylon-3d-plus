@@ -1,3 +1,4 @@
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -17,6 +18,25 @@ const RESOURCE_FIELDS = new Set(['id', 'name', 'displayName', 'sourceUrl', 'sour
   'dataPlatformModel', 'sourceSnapshot', 'packagePath', 'metadataPath', 'thumbnailPath', 'thumbnailUrl', 'scriptPaths', 'scriptAssets',
   'parameterConfig', 'parameterScriptMetadata', 'animationScriptMetadata', 'animationConfig', 'fileSizeBytes',
   'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig']);
+
+/** 只描述发布预检读取的 JSON 字段；解析边界与原有校验及拒绝顺序保持一致。 */
+type PublishModelAssetReference = { sourceUrl?: unknown };
+type PublishModelTargetReference = { modelAsset?: PublishModelAssetReference };
+type PublishReferenceEntity = {
+  id?: unknown;
+  parentId?: unknown;
+  childrenIds?: { length?: unknown };
+  components: {
+    modelAsset?: PublishModelAssetReference;
+    modelGenerator?: {
+      defaultTarget?: PublishModelTargetReference;
+      rules?: Array<{ target?: PublishModelTargetReference }>;
+    };
+    clickEventBinding?: { deviceSlots?: Array<{ deviceType?: PublishModelAssetReference }> };
+    transform?: { position?: Record<string, unknown>; rotation?: Record<string, unknown>; scale?: Record<string, unknown> };
+    [component: string]: unknown;
+  };
+};
 
 type ParameterTemplate = { parameterConfig?: unknown };
 type ParameterConfig = { parameters?: Array<{ key?: string; type?: string; defaultValue?: unknown }> };
@@ -88,10 +108,10 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
       throw new Error('发布准备改变了原场景实体顺序或遗漏实体引用。');
     }
   }
-  const clickReferences = (entities: Record<string, any>) => {
+  const clickReferences = (entities: Record<string, PublishReferenceEntity>) => {
     const targets = new Set<string>();
-    const devices: any[] = [];
-    const addTarget = (asset: any) => { const key = getClickEventModelResourceKey(asset?.sourceUrl); if (key) targets.add(key); };
+    const devices: PublishModelAssetReference[] = [];
+    const addTarget = (asset: PublishModelAssetReference | null | undefined) => { const key = getClickEventModelResourceKey(asset?.sourceUrl); if (key) targets.add(key); };
     for (const entity of Object.values(entities)) {
       const components = entity?.components;
       addTarget(components?.modelAsset);
@@ -108,7 +128,7 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
   }));
   const nextDeviceKeys = new Set(clickReferences(afterEntities).devices.map(device => getClickEventModelResourceKey(device.sourceUrl)));
   const restoredKeys = new Set<string>();
-  for (const [id, entity] of Object.entries(afterEntities) as Array<[string, any]>) {
+  for (const [id, entity] of Object.entries<PublishReferenceEntity>(afterEntities)) {
     if (Object.hasOwn(beforeEntities, id)) continue;
     const key = getClickEventModelResourceKey(entity?.components?.modelAsset?.sourceUrl);
     const transform = entity?.components?.transform;
@@ -167,7 +187,7 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
 function parseScene(content: string): { scene: { name?: string } } {
   if (typeof content !== 'string' || !content) throw new Error('发布准备场景内容不能为空。');
   const parsed = JSON.parse(content);
-  if (![1, 2, 3, 4, 5].includes(parsed?.version) || !parsed.scene || typeof parsed.scene !== 'object' || Array.isArray(parsed.scene)) throw new Error('发布准备场景格式无效。');
+  if (!isSupportedSceneFileVersion(parsed?.version) || !parsed.scene || typeof parsed.scene !== 'object' || Array.isArray(parsed.scene)) throw new Error('发布准备场景格式无效。');
   if (parsed.scene.entities !== undefined && (!parsed.scene.entities || typeof parsed.scene.entities !== 'object' || Array.isArray(parsed.scene.entities))) throw new Error('发布准备场景实体集合无效。');
   return parsed;
 }

@@ -38,7 +38,7 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
     await writeFile(input, ['preparePublishScene', 'preparePublishSceneSnapshots'].map(name =>
       `export * from ${JSON.stringify(path.resolve('src/editor/deployment', name + '.ts').replace(/\\/g, '/'))};`).join('\n'));
     await build({ configFile: false, logLevel: 'error', plugins: [{ name: 'publish-warning-dependencies', enforce: 'pre',
-      resolveId(source) { return Object.hasOwn(stubs, source) ? '\0publish-test:' + source : null; },
+      resolveId(source) { const key = source.startsWith('@babylonjs/core/') ? '@babylonjs/core' : source; return Object.hasOwn(stubs, key) ? '\0publish-test:' + key : null; },
       load(id) { return id.startsWith('\0publish-test:') ? stubs[id.slice('\0publish-test:'.length)] : null; },
     }], ssr: { noExternal: true }, build: { ssr: input, outDir: path.join(root, 'out'), minify: false,
       rollupOptions: { output: { entryFileNames: 'entry.mjs' } } } });

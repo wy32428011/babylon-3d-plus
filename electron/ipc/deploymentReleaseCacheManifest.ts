@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../shared/asciiControlCharacters.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -68,7 +69,7 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
 /** 清单保存可直接相对发布根解析的 URL 路径，避免文件名中的 #、?、% 改变请求语义。 */
 export function toReleaseCacheManifestUrlPath(relativePath: string): string {
   const segments = relativePath.split('/');
-  if (/[\\:\u0000-\u001f\u007f]/.test(relativePath)
+  if (containsAsciiControlCharactersOr(relativePath, ":\\\u007f")
     || segments.some((segment) => !segment || segment === '.' || segment === '..')) {
     throw new Error('发布缓存文件相对路径无效。');
   }

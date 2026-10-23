@@ -103,7 +103,7 @@ async function waitForAllEntityMeshes(scene, entityIds) {
 async function waitForEditThinInstanceBatch(runtime, sourceEntityId, expectedEntityCount) {
   let lastObserved = null;
   for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
-    const sourceModel = runtime.models.get(sourceEntityId);
+    const sourceModel = runtime.assets.models.get(sourceEntityId);
     const batch = sourceModel?.modelArrayBatch;
     const activeMeshes = batch?.meshes.filter((mesh) => mesh.thinInstanceCount > 0) ?? [];
     lastObserved = {
@@ -127,7 +127,7 @@ async function waitForEditThinInstanceBatch(runtime, sourceEntityId, expectedEnt
 /** 等待单实体参数变化收敛到独立变体批次，并确认基础批次已移除旧视觉。 */
 async function waitForModelParameterVariantBatch(runtime, entityId) {
   for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
-    const variant = runtime.modelArrayParameterVariantByEntityId.get(entityId);
+    const variant = runtime.variants.modelArrayParameterVariantByEntityId.get(entityId);
     if (variant?.model.modelArrayBatch?.hasEntityId(entityId)) return variant;
     await new Promise((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS));
   }
@@ -216,7 +216,7 @@ export class ParametricModelRuntimeComponent {
       { modelArrayIdentityMode: 'visual' },
     );
     const initialBatch = await waitForEditThinInstanceBatch(runtime, sourceEntityId, entityIds.length);
-    const sourceModel = runtime.models.get(sourceEntityId);
+    const sourceModel = runtime.assets.models.get(sourceEntityId);
     const externalScriptRuntime = sourceModel?.externalScriptRuntime;
     assert.ok(sourceModel && externalScriptRuntime, '编辑态批次源必须保留唯一外置参数脚本宿主');
     assert.equal(
@@ -244,7 +244,7 @@ export class ParametricModelRuntimeComponent {
       { modelArrayIdentityMode: 'visual' },
     );
     const editedBatch = await waitForEditThinInstanceBatch(runtime, sourceEntityId, entityIds.length);
-    const editedSourceModel = runtime.models.get(sourceEntityId);
+    const editedSourceModel = runtime.assets.models.get(sourceEntityId);
 
     assert.equal(editedBatch, initialBatch, '批次源输入资产编号不得重建编辑态 Geometry 批次');
     assert.equal(editedSourceModel, sourceModel, '批次源输入资产编号不得重建模型或外置脚本宿主');
@@ -256,18 +256,18 @@ export class ParametricModelRuntimeComponent {
       editedAssetCode,
       '外置参数脚本必须实际收到修改后的资产编号',
     );
-    assert.equal(runtime.modelArrayParameterVariants.size, 0, '编辑态资产编号不得创建逐设备参数脚本宿主');
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 0, '编辑态资产编号不得创建逐设备参数脚本宿主');
 
     const lifecycleMeshes = [...initialBatch.meshes];
     const lifecycleMatrixBuffers = captureBatchMatrixBuffers(initialBatch);
     const lifecyclePerformance = runtime.getPerformanceMetrics();
     runtime.beginTelemetryPreview();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本切换到运行上下文不得重建 Geometry 批次');
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本切换到运行上下文不得重建 Geometry 批次');
     assertSameReferences([...initialBatch.meshes], lifecycleMeshes, '参数脚本切换到运行上下文不得替换批次 Mesh');
     assertSameReferences(captureBatchMatrixBuffers(initialBatch), lifecycleMatrixBuffers, '参数脚本切换到运行上下文不得重新分配矩阵缓冲');
     assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, '参数脚本切换到运行上下文不得增加完整 sync 次数');
     runtime.endTelemetryPreview();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本恢复编辑上下文不得重新合批');
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(sourceEntityId), initialBatch, '参数脚本恢复编辑上下文不得重新合批');
     assertSameReferences([...initialBatch.meshes], lifecycleMeshes, '参数脚本恢复编辑上下文不得替换批次 Mesh');
     assertSameReferences(captureBatchMatrixBuffers(initialBatch), lifecycleMatrixBuffers, '参数脚本恢复编辑上下文不得重新分配矩阵缓冲');
     assert.equal(runtime.getPerformanceMetrics().fullSyncCount, lifecyclePerformance.fullSyncCount, '参数脚本恢复编辑上下文不得增加完整 sync 次数');
@@ -609,9 +609,9 @@ async function run() {
       EDIT_BATCH_ENTITY_COUNT,
     );
     assert.equal(loadCount, 1, '编辑态 100 个同源模型必须只加载一次 AssetContainer');
-    assert.equal(runtime.models.size, 1, '编辑态重复模型不得创建逐实体 ModelRuntimeEntry');
+    assert.equal(runtime.assets.models.size, 1, '编辑态重复模型不得创建逐实体 ModelRuntimeEntry');
     assert.equal(
-      runtime.modelArrayInstanceEntities.size,
+      runtime.arrays.modelArrayInstanceEntities.size,
       EDIT_THIN_INSTANCE_ENTITY_COUNT,
       '编辑态覆盖层必须保留每个逻辑实体的独立 ID 与 Transform',
     );
@@ -621,7 +621,7 @@ async function run() {
     );
     const editBatchMeshCount = editBatch.meshes.length;
     assert.equal(
-      runtime.modelArrayParameterVariants.size,
+      runtime.variants.modelArrayParameterVariants.size,
       0,
       '编辑态自动合批不得因不同 assetCode 或相同遥测配置拆成逐设备参数宿主',
     );
@@ -654,9 +654,9 @@ async function run() {
       EDIT_BATCH_ENTITY_COUNT,
     );
     assert.equal(assetCodeBatch, editBatch, '输入资产编号不得重建或拆散编辑态 Geometry 批次');
-    assert.equal(runtime.modelArrayParameterVariants.size, 0, '输入资产编号后不得新增单实例参数宿主');
+    assert.equal(runtime.variants.modelArrayParameterVariants.size, 0, '输入资产编号后不得新增单实例参数宿主');
     assert.equal(
-      runtime.modelArrayInstanceEntities.get(assetCodeEntityId)?.components.modelAsset?.assetCode,
+      runtime.arrays.modelArrayInstanceEntities.get(assetCodeEntityId)?.components.modelAsset?.assetCode,
       editedAssetCode,
       '合批后仍必须保留逻辑实体自己的资产编号',
     );
@@ -687,7 +687,7 @@ async function run() {
     );
     await waitForModelParameterVariantBatch(runtime, parameterEntityId);
 
-    const sourceModelAfterFirstParameter = runtime.models.get(editPlan.sourceEntityIds[0]);
+    const sourceModelAfterFirstParameter = runtime.assets.models.get(editPlan.sourceEntityIds[0]);
     const stableBaseBatch = sourceModelAfterFirstParameter?.modelArrayBatch;
     assert.ok(stableBaseBatch, '参数变体 ready 后必须保留稳定基础批次');
     assert.equal(stableBaseBatch.hasEntityId(parameterEntityId), false, '基础批次必须只在首次参数分组变化时移除目标实体');
@@ -735,24 +735,24 @@ async function run() {
     const parameterSyncBaseBatchReused = true;
 
     // 运行预览只切换脚本、动画和遥测生命周期，必须原位复用已完成的 Geometry 合批。
-    const previewBatch = runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]);
+    const previewBatch = runtime.arrays.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]);
     assert.equal(previewBatch, stableBaseBatch, '运行预览前必须以当前参数稳定批次作为唯一渲染结果');
     const previewBatchMeshes = [...previewBatch.meshes];
     const previewMatrixBuffers = captureBatchMatrixBuffers(previewBatch);
     const performanceBeforePreview = runtime.getPerformanceMetrics();
     runtime.beginTelemetryPreview();
     const performanceDuringPreview = runtime.getPerformanceMetrics();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '进入运行预览不得重建 Geometry 合批');
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '进入运行预览不得重建 Geometry 合批');
     assertSameReferences([...previewBatch.meshes], previewBatchMeshes, '进入运行预览不得替换已提交的批次 Mesh');
     assertSameReferences(captureBatchMatrixBuffers(previewBatch), previewMatrixBuffers, '进入运行预览不得重新分配矩阵缓冲');
     assert.equal(performanceDuringPreview.fullSyncCount, performanceBeforePreview.fullSyncCount, '进入运行预览不得增加完整 sync 次数');
-    assert.equal(runtime.models.size, 1, '运行预览不得把视觉合批展开为逐设备 ModelRuntimeEntry');
-    assert.equal(runtime.modelArrayInstanceEntities.size, EDIT_THIN_INSTANCE_ENTITY_COUNT, '运行预览必须保留每个逻辑实体及其参数');
+    assert.equal(runtime.assets.models.size, 1, '运行预览不得把视觉合批展开为逐设备 ModelRuntimeEntry');
+    assert.equal(runtime.arrays.modelArrayInstanceEntities.size, EDIT_THIN_INSTANCE_ENTITY_COUNT, '运行预览必须保留每个逻辑实体及其参数');
     assert.equal(loadCount, 1, '进入运行预览不得重新加载模型源');
 
     runtime.endTelemetryPreview();
     const performanceAfterPreview = runtime.getPerformanceMetrics();
-    assert.equal(runtime.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '退出运行预览不得重新合批');
+    assert.equal(runtime.arrays.resolveModelArrayBatchForEntityId(editPlan.sourceEntityIds[0]), previewBatch, '退出运行预览不得重新合批');
     assertSameReferences([...previewBatch.meshes], previewBatchMeshes, '退出运行预览不得替换已提交的批次 Mesh');
     assertSameReferences(captureBatchMatrixBuffers(previewBatch), previewMatrixBuffers, '退出运行预览不得重新分配矩阵缓冲');
     assert.equal(performanceAfterPreview.fullSyncCount, performanceBeforePreview.fullSyncCount, '退出运行预览不得增加完整 sync 次数');

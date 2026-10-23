@@ -303,7 +303,7 @@ export class DigitalTwinUploadClient {
       }
       return envelope.data;
     } catch (error) {
-      if (timedOut) throw new Error(`数字孪生接口请求超时：${endpoint.pathname}`);
+      if (timedOut) throw new Error(`数字孪生接口请求超时：${endpoint.pathname}`, { cause: error });
       if (signal.aborted) throw createAbortError();
       throw error;
     } finally {

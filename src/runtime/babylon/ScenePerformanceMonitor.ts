@@ -1,18 +1,12 @@
-import {
-  ArcRotateCamera,
-  Camera,
-  Mesh,
-  PBRMaterial,
-  type AbstractMesh,
-  type Engine,
-  type Material,
-  type Scene,
-  type Observer,
-} from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import type { AbstractMesh, Engine, Material, Scene, Observer } from '@babylonjs/core';
 import { EngineInstrumentation } from '@babylonjs/core/Instrumentation/engineInstrumentation';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
 import type { SceneRuntimePerformanceMetrics } from './SceneRuntime';
-import { FrameTimingWindow, type FrameTimingReport } from './FrameTimingWindow';
+import { FrameTimingWindow, type FrameTimingReport, type FrameTimingWallClockReport } from './FrameTimingWindow';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 const MAX_HISTORY_SAMPLES = 60;
@@ -112,12 +106,12 @@ export type ScenePerformanceGpuMaterialTotals = {
 export type ScenePerformanceSnapshot = {
   sampledAt: string;
   fps: number;
-  frameTimeMs: number;
-  renderTimeMs: number;
-  activeMeshesEvaluationMs: number;
+  frameTimeMs: number | null;
+  renderTimeMs: number | null;
+  activeMeshesEvaluationMs: number | null;
   gpuFrameTimeMs: number | null;
-  shaderCompilationMs: number;
-  drawCalls: number;
+  shaderCompilationMs: number | null;
+  drawCalls: number | null;
   activeMeshes: number;
   totalMeshes: number;
   totalVertices: number;
@@ -143,9 +137,9 @@ export type ScenePerformanceSummary = {
   sampleCount: number;
   averageFps: number;
   minimumFps: number;
-  p95FrameTimeMs: number;
+  p95FrameTimeMs: number | null;
   maximumGpuFrameTimeMs: number | null;
-  maximumDrawCalls: number;
+  maximumDrawCalls: number | null;
   maximumActiveMeshes: number;
   maximumActiveThinInstances: number;
   maximumEstimatedActiveVertexInvocations: number;
@@ -166,10 +160,15 @@ type ScenePerformanceMonitorOptions = {
   captureFrameTimings?: boolean;
 };
 
-/** 将性能计数器的最近一秒均值转换为稳定 HUD 数值。 */
-function readCounterValue(counter: { current: number; lastSecAverage: number }): number {
+/** 未支持或尚未采样不能冒充零；实际 PerfCounter 已采集的零仍为有效测量。 */
+function readCounterValue(counter: { current: number; lastSecAverage: number; count: number } | null | undefined): number | null {
+  if (!counter || !Number.isFinite(counter.count) || counter.count <= 0) return null;
   const value = counter.lastSecAverage > 0 ? counter.lastSecAverage : counter.current;
-  return Number.isFinite(value) && value > 0 ? value : 0;
+  return isAvailableMetric(value) ? value : null;
+}
+
+function isAvailableMetric(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 /** 只在展示边界做有限数值归一化，保留内部原始采样精度。 */
@@ -186,9 +185,9 @@ export function summarizeScenePerformance(
       sampleCount: 0,
       averageFps: 0,
       minimumFps: 0,
-      p95FrameTimeMs: 0,
+      p95FrameTimeMs: null,
       maximumGpuFrameTimeMs: null,
-      maximumDrawCalls: 0,
+      maximumDrawCalls: null,
       maximumActiveMeshes: 0,
       maximumActiveThinInstances: 0,
       maximumEstimatedActiveVertexInvocations: 0,
@@ -201,19 +200,20 @@ export function summarizeScenePerformance(
     };
   }
 
-  const sortedFrameTimes = snapshots.map((snapshot) => snapshot.frameTimeMs).sort((left, right) => left - right);
+  const sortedFrameTimes = snapshots.map((snapshot) => snapshot.frameTimeMs).filter(isAvailableMetric).sort((left, right) => left - right);
   const p95Index = Math.min(sortedFrameTimes.length - 1, Math.ceil(sortedFrameTimes.length * 0.95) - 1);
   const gpuFrameTimes = snapshots
     .map((snapshot) => snapshot.gpuFrameTimeMs)
-    .filter((value): value is number => value !== null);
+    .filter(isAvailableMetric);
+  const drawCalls = snapshots.map((snapshot) => snapshot.drawCalls).filter(isAvailableMetric);
 
   return {
     sampleCount: snapshots.length,
     averageFps: snapshots.reduce((total, snapshot) => total + snapshot.fps, 0) / snapshots.length,
     minimumFps: Math.min(...snapshots.map((snapshot) => snapshot.fps)),
-    p95FrameTimeMs: sortedFrameTimes[p95Index] ?? 0,
+    p95FrameTimeMs: sortedFrameTimes[p95Index] ?? null,
     maximumGpuFrameTimeMs: gpuFrameTimes.length > 0 ? Math.max(...gpuFrameTimes) : null,
-    maximumDrawCalls: Math.max(...snapshots.map((snapshot) => snapshot.drawCalls)),
+    maximumDrawCalls: drawCalls.length > 0 ? Math.max(...drawCalls) : null,
     maximumActiveMeshes: Math.max(...snapshots.map((snapshot) => snapshot.activeMeshes)),
     maximumActiveThinInstances: Math.max(...snapshots.map((snapshot) => snapshot.activeThinInstances ?? 0)),
     maximumEstimatedActiveVertexInvocations: Math.max(
@@ -531,6 +531,22 @@ export class ScenePerformanceMonitor {
     return this.frameTimings?.createReport(this.frameTimingObserver ? performance.now() : undefined) ?? null;
   }
 
+  /** 先启用逐帧计量并预热，再固定墙钟起点；不改变渲染循环或旧interval报告。 */
+  beginWallClockFrameTimingWindow(startMs = performance.now()): void {
+    if (!this.frameTimingObserver || !this.frameTimings) throw new Error('墙钟采样前必须先启用逐帧计量并预热。');
+    this.frameTimings.beginWallClockWindow(startMs);
+  }
+
+  /** 截止时刻冻结后仍需保留观察器，直到跨窗后邻帧完整结算。 */
+  endWallClockFrameTimingWindow(endMs = performance.now()): void {
+    if (!this.frameTimings) throw new Error('尚未开始墙钟采样。');
+    this.frameTimings.endWallClockWindow(endMs);
+  }
+
+  getWallClockFrameTimingReport(): FrameTimingWallClockReport | null {
+    return this.frameTimings?.createWallClockReport() ?? null;
+  }
+
   /** 启动低频采样；重复调用会替换旧订阅，不会叠加 interval。 */
   start(
     onSample: (snapshot: ScenePerformanceSnapshot) => void,
@@ -549,7 +565,10 @@ export class ScenePerformanceMonitor {
 
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
-    const gpuFrameTimeNanoseconds = readCounterValue(this.engineInstrumentation.gpuFrameTimeCounter);
+    const gpuFrameTimeNanoseconds = this.gpuFrameTimeCaptureEnabled
+      ? readCounterValue(this.engineInstrumentation.gpuFrameTimeCounter) : null;
+    // installed Babylon 的公开 getter 委托到 engine._drawCalls；缺少此来源时保持不可用，不造替代 counter。
+    const drawCalls = readCounterValue(this.sceneInstrumentation.drawCallsCounter);
     const details = this.options.collectDetailedGpuWorkloads;
     const activeGpuWorkload = collectActiveGpuWorkload(this.scene, typeof details === 'function' ? details() : details !== false);
     const snapshot: ScenePerformanceSnapshot = {
@@ -558,11 +577,11 @@ export class ScenePerformanceMonitor {
       frameTimeMs: readCounterValue(this.sceneInstrumentation.frameTimeCounter),
       renderTimeMs: readCounterValue(this.sceneInstrumentation.renderTimeCounter),
       activeMeshesEvaluationMs: readCounterValue(this.sceneInstrumentation.activeMeshesEvaluationTimeCounter),
-      gpuFrameTimeMs: this.gpuFrameTimeCaptureEnabled && gpuFrameTimeNanoseconds > 0
+      gpuFrameTimeMs: gpuFrameTimeNanoseconds !== null
         ? gpuFrameTimeNanoseconds * GPU_NANOSECONDS_TO_MILLISECONDS
         : null,
       shaderCompilationMs: readCounterValue(this.engineInstrumentation.shaderCompilationTimeCounter),
-      drawCalls: Math.round(readCounterValue(this.sceneInstrumentation.drawCallsCounter)),
+      drawCalls: drawCalls === null ? null : Math.round(drawCalls),
       activeMeshes: this.scene.getActiveMeshes().length,
       totalMeshes: this.scene.meshes.length,
       totalVertices: this.scene.getTotalVertices(),
@@ -593,6 +612,7 @@ export class ScenePerformanceMonitor {
       renderer: this.glInfo,
       summary: summarizeScenePerformance(this.history),
       frameTiming: this.getFrameTimingReport(),
+      wallClockFrameTiming: this.getWallClockFrameTimingReport(),
       samples: this.history,
     }, null, 2);
   }

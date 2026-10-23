@@ -132,7 +132,7 @@ test('采样历史有界且仅保留运行中最近一分钟，停止后不会�
   assert.equal(JSON.parse(session.createReport()).samples.length, 1);
 });
 
-test('无效和负数指标归零，GPU 不可用保留 null，遥测计数不会产生负增量', () => {
+test('无效计时和 Draw 保留不可用，兼容计数不会产生负增量', () => {
   let now = 0;
   const session = createEditorPerformanceRunSession(telemetry(), () => now);
   now = 2_000;
@@ -142,8 +142,8 @@ test('无效和负数指标归零，GPU 不可用保留 null，遥测计数不�
   });
   const report = JSON.parse(session.createReport());
   assert.equal(report.samples[0].fps, 0);
-  assert.equal(report.samples[0].frameTimeMs, 0);
-  assert.equal(report.samples[0].drawCalls, 0);
+  assert.equal(report.samples[0].frameTimeMs, null);
+  assert.equal(report.samples[0].drawCalls, null);
   assert.equal(report.samples[0].gpuFrameTimeMs, null);
   assert.equal(report.summary.maximumGpuFrameTimeMs, null);
   assert.equal(report.telemetry.frames, 0);

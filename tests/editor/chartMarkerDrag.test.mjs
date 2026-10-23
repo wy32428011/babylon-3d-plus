@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 test('图表立标拖放输入与嵌套边界', async (t) => {
-  const server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true } });
+  const server = await createP4SsrTestModules([
+    '/src/editor/assets/dataPlatformScreenDrag.ts',
+    '/src/shared/chartMarkerEmbed.ts',
+  ]);
   t.after(() => server.close());
   const { decodeDataPlatformScreenDragPayload: decode } = await server.ssrLoadModule('/src/editor/assets/dataPlatformScreenDrag.ts');
   const { canEmbedChartMarkerScreen } = await server.ssrLoadModule('/src/shared/chartMarkerEmbed.ts');

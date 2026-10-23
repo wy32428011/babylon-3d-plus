@@ -11,7 +11,7 @@ import {
   type CadReferencePoint2D,
   type DxfEntityRecord,
   type DxfInsertEntityRecord,
-} from './cadReference';
+} from './cadReferenceCore';
 import {
   CAD_REFERENCE_MAX_BATCH_POINTS,
   CAD_REFERENCE_MAX_BATCH_POLYLINES,

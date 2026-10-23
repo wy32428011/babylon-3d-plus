@@ -1,4 +1,5 @@
-import { Vector3, type Matrix, type Ray, type TransformNode } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { Matrix, Ray, TransformNode } from '@babylonjs/core';
 import { isMeasurableModelMesh } from './modelMeasurement';
 
 const MATRIX_DETERMINANT_EPSILON = 1e-12;

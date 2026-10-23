@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useEffectEvent, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PoiEffectComponent } from '../model/components';
 import type { EffectConfiguration, EffectDataBinding, EffectDeviceIdentity, EffectFieldMapping } from '../model/effectConfiguration';
 import { getEffectParameterDefinitions } from '../model/effectParameterRegistry';
@@ -16,7 +16,7 @@ const STATUS: Record<EffectDataResult['status'], string> = { static: '静态', w
 const SENSITIVE_FIELD = /password|passwd|secret|token|authorization|cookie|credential|api[_-]?key/i;
 const FIELD_PATH = /^(?:\$\.)?[\w$\u0080-\uffff-]+(?:\[\d+\])*(?:\.[\w$\u0080-\uffff-]+(?:\[\d+\])*)*$/;
 function safePath(value: string, empty = false): boolean {
-  return (empty && (value === '' || value === '$')) || (value.length <= 512 && FIELD_PATH.test(value) && !value.split(/[.\[\]]/).some(key => ['__proto__', 'prototype', 'constructor'].includes(key)));
+  return (empty && (value === '' || value === '$')) || (value.length <= 512 && FIELD_PATH.test(value) && !value.split(/[.[\]]/).some(key => ['__proto__', 'prototype', 'constructor'].includes(key)));
 }
 function clone(value: EffectDataBinding): EffectDataBinding { return structuredClone(value); }
 
@@ -64,7 +64,8 @@ function validateDraft(data: EffectDataBinding, sinks: Set<string>, hasRegionPol
 function EnumDraft({ value, disabled, onChange, onPending, label }: { value: EffectFieldMapping['values']; disabled: boolean; onChange: (value: EffectFieldMapping['values']) => void; onPending: (pending: boolean) => void; label: string }) {
   const saved = JSON.stringify(value, null, 2); const [draft, setDraft] = useState(saved); const [error, setError] = useState('');
   useEffect(() => { setDraft(saved); setError(''); }, [saved]);
-  useEffect(() => { onPending(draft !== saved); }, [draft, saved]);
+  const notifyPending = useEffectEvent(onPending);
+  useEffect(() => { notifyPending(draft !== saved); }, [draft, saved]);
   return <details className="effect-data-enum"><summary>枚举映射（{value.length} 项）</summary>
     <p className="muted">例如 [{'{'}"value":"running","output":"#22ff88"{'}'}]。有枚举时优先匹配，未命中会提示。</p>
     <textarea aria-label={`${label}枚举 JSON`} rows={4} disabled={disabled} maxLength={16384} spellCheck={false} value={draft} onChange={event => { setDraft(event.target.value); setError(''); }} />
@@ -108,7 +109,7 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   ];
   const sinkKeys = new Set(sinkOptions.map(option => option.value));
   const hasChanges = JSON.stringify(draft) !== saved;
-  const resolution = useMemo(() => resolveEffectTargets(scene, configuration.target, component.effectKind), [scene, targetSignature, component.effectKind]);
+  const resolution = useMemo(() => resolveEffectTargets(scene, JSON.parse(targetSignature) as EffectConfiguration['target'], component.effectKind), [scene, targetSignature, component.effectKind]);
   const multipleTargets = component.effectKind !== 'target-follow' && (configuration.target.selection === 'all' || (configuration.target.entityIds?.length ?? 0) > 1);
   const probeCandidates = resolution.candidates.filter(candidate => !!scene.entities[candidate.id] && !!effectDeviceIdentity(scene.entities[candidate.id]));
   const selectedProbeId = probeCandidates.some(candidate=>candidate.id === probeTargetId) ? probeTargetId : '';
@@ -128,7 +129,9 @@ export function EffectDataBindingInspector({ component, configuration, disabled,
   const hasRegionPolygons = component.effectKind === 'region-level' && Array.isArray(configuration.parameters.regions) && configuration.parameters.regions.length > 0;
 
   function cancelProbe(): void { const current = probe.current; if (!current) return; current.cancelled = true; if (current.timer) clearTimeout(current.timer); current.runtime.dispose(); probe.current = null; }
-  useEffect(() => { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); setPendingEnums({}); setDraft(clone(configuration.data)); }, [selectedId, saved, component.effectKind]);
+  // 签名只决定何时重置；草稿仍按原对象深拷贝，保留 -0 等合法数据值。
+  const resetSavedDataDraft = useEffectEvent(() => setDraft(clone(configuration.data)));
+  useEffect(() => { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); setPendingEnums({}); resetSavedDataDraft(); }, [selectedId, saved, component.effectKind]);
   useEffect(() => { cancelProbe(); setBusy(false); setResult(null); setIssues([]); setError(''); }, [targetSignature, identitySignature, disabled]);
   useEffect(() => { setProbeTargetId(''); }, [targetSignature, selectedId]);
   useEffect(() => () => cancelProbe(), []);

@@ -1,16 +1,39 @@
+import { createScenePerformanceReportHandlers } from './scene-view/scenePerformanceReports';
+import { useSceneFocusTransition } from './scene-view/useSceneFocusTransition';
+import { useSceneCameraTransition } from './scene-view/useSceneCameraTransition';
+import { useSceneKeyboardShortcuts } from './scene-view/useSceneKeyboardShortcuts';
+import { useSceneLightingPreview } from './scene-view/useSceneLightingPreview';
+import { useSceneAssetDropHandler } from './scene-view/useSceneAssetDropHandler';
+import { useSceneSelectionHandlers } from './scene-view/useSceneSelectionHandlers';
+import { SceneViewportOverlays } from './scene-view/SceneViewportOverlays';
+import { ScenePerformanceHud } from './scene-view/ScenePerformanceHud';
+import {
+  transformPreviewStore,
+  isTransformPreviewSessionValid,
+  type TransformPreviewSession,
+} from '../store/transformPreviewStore';
 import { subscribeCadReferenceLoadStatus } from '../cad/cadReferenceLoadStatus';
-import { RuntimeFollowControls } from '../../shared/ui/RuntimeFollowControls';
-import { OpeningAnimationOverlay } from '../../shared/ui/OpeningAnimationOverlay';
+
+
 import { useEditorOpeningAnimation } from '../opening/useEditorOpeningAnimation';
 import { SceneModelEntrancePlayback } from '../../shared/opening/SceneModelEntrancePlayback';
-import { SceneLoadingMask } from '../../shared/ui/SceneLoadingMask';
+
 import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
-import { Color3, Constants, MeshBuilder, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
-import { appendEffectPathDrawingPoint, cancelEffectPathDrawing, getEffectPathDrawing, setEffectPathDrawingError, subscribeEffectPathDrawing } from '../model/effectPathDrawing';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import {
+  cancelEffectPathDrawing,
+  getEffectPathDrawing,
+  subscribeEffectPathDrawing,
+} from '../model/effectPathDrawing';
 import { CompositionEditStatus } from '../composition/CompositionControls';
-import { COMPOSITION_DRAG, findCompositionRoot, parseCompositionDragPayload } from '../composition/composition';
-import { placeComposition } from '../composition/compositionActions';
-import type { CompositionLibraryApi } from '../../../electron/shared/compositionTypes';
+import { findCompositionRoot } from '../composition/composition';
+
+
 import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
@@ -22,9 +45,6 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type DragEvent,
-  type PointerEvent,
-  type WheelEvent,
 } from 'react';
 import {
   createBabylonViewport,
@@ -32,27 +52,11 @@ import {
   type BabylonViewport,
   type BabylonViewportRuntimeStatus,
 } from '../../runtime/babylon/createEngine';
-import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../../runtime/babylon/cameraControlStandard';
-import {
-  completeSceneModelSelectionPointer,
-  createSceneModelSelectionPointerSnapshot,
-  updateSceneModelSelectionPointerSnapshot,
-  type SceneModelSelectionPointerSnapshot,
-} from '../../shared/sceneModelSelectionPointer';
-import { applySavedSceneCameraView } from '../../runtime/babylon/sceneCameraView';
-import {
-  buildClickEventAssetClickedPayload,
-  CLICK_EVENT_FOCUS_DURATION_MS,
-  CLICK_EVENT_FOCUS_RADIUS_SCALE,
-  resolveClickEventBindingClick,
-  resolveGeneratedUnitClick,
-  type ClickEventBindingPickedCell,
-} from '../model/clickEventBinding';
-import {
-  DIGITAL_TWIN_BRIDGE_CHANNEL,
-  DIGITAL_TWIN_BRIDGE_VERSION,
-  DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID,
-} from '../../player/digitalTwinInteractionProtocol';
+
+import { type SceneModelSelectionPointerSnapshot } from '../../shared/sceneModelSelectionPointer';
+
+import { CLICK_EVENT_FOCUS_DURATION_MS } from '../model/clickEventBinding';
+
 import { MqttStackerTelemetryClient } from '../../runtime/mqtt/MqttStackerTelemetryClient';
 import { SceneRuntime, type DataPlatformScreenOverlayItem } from '../../runtime/babylon/SceneRuntime';
 import { createEntityGroupRotationDeltaMatrix } from '../../runtime/babylon/EntityGroupRotationPreview';
@@ -63,10 +67,7 @@ import {
   type AutoPatrolPlaybackRoute,
 } from '../../runtime/babylon/AutoPatrolPlaybackController';
 import { AutoPatrolRuntimeIntegration } from '../../runtime/patrol/AutoPatrolRuntimeIntegration';
-import {
-  createSceneCameraPoseFromReplayCamera,
-  type AutoPatrolInspectionReplayCamera,
-} from '../../runtime/patrol/AutoPatrolInspectionReplayController';
+import { createSceneCameraPoseFromReplayCamera, type AutoPatrolInspectionReplayCamera } from '../../runtime/patrol/AutoPatrolInspectionReplayController';
 import type { AutoPatrolInspectionRecordStore } from '../../runtime/patrol/AutoPatrolInspectionRecordStore';
 import {
   ScenePerformanceMonitor,
@@ -79,26 +80,13 @@ import {
   type EditorPerformanceRunSession,
   type EditorPerformanceRunSnapshot,
 } from '../runtime/editorPerformanceRunSession';
-import {
-  TransformGizmoController,
-  type EntityArrayDragUpdate,
-} from '../../runtime/babylon/TransformGizmoController';
-import {
-  BUILT_IN_ASSET_DRAG_MIME_TYPE,
-  decodeBuiltInAssetDragPayload,
-  decodeModelAssetDragPayload,
-  decodeSkyboxAssetDragPayload,
-  MODEL_ASSET_DRAG_MIME_TYPE,
-  SKYBOX_ASSET_DRAG_MIME_TYPE,
-} from '../assets/AssetDatabase';
-import {
-  useEditorStore,
-  type EntityArrayDirection,
-} from '../store/editorStore';
-import { DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE, decodeDataPlatformScreenDragPayload } from '../assets/dataPlatformScreenDrag';
-import { getBuiltInMeshGroundOffsetMeters } from '../model/builtInMeshGeometry';
+import { TransformGizmoController, type EntityArrayDragUpdate } from '../../runtime/babylon/TransformGizmoController';
+
+import { useEditorStore, type EntityArrayDirection } from '../store/editorStore';
+
+
 import { getLightEditorCapabilities } from '../model/lightEditor';
-import { SCENE_THEME_DRAG_MIME_TYPE, isSceneThemePresetId } from '../model/sceneTheme';
+
 import {
   createAutoPatrolWaypointFromWorldPose,
   getAutoPatrolWaypointWorldPose,
@@ -112,21 +100,15 @@ import {
   resolveManualRoamAvatarSource,
 } from '../model/manualRoamSpawn';
 import type { EditorRuntimeMode } from '../model/editorRuntimeMode';
-import {
-  getSceneSkyboxSettings,
-  SKYBOX_FOCUS_VIEW_DISTANCE_METERS,
-  SCENE_VIEW_DISTANCE_MAX,
-  type SceneDocument,
-} from '../model/SceneDocument';
+import { type SceneDocument } from '../model/SceneDocument';
 import { resolveEnvironmentRuntimeSettings } from '../model/environmentRuntime';
-import { createSceneSkyboxFromAsset } from '../assets/skyboxAssets';
-import { ensureVirtualConveyorAsset } from '../assets/virtualConveyorAsset';
+
+
 import type { Vector3Data } from '../model/math';
 import { createGroupPositionDelta } from '../model/groupSpatialInfo';
 import {
   resolveHierarchyGroupTransformSelection,
   isEntityEffectivelyLocked,
-  toggleHierarchyEntitySelection,
   type HierarchyGroupTransformReadySelection,
 } from '../model/entityHierarchy';
 import {
@@ -144,14 +126,14 @@ import {
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
 import { EntityArrayDialog, type EntityArrayDialogValue } from '../ui/EntityArrayDialog';
-import { ViewportOrientationCompass } from '../ui/ViewportOrientationCompass';
-import { AutoPatrolControls } from '../../shared/ui/AutoPatrolControls';
-import { DataPlatformScreenOverlay } from '../../runtime/babylon/DataPlatformScreenOverlay';
-import { DataPlatformViewportScreenOverlay } from '../../runtime/babylon/DataPlatformViewportScreenOverlay';
+
+
+
+
 import type { DataPlatformScreenCommand } from '../../runtime/babylon/dataPlatformScreenBridge';
 import { buildDigitalTwinAssetIndex, findDigitalTwinAsset } from '../../shared/digitalTwinAssetCodes';
 import { useAutoPatrolInspectionHistory } from '../../shared/ui/useAutoPatrolInspectionHistory';
-import { ManualRoamControls } from '../../shared/ui/ManualRoamControls';
+
 import {
   createInitialManualRoamSnapshot,
   ManualRoamRuntime,
@@ -171,7 +153,6 @@ import {
   hasScenePreparationRuntimeTimedOut,
   isScenePreparationActive,
   reportSceneRuntimeProgress,
-  getScenePreparationTimings,
   settleSceneRuntimeWithWarning,
   isScenePreparationSettled,
   subscribeScenePreparation,
@@ -207,39 +188,6 @@ function getErrorMessage(error: unknown): string {
 /** 浏览器与 smoke 环境共用的高精度计时入口。 */
 function readScenePanelTimestampMs(): number {
   return typeof performance === 'undefined' ? Date.now() : performance.now();
-}
-
-/** HUD 只展示两位以内的稳定数字，原始报告仍保留完整精度。 */
-function formatPerformanceMetric(value: number, digits = 1): string {
-  return Number.isFinite(value) ? value.toFixed(digits) : '0';
-}
-
-/** 复制性能报告；Clipboard API 被策略禁用时回退到临时 textarea。 */
-async function copyScenePerformanceReport(report: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(report);
-      return;
-    } catch {
-      // Electron 权限或非安全上下文会进入同步 fallback。
-    }
-  }
-
-  const textarea = document.createElement('textarea');
-  textarea.value = report;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  let copied = false;
-  try {
-    textarea.focus();
-    textarea.select();
-    copied = document.execCommand('copy');
-  } finally {
-    textarea.remove();
-  }
-  if (!copied) throw new Error('系统剪贴板拒绝复制。');
 }
 
 /** 从带正负号的阵列方向读取唯一世界坐标轴。 */
@@ -306,6 +254,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     useEditorStore.getState().reportCadReferenceRuntimeLoad(status);
   }), []);
   const gizmoRef = useRef<TransformGizmoController | null>(null);
+  const transformPreviewSessionRef = useRef<TransformPreviewSession | null>(null);
+  useEffect(() => {
+    const unsubscribe = useEditorStore.subscribe(state => {
+      const session = transformPreviewSessionRef.current;
+      if (session && !isTransformPreviewSessionValid(session, state)) gizmoRef.current?.cancelActiveDrag();
+    });
+    return () => {
+      unsubscribe();
+      const session = transformPreviewSessionRef.current;
+      if (session) transformPreviewStore.clear(session);
+      transformPreviewSessionRef.current = null;
+    };
+  }, []);
+
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
   const manualRoamRef = useRef<ManualRoamRuntime | null>(null);
   const mqttTelemetryClientRef = useRef<MqttStackerTelemetryClient | null>(null);
@@ -373,8 +335,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const entity = sceneDocument.entities[effectDrawing.entityId];
     if (runtimeMode !== 'edit' || selectedEntityId !== effectDrawing.entityId || !entity || entity.locked || entity.components.poiEffect?.effectKind !== effectDrawing.effectKind) cancelEffectPathDrawing();
   }, [effectDrawing, runtimeMode, selectedEntityId, sceneDocument.entities]);
+  const effectDrawingEntityId = effectDrawing?.entityId;
   useEffect(() => {
-    if (!effectDrawing) {
+    if (effectDrawingEntityId === undefined) {
       const pointerId = effectDrawingPointerRef.current;
       const canvas = canvasRef.current;
       if (pointerId !== null && canvas?.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
@@ -389,7 +352,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [effectDrawing?.entityId]);
+  }, [effectDrawingEntityId]);
 
   // 绘制预览只挂在真实特效根节点下；草稿变动、切场景和取消均释放自有资源。
   useEffect(() => {
@@ -424,7 +387,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const entityArrayRequest = useEditorStore((state) => state.entityArrayRequest);
   const sceneFocusRequest = useEditorStore((state) => state.sceneFocusRequest);
   const environmentApplyRequest = useEditorStore((state) => state.environmentApplyRequest);
-  const shadowBakeRequest = useEditorStore((state) => state.shadowBakeRequest);
+  const lightingBakeRequest = useEditorStore(state => state.lightingBakeRequest);
+  const lightingDebugVisible = useEditorStore(state => state.lightingDebugVisible);
+  const lightingComparisonEnabled = useEditorStore(state => state.lightingComparisonEnabled);
+  const lightingNodeFocusRequest = useEditorStore(state => state.lightingNodeFocusRequest);
+  const lightingManagerOpen = useEditorStore(state => state.lightingManagerOpen);
+  const lightingManagerPreviewRequest = useEditorStore(state => state.lightingManagerPreviewRequest);
   const environmentRuntimeOverride = useEditorStore((state) => state.environmentRuntimeOverride);
   const environmentStartupRelinkSessionId = useEditorStore((state) => state.environmentStartupRelinkSessionId);
   const environmentAdjustmentActive = useEditorStore((state) => state.environmentAdjustmentActive);
@@ -572,25 +540,29 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       reportError: state.pushLog,
     });
   }, [pauseHistoryReplay]);
+  const { entityIds: sceneEntityIds, entities: sceneEntities } = sceneDocument;
+  const cachedParameterSceneChange = modelParameterSceneChangeRef.current;
+  // 参数变更识别读取当前文档上下文；昂贵的分组仍只随实体图或识别结果变化。
+  const parameterSceneChangeEntityId = editModeThinInstancePlanRef.current
+    ? cachedParameterSceneChange?.entities === sceneEntities
+      ? cachedParameterSceneChange.entityId
+      : resolveModelParameterOnlySceneChangeEntityId(sceneDocumentRef.current, sceneDocument)
+    : null;
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
     const previousPlan = editModeThinInstancePlanRef.current;
-    const cachedParameterSceneChange = modelParameterSceneChangeRef.current;
-    const parameterSyncEntityId = previousPlan
-      ? cachedParameterSceneChange?.entities === sceneDocument.entities
-        ? cachedParameterSceneChange.entityId
-        : resolveModelParameterOnlySceneChangeEntityId(sceneDocumentRef.current, sceneDocument)
-      : null;
+    const parameterSyncEntityId = parameterSceneChangeEntityId;
+    const entityGraph = { entityIds: sceneEntityIds, entities: sceneEntities };
     const plan = parameterSyncEntityId && previousPlan
-      ? patchEditModeModelThinInstancePlanForModelParameters(sceneDocument, previousPlan, parameterSyncEntityId)
-      : createEditModeModelThinInstancePlan(sceneDocument, previousPlan ?? undefined);
+      ? patchEditModeModelThinInstancePlanForModelParameters(entityGraph, previousPlan, parameterSyncEntityId)
+      : createEditModeModelThinInstancePlan(entityGraph, previousPlan ?? undefined);
     return {
       plan,
       parameterSyncEntityId,
       durationMs: Math.max(0, readScenePanelTimestampMs() - startedAt),
-      entityCount: sceneDocument.entityIds.length,
+      entityCount: sceneEntityIds.length,
     };
-  }, [sceneDocument.entityIds, sceneDocument.entities]);
+  }, [sceneEntityIds, sceneEntities, parameterSceneChangeEntityId]);
   const editModeThinInstancePlan = editModeThinInstancePlanComputation.plan;
   const modelParameterSyncEntityId = editModeThinInstancePlanComputation.parameterSyncEntityId;
   const editRuntimeSceneDocument = useMemo(
@@ -614,13 +586,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     environmentApplyRequest?.environment ?? sceneDocument.sceneSettings.environment,
   );
   const autoPatrolRoutes = useMemo<AutoPatrolPlaybackRoute[]>(
-    () => collectAutoPatrolPlaybackRoutes(sceneDocument),
-    [sceneDocument.entityIds, sceneDocument.entities],
+    () => collectAutoPatrolPlaybackRoutes({ entityIds: sceneEntityIds, entities: sceneEntities }),
+    [sceneEntityIds, sceneEntities],
   );
   /** 未摆放手动漫游 POI 时不展示运行预览漫游面板。 */
   const hasManualRoamSpawn = useMemo(
-    () => hasManualRoamSpawnEntity(sceneDocument),
-    [sceneDocument.entityIds, sceneDocument.entities],
+    () => hasManualRoamSpawnEntity({ entityIds: sceneEntityIds, entities: sceneEntities }),
+    [sceneEntityIds, sceneEntities],
   );
   const hierarchyGroupTransformSelection = useMemo(
     () => resolveHierarchyGroupTransformSelection(sceneDocument, hierarchySelectionIds),
@@ -898,491 +870,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     selectedEntityId,
   ]);
 
-  /** 记录主指针左键按下位置与 Ctrl/Cmd 状态，用于区分多选点击和相机拖拽。 */
-  function handleEffectPathPointerDownCapture(event: PointerEvent<HTMLCanvasElement>): void {
-    const drawing = getEffectPathDrawing();
-    if (!drawing || event.button !== 0 || runtimeModeRef.current !== 'edit') return;
-    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
-    clickSnapshotRef.current = null;
-    effectDrawingPointerRef.current = event.pointerId;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const runtime = runtimeRef.current;
-    const target = runtime?.getGizmoTargetByEntityId(drawing.entityId);
-    const world = runtime?.getGroundPointAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
-    if (!target || target.isDisposed() || !world) { setEffectPathDrawingError('无法取得地面落点，请调整视角或等待特效加载。'); return; }
-    const matrix = target.computeWorldMatrix(true);
-    if (Math.abs(matrix.determinant()) < 1e-12) { setEffectPathDrawingError('特效缩放过小或为零，无法转换局部坐标。'); return; }
-    const local = Vector3.TransformCoordinates(new Vector3(world.x, world.y, world.z), matrix.clone().invert());
-    if (drawing.mode === 'wall') {
-      const elevation = useEditorStore.getState().scene.entities[drawing.entityId]?.components.poiEffect?.configuration?.parameters.elevation;
-      local.y = typeof elevation === 'number' && Number.isFinite(elevation) ? elevation : 0;
-    }
-    const displayed = Vector3.TransformCoordinates(local, matrix);
-    appendEffectPathDrawingPoint({ x: displayed.x, y: displayed.y, z: displayed.z }, { x: local.x, y: local.y, z: local.z });
-  }
-  function handleEffectPathPointerMoveCapture(event: PointerEvent<HTMLCanvasElement>): void {
-    if (effectDrawingPointerRef.current !== event.pointerId) return;
-    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
-  }
-  function handleEffectPathPointerUpCapture(event: PointerEvent<HTMLCanvasElement>): void {
-    if (effectDrawingPointerRef.current !== event.pointerId) return;
-    event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation();
-    effectDrawingPointerRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-  }
+  const { handleEffectPathPointerDownCapture, handleEffectPathPointerMoveCapture, handleEffectPathPointerUpCapture, handleCanvasPointerDown, handleCanvasPointerMove, handleCanvasPointerUp, handleCanvasPointerCancel, handleCanvasWheel } = useSceneSelectionHandlers({
+    runtimeModeRef, clickSnapshotRef, effectDrawingPointerRef, runtimeRef, gizmoRef, pauseHistoryReplay, autoPatrolPlaybackRef, isRuntimePreview, handleChartMarkerClick, manualRoamRef, viewportRef, clickProductHighlightIdRef, selectEntity,
+  });
 
-  function handleCanvasPointerDown(event: PointerEvent<HTMLCanvasElement>): void {
-    if (gizmoRef.current?.isPointerUsingGizmo()) {
-      clickSnapshotRef.current = null;
-      return;
-    }
-
-    clickSnapshotRef.current = createSceneModelSelectionPointerSnapshot({
-      pointerId: event.pointerId,
-      button: event.button,
-      clientX: event.clientX,
-      clientY: event.clientY,
-      isPrimary: event.isPrimary,
-      ctrlKey: event.ctrlKey,
-      metaKey: event.metaKey,
-    });
-    if (clickSnapshotRef.current) return;
-
-    pauseHistoryReplay();
-    autoPatrolPlaybackRef.current?.notifyManualInput();
-    autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-  }
-
-  /** 只累计真实指针位移；超过点击阈值后才把本次会话视为相机手动接管。 */
-  function handleCanvasPointerMove(event: PointerEvent<HTMLCanvasElement>): void {
-    const snapshot = clickSnapshotRef.current;
-    if (!snapshot || snapshot.pointerId !== event.pointerId || (event.buttons & 1) === 0) return;
-
-    const nextSnapshot = updateSceneModelSelectionPointerSnapshot(snapshot, event);
-    clickSnapshotRef.current = nextSnapshot;
-    const clickTolerancePx = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx;
-    if (snapshot.maxTravelDistancePx <= clickTolerancePx && nextSnapshot.maxTravelDistancePx > clickTolerancePx) {
-      pauseHistoryReplay();
-      autoPatrolPlaybackRef.current?.notifyManualInput();
-      autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-    }
-  }
-
-  /** 左键释放时只依据真实指针轨迹判断点击，自动巡检产生的相机位姿变化不会取消拾取。 */
-  function handleCanvasPointerUp(event: PointerEvent<HTMLCanvasElement>): void {
-    const snapshot = clickSnapshotRef.current;
-    if (!snapshot || snapshot.pointerId !== event.pointerId || snapshot.button !== event.button) return;
-    clickSnapshotRef.current = null;
-    if (gizmoRef.current?.isPointerUsingGizmo()) return;
-
-    const selectionClick = completeSceneModelSelectionPointer(
-      snapshot,
-      event,
-      DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx,
-    );
-    if (!selectionClick) return;
-    pauseHistoryReplay();
-    // 任何新点击先清空「忽略固定轨道」排除；点击事件 trigger 分支随后按需重建，避免残留污染手动选中。
-    runtimeRef.current?.setClickHighlightTrackExclusion([]);
-
-    if (!isRuntimePreview) {
-      const patrolPick = runtimeRef.current?.pickAutoPatrolAtCanvasPoint(
-        selectionClick.clientX,
-        selectionClick.clientY,
-        event.currentTarget,
-      );
-      if (patrolPick) {
-        const state = useEditorStore.getState();
-        state.setEnvironmentAdjustmentActive(false);
-        if (selectionClick.toggleSelection) {
-          const nextSelection = toggleHierarchyEntitySelection(
-            state.scene,
-            state.hierarchySelectionIds,
-            state.scene.selectedEntityId,
-            patrolPick.entityId,
-          );
-          state.selectHierarchyEntities(nextSelection.entityIds, nextSelection.primaryEntityId);
-        } else {
-          state.selectEntity(patrolPick.entityId);
-          state.selectAutoPatrolWaypoint(patrolPick.waypointId);
-        }
-        return;
-      }
-    }
-
-    if (isRuntimePreview) {
-      const markerId = runtimeRef.current?.pickChartMarkerAtCanvasPoint(
-        selectionClick.clientX, selectionClick.clientY, event.currentTarget,
-      );
-      if (markerId && handleChartMarkerClick(markerId)) return;
-    }
-    const previewModelHit = isRuntimePreview
-      ? runtimeRef.current?.pickRuntimeModelHitAtCanvasPoint(
-          selectionClick.clientX,
-          selectionClick.clientY,
-          event.currentTarget,
-        ) ?? null
-      : null;
-    const previewGeneratedHit = isRuntimePreview
-      ? runtimeRef.current?.pickGeneratedUnitClickTargetAtCanvasPoint(
-          selectionClick.clientX,
-          selectionClick.clientY,
-          event.currentTarget,
-        ) ?? null
-      : null;
-    let pickedEntityId = isRuntimePreview
-      ? previewModelHit?.entityId ?? null
-      : runtimeRef.current?.pickEntityIdAtCanvasPoint(
-          selectionClick.clientX,
-          selectionClick.clientY,
-          event.currentTarget,
-        ) ?? null;
-    // 货格反解改为对所有内置货格填充体做射线检测取最近命中：货架是框架，透过前排空格时
-    // 模型拾取会命中后排货架（穿透到另一排），填充体深度比较保证最近一排的格子胜出。
-    const cellHit = runtimeRef.current?.pickBuiltInSlotCellAtCanvasPoint(
-      selectionClick.clientX,
-      selectionClick.clientY,
-      event.currentTarget,
-    ) ?? null;
-    let pickedCell: ClickEventBindingPickedCell | null = null;
-    if (isRuntimePreview) {
-      // 包围盒兜底命中（precise=false）是穿过框架空隙后的保守估计，不得压过货格解析命中：
-      // 否则端面点击会先被货架前方巷道设备的包围盒截获，开口空洞永远点不中。
-      if (cellHit && (!previewModelHit || !previewModelHit.precise || previewModelHit.entityId === cellHit.hostEntityId || cellHit.distance < previewModelHit.distance)) {
-        pickedEntityId = cellHit.hostEntityId;
-        pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
-        const state = useEditorStore.getState();
-        const host = state.scene.entities[pickedEntityId];
-        const assetCode = host?.components.modelAsset?.assetCode;
-        const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
-        state.pushLog(`命中货格：${hostLabel} ${cellHit.row}-${cellHit.column}-${cellHit.layer}（排-列-层）`);
-      }
-    } else if (cellHit && pickedEntityId && cellHit.hostEntityId === pickedEntityId) {
-      pickedCell = { locatorEntityId: cellHit.locatorEntityId, row: cellHit.row, column: cellHit.column, layer: cellHit.layer };
-      const state = useEditorStore.getState();
-      const host = state.scene.entities[pickedEntityId];
-      const assetCode = host?.components.modelAsset?.assetCode;
-      const hostLabel = `${host?.name ?? pickedEntityId}${assetCode ? `（${assetCode}）` : ''}`;
-      state.pushLog(`命中货格：${hostLabel} ${cellHit.row}-${cellHit.column}-${cellHit.layer}（排-列-层）`);
-    }
-    // 运行预览下场景存在已注册设备类型的点击事件绑定时点击行为全接管：
-    // 命中注册设备按事件效果执行（点击单元优先于点击，命中货格只高亮单格线框），
-    // 点未注册模型无效果，点空白清除选中与单格高亮；Ctrl 多选同样被吞。
-    if (isRuntimePreview) {
-      const state = useEditorStore.getState();
-      // 生成器产物按真实几何命中优先；常规命中只是包围盒兜底时按距离比较。
-      const generatedUnit = previewGeneratedHit
-        && (!previewModelHit || !previewModelHit.precise || previewGeneratedHit.distance < previewModelHit.distance)
-        ? previewGeneratedHit.hit
-        : null;
-      const resolution = (generatedUnit ? resolveGeneratedUnitClick(state.scene, generatedUnit) : null)
-        ?? resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
-      if (resolution.kind !== 'pass-through') {
-        // 命中 show-chart 效果时向宿主页面发送点击事件；编辑器无握手流程，用固定会话标识 + 通配 origin（仅开发预览）。
-        const assetClickedPayload = buildClickEventAssetClickedPayload(state.scene, resolution);
-        if (assetClickedPayload) {
-          const slotText = assetClickedPayload.slot
-            ? `，库位 ${assetClickedPayload.slot.row}-${assetClickedPayload.slot.column}-${assetClickedPayload.slot.layer}`
-            : '';
-          const unitText = assetClickedPayload.unit
-            ? assetClickedPayload.unit.kind === 'cargo'
-              ? `，产物货箱 ${assetClickedPayload.unit.containerCode || '匿名'}`
-              : `，产物设备 ${assetClickedPayload.unit.assetCode || '未知编号'}`
-            : '';
-          const hostText = assetClickedPayload.host
-            ? `，承运设备 ${assetClickedPayload.host.name ?? assetClickedPayload.host.entityId}（${assetClickedPayload.host.assetCode ?? '未设置'}）`
-            : '';
-          const framed = window.parent !== window;
-          state.pushLog(
-            `点击事件绑定：展示图表事件（资产编号 ${assetClickedPayload.assetCode ?? '未设置'}${slotText}${unitText}${hostText}，图表id ${assetClickedPayload.chartId ?? '未配置'}）${framed ? '已发送至宿主页面' : '未嵌入宿主页面，仅记录'}`,
-          );
-          if (framed) {
-            window.parent.postMessage({
-              channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
-              version: DIGITAL_TWIN_BRIDGE_VERSION,
-              sessionId: DIGITAL_TWIN_EDITOR_PREVIEW_SESSION_ID,
-              type: 'event.assetClicked',
-              payload: assetClickedPayload,
-            }, '*');
-          }
-        }
-        if (resolution.kind === 'trigger-cell') {
-          state.setEnvironmentAdjustmentActive(false);
-          if (resolution.effects.includes('highlight')) {
-            runtimeRef.current?.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
-          } else {
-            runtimeRef.current?.setLocalSlotHighlight('', null);
-          }
-          if (resolution.effects.includes('focus')) {
-            const bounds = runtimeRef.current?.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
-            if (bounds) {
-              manualRoamRef.current?.setEnabled(false);
-              viewportRef.current?.focusOnBounds(bounds, { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE });
-            }
-          }
-        } else if (resolution.kind === 'trigger') {
-          runtimeRef.current?.setLocalSlotHighlight('', null);
-          state.setEnvironmentAdjustmentActive(false);
-          // 生成产物的高亮目标可能是没有文档实体的动态设备实例合成 id，走运行时高亮而非编辑器选区。
-          const hasEntityTarget = state.scene.entities[resolution.entityId] !== undefined;
-          if (resolution.effects.includes('highlight')) {
-            runtimeRef.current?.setClickHighlightTrackExclusion(
-              resolution.highlightExcludeFixedTrack ? [resolution.entityId] : [],
-            );
-            if (hasEntityTarget) {
-              clickProductHighlightIdRef.current = null;
-              runtimeRef.current?.setLocalHighlightEntityIds([]);
-              state.selectEntity(resolution.entityId);
-            } else {
-              clickProductHighlightIdRef.current = resolution.entityId;
-              runtimeRef.current?.setLocalHighlightEntityIds([resolution.entityId]);
-              // 产物高亮与编辑器选区互斥：旧选中设备不清掉会残留双高亮，也表现为切不回产物。
-              state.selectEntity(null);
-            }
-          }
-          if (resolution.effects.includes('focus')) {
-            if (hasEntityTarget) {
-              state.requestSceneFocusForSelection([resolution.entityId], {
-                animate: true,
-                durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
-              });
-            } else {
-              const bounds = runtimeRef.current?.getEntitiesFocusBounds([resolution.entityId]);
-              if (bounds) {
-                manualRoamRef.current?.setEnabled(false);
-                viewportRef.current?.focusOnBounds(bounds, {
-                  animate: true,
-                  durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
-                });
-              }
-            }
-          }
-        } else if (resolution.kind === 'clear') {
-          clickProductHighlightIdRef.current = null;
-          runtimeRef.current?.setLocalSlotHighlight('', null);
-          runtimeRef.current?.setLocalHighlightEntityIds([]);
-          state.selectEntity(null);
-        }
-        return;
-      }
-    }
-    // 预览下点击转入常规选择路径（点空白或未接管模型）时，产物本地高亮一并清除。
-    if (isRuntimePreview && clickProductHighlightIdRef.current) {
-      clickProductHighlightIdRef.current = null;
-      runtimeRef.current?.setLocalHighlightEntityIds([]);
-    }
-    if (selectionClick.toggleSelection) {
-      if (!pickedEntityId) return;
-      const state = useEditorStore.getState();
-      state.setEnvironmentAdjustmentActive(false);
-      const nextSelection = toggleHierarchyEntitySelection(
-        state.scene,
-        state.hierarchySelectionIds,
-        state.scene.selectedEntityId,
-        pickedEntityId,
-      );
-      state.selectHierarchyEntities(nextSelection.entityIds, nextSelection.primaryEntityId);
-      return;
-    }
-
-    if (pickedEntityId) useEditorStore.getState().setEnvironmentAdjustmentActive(false);
-    if (isRuntimePreview && pickedEntityId) {
-      autoPatrolPlaybackRef.current?.triggerManualEventsForTarget(pickedEntityId);
-    }
-    const compositionState = useEditorStore.getState();
-    const compositionRoot = pickedEntityId ? findCompositionRoot(compositionState.scene, pickedEntityId) : null;
-    selectEntity(compositionRoot && compositionState.compositionEditRootId !== compositionRoot ? compositionRoot : pickedEntityId);
-  }
-  /** 指针流程被浏览器取消时丢弃点击快照，并取消尚未完成的 Shift 阵列拖拽。 */
-  function handleCanvasPointerCancel(): void {
-    effectDrawingPointerRef.current = null;
-    clickSnapshotRef.current = null;
-    gizmoRef.current?.cancelActiveDrag();
-  }
-
-  /** 滚轮缩放属于手动相机接管，立即暂停自动巡检。 */
-  function handleCanvasWheel(_event: WheelEvent<HTMLCanvasElement>): void {
-    pauseHistoryReplay();
-    autoPatrolPlaybackRef.current?.notifyManualInput();
-    autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-  }
-
-  /** 仅当拖拽数据是可创建场景实体的资源时允许浏览器在 Scene 画布触发 drop。 */
-  function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
-    if (isRuntimePreview) return;
-
-    if (event.dataTransfer.types.includes(SCENE_THEME_DRAG_MIME_TYPE)) {
-      event.preventDefault();
-      const state = useEditorStore.getState();
-      event.dataTransfer.dropEffect = isScenePreparationActive() || state.shadowBakeStatus.phase === 'baking'
-        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading' ? 'none' : 'copy';
-      return;
-    }
-
-    if (event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE)) {
-      event.preventDefault();
-      const entityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
-      const marker = entityId ? useEditorStore.getState().scene.entities[entityId]?.components.chartMarker : null;
-      event.dataTransfer.dropEffect = marker ? 'copy' : 'none';
-      return;
-    }
-
-    const hasSupportedPayload =
-      event.dataTransfer.types.includes(COMPOSITION_DRAG) ||
-      event.dataTransfer.types.includes(MODEL_ASSET_DRAG_MIME_TYPE) ||
-      event.dataTransfer.types.includes(SKYBOX_ASSET_DRAG_MIME_TYPE) ||
-      event.dataTransfer.types.includes(BUILT_IN_ASSET_DRAG_MIME_TYPE);
-    if (!hasSupportedPayload) return;
-
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-  }
-
-  /** 主题直接应用到场景，其余模型资产或内置资源按落点放置。 */
-  function handleCanvasDrop(event: DragEvent<HTMLCanvasElement>): void {
-    if (isRuntimePreview) {
-      event.preventDefault();
-      clickSnapshotRef.current = null;
-      return;
-    }
-
-    if (event.dataTransfer.types.includes(SCENE_THEME_DRAG_MIME_TYPE)) {
-      event.preventDefault();
-      clickSnapshotRef.current = null;
-      const state = useEditorStore.getState();
-      if (isScenePreparationActive() || state.runtimeMode !== 'edit' || state.shadowBakeStatus.phase === 'baking'
-        || state.environmentApplyRequest || state.environmentRuntimeSnapshot.phase === 'loading') return;
-      const presetId = event.dataTransfer.getData(SCENE_THEME_DRAG_MIME_TYPE);
-      if (isSceneThemePresetId(presetId)) {
-        state.applySceneTheme(presetId);
-        state.selectEntity(null);
-      }
-      return;
-    }
-
-    if (event.dataTransfer.types.includes(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE)) {
-      event.preventDefault();
-      clickSnapshotRef.current = null;
-      const source = decodeDataPlatformScreenDragPayload(event.dataTransfer.getData(DATA_PLATFORM_SCREEN_ASSET_DRAG_MIME_TYPE));
-      const entityId = runtimeRef.current?.pickEntityIdAtCanvasPoint(event.clientX, event.clientY, event.currentTarget);
-      const state = useEditorStore.getState();
-      if (!source || !entityId || !state.bindChartMarkerScreen(entityId, source)) {
-        state.pushLog('请将有效大屏拖到未锁定的图表立标，或选中立标后拖到右侧大屏槽位。');
-      } else state.selectEntity(entityId);
-      return;
-    }
-
-    const placementPosition = runtimeRef.current?.getGroundPointAtCanvasPoint(
-      event.clientX,
-      event.clientY,
-      event.currentTarget,
-    ) ?? { x: 0, y: 0, z: 0 };
-
-    const compositionPayload = event.dataTransfer.getData(COMPOSITION_DRAG);
-    if (compositionPayload) {
-      event.preventDefault(); clickSnapshotRef.current = null;
-      const session = useEditorStore.getState().sceneSessionId;
-      let payload: {id:string;revision?:string};
-      try {
-        payload = parseCompositionDragPayload(compositionPayload);
-      } catch (error) { useEditorStore.getState().pushLog(String(error)); return; }
-      void (window.editorApi as unknown as CompositionLibraryApi).loadComposition(payload.id, payload.revision).then(entry => {
-        if (useEditorStore.getState().sceneSessionId !== session) return;
-        if (!entry) throw new Error('组合卡片已不存在，请刷新资源库。');
-        placeComposition(entry, placementPosition);
-      }).catch(e => useEditorStore.getState().pushLog(String(e.message ?? e)));
-      return;
-    }
-    const rawSkyboxPayload = event.dataTransfer.getData(SKYBOX_ASSET_DRAG_MIME_TYPE);
-    const skyboxAsset = decodeSkyboxAssetDragPayload(rawSkyboxPayload);
-    if (skyboxAsset) {
-      event.preventDefault();
-      clickSnapshotRef.current = null;
-      const currentSkybox = getSceneSkyboxSettings(sceneDocument);
-      placeSkybox(createSceneSkyboxFromAsset(skyboxAsset, currentSkybox), placementPosition);
-      return;
-    }
-
-    const rawModelPayload = event.dataTransfer.getData(MODEL_ASSET_DRAG_MIME_TYPE);
-    const modelAsset = decodeModelAssetDragPayload(rawModelPayload);
-    if (modelAsset?.libraryKind === 'model') {
-      event.preventDefault();
-      clickSnapshotRef.current = null;
-      importModelAsset(modelAsset, placementPosition);
-      return;
-    }
-
-    const rawBuiltInPayload = event.dataTransfer.getData(BUILT_IN_ASSET_DRAG_MIME_TYPE);
-    const builtInAsset = decodeBuiltInAssetDragPayload(rawBuiltInPayload);
-    if (!builtInAsset) return;
-
-    event.preventDefault();
-    clickSnapshotRef.current = null;
-
-    if (builtInAsset.kind === 'auto-patrol') {
-      createAutoPatrol(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'manual-roam-spawn') {
-      createManualRoamSpawn(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'model-generator') {
-      createModelGenerator(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'device-spawner') {
-      createDeviceSpawner(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'click-event-binding') {
-      createClickEventBinding(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'alarm-manager') { useEditorStore.getState().createAlarmManager(placementPosition); return; }
-    if (builtInAsset.kind === 'chart-marker') {
-      createChartMarker(placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'poi-effect') {
-      createPoiEffect(builtInAsset.effectKind, placementPosition);
-      return;
-    }
-
-    if (builtInAsset.kind === 'mesh') {
-      const groundOffsetMeters = getBuiltInMeshGroundOffsetMeters(builtInAsset.meshKind);
-      createMesh(builtInAsset.meshKind, {
-        ...placementPosition,
-        y: placementPosition.y + groundOffsetMeters,
-      });
-      return;
-    }
-
-    if (builtInAsset.kind === 'virtual-conveyor') {
-      void (async () => {
-        const result = await ensureVirtualConveyorAsset();
-        if (!result.asset) {
-          pushLog(result.error ?? '虚拟输送线模型包不可用。');
-          return;
-        }
-        importModelAsset(result.asset, placementPosition);
-      })();
-      return;
-    }
-
-    if (builtInAsset.kind === 'locator') {
-      createLocator(placementPosition);
-      return;
-    }
-
-    createLight(builtInAsset.lightKind, placementPosition);
-  }
+  const { handleCanvasDragOver, handleCanvasDrop } = useSceneAssetDropHandler({
+    isRuntimePreview, runtimeRef, clickSnapshotRef, sceneDocument, placeSkybox, importModelAsset, createAutoPatrol, createManualRoamSpawn, createModelGenerator, createDeviceSpawner, createClickEventBinding, createChartMarker, createPoiEffect, createMesh, createLocator, createLight, pushLog,
+  });
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -1543,8 +1037,52 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       });
       setManualRoamSnapshot(manualRoam.getSnapshot());
       gizmo = new TransformGizmoController(viewport.scene, {
-        previewTransform: previewEntityTransform,
-        commitTransform: commitEntityTransform,
+        beginTransformDrag: (entityId, _before) => {
+          const state = useEditorStore.getState();
+          const currentRuntime = runtimeRef.current ?? runtime;
+          if (!currentRuntime || state.runtimeMode !== 'edit' || state.scene.selectedEntityId !== entityId
+            || !state.scene.entities[entityId] || isEntityEffectivelyLocked(state.scene.entities, state.scene.entities[entityId])
+            || !currentRuntime.beginSingleTransformPreview(entityId, state.scene.entities[entityId].components.transform)) return false;
+          transformPreviewSessionRef.current = transformPreviewStore.begin(state.sceneSessionId, state.scene, entityId, state.scene.entities[entityId].components.transform);
+          return true;
+        },
+        isTransformDragValid: entityId => {
+          const session = transformPreviewSessionRef.current;
+          return Boolean(session && session.entityId === entityId && isTransformPreviewSessionValid(session, useEditorStore.getState()));
+        },
+        previewRuntimeTransform: (entityId, transform) => {
+          (runtimeRef.current ?? runtime)?.updateSingleTransformPreview(entityId, transform);
+        },
+        previewTransform: (entityId, transform) => {
+          const session = transformPreviewSessionRef.current;
+          if (!session || session.entityId !== entityId) { previewEntityTransform(entityId, transform); return; }
+          transformPreviewStore.publish(session, transform);
+        },
+        cancelTransformDrag: () => {
+          const session = transformPreviewSessionRef.current;
+          transformPreviewSessionRef.current = null;
+          if (session) transformPreviewStore.clear(session);
+          const currentRuntime = runtimeRef.current ?? runtime;
+          currentRuntime?.endSingleTransformPreview();
+          const state = useEditorStore.getState();
+          currentRuntime?.sync(state.runtimeMode === 'edit'
+              ? { ...state.scene, entities: createEditModeModelThinInstancePlan(state.scene, editModeThinInstancePlanRef.current ?? undefined).entities }
+              : state.scene, state.hierarchySelectionIds, { modelArrayIdentityMode: state.runtimeMode === 'edit' ? 'visual' : 'device' });
+        },
+        commitTransform: (entityId, before, after) => {
+          const session = transformPreviewSessionRef.current;
+          transformPreviewSessionRef.current = null;
+          (runtimeRef.current ?? runtime)?.endSingleTransformPreview();
+          try {
+            if (!session || isTransformPreviewSessionValid(session, useEditorStore.getState())) commitEntityTransform(entityId, session?.before ?? before, after);
+          } finally {
+            if (session) transformPreviewStore.clear(session);
+            const state = useEditorStore.getState();
+            (runtimeRef.current ?? runtime)?.sync(state.runtimeMode === 'edit'
+              ? { ...state.scene, entities: createEditModeModelThinInstancePlan(state.scene, editModeThinInstancePlanRef.current ?? undefined).entities }
+              : state.scene, state.hierarchySelectionIds, { modelArrayIdentityMode: state.runtimeMode === 'edit' ? 'visual' : 'device' });
+          }
+        },
         previewSubTransform: (entityId, waypointId, transform) => {
           (runtimeRef.current ?? runtime)?.previewAutoPatrolWaypointTransform(entityId, waypointId, transform);
         },
@@ -1838,6 +1376,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       pushLog(`Scene View 性能监控初始化失败：${getErrorMessage(error)}`);
     }
 
+    runtime.registerHostSceneObservers();
     const initializedPerformanceMonitor = performanceMonitor;
     const canvas = canvasRef.current;
     // Project 内容会改变中列 auto 行高；元素自身尺寸变化不会触发 window.resize。
@@ -1847,14 +1386,19 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       : new ResizeObserver(resize);
     if (canvas) resizeObserver?.observe(canvas);
     const cancelActiveGizmoDrag = () => initializedGizmo.cancelActiveDrag();
+    const cancelGizmoOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') initializedGizmo.cancelActiveDrag();
+    };
     window.addEventListener('resize', resize);
     window.addEventListener('blur', cancelActiveGizmoDrag);
+    window.addEventListener('keydown', cancelGizmoOnEscape);
     resize();
 
     return () => {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       window.removeEventListener('blur', cancelActiveGizmoDrag);
+      window.removeEventListener('keydown', cancelGizmoOnEscape);
       performanceRunSessionRef.current?.stop(initializedRuntime.getTelemetryPerformanceMetrics());
       initializedRuntime.setTelemetryPerformanceTimingEnabled(false);
       initializedPerformanceMonitor?.dispose();
@@ -1944,47 +1488,33 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     };
   }, [environmentApplyRequest, completeEnvironmentApply, failEnvironmentApply]);
 
-  useEffect(() => {
-    if (!shadowBakeRequest) return;
-    const runtime = runtimeRef.current;
-    const state = useEditorStore.getState();
-    if (!runtime || isRuntimePreview) {
-      state.failShadowBake(shadowBakeRequest.id, '请在场景编辑就绪后更新静态阴影。');
-      return;
-    }
-    const controller = new AbortController();
-    let active = true;
-    void runtime.bakeStaticShadows(state.scene, controller.signal, message => {
-      if (active) useEditorStore.setState(current => current.shadowBakeRequest?.id === shadowBakeRequest.id
-        ? { shadowBakeStatus: { phase: 'baking', message } } : {});
-    }).then(snapshot => {
-      if (active) useEditorStore.getState().completeShadowBake(shadowBakeRequest.id, snapshot);
-    }).catch(error => {
-      if (active) useEditorStore.getState().failShadowBake(shadowBakeRequest.id, error instanceof Error ? error.message : String(error));
-    });
-    return () => { active = false; controller.abort(); };
-  }, [shadowBakeRequest, isRuntimePreview, sceneSessionId]);
+  useSceneLightingPreview({
+    lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument,
+  });
 
   /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
-    if (!runtime || !gizmo) return;
+    // 前序快照effect先发布当前文档；结构同步保持实体/会话门控。
+    const currentDocument = editRuntimeSceneDocumentRef.current;
+    if (!runtime || !gizmo || !currentDocument) return;
     if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
     if (sceneRuntimeStartupDeferred) return;
 
     statisticsSceneSessionRef.current = sceneSessionId;
+    runtime.beginSceneSession(sceneSessionId);
     gizmo.cancelActiveGroupDrag();
     if (modelParameterSyncEntityId) {
       runtime.syncModelParameters(
-        editRuntimeSceneDocument,
+        currentDocument,
         modelParameterSyncEntityId,
         useEditorStore.getState().hierarchySelectionIds,
         { modelArrayIdentityMode: 'visual' },
       );
     } else {
       runtime.sync(
-        editRuntimeSceneDocument,
+        currentDocument,
         useEditorStore.getState().hierarchySelectionIds,
         { modelArrayIdentityMode: 'visual' },
       );
@@ -2273,6 +1803,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       stopReadinessPolling();
     };
   }, [
+    editRuntimeSceneDocument,
     editRuntimeSceneDocument.entities,
     sceneDocument,
     sceneDocument.entityIds,
@@ -2460,7 +1991,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     if (!runtime || !isPerformanceRun || !state.runtimePerformanceEnabled || state.runtimeMode !== 'preview') return;
     runtime.setTelemetryPerformanceTimingEnabled(true);
     const monitor = performanceMonitorRef.current;
-    monitor?.setFrameTimingEnabled(true, 2_000);
+    runtime.withControlledSceneObservers(() => monitor?.setFrameTimingEnabled(true, 2_000));
     const session = createEditorPerformanceRunSession(runtime.getTelemetryPerformanceMetrics(), Date.now,
       () => monitor?.getFrameTimingReport() ?? null);
     performanceRunSessionRef.current = session;
@@ -2579,10 +2110,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id);
   }, [autoPatrolCameraRequest, consumeAutoPatrolCameraRequest, sceneDocument.entities]);
 
+  const stopOpeningForPatrol = opening.stop;
   /** Inspector 和悬浮控制器通过 Store 发出一次性播放命令。 */
   useEffect(() => {
     if (!autoPatrolPlaybackRequest) return;
-    opening.stop();
+    stopOpeningForPatrol();
     const controller = autoPatrolPlaybackRef.current;
     if (!controller) return;
     if (
@@ -2672,6 +2204,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     pauseHistoryReplay,
     pushLog,
     sceneReadyForAutoPatrol,
+    stopOpeningForPatrol,
   ]);
 
   /** 每次进入运行预览只尝试一次自动启动；退出时停止且保留当前视角。 */
@@ -2726,56 +2259,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     manualRoamRef.current?.setTouchAction(action, pressed);
   }
 
-  /** F1 只在非输入态、编辑模式且选中巡检路线时录制或覆盖当前相机视角。 */
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (isScenePreparationActive()) {
-        if (event.target instanceof Element && event.target.closest('[data-scene-loading-action]')) return;
-        event.preventDefault();
-        return;
-      }
-      const target = event.target;
-      if (target instanceof Element && target.closest('dialog.manual-roam-avatar-preview[open]')) return;
-      const inputFocused = target instanceof HTMLInputElement
-        || target instanceof HTMLTextAreaElement
-        || target instanceof HTMLSelectElement
-        || (target instanceof HTMLElement && target.isContentEditable);
-      if (inputFocused || event.ctrlKey || event.metaKey || event.altKey) return;
-
-      if (event.key === 'F1') {
-        const state = useEditorStore.getState();
-        const entity = state.scene.selectedEntityId ? state.scene.entities[state.scene.selectedEntityId] : null;
-        if (state.runtimeMode !== 'edit' || !entity?.components.autoPatrol) return;
-        event.preventDefault();
-        if (event.repeat) return;
-        state.requestAutoPatrolCapture();
-        return;
-      }
-
-      if (!['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC'].includes(event.code)) return;
-      const interactiveControlFocused = target instanceof HTMLElement
-        && Boolean(target.closest('button, a, [role="button"]'));
-      if (interactiveControlFocused) return;
-      pauseHistoryReplay();
-      autoPatrolPlaybackRef.current?.notifyManualInput();
-      autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-    };
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [pauseHistoryReplay, requestAutoPatrolCapture]);
-
-  /** Esc 随时结束环境临时调整，不影响当前普通实体选择。 */
-  useEffect(() => {
-    if (!environmentAdjustmentActive) return;
-
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (isScenePreparationActive()) return;
-      if (event.key !== 'Escape') return;
-      setEnvironmentAdjustmentActive(false);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [environmentAdjustmentActive, setEnvironmentAdjustmentActive]);
+  useSceneKeyboardShortcuts({
+    pauseHistoryReplay, autoPatrolPlaybackRef, requestAutoPatrolCapture, environmentAdjustmentActive, setEnvironmentAdjustmentActive,
+  });
 
 
   useEffect(() => {
@@ -2789,18 +2275,20 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   useEffect(() => {
     const viewport = viewportRef.current;
     const runtime = runtimeRef.current;
-    if (!viewport || !runtime) return;
+    // 场景设置单独同步，实体/选区变化不扩大此effect的触发边界。
+    const currentDocument = sceneDocumentRef.current;
+    if (!viewport || !runtime || !currentDocument) return;
 
-    viewport.setViewDistance(sceneDocument.sceneSettings.camera.viewDistance);
-    viewport.setSensitivity(sceneDocument.sceneSettings.sensitivity);
+    viewport.setViewDistance(currentDocument.sceneSettings.camera.viewDistance);
+    viewport.setSensitivity(currentDocument.sceneSettings.sensitivity);
     if (sceneRuntimeStartupDeferred) return;
-    runtime.syncDefaultCargoGenerator(sceneDocument.sceneSettings.defaultCargoGeneratorId);
-    runtime.syncTheme(sceneDocument);
-    runtime.syncShadows(sceneDocument.sceneSettings.shadows, sceneDocument);
-    runtime.syncSkybox(sceneDocument);
+    runtime.syncDefaultCargoGenerator(currentDocument.sceneSettings.defaultCargoGeneratorId);
+    runtime.syncAppearance(currentDocument);
+    runtime.syncLighting(currentDocument);
+    runtime.syncSkybox(currentDocument);
     if (!environmentApplyRequest && !environmentAdjustmentActive) {
       runtime.syncEnvironment(resolveEnvironmentRuntimeSettings(
-        sceneDocument.sceneSettings.environment,
+        currentDocument.sceneSettings.environment,
         environmentRuntimeOverride,
         { deferEnvironmentLoad: environmentStartupRelinkSessionId === sceneSessionId },
       ));
@@ -2815,76 +2303,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     sceneDocument.sceneSettings,
   ]);
 
-  /** 复位请求由原子视角应用负责，普通切换则先同步投影再驱动方向动画。 */
-  useEffect(() => {
-    if (cameraResetRequest || manualRoamSnapshot.enabled) return;
-    viewportRef.current?.setCameraProjection(cameraProjection);
-  }, [cameraProjection, cameraResetRequest, manualRoamSnapshot.enabled]);
-
-  useEffect(() => {
-    if (cameraResetRequest || manualRoamSnapshot.enabled) return;
-    viewportRef.current?.setCameraOrientation(cameraOrientation);
-  }, [cameraOrientation, cameraResetRequest, manualRoamSnapshot.enabled]);
-
-  useEffect(() => {
-    if (!cameraPoseSaveRequest) return;
-
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-
-    consumeCameraPoseSaveRequest(cameraPoseSaveRequest.id, viewport.getCameraPose());
-  }, [cameraPoseSaveRequest, consumeCameraPoseSaveRequest]);
-
-  useEffect(() => {
-    if (!regionViewRequest) return;
-    const state = useEditorStore.getState();
-    if (regionViewRequest.sceneSessionId !== state.sceneSessionId || state.regionViewRequest?.id !== regionViewRequest.id) return;
-    const finish = state.consumeRegionViewRequest;
-    const viewport = viewportRef.current;
-    if (!viewport || isScenePreparationActive()) {
-      finish(regionViewRequest.id, undefined, '场景尚未就绪，请加载完成后重试');
-      return;
-    }
-    if (state.runtimeMode !== 'edit') { finish(regionViewRequest.id); return; }
-    try {
-      if (regionViewRequest.kind === 'save') {
-        if (manualRoamRef.current?.getSnapshot().enabled) throw new Error('请先退出手动漫游，再保存区域视角');
-        finish(regionViewRequest.id, viewport.getCameraView());
-      } else {
-        const view = state.scene.sceneSettings.regionViews.find(item => item.id === regionViewRequest.regionViewId);
-        if (!view) throw new Error('区域视角不存在，可能已被删除');
-        opening.stop();
-        pauseHistoryReplay();
-        autoPatrolPlaybackRef.current?.stop();
-        manualRoamRef.current?.setEnabled(false);
-        viewport.applyCameraView({ ...view.camera, viewDistance: state.scene.sceneSettings.camera.viewDistance }, { animate: false });
-        finish(regionViewRequest.id);
-      }
-    } catch (error) {
-      finish(regionViewRequest.id, undefined, error instanceof Error ? error.message : '区域视角操作失败');
-    }
-  }, [regionViewRequest, pauseHistoryReplay]);
-
-  useEffect(() => {
-    if (!cameraResetRequest) return;
-    opening.stop();
-    if (manualRoamSnapshot.enabled) {
-      consumeCameraResetRequest(cameraResetRequest.id);
-      manualRoamRef.current?.reset();
-      return;
-    }
-
-    const viewport = viewportRef.current;
-    if (!viewport) return;
-
-    applySavedSceneCameraView(viewport, sceneDocument.sceneSettings.camera);
-    consumeCameraResetRequest(cameraResetRequest.id);
-  }, [
-    cameraResetRequest,
-    consumeCameraResetRequest,
-    manualRoamSnapshot.enabled,
-    sceneDocument.sceneSettings.camera,
-  ]);
+  useSceneCameraTransition({
+    cameraResetRequest, manualRoamSnapshot, viewportRef, cameraProjection, cameraOrientation, cameraPoseSaveRequest, consumeCameraPoseSaveRequest, regionViewRequest, manualRoamRef, stopOpening: opening.stop, pauseHistoryReplay, autoPatrolPlaybackRef, consumeCameraResetRequest, sceneDocument,
+  });
 
   useEffect(() => {
     if (!entityArrayRequest) return;
@@ -2905,74 +2326,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     resolveEntityArrayRequest(entityArrayRequest.id, selectionSpanMeters);
   }, [entityArrayRequest, resolveEntityArrayRequest]);
 
-  useEffect(() => {
-    if (!sceneFocusRequest) return;
-
-    const runtime = runtimeRef.current;
-    const viewport = viewportRef.current;
-    if (!runtime || !viewport) return;
-
-    const bounds = runtime.getEntitiesFocusBounds(sceneFocusRequest.entityIds);
-    if (bounds) {
-      manualRoamRef.current?.setEnabled(false);
-      const currentScene = sceneDocumentRef.current;
-      const containsSkybox = sceneFocusRequest.entityIds.some((entityId) => (
-        Boolean(currentScene?.entities[entityId]?.components.skybox)
-      ));
-      const containsCad = sceneFocusRequest.entityIds.some(entityId => Boolean(currentScene?.entities[entityId]?.components.cadReference));
-      // CAD 参考层按完整实例范围取景，不能套用普通模型 3m 聚焦上限。
-      viewport.setViewDistance(
-        containsSkybox
-          ? SKYBOX_FOCUS_VIEW_DISTANCE_METERS
-          : containsCad
-            ? Math.min(SCENE_VIEW_DISTANCE_MAX, Math.max(currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX, Math.ceil(bounds.radiusMeters * 4)))
-            : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
-      );
-      viewport.focusOnBounds(
-        bounds,
-        containsSkybox
-          ? { animate: false, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-          : containsCad
-            ? { ...sceneFocusRequest.transition, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-            : sceneFocusRequest.transition,
-      );
-      sceneFocusPerformanceRef.current = {
-        ...bounds,
-        focusedAt: new Date().toISOString(),
-      };
-    }
-    consumeSceneFocusRequest(sceneFocusRequest.id);
-  }, [sceneFocusRequest, consumeSceneFocusRequest]);
-
-
-  /** 聚焦全局环境，并在超大厂区场景中临时提高可视距离但不超过 20 km。 */
-  useEffect(() => {
-    if (!environmentFocusRequest) return;
-
-    const runtime = runtimeRef.current;
-    const viewport = viewportRef.current;
-    if (!runtime || !viewport) return;
-
-    const bounds = runtime.getEnvironmentWorldBounds();
-    if (bounds) {
-      manualRoamRef.current?.setEnabled(false);
-      const requiredViewDistance = Math.min(
-        SCENE_VIEW_DISTANCE_MAX,
-        Math.max(sceneDocument.sceneSettings.camera.viewDistance, Math.ceil(bounds.radiusMeters * 4)),
-      );
-      viewport.setViewDistance(requiredViewDistance);
-      viewport.focusOnBounds(bounds, {
-        animate: false,
-        maxRadiusMeters: Number.POSITIVE_INFINITY,
-        useModelFocusAngle: false,
-      });
-    }
-    consumeEnvironmentFocusRequest(environmentFocusRequest.id);
-  }, [
-    consumeEnvironmentFocusRequest,
-    environmentFocusRequest,
-    sceneDocument.sceneSettings.camera.viewDistance,
-  ]);
+  useSceneFocusTransition({
+    sceneFocusRequest, runtimeRef, viewportRef, manualRoamRef, sceneDocumentRef, sceneFocusPerformanceRef, consumeSceneFocusRequest, environmentFocusRequest, sceneDocument, consumeEnvironmentFocusRequest,
+  });
 
   const entityArrayDialogValidationError = entityArrayDialog
     ? entityArrayDialog.commitError ?? getEntityArrayDialogError(sceneDocument, entityArrayDialog)
@@ -3049,37 +2405,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     closeEntityArrayDialog();
   }
 
-  /** 复制最近一分钟 Scene View 指标，便于在不同显卡设备上对比 CPU/GPU 瓶颈。 */
-  async function handleCopyPerformanceReport(): Promise<void> {
-    const monitor = performanceMonitorRef.current;
-    if (!monitor) {
-      pushLog('Scene View 性能报告尚未就绪。');
-      return;
-    }
-
-    try {
-      const report = JSON.parse(monitor.createReport());
-      report.scenePreparation = getScenePreparationTimings();
-      await copyScenePerformanceReport(JSON.stringify(report, null, 2));
-      pushLog('Scene View 性能报告已复制到剪贴板。');
-    } catch (error) {
-      pushLog(`Scene View 性能报告复制失败：${getErrorMessage(error)}`);
-    }
-  }
-
-  async function handleCopyPerformanceRunReport(): Promise<void> {
-    const session = performanceRunSessionRef.current;
-    if (!session) {
-      pushLog('性能运行报告尚未就绪。');
-      return;
-    }
-    try {
-      await copyScenePerformanceReport(session.createReport());
-      pushLog('性能运行报告已复制到剪贴板。');
-    } catch (error) {
-      pushLog(`性能运行报告复制失败：${getErrorMessage(error)}`);
-    }
-  }
+  const { handleCopyPerformanceReport, handleCopyPerformanceRunReport } = createScenePerformanceReportHandlers({
+    performanceMonitorRef, performanceRunSessionRef, pushLog, getErrorMessage,
+  });
 
   const overlayViewport = viewportRef.current;
   const overlayRuntime = runtimeRef.current;
@@ -3109,160 +2437,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           onPointerCancelCapture={handleCanvasPointerCancel}
           onWheel={handleCanvasWheel}
         />
-        {sceneResourcesReady && entranceRequired && entranceReadySession !== sceneSessionId ? <SceneLoadingMask
-          label={entrancePreparationError ? '场景首帧验证失败' : entrancePreparation?.status === 'preparing' ? '正在准备入场材质' : '正在验证场景首帧'}
-          detail={entrancePreparationError ?? (entrancePreparation?.status === 'preparing'
-            ? `入场网格 ${entrancePreparation.preparedBindingCount}/${entrancePreparation.totalBindingCount}`
-            : '等待入场材质与实际渲染完成…')}
-          percent={99}
-        /> : null}
-        {opening.active && isRuntimePreview ? <OpeningAnimationOverlay settings={opening.settings} snapshot={opening.snapshot} preview={!isRuntimePreview} onSkip={isRuntimePreview ? opening.skip : opening.stop} /> : null}
-        {overlayViewport && overlayRuntime ? (
-          <DataPlatformScreenOverlay
-            playbackActive={isRuntimePreview}
-            canvas={canvasRef.current}
-            interactive={isRuntimePreview}
-            onCommand={handleDataPlatformScreenCommand}
-            runtime={overlayRuntime}
-            selectedEntityIds={hierarchySelectionIds.length > 0
-              ? hierarchySelectionIds
-              : selectedEntityId
-                ? [selectedEntityId]
-                : []}
-            scene={overlayViewport.scene}
-          />
-        ) : null}
-        <DataPlatformViewportScreenOverlay
-          interactive={isRuntimePreview}
-          onCommand={handleViewportDataPlatformScreenCommand}
-          screen={sceneDocument.sceneSettings.viewportScreen}
-          selectedEntityIds={hierarchySelectionIds.length > 0
-            ? hierarchySelectionIds
-            : selectedEntityId
-              ? [selectedEntityId]
-              : []}
-        />
-        <ViewportOrientationCompass
-          camera={viewportCamera}
-          disabled={Boolean(viewportError) || (isRuntimePreview && manualRoamSnapshot.enabled)}
-          onReset={() => {
-            pauseHistoryReplay();
-            autoPatrolPlaybackRef.current?.notifyManualInput();
-            autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-            requestCameraReset();
-          }}
-          onToggleStandardView={(orientation) => {
-            pauseHistoryReplay();
-            autoPatrolPlaybackRef.current?.notifyManualInput();
-            autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
-            toggleCameraStandardView(orientation);
-          }}
-          orientation={cameraOrientation}
-        />
-        {isRuntimePreview && !opening.active ? <RuntimeFollowControls /> : null}
-        {isRuntimePreview && hasManualRoamSpawn ? (
-          <ManualRoamControls
-            snapshot={manualRoamSnapshot}
-            onConfigChange={handleManualRoamConfig}
-            onDebugCollidersChange={(visible) => manualRoamRef.current?.setDebugColliders(visible)}
-            onEnabledChange={handleManualRoamEnabled}
-            onLocomotionModeChange={handleManualRoamLocomotionMode}
-            onPointerLock={() => manualRoamRef.current?.requestPointerLock()}
-            onReset={() => manualRoamRef.current?.reset()}
-            onTouchAction={handleManualRoamTouchAction}
-            onViewModeChange={handleManualRoamViewMode}
-            onVirtualMove={(right, forward) => manualRoamRef.current?.setVirtualMovement(right, forward)}
-          />
-        ) : null}
-        {isRuntimePreview
-          && (autoPatrolRoutes.length > 0 || Boolean(autoPatrolHistory?.records.length))
-          && !manualRoamSnapshot.enabled ? (
-          <AutoPatrolControls
-            routes={autoPatrolRoutes}
-            snapshot={autoPatrolPlaybackSnapshot}
-            onAction={(action, routeId, payload) => requestAutoPatrolPlayback(action, routeId, payload)}
-            history={autoPatrolHistory}
-            onHistoryAction={handleHistoryAction}
-          />
-        ) : null}
-        {showPerformanceHud || hasStoppedPerformanceReport ? (
-          <div className={showPerformanceHud && isPerformanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
-            {performanceSnapshot && showPerformanceHud ? <>
-            <button
-              aria-expanded={isPerformanceHudExpanded}
-              className="scene-performance-summary"
-              onClick={() => isPerformanceRun
-                ? setPerformanceRunHudExpanded((expanded) => !expanded)
-                : setPerformanceHudExpanded((expanded) => !expanded)}
-              title="展开或收起 Scene View 性能指标"
-              type="button"
-            >
-              <strong>{formatPerformanceMetric(performanceSnapshot.fps, 0)} FPS</strong>
-              <span>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} ms</span>
-              <span>{performanceSnapshot.drawCalls} DC</span>
-            </button>
-            {isPerformanceHudExpanded ? (
-              <div className="scene-performance-details" role="status">
-                {isPerformanceRun ? (
-                  <p className="scene-performance-run-status">
-                    {performanceRunSnapshot?.phase === 'running'
-                      ? `性能运行 · 已保留 ${performanceRunSnapshot.sampleCount} 个样本`
-                      : '性能运行 · 等待完整采样窗口（约 2 秒）'}
-                  </p>
-                ) : null}
-                <dl>
-                  <div><dt>Frame / Render</dt><dd>{formatPerformanceMetric(performanceSnapshot.frameTimeMs)} / {formatPerformanceMetric(performanceSnapshot.renderTimeMs)} ms</dd></div>
-                  <div><dt>GPU frame</dt><dd>{performanceSnapshot.gpuFrameTimeMs === null ? 'N/A' : `${formatPerformanceMetric(performanceSnapshot.gpuFrameTimeMs)} ms`}</dd></div>
-                  <div><dt>Active eval</dt><dd>{formatPerformanceMetric(performanceSnapshot.activeMeshesEvaluationMs)} ms</dd></div>
-                  <div><dt>Draw Calls</dt><dd>{performanceSnapshot.drawCalls}</dd></div>
-                  <div><dt>Meshes</dt><dd>{performanceSnapshot.activeMeshes} / {performanceSnapshot.totalMeshes}</dd></div>
-                  <div><dt>Vertices</dt><dd>{performanceSnapshot.totalVertices.toLocaleString()}</dd></div>
-                  <div><dt>Thin instances</dt><dd>{performanceSnapshot.thinInstances.toLocaleString()}</dd></div>
-                  <div><dt>Active thin</dt><dd>{performanceSnapshot.activeThinInstances.toLocaleString()}</dd></div>
-                  <div><dt>GPU vertex calls</dt><dd>{performanceSnapshot.estimatedActiveVertexInvocations.toLocaleString()}</dd></div>
-                  <div><dt>GPU triangle calls</dt><dd>{performanceSnapshot.estimatedActiveTriangleInvocations.toLocaleString()}</dd></div>
-                  <div><dt>双面顶点</dt><dd>{performanceSnapshot.gpuMaterialTotals.doubleSidedVertexInvocations.toLocaleString()}</dd></div>
-                  <div><dt>Alpha test / blend</dt><dd>{performanceSnapshot.gpuMaterialTotals.alphaTestedVertexInvocations.toLocaleString()} / {performanceSnapshot.gpuMaterialTotals.alphaBlendedVertexInvocations.toLocaleString()}</dd></div>
-                  <div><dt>原模型 / 代理</dt><dd>{performanceSnapshot.runtime.modelArrayDetailedEntityCount.toLocaleString()} / {performanceSnapshot.runtime.modelArrayProxyEntityCount.toLocaleString()}</dd></div>
-                  <div><dt>完整同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastFullSyncDurationMs)} ms</dd></div>
-                  <div><dt>选择同步</dt><dd>{formatPerformanceMetric(performanceSnapshot.runtime.lastSelectionSyncDurationMs)} ms / {performanceSnapshot.runtime.lastSelectionChangedEntityCount} 个</dd></div>
-                  <div><dt>编辑态分组</dt><dd>{formatPerformanceMetric(performanceSnapshot.editThinInstancePlan.lastDurationMs)} ms / {performanceSnapshot.editThinInstancePlan.entityCount.toLocaleString()} 个</dd></div>
-                  <div><dt>Long Task</dt><dd>{performanceSnapshot.longTaskCount} / {formatPerformanceMetric(performanceSnapshot.longTaskDurationMs)} ms</dd></div>
-                  {isPerformanceRun && performanceRunSnapshot ? <>
-                    <div><dt>遥测帧 / 峰值</dt><dd>{performanceRunSnapshot.telemetry.lastFrameTimeMs === null ? 'N/A' : formatPerformanceMetric(performanceRunSnapshot.telemetry.lastFrameTimeMs, 2)} / {performanceRunSnapshot.telemetry.maxFrameTimeMs === null ? 'N/A' : formatPerformanceMetric(performanceRunSnapshot.telemetry.maxFrameTimeMs, 2)} ms</dd></div>
-                    <div><dt>候选重建（本次）</dt><dd>{performanceRunSnapshot.telemetry.candidateRebuilds.toLocaleString()}</dd></div>
-                    <div><dt>签名计算（本次）</dt><dd>{performanceRunSnapshot.telemetry.contextSignatureBuilds.toLocaleString()}</dd></div>
-                    <div><dt>诊断写入（本次）</dt><dd>{performanceRunSnapshot.telemetry.diagnosticWrites.toLocaleString()}</dd></div>
-                  </> : null}
-                </dl>
-                {isPerformanceRun ? <p className="scene-performance-run-note">1 Hz 采样，CPU 为秒级均值；报告保留本次最近一分钟。</p> : null}
-                <button className="scene-performance-copy" onClick={() => void (isPerformanceRun ? handleCopyPerformanceRunReport() : handleCopyPerformanceReport())} type="button">
-                  {isPerformanceRun ? '复制本次性能运行报告' : '复制最近一分钟报告'}
-                </button>
-              </div>
-            ) : null}
-            </> : null}
-            {hasStoppedPerformanceReport ? (
-              <button className="scene-performance-copy scene-performance-retained-report" onClick={() => void handleCopyPerformanceRunReport()} type="button">
-                复制上次性能运行报告（{performanceRunSnapshot.sampleCount} 个样本）
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-        {isRuntimePreview ? (
-          <span aria-live="polite" className="scene-preview-badge" role="status">{isPerformanceRun ? '性能运行' : '运行预览'}</span>
-        ) : null}
-        {!isRuntimePreview && environmentAdjustmentActive ? (
-          <span aria-live="polite" className="scene-environment-adjustment-badge" role="status">
-            正在调整环境（Esc 结束）
-          </span>
-        ) : null}
-        {viewportError ? (
-          <div className="scene-error" role="alert">
-            <strong>Scene View 暂时不可用</strong>
-            <p>{viewportError}</p>
-          </div>
-        ) : null}
+        <SceneViewportOverlays {...{
+          isPerformanceRun, sceneResourcesReady, entranceRequired, entranceReadySession, sceneSessionId, entrancePreparationError, entrancePreparation, opening, isRuntimePreview, overlayViewport, overlayRuntime, canvasRef, handleDataPlatformScreenCommand, hierarchySelectionIds, selectedEntityId, handleViewportDataPlatformScreenCommand, sceneDocument, viewportCamera, viewportError, manualRoamSnapshot, pauseHistoryReplay, autoPatrolPlaybackRef, requestCameraReset, toggleCameraStandardView, cameraOrientation, hasManualRoamSpawn, handleManualRoamConfig, manualRoamRef, handleManualRoamEnabled, handleManualRoamLocomotionMode, handleManualRoamTouchAction, handleManualRoamViewMode, autoPatrolRoutes, autoPatrolHistory, autoPatrolPlaybackSnapshot, requestAutoPatrolPlayback, handleHistoryAction, environmentAdjustmentActive,
+        }} performanceHud={<ScenePerformanceHud {...{
+          showPerformanceHud, hasStoppedPerformanceReport, isPerformanceHudExpanded, performanceSnapshot, isPerformanceRun, setPerformanceRunHudExpanded, setPerformanceHudExpanded, performanceRunSnapshot, handleCopyPerformanceRunReport, handleCopyPerformanceReport,
+        }} />} />
       </div>
       {entityArrayDialog ? (
         <EntityArrayDialog

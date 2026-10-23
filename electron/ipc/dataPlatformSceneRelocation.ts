@@ -1,5 +1,7 @@
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import path from 'node:path';
-import { captureSceneShadowBakeRelocation } from '../shared/sceneShadowBakeContract.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 const LOCAL_ASSET_URL_PREFIX = 'editor-asset://local/';
 const SCENE_URL_KEYS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl']);
@@ -13,10 +15,13 @@ function isPathInside(root: string, target: string): boolean {
 
 /** SOURCE 场景仅迁移本地资源位置，其余编辑内容完整透传。 */
 export function relocateDataPlatformScene(parsed: unknown, editorRoot: string): unknown {
-  const restoreBake = captureSceneShadowBakeRelocation(isPlainObject(parsed) ? parsed.scene : null);
-  const rewritten = rewriteSceneValue(parsed, null, editorRoot);
-  if (isPlainObject(rewritten) && restoreBake && !restoreBake(rewritten.scene)) {
-    throw new Error('源工程资源迁移后与已烘焙阴影不一致，已停止打开以避免丢失原场景效果。');
+  const canonical = isPlainObject(parsed) && isPlainObject(parsed.scene)
+    ? { ...parsed, ...(isSupportedSceneFileVersion(parsed.version) ? { version: CURRENT_SCENE_FILE_VERSION } : {}),
+      scene: migrateSceneLightingDocument(parsed.scene) } : parsed;
+  const restoreLighting = captureSceneLightingBakeRelocation(isPlainObject(canonical) ? canonical.scene : null);
+  const rewritten = rewriteSceneValue(canonical, null, editorRoot);
+  if (isPlainObject(rewritten) && restoreLighting && !restoreLighting(rewritten.scene)) {
+    throw new Error('源工程资源迁移改变了光照烘焙输入或产物身份，已停止打开。');
   }
   return rewritten;
 }
@@ -56,10 +61,10 @@ function rewriteSceneAssetUrl(value: string, editorRoot: string): string {
 
 function rewriteSceneAssetPath(value: string, editorRoot: string): string | null {
   const normalized = value.trim().replace(/\\/g, '/');
-  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/.*|$))/i);
+  const match = normalized.match(/(?:^|\/)(Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets|LightingBakes)(?:\/.*|$))/i);
   if (!match) return null;
   const relativeAssetPath = path.posix.normalize(match[1]);
-  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets)(?:\/|$)/i.test(relativeAssetPath)) return null;
+  if (!/^Assets\/(?:Models|Environments|Skyboxes|Cad|Images|Compositions|OpeningPackages|OpeningAssets|LightingBakes)(?:\/|$)/i.test(relativeAssetPath)) return null;
   const targetPath = path.resolve(editorRoot, ...relativeAssetPath.split('/'));
   return isPathInside(editorRoot, targetPath) ? targetPath : null;
 }

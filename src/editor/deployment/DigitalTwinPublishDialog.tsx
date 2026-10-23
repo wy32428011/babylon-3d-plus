@@ -39,7 +39,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   const projectListRequestRef = useRef(0);
   const [validationError, setValidationError] = useState<string | null>(null);
   const containsWildcard = allowedParentOrigins.some((value) => value.trim() === '*');
-  const { state, isBusy } = props.controller;
+  const { state, isBusy, loadContext, reset } = props.controller;
   const context = state.context;
   const missingBindings = useMemo(() => readMissingBindings(state.result?.errorData), [state.result?.errorData]);
   const requiresOverwriteConfirmation = Boolean(
@@ -51,7 +51,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   useEffect(() => {
     projectListRequestRef.current += 1;
     if (!props.open) {
-      props.controller.reset();
+      reset();
       return;
     }
     setPublishName('');
@@ -65,8 +65,8 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
     setSelectedProjectId('');
     setIsLoadingProjects(false);
     setProjectListError(null);
-    void props.controller.loadContext();
-  }, [props.controller.loadContext, props.controller.reset, props.open, sceneSessionId]);
+    void loadContext();
+  }, [loadContext, reset, props.open, sceneSessionId]);
 
   useEffect(() => {
     if (!props.open || state.status === 'loading-context' || context === null || context.available || requiresProjectSelection) return;
@@ -91,7 +91,7 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
   useEffect(() => {
     if (!props.open || !context?.available) return;
     setAllowedParentOrigins(context.allowedParentOrigins);
-  }, [context?.allowedParentOrigins, context?.projectId, props.open]);
+  }, [context?.allowedParentOrigins, context?.available, context?.projectId, props.open]);
 
   useEffect(() => {
     if (props.open) setConfirmAssetWarnings(false);

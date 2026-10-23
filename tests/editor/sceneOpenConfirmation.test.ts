@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../../src/editor/store/editorStore.ts', import.meta.url), 'utf8');
+const source = await readFile(new URL('../../src/editor/store/slices/sceneDocumentSlice.ts', import.meta.url), 'utf8');
 const start = source.indexOf('  loadScene: async (');
 const end = source.indexOf('  loadSceneFromContent:', start);
 assert.ok(start >= 0 && end > start);

@@ -698,7 +698,7 @@ async function promoteEnvironmentBatch(options: {
         }
       } catch (rollbackError) { rollbackErrors.push(`${state.item.label}：${toErrorMessage(rollbackError)}`); }
     }
-    if (rollbackErrors.length > 0) throw new Error(`${toErrorMessage(error)}；环境模型回滚不完整：${rollbackErrors.join('；')}`);
+    if (rollbackErrors.length > 0) throw new Error(`${toErrorMessage(error)}；环境模型回滚不完整：${rollbackErrors.join('；')}`, { cause: error });
     throw error;
   }
 }

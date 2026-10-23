@@ -1,6 +1,7 @@
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { dialog, ipcMain } from 'electron';
 import { promises as fs } from 'node:fs';
-import path from 'node:path';
+
 import type {
   LoadSceneFileRequest,
   LoadSceneResult,
@@ -14,17 +15,20 @@ import type {
   SaveSceneResult,
   SelectProjectDirectoryResult,
 } from '../types.js';
-import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
+import { authorizeAssetFile, authorizeSceneFile, decodeAssetUrl, isAuthorizedAssetFile, isAuthorizedSceneFile, normalizeFilePath } from './assetRegistry.js';
 import { isSupportedSceneFilePath } from './sceneFilePath.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { registerOpeningPackageIpc } from './openingPackageIpc.js';
 import { prepareOpeningSceneContent } from './openingPackageResources.js';
-import { beginScenePublishScopeUpdate, confirmScenePublishScopeFile, stageScenePublishScopeFile } from './scenePublishScope.js';
+import { prepareLightingSceneSave, prepareLightingSceneContent } from './sceneLightingBakeResources.js';
+import { preserveLegacyLightingSceneBeforeWrite } from './sceneLightingMigrationSave.js';
+import { beginScenePublishScopeUpdate, confirmScenePublishScopeFile, getScenePublishScope, stageScenePublishScopeFile } from './scenePublishScope.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import {
   assertRecentSceneFile,
   commitRecentProjectActivation,
   getProjectAssetStoreStateSnapshot,
+  getCurrentProjectRoot,
   getRecentWorkspaceStateSnapshot,
   getRecentWorkspaces,
   listProjectAssets,
@@ -187,9 +191,12 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null };
     }
 
-    await fs.writeFile(result.filePath, saveRequest.content, 'utf-8');
+    const saved = await prepareLightingSceneSave(saveRequest.content, result.filePath, { projectRoot: getCurrentProjectRoot(), isAuthorizedFile: isAuthorizedAssetFile });
+    await preserveLegacyLightingSceneBeforeWrite(result.filePath, saved.content);
+    await fs.writeFile(result.filePath, saved.content, 'utf-8');
+    for (const file of saved.files) authorizeAssetFile(file);
     authorizeSceneFile(result.filePath);
-    authorizeModelAssetsFromSceneContent(saveRequest.content);
+    authorizeModelAssetsFromSceneContent(saved.content);
     await rememberRecentSceneFile(result.filePath);
 
     return { canceled: false, filePath: result.filePath };
@@ -198,6 +205,11 @@ export function registerProjectIpc(): void {
   ipcMain.handle('scene:load', async (): Promise<LoadSceneResult> => {
     assertSceneSwitchAllowed();
     const sceneOpenToken = beginScenePublishScopeUpdate();
+    const sceneScopeGeneration = getScenePublishScope().generation;
+    const canCommitSceneOpen = (): boolean => {
+      assertSceneSwitchAllowed();
+      return getScenePublishScope().generation === sceneScopeGeneration;
+    };
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [{ name: 'JSON', extensions: ['json'] }],
@@ -210,8 +222,8 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null, content: null };
     }
 
-    const content = await prepareOpeningSceneContent(await readUtf8File(filePath, '场景文件'), filePath);
-    assertSceneSwitchAllowed();
+    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen);
+    if (!canCommitSceneOpen()) return { canceled: true, filePath: null, content: null };
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
@@ -225,10 +237,15 @@ export function registerProjectIpc(): void {
     assertSceneSwitchAllowed();
     const loadRequest = validateLoadSceneFileRequest(request);
     const sceneOpenToken = beginScenePublishScopeUpdate();
+    const sceneScopeGeneration = getScenePublishScope().generation;
+    const canCommitSceneOpen = (): boolean => {
+      assertSceneSwitchAllowed();
+      return getScenePublishScope().generation === sceneScopeGeneration;
+    };
     const filePath = await assertRecentSceneFile(loadRequest.filePath);
     assertSceneSwitchAllowed();
-    const content = await prepareOpeningSceneContent(await readUtf8File(filePath, '场景文件'), filePath);
-    assertSceneSwitchAllowed();
+    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen);
+    if (!canCommitSceneOpen()) return { canceled: true, filePath: null, content: null };
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
@@ -250,7 +267,7 @@ export function registerProjectIpc(): void {
 
   ipcMain.handle('file:readText', async (_event, request: ReadTextFileRequest): Promise<ReadTextFileResult> => {
     const readRequest = validateReadTextFileRequest(request);
-    const content = await prepareOpeningSceneContent(await readUtf8File(readRequest.filePath, '文本文件'), readRequest.filePath);
+    const content = await prepareSceneResourceContent(await readUtf8File(readRequest.filePath, '文本文件'), readRequest.filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(readRequest.filePath);
 
@@ -258,6 +275,17 @@ export function registerProjectIpc(): void {
   });
 }
 
+
+/** 完整校验场景伴随资产后再授权；仅移动地址不改变有效烘焙内容。 */
+async function prepareSceneResourceContent(content: string, filePath: string, canCommit?: () => boolean): Promise<string> {
+  const opening = await prepareOpeningSceneContent(content, filePath);
+  // 打开准备跨越异步边界后再次校验；发布开始或会话关闭时不能授权迟到的光照资源。
+  if (canCommit && !canCommit()) return opening;
+  const prepared = await prepareLightingSceneContent(opening, filePath, { projectRoot: getCurrentProjectRoot(), isAuthorizedFile: isAuthorizedAssetFile });
+  if (canCommit && !canCommit()) return prepared.content;
+  for (const file of prepared.files) authorizeAssetFile(file);
+  return prepared.content;
+}
 
 function validateSaveSceneRequest(request: SaveSceneRequest): SaveSceneRequest {
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
@@ -455,11 +483,6 @@ function authorizeSceneSkyboxFile(value: unknown): void {
   const sourcePath = normalizeFilePath(value.sourcePath);
   const expectedExtension = value.format === 'hdr' ? '.hdr' : '.exr';
   if (sourcePath.toLowerCase().endsWith(expectedExtension)) authorizeAssetFile(sourcePath);
-}
-
-/** 与 renderer SceneSerializer 支持的版本保持一致（v1 原始版、v2 绑定反转、v3 fetchDrive、v4 数据中台大屏、v5 视窗大屏）；版本不符时不做资源授权。 */
-function isSupportedSceneFileVersion(version: unknown): boolean {
-  return version === 1 || version === 2 || version === 3 || version === 4 || version === 5;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

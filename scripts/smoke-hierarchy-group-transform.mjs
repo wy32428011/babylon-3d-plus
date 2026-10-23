@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { MeshBuilder, NullEngine, Scene } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../tests/helpers/p4SsrTestModules.mjs';
 
 const SSR_MODULE_LOAD_TIMEOUT_MS = 180_000;
 
@@ -55,14 +55,13 @@ function sceneOf(entities, selectedEntityId) {
 
 let server;
 try {
-  server = await createServer({
-    appType: 'custom',
-    configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  server = await createP4SsrTestModules([
+    '/src/editor/model/entityHierarchy.ts',
+    '/src/editor/commands/entityCommands.ts',
+    '/src/editor/commands/CommandHistory.ts',
+    '/src/editor/store/editorStore.ts',
+    '/src/runtime/babylon/SceneRuntime.ts',
+  ]);
 
   const hierarchyModule = await loadModule(server, '/src/editor/model/entityHierarchy.ts');
   const commandModule = await loadModule(server, '/src/editor/commands/entityCommands.ts');
@@ -256,9 +255,9 @@ try {
   const babylonScene = new Scene(engine);
   const runtime = new SceneRuntime(babylonScene);
   try {
-    runtime.setHierarchySelectionIds(scene, selectionIds);
+    runtime.selection.setHierarchySelectionIds(scene, selectionIds);
     assert.deepEqual(
-      [...runtime.resolveSelectedEntityIds(scene)],
+      [...runtime.selection.resolveSelectedEntityIds(scene)],
       selectionIds,
       '运行时高亮必须使用完整 Hierarchy 多选，而不是只使用主选实体',
     );
@@ -266,7 +265,7 @@ try {
     const firstMesh = MeshBuilder.CreateBox('group-ready-first', { size: 2 }, babylonScene);
     firstMesh.position.x = 0;
     firstMesh.computeWorldMatrix(true);
-    runtime.meshes.set(first.id, firstMesh);
+    runtime.presentation.meshes.set(first.id, firstMesh);
 
     const missingRuntimeTarget = entity('missing-runtime-target', 9, {
       components: {
@@ -274,7 +273,7 @@ try {
         autoPatrol: {},
       },
     });
-    runtime.syncedEntities.set(missingRuntimeTarget.id, missingRuntimeTarget);
+    runtime.document.syncedEntities.set(missingRuntimeTarget.id, missingRuntimeTarget);
     const unavailableTarget = runtime.getFolderGroupGizmoTarget(
       'missing-runtime-target-group',
       [first.id, missingRuntimeTarget.id],
@@ -290,7 +289,7 @@ try {
       runtime.isEntityGroupTransformReady([first.id, missingRuntimeTarget.id], 'rotate'),
       false,
     );
-    runtime.syncedEntities.delete(missingRuntimeTarget.id);
+    runtime.document.syncedEntities.delete(missingRuntimeTarget.id);
 
     const pendingTarget = runtime.getFolderGroupGizmoTarget('pending-group', [first.id, second.id]);
     assert.ok(pendingTarget, '几何加载期间必须保留可自动恢复的组合代理');
@@ -305,8 +304,8 @@ try {
     const secondMesh = MeshBuilder.CreateBox('group-ready-second', { size: 2 }, babylonScene);
     secondMesh.position.x = 6;
     secondMesh.computeWorldMatrix(true);
-    runtime.meshes.set(second.id, secondMesh);
-    runtime.refreshGroupTransformPreviewTargets();
+    runtime.presentation.meshes.set(second.id, secondMesh);
+    runtime.transforms.refreshGroupTransformPreviewTargets();
 
     assert.equal(pendingTarget.isEnabled(), true, '全部成员就绪后组合 Gizmo 必须自动恢复显示');
     assert.equal(runtime.isEntityGroupTransformReady([first.id, second.id], 'translate'), true);

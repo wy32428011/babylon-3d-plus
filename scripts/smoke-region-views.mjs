@@ -30,7 +30,7 @@ try {
     createCommandHistory, ArcRotateCameraViewController, DigitalTwinInteractionController } = await import(pathToFileURL(path.join(work, 'ssr/region-modules.mjs')).href);
   store = useEditorStore; original = store.getState();
   const document = createEmptySceneDocument('区域视角验收');
-  document.sceneSettings.shadows.enabled = false;
+  document.sceneSettings.lighting.shadows.enabled = false;
   for (const x of [-8, 8]) {
     const mesh = createMeshEntity('cube', { x, y: 1, z: 0 });
     document.entityIds.push(mesh.id); document.entities[mesh.id] = mesh;

@@ -1,4 +1,8 @@
-import { ArcRotateCamera, EngineStore, Vector3, Color4, type Node } from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { EngineStore } from '@babylonjs/core/Engines/engineStore.js';
+import { Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { Node } from '@babylonjs/core';
 import { CreateScreenshotUsingRenderTargetAsync } from '@babylonjs/core/Misc/screenshotTools';
 import { GLTF2Export } from '@babylonjs/serializers/glTF/2.0/glTFSerializer';
 

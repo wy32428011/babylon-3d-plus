@@ -108,7 +108,7 @@ async function synchronize(root: string, baseUrl: string, projectId: string | un
         syncStatus: e.revision === entry.revision ? 'synced' : 'pending', syncError: undefined } : e));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      entries = await mutateCompositionIndex(root, latest => latest.map(e => e.id === entry.id ? { ...e, syncStatus: message.includes('REVISION_CONFLICT') ? 'conflict' : 'failed', syncError: message } : e));
+      await mutateCompositionIndex(root, latest => latest.map(e => e.id === entry.id ? { ...e, syncStatus: message.includes('REVISION_CONFLICT') ? 'conflict' : 'failed', syncError: message } : e));
       break;
     } finally { await fs.rm(temporary, { force: true }); }
     }

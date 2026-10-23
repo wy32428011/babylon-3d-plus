@@ -1,4 +1,4 @@
-import { synchronizePublishScene, waitForPublishRuntime, preparePublishShadowBake } from './preparePublishScene';
+import { synchronizePublishScene, waitForPublishRuntime, preparePublishLightingBake } from './preparePublishScene';
 import { commitPublishRecovery, publishWithResourceRetry } from './publishOrchestration';
 import { beginSceneModelAssetRefresh, settleSceneModelAssetRefresh } from '../loading/scenePreparationProgress';
 import { preparePublishSceneSnapshot } from './preparePublishSceneSnapshots';
@@ -192,7 +192,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
           }
           if (repairedSkyboxes.restoredCount) pushLog(`发布前已恢复 ${repairedSkyboxes.restoredCount} 个天空盒引用，保留原有强度和旋转参数。`);
           await waitForPublishRuntime(prepared.sceneSessionId, assertCurrent);
-          await preparePublishShadowBake(assertCurrent);
+          await preparePublishLightingBake(assertCurrent);
           assertCurrent();
           const entryContent = serializeScene(useEditorStore.getState().scene);
           const entryScene = useEditorStore.getState().scene;

@@ -277,7 +277,7 @@ function toSafeSkyboxCacheFailureReason(error: unknown): string {
 }
 
 function containsAbsoluteLocalPath(value: string): boolean {
-  return /[A-Za-z]:[\/]|\\|file:\/\/|(?:^|[\s：])\/(?:[^/\s]+\/)+[^/\s]*/i.test(value);
+  return /[A-Za-z]:[/]|\\|file:\/\/|(?:^|[\s：])\/(?:[^/\s]+\/)+[^/\s]*/i.test(value);
 }
 
 function isNodeFileSystemError(value: unknown): value is NodeJS.ErrnoException {

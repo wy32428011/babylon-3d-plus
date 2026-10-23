@@ -1,4 +1,5 @@
-import { Vector3, type AbstractMesh, type Node, type TransformNode } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { AbstractMesh, Node, TransformNode } from '@babylonjs/core';
 import type { SceneCameraPose } from '../../editor/model/SceneDocument';
 import type { ModelRuntimeEntry } from './SceneRuntime';
 import { isMeasurableModelMesh } from './modelMeasurement';

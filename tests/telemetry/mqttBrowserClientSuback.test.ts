@@ -1,15 +1,12 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createRequire } from 'node:module';
 import test from 'node:test';
 
 import { mqttRuntimeStatusStore } from '../../src/runtime/mqtt/mqttRuntimeStatus';
 import type { MqttTelemetryClientConfig } from '../../src/runtime/mqtt/MqttTelemetryClient';
+import type { BrowserMqttModule, MqttModuleLoader } from '../../src/runtime/mqtt/browserMqttLoader';
 
 type SubscribeCallback = (error?: Error | null) => void;
-type FakeMqttConnect = (...args: unknown[]) => FakeBrowserMqttClient;
-
-let activeFakeConnect: FakeMqttConnect | null = null;
 
 /** 记录浏览器 MQTT 客户端的订阅回调，便于测试精确控制 SUBACK 到达顺序。 */
 class FakeBrowserMqttClient extends EventEmitter {
@@ -28,46 +25,16 @@ class FakeBrowserMqttClient extends EventEmitter {
 }
 
 /** 安装可控的 mqtt.connect 替身，并返回所有创建出的假客户端。 */
-function installFakeMqttConnect(): { clients: FakeBrowserMqttClient[]; restore: () => void } {
+function installFakeMqttConnect(): { clients: FakeBrowserMqttClient[]; loadMqtt: MqttModuleLoader } {
   const clients: FakeBrowserMqttClient[] = [];
-  const require = createRequire(import.meta.url);
-  const mqttModulePath = require.resolve('mqtt');
-  const originalCacheEntry = require.cache[mqttModulePath];
-  const fakeMqttModule = {
-    connect: (...args: unknown[]) => {
-      if (!activeFakeConnect) throw new Error('fake mqtt connect is not installed');
-      return activeFakeConnect(...args);
+  const mqtt = {
+    connect: () => {
+      const client = new FakeBrowserMqttClient();
+      clients.push(client);
+      return client;
     },
-  };
-  require.cache[mqttModulePath] = {
-    id: mqttModulePath,
-    path: mqttModulePath,
-    filename: mqttModulePath,
-    loaded: true,
-    exports: fakeMqttModule,
-    parent: null,
-    children: [],
-    paths: [],
-    isPreloading: false,
-    require,
-  };
-  activeFakeConnect = () => {
-    const client = new FakeBrowserMqttClient();
-    clients.push(client);
-    return client;
-  };
-
-  return {
-    clients,
-    restore: () => {
-      activeFakeConnect = null;
-      if (originalCacheEntry) {
-        require.cache[mqttModulePath] = originalCacheEntry;
-      } else {
-        delete require.cache[mqttModulePath];
-      }
-    },
-  };
+  } as unknown as BrowserMqttModule;
+  return { clients, loadMqtt: async () => mqtt };
 }
 
 /** 生成启用状态的浏览器 MQTT 测试配置。 */
@@ -83,10 +50,11 @@ test('浏览器 MQTT 客户端等待全部订阅 SUBACK 成功后才进入 conne
   const fakeMqtt = installFakeMqttConnect();
   const { MqttTelemetryClient } = await import('../../src/runtime/mqtt/MqttTelemetryClient.js');
   const logs: string[] = [];
-  const client = new MqttTelemetryClient((message) => logs.push(message));
+  const client = new MqttTelemetryClient((message) => logs.push(message), undefined, fakeMqtt.loadMqtt);
 
   try {
     client.updateConfig(createConfig(['a', 'b']));
+    await Promise.resolve();
     const mqttClient = fakeMqtt.clients[0];
 
     mqttClient.emit('connect');
@@ -103,7 +71,6 @@ test('浏览器 MQTT 客户端等待全部订阅 SUBACK 成功后才进入 conne
     assert.deepEqual(logs, ['MQTT 已连接并订阅：factory/a', 'MQTT 已连接并订阅：factory/b']);
   } finally {
     client.dispose();
-    fakeMqtt.restore();
     mqttRuntimeStatusStore.update('disabled');
   }
 });
@@ -112,10 +79,11 @@ test('浏览器 MQTT 客户端任一订阅 SUBACK 失败会进入 error 且不�
   const fakeMqtt = installFakeMqttConnect();
   const { MqttTelemetryClient } = await import('../../src/runtime/mqtt/MqttTelemetryClient.js');
   const logs: string[] = [];
-  const client = new MqttTelemetryClient((message) => logs.push(message));
+  const client = new MqttTelemetryClient((message) => logs.push(message), undefined, fakeMqtt.loadMqtt);
 
   try {
     client.updateConfig(createConfig(['ok', 'bad']));
+    await Promise.resolve();
     const mqttClient = fakeMqtt.clients[0];
 
     mqttClient.emit('connect');
@@ -130,7 +98,6 @@ test('浏览器 MQTT 客户端任一订阅 SUBACK 失败会进入 error 且不�
     assert.equal(logs.some((message) => message.includes('MQTT 订阅失败：suback rejected')), true);
   } finally {
     client.dispose();
-    fakeMqtt.restore();
     mqttRuntimeStatusStore.update('disabled');
   }
 });
@@ -139,10 +106,11 @@ test('浏览器 MQTT 客户端连接 error 后延迟成功 SUBACK 不能覆盖 e
   const fakeMqtt = installFakeMqttConnect();
   const { MqttTelemetryClient } = await import('../../src/runtime/mqtt/MqttTelemetryClient.js');
   const logs: string[] = [];
-  const client = new MqttTelemetryClient((message) => logs.push(message));
+  const client = new MqttTelemetryClient((message) => logs.push(message), undefined, fakeMqtt.loadMqtt);
 
   try {
     client.updateConfig(createConfig(['a', 'b']));
+    await Promise.resolve();
     const mqttClient = fakeMqtt.clients[0];
 
     mqttClient.emit('connect');
@@ -162,7 +130,6 @@ test('浏览器 MQTT 客户端连接 error 后延迟成功 SUBACK 不能覆盖 e
     assert.equal(logs.some((message) => message.includes('MQTT 连接错误：socket failed')), true);
   } finally {
     client.dispose();
-    fakeMqtt.restore();
     mqttRuntimeStatusStore.update('disabled');
   }
 });
@@ -170,10 +137,11 @@ test('浏览器 MQTT 客户端连接 error 后延迟成功 SUBACK 不能覆盖 e
 test('浏览器 MQTT 客户端忽略旧连接周期的延迟 SUBACK，避免覆盖新周期状态', async () => {
   const fakeMqtt = installFakeMqttConnect();
   const { MqttTelemetryClient } = await import('../../src/runtime/mqtt/MqttTelemetryClient.js');
-  const client = new MqttTelemetryClient(() => undefined);
+  const client = new MqttTelemetryClient(() => undefined, undefined, fakeMqtt.loadMqtt);
 
   try {
     client.updateConfig(createConfig(['cycle']));
+    await Promise.resolve();
     const mqttClient = fakeMqtt.clients[0];
 
     mqttClient.emit('connect');
@@ -194,7 +162,6 @@ test('浏览器 MQTT 客户端忽略旧连接周期的延迟 SUBACK，避免覆�
     assert.equal(mqttRuntimeStatusStore.getSnapshot().state, 'connected');
   } finally {
     client.dispose();
-    fakeMqtt.restore();
     mqttRuntimeStatusStore.update('disabled');
   }
 });

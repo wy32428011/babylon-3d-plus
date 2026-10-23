@@ -7,7 +7,7 @@ import {
 import { SceneShadowRuntime } from '../../src/runtime/babylon/SceneShadowRuntime.ts';
 
 const settings = {
-  enabled: true, mode: 'realtime' as const, quality: 'balanced' as const,
+  enabled: true, mode: 'hybrid' as const, quality: 'balanced' as const,
   darkness: 0.32, catcherEnabled: true, sunAzimuthDegrees: 56, sunElevationDegrees: 63,
   sunIntensity: 1.05, distanceMeters: 0, bias: 0.002, normalBias: 0.03, fillIntensity: 0.2, iblIntensityMax: 0.45,
 };
@@ -78,12 +78,12 @@ for (const MaterialClass of [PBRMaterial, StandardMaterial]) {
         const index = floor.lightSources.indexOf(replacement);
         const lightDefine = replacement instanceof PointLight ? 'POINTLIGHT' : 'SPOTLIGHT';
         assert.match(floor.subMeshes[0].effect!.defines, new RegExp('^#define ' + lightDefine + index + '$', 'm'));
-        runtime.applySettings({ ...settings, mode: 'baked' });
+        runtime.applySettings({ ...settings, enabled: false });
         await renderReady(scene);
         assert.equal(hasShadow(replacement), false);
         runtime.applySettings(settings);
         await renderReady(scene);
-        assert.ok(hasShadow(replacement), '静态/实时模式切换后恢复实际阴影 shader');
+        assert.ok(hasShadow(replacement), '重新开启混合投影后恢复实际阴影 shader');
         assert.equal(material.isFrozen, true, '灯光变化不得丢失原冻结状态');
       } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
     });
@@ -128,7 +128,7 @@ test('灯光拓扑变更按共享及 MultiMaterial 子材质去重，普通变�
     runtime.applySettings({ ...settings, bias: 0, normalBias: 0, distanceMeters: 120 });
     assert.equal(calls.size, 0, '位置、正强度与偏移变化无需刷新 shader');
     const theme = new DirectionalLight('theme', Vector3.Down(), scene);
-    runtime.setThemeLight(theme);
+    runtime.setManagedLight(theme);
     for (const material of [shared, other, multi]) assert.equal(calls.get(material), 1, '主题主方向光更替需要刷新冻结材质');
   } finally { runtime.dispose(); scene.dispose(); engine.dispose(); }
 });
@@ -156,7 +156,7 @@ for (const kind of ['point', 'spot'] as const) {
       const shadowMap = first.getShadowMap()!;
       shadowMap.resetRefreshCounter();
       assert.equal(shadowMap._shouldRender(), true);
-      assert.equal(shadowMap._shouldRender(), false);
+      assert.equal(shadowMap._shouldRender(), true, '混合管线每帧合成动态投影，静态深度复用由独立cache管理');
       caster.position.x = 3;
       caster.computeWorldMatrix(true);
       assert.equal(shadowMap._shouldRender(), true, '模型移动后缓存阴影必须刷新');
@@ -176,8 +176,8 @@ for (const kind of ['point', 'spot'] as const) {
       assert.equal(light.getShadowGenerator(), null);
       runtime.applySettings(settings);
       assert.ok(light.getShadowGenerator(), '重新启用阴影不应要求重新同步灯光实体');
-      runtime.applySettings({ ...settings, mode: 'baked' });
-      assert.equal(light.getShadowGenerator(), null, '静态烘焙模式不得创建局部实时阴影');
+      runtime.applySettings({ ...settings, enabled: false });
+      assert.equal(light.getShadowGenerator(), null, '关闭投影后不得残留局部阴影资源');
       runtime.applySettings(settings);
       runtime.removeLight('local');
       assert.equal(light.getShadowGenerator(), null);

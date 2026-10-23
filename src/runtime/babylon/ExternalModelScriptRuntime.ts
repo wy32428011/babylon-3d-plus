@@ -1,4 +1,5 @@
-import * as BabylonCore from '@babylonjs/core';
+import { resolveBabylonScriptRuntimeNamespace, type BabylonScriptRuntimeNamespace } from './babylonScriptRuntimeNamespace.js';
+import { digestModelScriptText, normalizePrecompiledModelScript, prepareModelScriptCompilation, MODEL_SCRIPT_CACHE_MAX_BYTES } from '../../../electron/shared/modelScriptCompilation.js';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch';
 import type { TransformNode } from '@babylonjs/core';
 import type * as TypeScriptModule from 'typescript';
@@ -41,25 +42,18 @@ type CompiledExternalModelScript = {
   initializationError?: string;
 };
 
-type ImportBinding = {
-  localName: string;
-  importedName: string;
-  source: 'babylon' | 'babylonNamespace' | 'decorator';
-};
-
 const DEFAULT_RUNTIME_CLASS_NAMES = [
   'default',
   'ParametricModelRuntimeComponent',
   'ModelRuntimeComponent',
   'RuntimeComponent',
 ];
-const SCRIPT_IMPORT_PATTERN = /^\s*import\s+(type\s+)?(.+?)\s+from\s+["']([^"']+)["'];?\s*$/gm;
-const VISIBLE_DECORATOR_PATTERN = /^\s*@visibleAs[A-Za-z]+\([^)]*\)\s*$/;
+const sourceHashRequests = new Map<string, Promise<string>>();
 const compiledScriptCache = new Map<string, CompiledExternalModelScript>();
 const scriptTextRequests = new Map<string, Promise<string>>();
 const compiledScriptRequests = new Map<string, Promise<CompiledExternalModelScript>>();
 const scriptLoadDiagnostics = { readRequests: 0, sharedReads: 0, compileRequests: 0, sharedCompiles: 0,
-  compiledCacheHits: 0, compileElapsedMs: 0, initializationCount: 0, initializationQueueMs: 0,
+  precompiledHits: 0, compilerFallbacks: 0, compiledCacheHits: 0, compileElapsedMs: 0, initializationCount: 0, initializationQueueMs: 0,
   initializationMs: 0, maxInitializationMs: 0, cancelledInitializations: 0 };
 let typescriptModulePromise: Promise<typeof TypeScriptModule> | null = null;
 
@@ -271,7 +265,14 @@ async function loadCompiledExternalModelScript(
   assetRevision: string | undefined,
 ): Promise<CompiledExternalModelScript> {
   const sourceText = await fetchScriptText(scriptAsset, assetRevision);
-  const cacheKey = `${scriptAsset.sourceUrl}:${hashText(sourceText)}`;
+  let hashRequest = sourceHashRequests.get(sourceText);
+  if (!hashRequest) {
+    hashRequest = digestModelScriptText(sourceText);
+    sourceHashRequests.set(sourceText, hashRequest);
+    if (sourceHashRequests.size > 128) sourceHashRequests.delete(sourceHashRequests.keys().next().value!);
+  }
+  const sourceHash = await hashRequest;
+  const cacheKey = `${scriptAsset.sourceUrl}:${sourceHash}`;
   const cachedScript = compiledScriptCache.get(cacheKey);
   if (cachedScript) {
     scriptLoadDiagnostics.compiledCacheHits += 1;
@@ -286,7 +287,7 @@ async function loadCompiledExternalModelScript(
   // 首次 compiler import 会让多个实例同时等待，在 await 前登记任务才可避免重复转译。
   scriptLoadDiagnostics.compileRequests += 1;
   const startedAt = performance.now();
-  const request = compileExternalModelScript(sourceText);
+  const request = compileExternalModelScript(sourceText, scriptAsset, assetRevision, sourceHash);
   compiledScriptRequests.set(cacheKey, request);
   try {
     const compiledScript = await request;
@@ -330,140 +331,65 @@ function createVersionedRuntimeAssetUrl(sourceUrl: string, assetRevision: string
   return `${runtimeUrl}${separator}assetRevision=${encodeURIComponent(assetRevision)}`;
 }
 
+/** 只从既有授权协议或 Viewer 资源读取派生产物，绝不执行 scene 内的 inline code。 */
+async function fetchPrecompiledModelScript(scriptAsset: ModelScriptAsset, assetRevision: string | undefined): Promise<unknown> {
+  const sourceUrl = createVersionedRuntimeAssetUrl(scriptAsset.sourceUrl, assetRevision);
+  const local = sourceUrl.startsWith('editor-asset://local/') || sourceUrl.startsWith('/__editor_asset__/');
+  const suffix = sourceUrl.search(/[?#]/);
+  const url = local
+    ? sourceUrl + (sourceUrl.includes('?') ? '&' : '?') + 'modelScriptCompiled=1'
+    : (suffix < 0 ? sourceUrl + '.compiled.json' : sourceUrl.slice(0, suffix) + '.compiled.json' + sourceUrl.slice(suffix));
+  try {
+    const response = await fetchRuntimeAsset(url, undefined, undefined, MODEL_SCRIPT_CACHE_MAX_BYTES);
+    if (!response.ok) return undefined;
+    return JSON.parse(await readUtf8ResponseText(response, '模型脚本预转译缓存'));
+  } catch {
+    // 旧包、开发服务器或损坏派生缓存不阻断已经授权的原 TS 兼容读取。
+    return undefined;
+  }
+}
+
 /** 将 TypeScript 模型脚本转成可在 renderer 内执行的本地函数模块。 */
-async function compileExternalModelScript(sourceText: string): Promise<CompiledExternalModelScript> {
-  const ts = await loadTypeScriptCompiler();
-  const { sourceWithoutImports, importPrelude } = createImportPrelude(sourceText);
-  const sourceWithoutDecorators = stripVisibleDecorators(sourceWithoutImports);
-  const exportTransform = removeTypeScriptExports(sourceWithoutDecorators);
-  const preparedSource = `${importPrelude}\n${exportTransform.sourceText}`;
-  const classNames = collectClassNames(preparedSource);
-  const transpiled = ts.transpileModule(preparedSource, {
-    reportDiagnostics: true,
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2020,
-      module: ts.ModuleKind.None,
-      experimentalDecorators: true,
-      useDefineForClassFields: false,
-    },
-  });
-
-  const returnStatement = createReturnStatement(classNames, exportTransform.defaultClassName);
-  const factory = new Function(
-    '__babylon',
-    '__decorator',
-    `${transpiled.outputText}\n${returnStatement}`,
-  ) as (babylon: typeof BabylonCore, decorator: () => PropertyDecorator) => CompiledExternalModelScript;
-
-  // 仅报告脚本源码诊断，编译器选项弃用提示不属于模型初始化失败。
-  const diagnostic = transpiled.diagnostics?.find(item => item.file && item.category === ts.DiagnosticCategory.Error);
-  const initializationError = diagnostic ? ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n') : undefined;
-  return { ...factory(BabylonCore, createNoopDecorator), ...(initializationError ? { initializationError } : {}) };
+async function compileExternalModelScript(
+  sourceText: string,
+  scriptAsset: ModelScriptAsset,
+  assetRevision: string | undefined,
+  sourceHash: string,
+): Promise<CompiledExternalModelScript> {
+  const cached = normalizePrecompiledModelScript(await fetchPrecompiledModelScript(scriptAsset, assetRevision));
+  let code: string;
+  let initializationError: string | undefined;
+  if (cached && cached.sourceSha256 === sourceHash && await digestModelScriptText(cached.code) === cached.codeSha256) {
+    code = cached.code;
+    initializationError = cached.initializationError;
+    scriptLoadDiagnostics.precompiledHits += 1;
+  } else {
+    // 旧工程和开发期裸 TS 保持可用；新导入/导出脚本优先使用 Node 生成的缓存。
+    scriptLoadDiagnostics.compilerFallbacks += 1;
+    const ts = await loadTypeScriptCompiler();
+    const prepared = prepareModelScriptCompilation(sourceText);
+    const transpiled = ts.transpileModule(prepared.sourceText, {
+      reportDiagnostics: true,
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.None,
+        experimentalDecorators: true, useDefineForClassFields: false,
+      },
+    });
+    code = transpiled.outputText + '\n' + prepared.returnStatement;
+    const diagnostic = transpiled.diagnostics?.find(item => item.file && item.category === ts.DiagnosticCategory.Error);
+    initializationError = diagnostic ? ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n') : undefined;
+  }
+  const babylon = await resolveBabylonScriptRuntimeNamespace(sourceText);
+  const factory = new Function('__babylon', '__decorator', code) as (
+    babylon: BabylonScriptRuntimeNamespace, decorator: () => PropertyDecorator,
+  ) => CompiledExternalModelScript;
+  return { ...factory(babylon, createNoopDecorator), ...(initializationError ? { initializationError } : {}) };
 }
 
 /** 延迟加载 TypeScript 编译器，避免 Electron 首屏启动时预构建整个 compiler 包。 */
 function loadTypeScriptCompiler(): Promise<typeof TypeScriptModule> {
   typescriptModulePromise ??= import('typescript');
   return typescriptModulePromise;
-}
-
-/** 将 import 语句转换为受控注入变量，避免运行时动态解析第三方模块。 */
-function createImportPrelude(sourceText: string): { sourceWithoutImports: string; importPrelude: string } {
-  const bindings: ImportBinding[] = [];
-  const sourceWithoutImports = sourceText.replace(SCRIPT_IMPORT_PATTERN, (statement, typeKeyword, importClause, moduleName) => {
-    if (typeKeyword) return '';
-    bindings.push(...parseImportBindings(importClause, moduleName));
-    return '';
-  });
-
-  const uniqueBindings = new Map<string, ImportBinding>();
-  for (const binding of bindings) {
-    uniqueBindings.set(binding.localName, binding);
-  }
-
-  const importPrelude = [...uniqueBindings.values()].map((binding) => {
-    if (binding.source === 'decorator') {
-      return `const ${binding.localName} = __decorator;`;
-    }
-    if (binding.source === 'babylonNamespace') {
-      return `const ${binding.localName} = __babylon;`;
-    }
-    return `const ${binding.localName} = __babylon[${JSON.stringify(binding.importedName)}];`;
-  }).join('\n');
-
-  return { sourceWithoutImports, importPrelude };
-}
-
-/** 解析外置脚本中常见的命名导入和命名空间导入。 */
-function parseImportBindings(importClause: string, moduleName: string): ImportBinding[] {
-  const source = moduleName.includes('babylonjs-editor-tools') ? 'decorator' : 'babylon';
-  const trimmedClause = importClause.trim();
-
-  if (trimmedClause.startsWith('* as ')) {
-    const localName = trimmedClause.slice(5).trim();
-    return isSafeIdentifier(localName) ? [{ localName, importedName: localName, source: 'babylonNamespace' }] : [];
-  }
-
-  const namedImportMatch = trimmedClause.match(/\{([\s\S]+)\}/);
-  if (!namedImportMatch) return [];
-
-  return namedImportMatch[1].split(',').flatMap((rawBinding) => {
-    const bindingParts = rawBinding.trim().split(/\s+as\s+/i).map((part) => part.trim()).filter(Boolean);
-    const importedName = bindingParts[0];
-    const localName = bindingParts[1] ?? importedName;
-    if (!isSafeIdentifier(importedName) || !isSafeIdentifier(localName)) return [];
-    return [{ localName, importedName, source }];
-  });
-}
-
-/** 移除 Inspector 装饰器行，运行时参数由当前编辑器显式注入。 */
-function stripVisibleDecorators(sourceText: string): string {
-  return sourceText
-    .split(/\r?\n/)
-    .filter((line) => !VISIBLE_DECORATOR_PATTERN.test(line.trim()))
-    .join('\n');
-}
-
-/** 移除 ES module export 关键字，让脚本在受控函数作用域中执行。 */
-function removeTypeScriptExports(sourceText: string): { sourceText: string; defaultClassName: string | null } {
-  let defaultClassName: string | null = null;
-  const normalizedSource = sourceText
-    .replace(/\bexport\s+default\s+class\s+([A-Za-z_$][\w$]*)/g, (_statement, className: string) => {
-      defaultClassName = className;
-      return `class ${className}`;
-    })
-    .replace(/\bexport\s+default\s+class\b/g, () => {
-      defaultClassName = '__DefaultExternalModelScript';
-      return 'class __DefaultExternalModelScript';
-    })
-    .replace(/\bexport\s+(?=(abstract\s+)?class|interface|type|enum|const|let|var|function)\b/g, '');
-
-  return { sourceText: normalizedSource, defaultClassName };
-}
-
-/** 收集脚本中声明的类名，用于构造返回表。 */
-function collectClassNames(sourceText: string): string[] {
-  const classNames = new Set<string>();
-  const classPattern = /\bclass\s+([A-Za-z_$][\w$]*)/g;
-  let match = classPattern.exec(sourceText);
-
-  while (match) {
-    classNames.add(match[1]);
-    match = classPattern.exec(sourceText);
-  }
-
-  return [...classNames];
-}
-
-/** 生成安全的返回语句，导出脚本内声明的类。 */
-function createReturnStatement(classNames: string[], defaultClassName: string | null): string {
-  const entries = classNames.map((className) => {
-    return `${JSON.stringify(className)}: typeof ${className} === "undefined" ? undefined : ${className}`;
-  });
-  if (defaultClassName) {
-    entries.push(`default: typeof ${defaultClassName} === "undefined" ? undefined : ${defaultClassName}`);
-  }
-  return `return { classes: { ${entries.join(', ')} }, dataDriven: typeof dataDriven === "undefined" ? undefined : dataDriven };`;
 }
 
 /** 创建空装饰器函数，兼容 Babylon Editor 脚本的可见性装饰器。 */
@@ -474,18 +400,4 @@ function createNoopDecorator(): PropertyDecorator {
 /** 判断对象是否为普通 JSON 对象。 */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-/** 限制注入变量名为普通标识符，避免外置脚本 import 预处理注入代码。 */
-function isSafeIdentifier(value: string): boolean {
-  return /^[A-Za-z_$][\w$]*$/.test(value);
-}
-
-/** 为脚本文本生成轻量缓存指纹。 */
-function hashText(value: string): string {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) | 0;
-  }
-  return `${value.length}:${hash}`;
 }

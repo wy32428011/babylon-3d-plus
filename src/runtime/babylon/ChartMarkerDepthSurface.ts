@@ -1,4 +1,9 @@
-import { DynamicTexture, Material, Mesh, Scene, ShaderMaterial, Texture } from '@babylonjs/core';
+import { Material } from '@babylonjs/core/Materials/material.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { Scene } from '@babylonjs/core/scene.js';
 import type { ChartMarkerTextureFrame } from './chartMarkerContent';
 
 export type ScreenPolygon = readonly { x: number; y: number }[];

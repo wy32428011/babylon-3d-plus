@@ -24,6 +24,29 @@ function fixture(embedded = true) {
   return { bridge, posted, timers, hello, visible, visibility, visibilityChanges, send };
 }
 
+test('同一会话重播必须重新确认宿主可见，不能消费上一轮的可见状态', async () => {
+  const f = fixture();
+  try {
+    f.hello();
+    f.visibility(true);
+    assert.equal(await f.bridge.waitForHostVisible(), true);
+    for (const terminal of ['completed', 'skipped', 'failed'] as const) {
+      f.bridge.setPhase(terminal);
+      f.bridge.setPhase('waiting');
+      assert.equal(f.bridge.isHostVisible(), false);
+      let settled = false;
+      const ready = f.bridge.waitForHostVisible().then(value => { settled = true; return value; });
+      f.visibility(false);
+      await Promise.resolve();
+      assert.equal(settled, false);
+      assert.equal(f.timers.size, 0);
+      f.visibility(true);
+      assert.equal(await ready, true);
+      f.bridge.setPhase('playing');
+    }
+  } finally { f.bridge.dispose(); }
+});
+
 test('新宿主后台打开会保留首播，超过旧降级时间后显示仍可开始', async () => {
   const f = fixture();
   try {

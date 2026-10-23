@@ -15,7 +15,7 @@ export function getRequiredEnvironmentResourceIds(sceneFile: unknown): string[] 
   // 只识别已定义的受管缓存布局，不用文件名或显示名猜测远端身份。
   for (const value of [environment.activeVariantUrl, environment.packagePath]) {
     if (typeof value !== 'string') continue;
-    let decoded = value;
+    let decoded: string;
     try { decoded = decodeURIComponent(value); } catch { continue; }
     const match = decoded.replace(/\\/g, '/').match(/\.babylon-editor\/data-platform-cache\/environments\/[a-f0-9]{64}\/([1-9]\d{0,63})\/\d+(?:\/|$)/i);
     if (match) return [match[1]];

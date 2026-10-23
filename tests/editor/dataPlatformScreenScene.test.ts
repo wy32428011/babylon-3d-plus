@@ -1,14 +1,12 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-});
+const viteServer = await createP4SsrTestModules([
+  '/src/editor/model/SceneDocument.ts',
+  '/src/editor/model/dataPlatformScreen.ts',
+  '/src/editor/project/SceneSerializer.ts',
+]);
 after(() => viteServer.close());
 
 const { createEmptySceneDocument } = await viteServer.ssrLoadModule('/src/editor/model/SceneDocument.ts') as typeof import('../../src/editor/model/SceneDocument.ts');
@@ -38,7 +36,7 @@ test('dataPlatformScreen 实体保存为带平面几何的可渲染场景组件'
   assert.deepEqual(entity.components.transform.scale, { x: 2, y: 1, z: 1.125 });
 });
 
-test('dataPlatformScreen 随 v5 场景文件序列化往返，并兼容 v3 的别名字段迁移', () => {
+test('dataPlatformScreen 随 v6 场景文件序列化往返，并兼容 v3 的别名字段迁移', () => {
   const scene = createEmptySceneDocument('大屏场景');
   const entity = createDataPlatformScreenEntity({
     projectId: 'project-1',
@@ -53,7 +51,7 @@ test('dataPlatformScreen 随 v5 场景文件序列化往返，并兼容 v3 的�
     version: number;
     scene: { entities: Record<string, { components: Record<string, Record<string, unknown>> }> };
   };
-  assert.equal(serialized.version, 5);
+  assert.equal(serialized.version, 6);
 
   const restored = deserializeScene(JSON.stringify(serialized));
   assert.deepEqual(restored.entities[entity.id]?.components.dataPlatformScreen, entity.components.dataPlatformScreen);

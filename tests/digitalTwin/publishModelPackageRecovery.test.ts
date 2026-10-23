@@ -72,6 +72,38 @@ test('当前受管模型没有缺失时不产生替换，跨工作区可读文�
   await assert.rejects(recovery.assertPublishSceneModelsReady(JSON.stringify(scene(external)), f.signal, f.scope), /缺失|恢复/);
 });
 
+test('version 6 通过真实模型就绪与本地恢复入口，保留参数和业务绑定', async t => {
+  const f = await fixture(t), asset = await f.writePackage(f.scope.sharedResourcesRoot);
+  const business = { parameterValues: { height: 0, enabled: false, label: '' }, assetCode: 'DEVICE-06' };
+  const document = { ...scene({ ...asset, ...business }), version: 6 };
+  Object.assign(document.scene.entities.main.components, { telemetryBinding: { enabled: false, field: 'speed' },
+    transform: { position: { x: 3, y: 0, z: -2 } } });
+  const content = JSON.stringify(document), bytes = await fs.readFile(asset.sourcePath);
+  await recovery.assertPublishSceneModelsReady(content, f.signal, f.scope);
+  assert.deepEqual(await recovery.recoverPublishSceneModels(content, async () => ({ ...f.scope, baseUrl: 'http://127.0.0.1:1' }),
+    f.signal, () => {}), { replacements: [] });
+  const missingDirectory = { ...scene({ ...asset, ...business }, { packagePath: path.join(f.root, 'missing-v6') }), version: 6 };
+  const missingContent = JSON.stringify(missingDirectory);
+  const restored = await recovery.recoverPublishSceneModels(missingContent, async () => ({ ...f.scope, baseUrl: 'http://127.0.0.1:1' }),
+    f.signal, () => {});
+  assert.equal(restored.replacements.length, 1);
+  assert.equal(restored.replacements[0].asset.packagePath, asset.packagePath);
+  assert.equal(restored.replacements[0].asset.assetRevision, asset.assetRevision);
+  assert.deepEqual(restored.replacements[0].sourceUrls, [asset.sourceUrl]);
+  assert.equal(JSON.stringify(document), content);
+  assert.equal(JSON.stringify(missingDirectory), missingContent);
+  assert.deepEqual(document.scene.entities.main.components.modelAsset, { ...asset, ...business });
+  assert.deepEqual(await fs.readFile(asset.sourcePath), bytes);
+});
+
+for (const version of [7, '6']) test(`模型发布拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async t => {
+  const f = await fixture(t), asset = await f.writePackage(f.scope.projectRoot);
+  const content = JSON.stringify({ ...scene(asset), version });
+  await assert.rejects(recovery.assertPublishSceneModelsReady(content, f.signal, f.scope), /场景格式|版本/);
+  await assert.rejects(recovery.recoverPublishSceneModels(content, async () => ({ ...f.scope, baseUrl: 'http://127.0.0.1:1' }),
+    f.signal, () => {}), /场景格式|版本/);
+});
+
 test('SOURCE 的旧工作区兼容范围只包含 Assets，不能放行工作区其它目录', async t => {
   const f = await fixture(t), legacyWorkspaceRoot = path.join(f.root, 'legacy');
   const legacy = await f.writePackage(legacyWorkspaceRoot);

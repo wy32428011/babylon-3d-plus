@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import packageInfo from '../../../package.json' with { type: 'json' };
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
@@ -220,6 +220,15 @@ export function HomePage({
     };
   }, []);
 
+  /** 关闭配置弹窗，保存过程中禁止通过遮罩或按钮中断。 */
+  const closeDataPlatformConfigDialog = useCallback((): void => {
+    if (isSavingConfig) return;
+    isConfigDialogOpenRef.current = false;
+    configDraftsDirtyRef.current = false;
+    setIsConfigDialogOpen(false);
+    setConfigDialogError(null);
+  }, [isSavingConfig]);
+
   useEffect(() => {
     if (!isConfigDialogOpen) return undefined;
 
@@ -232,7 +241,7 @@ export function HomePage({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isConfigDialogOpen, isSavingConfig]);
+  }, [closeDataPlatformConfigDialog, isConfigDialogOpen, isSavingConfig]);
 
   /** 选择新的项目目录后进入编辑器，Project 面板会沿用当前项目根目录加载资产。 */
   async function handleSelectProjectDirectory(): Promise<void> {
@@ -506,14 +515,6 @@ export function HomePage({
     setIsConfigDialogOpen(true);
   }
 
-  /** 关闭配置弹窗，保存过程中禁止通过遮罩或按钮中断。 */
-  function closeDataPlatformConfigDialog(): void {
-    if (isSavingConfig) return;
-    isConfigDialogOpenRef.current = false;
-    configDraftsDirtyRef.current = false;
-    setIsConfigDialogOpen(false);
-    setConfigDialogError(null);
-  }
 
   /** 保存数据中台地址，并使用新配置立即刷新左侧项目列表。 */
   async function handleSaveDataPlatformConfig(event: FormEvent<HTMLFormElement>): Promise<void> {

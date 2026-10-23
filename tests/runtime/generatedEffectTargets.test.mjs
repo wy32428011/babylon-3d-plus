@@ -8,6 +8,8 @@ import { Matrix, MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '
 const root = new URL('../../', import.meta.url);
 const hooks = registerHooks({
   resolve(specifier, context, next) {
+    // URL 资源保留查询参数，不参与 TS 扩展名补全。
+    if (specifier.startsWith('.') && specifier.includes('?')) return { url: new URL(specifier, context.parentURL).href, shortCircuit: true };
     // 此套不覆盖 CAD 解析；其浏览器专用依赖不参与运行目标生命周期。
     if (specifier === '@linkiez/dxf-renew') return { url: 'data:text/javascript,export function parseString(){throw new Error("CAD is outside this fixture")}', shortCircuit: true };
     if (specifier.startsWith('@babylonjs/')) {
@@ -21,7 +23,7 @@ const hooks = registerHooks({
     return next(specifier, context);
   },
   load(url, context, next) {
-    if (url.startsWith(root.href) && /\.(png|jpe?g|webp|gif|svg|glb|gltf)$/i.test(url)) return { format: 'module', shortCircuit: true, source: `export default ${JSON.stringify(url)};` };
+    if (url.startsWith(root.href) && /\.(png|jpe?g|webp|gif|svg|glb|gltf|bin)(\?.*)?$/i.test(url)) return { format: 'module', shortCircuit: true, source: `export default ${JSON.stringify(url)};` };
     if (url.startsWith(root.href) && url.endsWith('.ts') && !url.includes('/node_modules/')) return {
       format: 'module', shortCircuit: true, source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), {
         compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -100,24 +102,24 @@ test('真实 SceneRuntime 的货物加载、模板替换、移动、销毁与重
   const h = harness(t), runtime = new SceneRuntime(h.scene); t.after(() => runtime.dispose());
   runtime.beginTelemetryPreview();
   const pending = [];
-  runtime.loadModelRuntimeAssets = () => new Promise(resolve => pending.push(resolve));
+  runtime.assets.loadModelRuntimeAssets = () => new Promise(resolve => pending.push(resolve));
   const cargo = { root: new TransformNode('cargo-root', h.scene), assetCode: 'carrier-001', containerCode: '000317', outputOwner: null, generatorEntityId: null };
   const snapshot = { sourceId: 'a', deviceType: 'conveyor', assetCode: 'carrier-001', fields: {} };
   const gen = { entityId: 'gen', component: generator };
-  runtime.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, gen);
-  assert.equal(runtime.getRuntimeEffectTargets()[0].state, 'loading'); assert.equal(runtime.resolveGeneratedEffectTargetNode(cargo.outputOwner.entityId), null);
+  runtime.outputs.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, gen);
+  assert.equal(runtime.effects.getRuntimeEffectTargets()[0].state, 'loading'); assert.equal(runtime.effects.resolveGeneratedEffectTargetNode(cargo.outputOwner.entityId), null);
   const previousId = cargo.outputOwner.entityId;
   const targetB = { ...target, displayName: 'B', modelAsset: { ...target.modelAsset, sourcePath: 'C:/b.glb', sourceUrl: 'editor-asset://local/b.glb' } };
-  runtime.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, { ...gen, component: { ...generator, defaultTarget: targetB } });
+  runtime.outputs.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, { ...gen, component: { ...generator, defaultTarget: targetB } });
   const late = MeshBuilder.CreateBox('old-template', {}, h.scene); let oldDisposed = false;
   pending[0]({ kind: 'owned-container', meshes: [late], transformNodes: [], handle: { dispose: () => { oldDisposed = true; late.dispose(); } } }); await flush();
-  assert.equal(oldDisposed, true); assert.equal(runtime.getRuntimeEffectTargets()[0].model.name, 'B');
+  assert.equal(oldDisposed, true); assert.equal(runtime.effects.getRuntimeEffectTargets()[0].model.name, 'B');
   const current = MeshBuilder.CreateBox('current-template', {}, h.scene);
   pending[1]({ kind: 'owned-container', meshes: [current], transformNodes: [], handle: { dispose: () => current.dispose() } }); await flush();
-  const entry = runtime.getRuntimeEffectTargets()[0]; assert.equal(entry.state, 'ready'); assert.equal(entry.generatorId, 'gen'); assert.equal(entry.containerCode, '000317'); assert.equal(entry.identity, null);
-  cargo.root.position.x = 12; const pose = runtime.resolveGeneratedEffectTargetNode(entry.id); pose.computeWorldMatrix(true); assert.equal(pose.getAbsolutePosition().x, 12);
-  runtime.disposeGeneratedCargoOutputOwner(cargo); assert.equal(runtime.getRuntimeEffectTargets().length, 0);
-  runtime.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, gen); assert.notEqual(cargo.outputOwner.entityId, previousId);
-  runtime.endTelemetryPreview(); assert.equal(runtime.getRuntimeEffectTargets().length, 0);
-  runtime.disposeGeneratedCargoOutputOwner(cargo); cargo.root.dispose();
+  const entry = runtime.effects.getRuntimeEffectTargets()[0]; assert.equal(entry.state, 'ready'); assert.equal(entry.generatorId, 'gen'); assert.equal(entry.containerCode, '000317'); assert.equal(entry.identity, null);
+  cargo.root.position.x = 12; const pose = runtime.effects.resolveGeneratedEffectTargetNode(entry.id); pose.computeWorldMatrix(true); assert.equal(pose.getAbsolutePosition().x, 12);
+  runtime.outputs.disposeGeneratedCargoOutputOwner(cargo); assert.equal(runtime.effects.getRuntimeEffectTargets().length, 0);
+  runtime.outputs.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, gen); assert.notEqual(cargo.outputOwner.entityId, previousId);
+  runtime.endTelemetryPreview(); assert.equal(runtime.effects.getRuntimeEffectTargets().length, 0);
+  runtime.outputs.disposeGeneratedCargoOutputOwner(cargo); cargo.root.dispose();
 });

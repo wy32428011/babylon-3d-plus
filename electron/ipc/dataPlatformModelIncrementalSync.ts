@@ -1,3 +1,4 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -8,6 +9,7 @@ import type {
 } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { RemoteDownloadTracker } from '../shared/remoteDownloadProgress.js';
+import { runBoundedAssetPipeline } from '../shared/boundedAssetPipeline.js';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO } from '../modelUnits.js';
 import { sanitizeSceneModelPackageName, type SceneModelCatalogEntry } from '../shared/sceneModelUpdatePlan.js';
 import { encodeAssetUrl } from './assetRegistry.js';
@@ -43,6 +45,7 @@ const MODEL_QUERY_PAGE_SIZE = 100;
 const MAX_MODEL_QUERY_PAGES = 1_000;
 const MAX_MODEL_RECORDS = 100_000;
 const MAX_CONCURRENT_DOWNLOADS = 4;
+const MAX_CONCURRENT_PACKAGE_VALIDATIONS = 2;
 const MAX_CONCURRENT_CACHE_CHECKS = 16;
 const QUERY_TIMEOUT_MS = 20_000;
 const FILE_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
@@ -630,7 +633,7 @@ async function runDataPlatformModelSync(
   const runId = normalizeRunId(options.runId ?? dependencies.randomId());
   const signal = options.signal ?? new AbortController().signal;
   let stagingRoot: string | null = null;
-  let preserveStaging = false;
+
   let completedDownloads = 0;
   let totalDownloads = 0;
   let downloadTracker: RemoteDownloadTracker | null = null;
@@ -758,57 +761,88 @@ async function runDataPlatformModelSync(
       runtimeChangedResourceKeys: [],
     });
 
-    await runWithConcurrency(jobs, MAX_CONCURRENT_DOWNLOADS, async (job) => {
-      assertNotAborted(signal);
-      tracker.start(job.destinationPath);
-      const result = await dependencies.downloadFile({
-        baseUrl,
-        remoteUrl: job.remoteUrl,
-        destinationPath: job.destinationPath,
-        maxBytes: maxBytesForDownloadKind(job.kind),
-        signal,
-        timeoutMs: FILE_DOWNLOAD_TIMEOUT_MS,
-        context: `下载${job.label}`,
-        onProgress: (progress) => tracker.update(job.destinationPath, progress),
-        onBytes: (bytes) => {
-          downloadedBytes += bytes;
-          if (downloadedBytes > MAX_SYNC_DOWNLOAD_BYTES) {
-            throw new Error('模型同步下载总量超过 8 GB 限制。');
-          }
-        },
-      });
-      const expected = expectedByJob.get(job);
-      if (expected) {
-        const info = await fs.stat(job.destinationPath);
-        if (String(info.size) !== expected.size) throw new ModelSnapshotIntegrityError(`快照原始文件大小不一致：${job.label}`);
-        const digest = createHash('sha256');
-        for await (const chunk of createReadStream(job.destinationPath, { signal })) digest.update(chunk);
-        if (digest.digest('hex') !== expected.sha256.toLowerCase()) throw new ModelSnapshotIntegrityError(`快照原始文件摘要不一致：${job.label}`);
-      }
-      tracker.finish(job.destinationPath, result.bytes);
+    const jobsByPackage = new Map(prepared.map(item => [item, [] as DownloadJob[]]));
+    for (const job of jobs) jobsByPackage.get(job.preparedPackage)!.push(job);
+    let validatedPackages = 0;
+    // 每包原始文件和摘要全部就绪后即可校验，索引仍在所有包成功后一次提交。
+    const validated = await runBoundedAssetPipeline({
+      assets: prepared,
+      dependencies: item => jobsByPackage.get(item)!,
+      transferConcurrency: MAX_CONCURRENT_DOWNLOADS,
+      validationConcurrency: MAX_CONCURRENT_PACKAGE_VALIDATIONS,
+      maxActiveAssets: MAX_CONCURRENT_DOWNLOADS,
+      assertActive: () => assertNotAborted(signal),
+      transfer: async (job) => {
+        assertNotAborted(signal);
+        tracker.start(job.destinationPath);
+        const result = await dependencies.downloadFile({
+          baseUrl,
+          remoteUrl: job.remoteUrl,
+          destinationPath: job.destinationPath,
+          maxBytes: maxBytesForDownloadKind(job.kind),
+          signal,
+          timeoutMs: FILE_DOWNLOAD_TIMEOUT_MS,
+          context: `下载${job.label}`,
+          onProgress: (progress) => tracker.update(job.destinationPath, progress),
+          onBytes: (bytes) => {
+            downloadedBytes += bytes;
+            if (downloadedBytes > MAX_SYNC_DOWNLOAD_BYTES) {
+              throw new Error('模型同步下载总量超过 8 GB 限制。');
+            }
+          },
+        });
+        assertNotAborted(signal);
+        const expected = expectedByJob.get(job);
+        if (expected) {
+          const info = await fs.stat(job.destinationPath);
+          if (String(info.size) !== expected.size) throw new ModelSnapshotIntegrityError(`快照原始文件大小不一致：${job.label}`);
+          const digest = createHash('sha256');
+          for await (const chunk of createReadStream(job.destinationPath, { signal })) digest.update(chunk);
+          if (digest.digest('hex') !== expected.sha256.toLowerCase()) throw new ModelSnapshotIntegrityError(`快照原始文件摘要不一致：${job.label}`);
+        }
+        tracker.finish(job.destinationPath, result.bytes);
 
-      if (job.kind === 'thumbnail') {
-        job.preparedPackage.thumbnailPath = await finalizeThumbnailPath(
-          job.destinationPath,
-          result.contentType,
-          job.remoteUrl,
-        );
-      }
+        if (job.kind === 'thumbnail') {
+          job.preparedPackage.thumbnailPath = await finalizeThumbnailPath(
+            job.destinationPath,
+            result.contentType,
+            job.remoteUrl,
+          );
+        }
 
-      completedDownloads += 1;
-      if (completedDownloads === jobs.length || completedDownloads % downloadProgressStep === 0) {
+        assertNotAborted(signal);
+        completedDownloads += 1;
+        if (completedDownloads === jobs.length || completedDownloads % downloadProgressStep === 0) {
+          reportProgress({
+            runId,
+            phase: 'downloading',
+            completed: completedDownloads,
+            total: jobs.length,
+            download: tracker.snapshot(),
+            message: `已下载 ${completedDownloads}/${jobs.length} 个模型文件。`,
+            error: null,
+            libraryChanged: false,
+            runtimeChangedResourceKeys: [],
+          });
+        }
+      },
+      validate: async (item) => {
+        const result = await validatePreparedPackage(item, syncedAt, signal);
+        assertNotAborted(signal);
+        validatedPackages += 1;
         reportProgress({
           runId,
-          phase: 'downloading',
+          phase: completedDownloads < jobs.length ? 'downloading' : 'validating',
           completed: completedDownloads,
           total: jobs.length,
           download: tracker.snapshot(),
-          message: `已下载 ${completedDownloads}/${jobs.length} 个模型文件。`,
+          message: `已下载 ${completedDownloads}/${jobs.length} 个模型文件，已校验 ${validatedPackages}/${prepared.length} 个资源包。`,
           error: null,
           libraryChanged: false,
           runtimeChangedResourceKeys: [],
         });
-      }
+        return result;
+      },
     });
 
     tracker.close();
@@ -817,12 +851,11 @@ async function runDataPlatformModelSync(
       phase: 'validating',
       completed: completedDownloads,
       total: jobs.length,
-      message: prepared.length === 0 ? '模型包无需重新校验。' : '正在校验变化模型包并计算稳定内容版本…',
+      message: prepared.length === 0 ? '模型包无需重新校验。' : `已完成 ${validated.length} 个变化模型包的校验与稳定内容版本计算。`,
       error: null,
       libraryChanged: false,
       runtimeChangedResourceKeys: [],
     });
-    const validated = await validatePreparedPackages(prepared, syncedAt, signal);
 
     const finalEntries: DataPlatformModelIndexEntry[] = [];
     const finalManagedAssets: ProjectModelAssetEntry[] = [];
@@ -956,7 +989,7 @@ async function runDataPlatformModelSync(
     });
     return summary;
   } catch (error) {
-    preserveStaging = error instanceof DataPlatformRollbackError;
+    const preserveStaging = error instanceof DataPlatformRollbackError;
     if (stagingRoot && !preserveStaging) {
       await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -1402,58 +1435,54 @@ async function finalizeThumbnailPath(
   return finalPath;
 }
 
-async function validatePreparedPackages(
-  packages: PreparedPackage[],
+async function validatePreparedPackage(
+  prepared: PreparedPackage,
   syncedAt: string,
   signal: AbortSignal,
-): Promise<ValidatedPackage[]> {
-  const validated: ValidatedPackage[] = [];
-  for (const prepared of packages) {
-    assertNotAborted(signal);
-    await normalizeLocalMetadata(prepared);
-    await validateModelFile(prepared.mainFilePath);
-    const scanResult = await scanModelPackage(prepared.packagePath);
-    if (!scanResult.asset) {
-      throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}”校验失败：${scanResult.skipped?.reason ?? '无法扫描模型包。'}`);
-    }
-    const scriptPaths = [...new Set([
-      ...prepared.scriptPaths,
-      ...(scanResult.asset.scriptPaths ?? []),
-    ])];
-    const revision = await createDataPlatformModelRuntimeRevision({
-      modelPath: prepared.mainFilePath,
-      metadataPath: prepared.metadataPath,
-      scriptPaths,
-      thumbnailPath: prepared.thumbnailPath,
-    });
-    const stagedAsset: ProjectModelAssetEntry = {
-      ...scanResult.asset,
-      scriptPaths,
-      scriptAssets: scriptPaths.map((scriptPath) => ({
-        path: scriptPath,
-        sourceUrl: encodeAssetUrl(scriptPath),
-        name: path.basename(scriptPath),
-      })),
-      displayName: prepared.record.name,
-      assetRevision: revision.runtimeRevision,
-      kind: 'model',
-      libraryKind: 'model',
-    };
-    validated.push({
-      prepared,
-      stagedAsset,
-      indexEntry: {
-        ...prepared.descriptor,
-        runtimeRevision: revision.runtimeRevision,
-        fileRevision: revision.fileRevision,
-        metadataRevision: revision.metadataRevision,
-        scriptRevision: revision.scriptRevision,
-        thumbnailRevision: revision.thumbnailRevision,
-        syncedAt,
-      },
-    });
+): Promise<ValidatedPackage> {
+  assertNotAborted(signal);
+  await normalizeLocalMetadata(prepared);
+  await validateModelFile(prepared.mainFilePath);
+  const scanResult = await scanModelPackage(prepared.packagePath);
+  if (!scanResult.asset) {
+    throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}”校验失败：${scanResult.skipped?.reason ?? '无法扫描模型包。'}`);
   }
-  return validated;
+  const scriptPaths = [...new Set([
+    ...prepared.scriptPaths,
+    ...(scanResult.asset.scriptPaths ?? []),
+  ])];
+  const revision = await createDataPlatformModelRuntimeRevision({
+    modelPath: prepared.mainFilePath,
+    metadataPath: prepared.metadataPath,
+    scriptPaths,
+    thumbnailPath: prepared.thumbnailPath,
+  });
+  const stagedAsset: ProjectModelAssetEntry = {
+    ...scanResult.asset,
+    scriptPaths,
+    scriptAssets: scriptPaths.map((scriptPath) => ({
+      path: scriptPath,
+      sourceUrl: encodeAssetUrl(scriptPath),
+      name: path.basename(scriptPath),
+    })),
+    displayName: prepared.record.name,
+    assetRevision: revision.runtimeRevision,
+    kind: 'model',
+    libraryKind: 'model',
+  };
+  return {
+    prepared,
+    stagedAsset,
+    indexEntry: {
+      ...prepared.descriptor,
+      runtimeRevision: revision.runtimeRevision,
+      fileRevision: revision.fileRevision,
+      metadataRevision: revision.metadataRevision,
+      scriptRevision: revision.scriptRevision,
+      thumbnailRevision: revision.thumbnailRevision,
+      syncedAt,
+    },
+  };
 }
 
 async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> {
@@ -1465,7 +1494,7 @@ async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> 
     metadata = parsed;
   } catch (error) {
     if (!isNodeError(error) || error.code !== 'ENOENT') {
-      throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}” meta.json 无效：${toErrorMessage(error)}`);
+      throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}” meta.json 无效：${toErrorMessage(error)}`, { cause: error });
     }
   }
   const metadataLengthUnit = metadata.lengthUnit;
@@ -1494,7 +1523,7 @@ async function validateModelFile(filePath: string): Promise<void> {
     const parsed = JSON.parse(await readUtf8File(filePath, '模型资源元数据')) as unknown;
     if (!isPlainObject(parsed) || !isPlainObject(parsed.asset)) throw new Error('缺少 glTF asset 节点。');
   } catch (error) {
-    throw new Error(`glTF 文件无效：${path.basename(filePath)}（${toErrorMessage(error)}）`);
+    throw new Error(`glTF 文件无效：${path.basename(filePath)}（${toErrorMessage(error)}）`, { cause: error });
   }
 }
 
@@ -1848,8 +1877,7 @@ function fileNameFromUrl(value: string): string {
 
 function sanitizeFileName(value: string): string {
   const baseName = path.posix.basename(value.replace(/\\/g, '/'));
-  const normalized = baseName
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const normalized = replaceAsciiControlCharacters(baseName, '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 180);

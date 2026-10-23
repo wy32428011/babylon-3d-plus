@@ -18,7 +18,7 @@ export async function importManualRoamAvatarIntoProject(
   try {
     await inspectGlbModelFile(sourceFilePath);
   } catch (error) {
-    throw new Error(`人物模型校验失败：${error instanceof Error ? error.message.replaceAll('环境', '人物') : String(error)}`);
+    throw new Error(`人物模型校验失败：${error instanceof Error ? error.message.replaceAll('环境', '人物') : String(error)}`, { cause: error });
   }
   const modelsRoot = path.resolve(getProjectModelsRoot(projectRoot));
   await fs.mkdir(modelsRoot, { recursive: true });
@@ -45,7 +45,7 @@ export async function importManualRoamAvatarIntoProject(
     try {
       await fs.rm(packagePath, { recursive: true, force: true });
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], '人物导入失败，临时模型目录清理失败。');
+      throw new AggregateError([error, cleanupError], '人物导入失败，临时模型目录清理失败。', { cause: cleanupError });
     }
     throw error;
   }

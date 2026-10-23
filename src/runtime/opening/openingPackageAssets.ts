@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from '../../../electron/shared/asciiControlCharacters.ts';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl.ts';
 import { hashSkyboxContent } from '../babylon/skyboxContentHash.ts';
@@ -14,14 +15,14 @@ type AssetLoaderOptions = {
 
 /** 包引用始终相对自身 manifest，禁止跳出目录或隐式请求外部网络。 */
 export function resolveOpeningAssetUrl(manifestUrl: string, path: string, baseUrl = globalThis.document?.baseURI): string {
-  if (!path || /^[a-z][a-z\d+.-]*:/i.test(path) || /[\\?#\x00-\x1f]/.test(path) || path.startsWith('/')) {
+  if (!path || /^[a-z][a-z\d+.-]*:/i.test(path) || containsAsciiControlCharactersOr(path, "\\?#") || path.startsWith('/')) {
     throw new Error(`开场素材路径不合法：${path}`);
   }
   const segments = path.split('/');
   if (segments.some(segment => {
     let decoded: string;
     try { decoded = decodeURIComponent(segment); } catch { return true; }
-    return !decoded || decoded === '.' || decoded === '..' || /[\\/\x00-\x1f]/.test(decoded);
+    return !decoded || decoded === '.' || decoded === '..' || containsAsciiControlCharactersOr(decoded, "\\/");
   })) throw new Error(`开场素材路径不得离开包目录：${path}`);
   const manifest = new URL(manifestUrl, baseUrl);
   if (!['http:', 'https:', 'editor-asset:', 'file:'].includes(manifest.protocol)) throw new Error('开场素材路径协议不受支持。');

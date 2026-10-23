@@ -1,6 +1,10 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
+import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { assertPublishSceneModelsReady } from './digitalTwinModelRecovery.js';
 import { assertPublishResourceIdentities } from './digitalTwinPublishResourceIdentity.js';
-import { isAuthorizedAssetFile } from './assetRegistry.js';
+import { isAuthorizedAssetFile, authorizeAssetFile } from './assetRegistry.js';
+import { prepareLightingSceneSave } from './sceneLightingBakeResources.js';
+import { preserveLegacyLightingSceneBeforeWrite } from './sceneLightingMigrationSave.js';
 import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -454,14 +458,14 @@ export async function publishDigitalTwin(
   if (prepared) await validatePreparedPublishScenes(prepared.preparation.scenes, validated.preparedScenes!, current.projectRoot,
     prepared.entry.sourcePath ?? path.join(current.projectRoot, 'Scenes', '__entry_prepared__.scene.json'), signal);
   const savedScene = await saveCurrentScene(current.projectRoot, current.metadata.entryScenePath, validated.sceneContent,
-    prepared ? { diskHash: prepared.entry.diskHash } : undefined);
+    prepared ? { diskHash: prepared.entry.diskHash } : undefined, signal);
   const savedBinding = await updateDataPlatformBinding(current.projectRoot, current.metadata.projectId, { entryScenePath: savedScene.entryScenePath,
     ...(prepared ? { resourceRevision: current.metadata.resourceRevision } : {}) });
   selected.bindingSnapshot = JSON.stringify(savedBinding);
   if (prepared) {
     const previousEntryPath = prepared.entry.sourcePath ?? path.join(current.projectRoot, 'Scenes', '__entry_prepared__.scene.json');
     prepared.overlays.delete(previousEntryPath);
-    prepared.overlays.set(savedScene.filePath, validated.sceneContent);
+    prepared.overlays.set(savedScene.filePath, savedScene.sceneContent);
   }
 
   const workspaceRoot = resolveDataPlatformBindingWorkspaceRoot(current.projectRoot, current.metadata);
@@ -469,7 +473,6 @@ export async function publishDigitalTwin(
   const taskRoot = path.join(app.getPath('temp'), 'zending-digital-twin-publish', encodeURIComponent(validated.requestId));
   await fs.rm(taskRoot, { recursive: true, force: true });
   await fs.mkdir(taskRoot, { recursive: true });
-  let sourcePackage: DigitalTwinSourcePackageResult | null = null;
   let remoteTask: DigitalTwinPublishTask | null = null;
   let commitStarted = false;
   const warnings: string[] = [];
@@ -478,7 +481,7 @@ export async function publishDigitalTwin(
     const skyboxCacheContext = await loadDeploymentSkyboxCacheContext(signal);
     const skyboxValidationCache = createDeploymentSkyboxValidationCache();
     emit(onProgress, validated.requestId, 'source-package', '正在生成多场景源工程包…', 6);
-    sourcePackage = await buildDigitalTwinSourcePackage({
+    const sourcePackage: DigitalTwinSourcePackageResult = await buildDigitalTwinSourcePackage({
       projectRoot: current.projectRoot,
       sharedResourcesRoot,
       legacyWorkspaceRoot: workspaceRoot,
@@ -813,14 +816,15 @@ async function saveCurrentScene(
   entryScenePath: string | null,
   sceneContent: string,
   expected?: { diskHash: string | null },
-): Promise<{ filePath: string; entryScenePath: string }> {
+  signal?: AbortSignal,
+): Promise<{ filePath: string; entryScenePath: string; sceneContent: string }> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(sceneContent) as unknown;
   } catch {
     throw new Error('当前场景不是有效 JSON。');
   }
-  if (!isPlainObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3 && parsed.version !== 4 && parsed.version !== 5) || !isPlainObject(parsed.scene)) {
+  if (!isPlainObject(parsed) || !isSupportedSceneFileVersion(parsed.version) || !isPlainObject(parsed.scene)) {
     throw new Error('当前场景格式不受支持。');
   }
   const sceneName = typeof parsed.scene.name === 'string' && parsed.scene.name.trim() ? parsed.scene.name.trim() : 'main';
@@ -828,21 +832,29 @@ async function saveCurrentScene(
   const filePath = path.resolve(projectRoot, ...relativePath.replace(/\\/g, '/').split('/'));
   if (!isPathInside(projectRoot, filePath)) throw new Error('入口场景路径超出当前项目目录。');
   await ensureSafeDirectoryWithin(projectRoot, path.dirname(filePath), '入口场景目录');
+  signal?.throwIfAborted();
+  const prepared = await prepareLightingSceneSave(sceneContent, filePath, { projectRoot, isAuthorizedFile: isAuthorizedAssetFile, signal });
+  signal?.throwIfAborted();
+  const persistedContent = `${JSON.stringify(JSON.parse(prepared.content), null, 2)}\n`;
   const temporaryPath = `${filePath}.publish-save-${randomUUID()}`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+  await fs.writeFile(temporaryPath, persistedContent, { encoding: 'utf8', flag: 'wx' });
   try {
     if (expected) {
       const current = await fs.readFile(filePath).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return null; throw error; });
       const actualHash = current === null ? null : createHash('sha256').update(new TextDecoder('utf-8', { fatal: true }).decode(current)).digest('hex');
       if (actualHash !== expected.diskHash) throw new Error('入口场景在发布准备后发生变化，已保留最新保存内容，请重新发布。');
     }
+    signal?.throwIfAborted();
+    await preserveLegacyLightingSceneBeforeWrite(filePath, persistedContent);
+    signal?.throwIfAborted();
     await replaceFile(temporaryPath, filePath);
   } finally {
     await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
   }
+  for (const file of prepared.files) authorizeAssetFile(file);
   authorizeSceneFile(filePath);
   await rememberRecentSceneFile(filePath, projectRoot);
-  return { filePath, entryScenePath: path.relative(projectRoot, filePath).replace(/\\/g, '/') };
+  return { filePath, entryScenePath: path.relative(projectRoot, filePath).replace(/\\/g, '/'), sceneContent: persistedContent };
 }
 
 async function preserveConflictPackage(
@@ -994,7 +1006,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
       } catch (rollbackError) {
         const originalMessage = error instanceof Error ? error.message : String(error);
         const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        throw new Error(`替换文件失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`);
+        throw new Error(`替换文件失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`, { cause: rollbackError });
       }
     }
     throw error;
@@ -1003,7 +1015,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
 }
 
 function createSafeSceneFileName(value: string): string {
-  const normalized = value.normalize('NFKC').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 100);
+  const normalized = replaceAsciiControlCharacters(value.normalize('NFKC'), '_').replace(/[<>:"/\\|?*]/g, '_').trim().replace(/[. ]+$/g, '').slice(0, 100);
   return normalized || 'main';
 }
 

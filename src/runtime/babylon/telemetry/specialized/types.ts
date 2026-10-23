@@ -1,5 +1,5 @@
 import type { Mesh, Scene, StandardMaterial, TransformNode } from '@babylonjs/core';
-import { Quaternion, Vector3 } from '@babylonjs/core';
+import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import type { LocatorStorageDepth, ModelGeneratorComponent } from '../../../../editor/model/components';
 import type { ExternalModelScriptRuntime, ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
 import type {

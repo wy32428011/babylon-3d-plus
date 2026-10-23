@@ -5,7 +5,10 @@ import { getChartMarkerCorners } from './ChartMarkerPresentation';
 import { createChartMarkerContent, type ChartMarkerTextureFrame } from './chartMarkerContent';
 import { canEmbedChartMarkerScreen, CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import { useEffect, useRef } from 'react';
-import { Frustum, Matrix, Scene, Vector3, type Mesh, type Viewport } from '@babylonjs/core';
+import { Frustum } from '@babylonjs/core/Maths/math.frustum.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { Mesh, Viewport } from '@babylonjs/core';
 import type { SceneRuntime, DataPlatformScreenOverlayItem } from './SceneRuntime';
 import { createChartMarkerVideo } from './chartMarkerVideo';
 import { ChartMarkerDepthSurface, type ScreenPolygon } from './ChartMarkerDepthSurface';
@@ -515,7 +518,7 @@ export function DataPlatformScreenOverlay({
           const active = inView || !!entry.ringDialog?.isOpen;
           entry.videoContent?.setPlayback(playbackActiveRef.current, active);
           const frame = entry.builtin?.textureFrame()
-            ?? entry.ringMedia?.update(item.markerStyle, item.screenUrl ?? '', !!entry.iframe ? active : playbackActiveRef.current && active);
+            ?? entry.ringMedia?.update(item.markerStyle, item.screenUrl ?? '', entry.iframe ? active : playbackActiveRef.current && active);
           if (frame) {
             visibleMarkerMeshes.push(item.mesh);
             transparentContents.set(item.mesh, frame);

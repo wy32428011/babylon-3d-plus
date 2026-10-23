@@ -1,7 +1,16 @@
+import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
+import { collectSceneResourceReferences, collectSceneSkyboxReferences, collectLightingPolicyResourceModels, type SceneModelReference } from '../shared/sceneResourceTraversal.js';
+import type { PrecompiledDeploymentScript } from './deploymentPrecompiledScripts.js';
+import { serializePrecompiledModelScript } from '../shared/modelScriptCompilation.js';
+import { precompileModelScriptFile } from './modelScriptCompiler.js';
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { normalizeEffectDeploymentReferences } from '../shared/effectDeploymentReferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
-import { getSceneShadowBakeErrorContract, getSceneShadowBakeSignatureContract } from '../shared/sceneShadowBakeContract.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { getSceneLightingBakeError } from '../shared/sceneLightingBakeContract.js';
+import { captureSceneLightingBakeRelocation, restoreSceneLightingBakeAfterMappedRewrite, stripLightingPolicyIdentityLocationHints } from '../shared/sceneLightingBakeRelocation.js';
+import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { readUtf8File } from '../shared/strictUtf8.js';
@@ -36,6 +45,7 @@ import {
   createDeploymentSkyboxValidationCache,
   loadDeploymentSkyboxCacheContext,
   resolveDeploymentSkyboxReference,
+  readSceneSkyboxDataPlatformResourceId,
   type DeploymentSkyboxCacheContext,
   type DeploymentSkyboxValidationCache,
 } from './deploymentSkyboxCache.js';
@@ -76,7 +86,7 @@ const NON_RUNTIME_DEPLOYMENT_FILE_EXTENSIONS = new Set([
 const NON_RUNTIME_DEPLOYMENT_DIRECTORY_NAMES = new Set(['node_modules']);
 
 type PlainObject = Record<string, unknown>;
-type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts' | 'images' | 'openings' | 'opening-assets';
+type BundleCategory = 'models' | 'environments' | 'skyboxes' | 'cad' | 'scripts' | 'images' | 'openings' | 'opening-assets' | 'lighting-bakes';
 
 type ResourceBundle = {
   key: string;
@@ -89,11 +99,7 @@ type ResourceBundle = {
   dataPlatformSkyboxEntry: DataPlatformSkyboxIndexEntry | null;
 };
 
-type MutableModelReference = {
-  asset: PlainObject;
-  target?: PlainObject;
-  packageOwner?: PlainObject;
-};
+type MutableModelReference = Pick<SceneModelReference, 'asset' | 'target' | 'packageOwner'>;
 
 type ResolvedModelReference = MutableModelReference & {
   sourcePath: string;
@@ -143,6 +149,7 @@ export type PreparedDeploymentExport = {
   runtimeConfigContent: string;
   readmeContent: string;
   assetFiles: DeploymentCopyFile[];
+  precompiledScripts: PrecompiledDeploymentScript[];
   externalAssetCount: number;
   warnings: string[];
 };
@@ -175,20 +182,21 @@ export async function prepareDeploymentExport(
   throwIfDeploymentExportAborted(signal);
   onStatus('正在解析场景…');
   const sceneFile = parseSceneFile(content);
+  // 光照迁移会序列化设置；先以描述符验证天空盒身份，不能先执行其 getter。
+  for (const skybox of collectSceneSkyboxReferences(sceneFile.scene)) readSceneSkyboxDataPlatformResourceId(skybox);
+  sceneFile.scene = migrateSceneLightingDocument(requirePlainObject(sceneFile.scene, '场景内容'));
+  sceneFile.version = CURRENT_SCENE_FILE_VERSION;
   const warnings: string[] = [];
   if (options.skipCadReferences) {
     const skippedCadCount = stripCadReferencesFromSceneFile(sceneFile);
     if (skippedCadCount > 0) warnings.push(`发布包已跳过 ${skippedCadCount} 个 CAD 参考图及其 DXF 文件。`);
   }
   let scene = requirePlainObject(sceneFile.scene, '场景内容');
+  stripLightingPolicyIdentityLocationHints(scene);
 
-  const shadowBakeError = getSceneShadowBakeErrorContract(scene);
-  if (shadowBakeError) throw new Error(shadowBakeError);
-  const shadowSettings = isPlainObject(scene.sceneSettings) && isPlainObject(scene.sceneSettings.shadows)
-    ? scene.sceneSettings.shadows : null;
-  const validBake = shadowSettings && isPlainObject(shadowSettings.bake)
-    && shadowSettings.bake.signature === getSceneShadowBakeSignatureContract(scene)
-    ? shadowSettings.bake : null;
+  const lightingBakeError = getSceneLightingBakeError(scene);
+  if (lightingBakeError) throw new Error(lightingBakeError);
+  const originalLightingScene = captureSceneLightingBakeRelocation(scene) ? structuredClone(scene) : null;
 
   const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
   const bundles = new Map<string, ResourceBundle>();
@@ -201,7 +209,7 @@ export async function prepareDeploymentExport(
   scene = openingPlan.scene; sceneFile.scene = scene;
   warnings.push(...openingPlan.warnings);
   const opening = openingPlan.opening;
-  const references = collectSceneReferences(scene);
+  const references = collectSceneResourceReferences(scene, 'strict');
   const openingIntegrity = new Map<string, { size: number; sha256: string }>();
   if (opening) {
     const bundle = getOrCreateBundle(bundles, 'openings', opening.packageRoot, false,
@@ -230,6 +238,23 @@ export async function prepareDeploymentExport(
   for (const reference of references.environments) {
     resolvedEnvironments.push(await resolveEnvironmentReference(reference, projectContext, bundles, signal));
   }
+  const resolvedPolicyReferences: Array<{ model: PlainObject; field: 'sourcePath' | 'sourceUrl'; sourcePath: string }> = [];
+  const knownPolicyFiles = new Set([
+    ...resolvedModels.map(reference => toLocalPathKey(reference.sourcePath)),
+    ...resolvedEnvironments.flatMap(reference => reference.variantPaths.map(variant => toLocalPathKey(variant.sourcePath))),
+  ]);
+  // 规则可先于实例存在；仅收集明确的资源目标，不把普通参数或展示文字当文件路径。
+  for (const model of collectLightingPolicyResourceModels(scene)) {
+    for (const field of ['sourcePath', 'sourceUrl'] as const) {
+      if (typeof model[field] !== 'string' || !(model[field] as string).trim()) continue;
+      const sourcePath = resolveLocalAssetPath(model[field], model[field], '光照规则资源');
+      if (!knownPolicyFiles.has(toLocalPathKey(sourcePath))) {
+        await resolveModelReference({ asset: { sourcePath, sourceUrl: model[field] } }, projectContext, bundles, signal);
+        knownPolicyFiles.add(toLocalPathKey(sourcePath));
+      }
+      resolvedPolicyReferences.push({ model, field, sourcePath });
+    }
+  }
 
   const resolvedSkyboxes: ResolvedSkyboxReference[] = [];
   const warnedOrphanedSkyboxIds = new Set<string>();
@@ -249,6 +274,13 @@ export async function prepareDeploymentExport(
   const resolvedCadReferences: ResolvedCadReference[] = [];
   for (const reference of references.cadReferences) {
     resolvedCadReferences.push(await resolveCadReference(reference, bundles, signal));
+  }
+
+  const lightingAssets = await resolveSceneLightingBakeAssets(scene, { projectRoot: projectContext?.projectRoot,
+    isAuthorizedFile: isAuthorizedAssetFile, signal });
+  for (const asset of lightingAssets) {
+    const bundle = getOrCreateBundle(bundles, 'lighting-bakes', path.dirname(asset.sourcePath), false);
+    addExplicitFileToBundle(bundle, asset.sourcePath);
   }
 
   const externalAssetCount = [...bundles.values()].filter((bundle) => {
@@ -272,12 +304,29 @@ export async function prepareDeploymentExport(
     for (const { value, file } of opening.overrides) value.assetUrl = requireMappedUrl(sourceUrlMap, file.sourcePath, '开场替换图片');
   }
 
+  const lightingReferenceMap = originalLightingScene ? createLightingReferenceRewriteMap(originalLightingScene, sourceUrlMap, [...bundles.values()], projectContext?.projectRoot) : new Map<string, string>();
+  for (const model of resolvedModels) for (const [reference, imagePath] of model.textureImagePaths) {
+    lightingReferenceMap.set(reference, requireMappedUrl(sourceUrlMap, imagePath, '模型参数图片'));
+  }
+  const deploymentFileBySource = new Map(assetFiles.map(file => [toLocalPathKey(file.sourcePath), file]));
+  for (const asset of lightingAssets) {
+    const file = deploymentFileBySource.get(toLocalPathKey(asset.sourcePath));
+    if (!file) throw new Error('部署清单遗漏光照资产：' + asset.asset.id);
+    file.expectedSize = asset.byteLength; file.expectedSha256 = asset.sha256; file.integrityLabel = '光照烘焙固定产物 ' + asset.asset.id;
+    const mapped = requireMappedUrl(sourceUrlMap, asset.sourcePath, '光照烘焙产物');
+    lightingReferenceMap.set(asset.asset.url, mapped); asset.asset.url = mapped;
+  }
   normalizeEffectDeploymentReferences(scene, sourceUrlMap);
-  rewriteModelReferences(resolvedModels, sourceUrlMap);
+  const precompiledScripts = await rewriteModelReferences(resolvedModels, sourceUrlMap, signal);
   rewriteClickEventBindingReferences(resolvedClickEventBindings, sourceUrlMap);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
   rewriteSkyboxReferences(resolvedSkyboxes, sourceUrlMap);
   rewriteCadReferences(resolvedCadReferences, sourceUrlMap);
+  for (const reference of resolvedPolicyReferences) {
+    const mapped = requireMappedUrl(sourceUrlMap, reference.sourcePath, '光照规则资源');
+    lightingReferenceMap.set(reference.model[reference.field] as string, mapped);
+    reference.model[reference.field] = mapped;
+  }
 
   const originalMqttConfig = isPlainObject(scene.mqttConfig) ? scene.mqttConfig : {};
   scene.mqttConfig = createDisabledSceneMqttConfig();
@@ -289,7 +338,9 @@ export async function prepareDeploymentExport(
       && isPlainObject(entity.components.modelAsset.sourceSnapshot)) delete entity.components.modelAsset.sourceSnapshot.compositionResource;
   }
   // 只迁移已验证结果的签名；资源 URL 换成部署路径不代表几何或布局发生变化。
-  if (validBake) validBake.signature = getSceneShadowBakeSignatureContract(scene);
+  if (originalLightingScene && !restoreSceneLightingBakeAfterMappedRewrite(originalLightingScene, scene, lightingReferenceMap)) {
+    throw new Error('部署转换改变了光照烘焙的输入或产物身份，已停止导出。');
+  }
   assertNoLocalMachinePaths(sceneFile);
 
   return {
@@ -297,6 +348,7 @@ export async function prepareDeploymentExport(
     runtimeConfigContent: `${JSON.stringify(createRuntimeConfig(exportName, runtimeMqttConfig), null, 2)}\n`,
     readmeContent: createDeploymentReadme(exportName),
     assetFiles,
+    precompiledScripts,
     externalAssetCount,
     warnings,
   };
@@ -328,7 +380,7 @@ function createManifestAssetPath(destinationRelativePath: string): string {
   return `./${normalizedPath.slice(assetRootPrefix.length)}`;
 }
 
-/** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3/4/5。 */
+/** 解析并确认顶层场景文件为编辑器支持的 version 1/2/3/4/5/6。 */
 function parseSceneFile(content: string): PlainObject {
   if (typeof content !== 'string' || content.length === 0) throw new Error('导出场景内容不能为空。');
 
@@ -341,112 +393,12 @@ function parseSceneFile(content: string): PlainObject {
 
   const sceneFile = requirePlainObject(parsed, '场景文件');
   if (
-    (sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3 && sceneFile.version !== 4 && sceneFile.version !== 5)
+    !isSupportedSceneFileVersion(sceneFile.version)
     || !isPlainObject(sceneFile.scene)
   ) {
-    throw new Error('仅支持导出 version=1、version=2、version=3、version=4 或 version=5 的场景文件。');
+    throw new Error('仅支持导出 version=1 至 version=6 的场景文件。');
   }
   return sceneFile;
-}
-
-/** 从场景实体和场景设置中收集所有需要重写的资源引用。 */
-function collectSceneReferences(scene: PlainObject): {
-  models: MutableModelReference[];
-  environments: MutableEnvironmentReference[];
-  skyboxes: MutableSkyboxReference[];
-  cadReferences: MutableCadReference[];
-  clickEventBindings: MutableClickEventBindingReference[];
-} {
-  const entities = requirePlainObject(scene.entities, 'scene.entities');
-  const models: MutableModelReference[] = [];
-  const skyboxes: MutableSkyboxReference[] = [];
-  const cadReferences: MutableCadReference[] = [];
-  const clickEventBindings: MutableClickEventBindingReference[] = [];
-
-  for (const [entityId, entityValue] of Object.entries(entities)) {
-    const entity = requirePlainObject(entityValue, `实体 ${entityId}`);
-    const components = requirePlainObject(entity.components, `实体 ${entityId} components`);
-    if (components.modelAsset !== undefined) {
-      models.push({ asset: requirePlainObject(components.modelAsset, `实体 ${entityId} modelAsset`) });
-    }
-    if (components.manualRoamSpawn !== undefined) {
-      const spawn = requirePlainObject(components.manualRoamSpawn, '实体 ' + entityId + ' manualRoamSpawn');
-      if (spawn.avatar !== undefined) models.push({ asset: requirePlainObject(spawn.avatar, '实体 ' + entityId + ' 人物模型') });
-    }
-    if (components.alarmManager !== undefined) {
-      const alarm = requirePlainObject(components.alarmManager, '实体 ' + entityId + ' alarmManager');
-      collectModelGeneratorTarget(alarm.appearanceModel, alarm, models, '报警外观模型');
-      for (const slot of requireObjectArray(alarm.targets, '报警目标')) collectModelGeneratorTarget(slot.model, slot, models, '报警目标模型');
-    }
-    if (components.modelGenerator !== undefined) {
-      collectModelGeneratorReferences(requirePlainObject(components.modelGenerator, `实体 ${entityId} modelGenerator`), models, entityId);
-    }
-    if (components.clickEventBinding !== undefined) {
-      collectClickEventBindingReferences(
-        requirePlainObject(components.clickEventBinding, `实体 ${entityId} clickEventBinding`),
-        clickEventBindings,
-        entityId,
-      );
-    }
-    if (components.skybox !== undefined) {
-      skyboxes.push({ skybox: requirePlainObject(components.skybox, `实体 ${entityId} skybox`) });
-    }
-    if (components.cadReference !== undefined) {
-      cadReferences.push({ cad: requirePlainObject(components.cadReference, `实体 ${entityId} cadReference`) });
-    }
-  }
-
-  const environments: MutableEnvironmentReference[] = [];
-  if (scene.sceneSettings !== undefined) {
-    const sceneSettings = requirePlainObject(scene.sceneSettings, 'scene.sceneSettings');
-    if (sceneSettings.environment !== null && sceneSettings.environment !== undefined) {
-      const environment = requirePlainObject(sceneSettings.environment, 'scene.sceneSettings.environment');
-      const variants = requireObjectArray(environment.variants, '环境 variants');
-      if (variants.length === 0) throw new Error('环境配置至少需要一个变体。');
-      environments.push({ environment, variants });
-    }
-    if (sceneSettings.skybox !== null && sceneSettings.skybox !== undefined) {
-      skyboxes.push({ skybox: requirePlainObject(sceneSettings.skybox, 'scene.sceneSettings.skybox') });
-    }
-  }
-  return { models, environments, skyboxes, cadReferences, clickEventBindings };
-}
-
-/** 收集点击事件绑定中已填设备类型的引用，供导出时与场景模型同步改写部署 URL。 */
-function collectClickEventBindingReferences(
-  binding: PlainObject,
-  output: MutableClickEventBindingReference[],
-  entityId: string,
-): void {
-  if (binding.deviceSlots === undefined) return;
-  const slots = requireObjectArray(binding.deviceSlots, `实体 ${entityId} clickEventBinding.deviceSlots`);
-  for (const [index, slot] of slots.entries()) {
-    if (slot.deviceType === null || slot.deviceType === undefined) continue;
-    output.push({ deviceType: requirePlainObject(slot.deviceType, `实体 ${entityId} 设备类型槽位 ${index + 1}`) });
-  }
-}
-
-/** 收集模型生成器默认目标和每条规则中的 model 目标。 */
-function collectModelGeneratorReferences(generator: PlainObject, models: MutableModelReference[], entityId: string): void {
-  collectModelGeneratorTarget(generator.defaultTarget, generator, models, `实体 ${entityId} 默认生成目标`);
-  if (generator.rules === undefined) return;
-  const rules = requireObjectArray(generator.rules, `实体 ${entityId} modelGenerator.rules`);
-  for (const [index, rule] of rules.entries()) {
-    collectModelGeneratorTarget(rule.target, rule, models, `实体 ${entityId} 生成规则 ${index + 1}`);
-  }
-}
-
-/** 校验单个模型生成器目标，并把导入模型目标加入资源收集列表。 */
-function collectModelGeneratorTarget(value: unknown, packageOwner: PlainObject, models: MutableModelReference[], label: string): void {
-  if (value === null || value === undefined) return;
-  const target = requirePlainObject(value, label);
-  if (target.kind === 'mesh') return;
-  if (target.kind !== 'model') throw new Error(`${label}类型不受支持。`);
-  models.push({
-    asset: requirePlainObject(target.modelAsset, `${label} modelAsset`),
-    target,
-    packageOwner: target.packagePath !== undefined ? target : packageOwner,
-  });
 }
 
 /** 加载当前项目资产索引与独立天空盒缓存索引；损坏的天空盒索引必须阻止发布。 */
@@ -983,7 +935,8 @@ function replaceParameterValueStrings(value: unknown, original: string, replacem
 }
 
 /** 将普通模型、生成器目标及脚本路径改写为部署虚拟 URL。 */
-function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlMap: Map<string, string>): void {
+async function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlMap: Map<string, string>, signal: AbortSignal): Promise<PrecompiledDeploymentScript[]> {
+  const precompiledScripts = new Map<string, PrecompiledDeploymentScript>();
   for (const reference of references) {
     const modelUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '模型资源');
     reference.asset.sourcePath = modelUrl;
@@ -999,7 +952,17 @@ function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlM
     }
 
     for (const { script, sourcePath } of reference.scriptPaths) {
+      throwIfDeploymentExportAborted(signal);
       const scriptUrl = requireMappedUrl(sourceUrlMap, sourcePath, '模型脚本');
+      // 从本次实际源码生成独立资源；不接受场景提供的可执行缓存，也不改写原 TS。
+      delete script.precompiled;
+      if (!precompiledScripts.has(scriptUrl)) {
+        const artifact = await precompileModelScriptFile(sourcePath);
+        throwIfDeploymentExportAborted(signal);
+        const destinationRelativePath = decodeURIComponent(new URL(scriptUrl).pathname.slice(1)) + '.compiled.json';
+        precompiledScripts.set(scriptUrl, { sourcePath, sourceFileSha256: artifact.sourceFileSha256,
+          destinationRelativePath, logicalUrl: scriptUrl + '.compiled.json', content: serializePrecompiledModelScript(artifact) });
+      }
       script.path = scriptUrl;
       script.sourceUrl = scriptUrl;
     }
@@ -1009,6 +972,7 @@ function rewriteModelReferences(references: ResolvedModelReference[], sourceUrlM
       replaceParameterValueStrings(reference.asset.parameterValues, originalValue, imageUrl);
     }
   }
+  return [...precompiledScripts.values()];
 }
 
 /** 在改写 URL 前匹配场景实际快照；只有绑定引用的模型也进入资源计划，不能静默清空配置。 */
@@ -1038,7 +1002,7 @@ async function resolveClickEventBindingReferences(
       } catch (error) {
         throwIfDeploymentExportAborted(signal);
         const name = reference.deviceType.displayName ?? '未命名设备类型';
-        throw new Error(`点击事件绑定设备类型「${name}」无法完整发布：${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`点击事件绑定设备类型「${name}」无法完整发布：${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
       models.push(model);
       indexModel(model);
@@ -1212,6 +1176,27 @@ function assertSkyboxFileExtension(filePath: string, formatValue: unknown): void
   }
 }
 
+/** 记录本次文件/目录清单真实执行的地址变换，供光照签名做受控等价校验。 */
+function createLightingReferenceRewriteMap(original: unknown, files: ReadonlyMap<string, string>, bundles: readonly ResourceBundle[], projectRoot?: string): Map<string, string> {
+  const output = new Map<string, string>();
+  const directories = new Map(bundles.map(bundle => [toLocalPathKey(bundle.sourceRoot), createVirtualDirectoryUrl(bundle.destinationRoot)]));
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') {
+      let local: string;
+      try {
+        if (value.startsWith(EDITOR_ASSET_URL_PREFIX)) local = decodeAssetUrl(value);
+        else if (path.isAbsolute(value) || path.win32.isAbsolute(value)) local = value;
+        else return;
+        if (!path.isAbsolute(local) && projectRoot) local = path.resolve(projectRoot, local);
+      } catch { return; }
+      const mapped = files.get(toLocalPathKey(local)) ?? directories.get(toLocalPathKey(local));
+      if (mapped) output.set(value, mapped);
+    } else if (value && typeof value === 'object') for (const child of Object.values(value)) visit(child);
+  };
+  visit(original);
+  return output;
+}
+
 /** 根据资源类别和扩展名生成资产清单 kind。 */
 function inferAssetKind(category: BundleCategory, relativePath: string): DeploymentAssetKind {
   const lowerPath = relativePath.toLowerCase();
@@ -1237,9 +1222,8 @@ function createVirtualDirectoryUrl(destinationRoot: string): string {
 
 /** 生成兼容 Windows 文件名规则的稳定目录片段。 */
 function createSafePathSegment(value: string): string {
-  const normalized = value
-    .normalize('NFKC')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const normalized = replaceAsciiControlCharacters(value
+    .normalize('NFKC'), '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 64);

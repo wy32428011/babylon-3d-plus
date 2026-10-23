@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createServer } from 'vite';
+import { importIsolatedTypeScriptModules } from '../tests/helpers/extensionlessTypeScriptTestBootstrap.ts';
 
 const tempRoot = await mkdtemp(path.join(tmpdir(), 'babylon-skybox-assets-'));
 
@@ -41,20 +41,17 @@ function createExrFixture(width = 8, height = 1) {
   ]);
 }
 
-let server;
+let cleanupModules;
 try {
-  server = await createServer({
-    appType: 'custom',
-    configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
+  // 保留真实 createRequire(import.meta.url) 的邻接模块合同，不能打成改变目录的单文件。
+  const [skyboxAssetStore] = await importIsolatedTypeScriptModules(['electron/ipc/skyboxAssetStore.ts'], {
+    deferCleanup: cleanup => { cleanupModules = cleanup; },
   });
   const {
     importSkyboxFileIntoRoot,
     listSkyboxAssetsInRoot,
     validateSkyboxSourceFile,
-  } = await server.ssrLoadModule('/electron/ipc/skyboxAssetStore.ts');
+  } = skyboxAssetStore;
 
   const sourceRoot = path.join(tempRoot, 'source');
   const skyboxRoot = path.join(tempRoot, 'project', 'Assets', 'Skyboxes');
@@ -110,6 +107,6 @@ try {
 
   console.info('Skybox asset smoke test passed.');
 } finally {
-  await server?.close();
+  cleanupModules?.();
   await rm(tempRoot, { recursive: true, force: true });
 }

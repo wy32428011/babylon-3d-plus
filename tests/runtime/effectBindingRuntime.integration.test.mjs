@@ -249,9 +249,9 @@ test('删除配置实体释放所有派生对象、锚点、诊断与在途数�
   assert.ok(requests.every(request => request.signal.aborted));
 });
 
-test('46 类特效的已登记配置通过 JSON 保存与组件清洗后不丢字段', () => {
+test('52 类特效的已登记配置通过 JSON 保存与组件清洗后不丢字段', () => {
   const kinds = POI_EFFECT_DEFINITIONS.filter(definition => getEffectParameterDefinitions(definition.kind).length).map(definition => definition.kind);
-  assert.equal(kinds.length, 46);
+  assert.equal(kinds.length, 52);
   for (const kind of kinds) {
     const component = createDefaultPoiEffectComponent(kind); component.configuration = createDefaultEffectConfiguration(component);
     const configuration = component.configuration;

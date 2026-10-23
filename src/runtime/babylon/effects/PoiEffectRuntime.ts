@@ -8,25 +8,19 @@ import { isDigitalTwinEffectKind } from '../../../editor/model/digitalTwinEffect
 import { SpatialEffects, supportsSpatialEffect } from './SpatialEffects';
 import { TargetModelEffects } from './TargetModelEffects';
 import { SceneEnvironmentEffects } from './SceneEnvironmentEffects';
-import {
-  Color3,
-  Color4,
-  DynamicTexture,
-  Mesh,
-  MeshBuilder,
-  ParticleSystem,
-  Scene,
-  StandardMaterial,
-  Texture,
-  TransformNode,
-  Vector3,
-  type Material,
-  type AbstractMesh,
-  type Nullable,
-  type Observer,
-} from '@babylonjs/core';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
+import { Color3, Color4 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { ParticleSystem } from '@babylonjs/core/Particles/particleSystem.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { Material, AbstractMesh, Nullable, Observer } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
-import type { SceneThemeSettings } from '../../../editor/model/sceneTheme';
+import type { SceneAppearanceConfig } from '../../../../electron/shared/sceneLightingConfig.ts';
 import type { PoiEffectComponent, PoiEffectKind, TransformComponent } from '../../../editor/model/components';
 import { sanitizePoiEffectComponent } from '../../../editor/model/poiEffect';
 import { LightWallFence } from './LightWallFence';
@@ -109,12 +103,17 @@ export class PoiEffectRuntime {
     this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
   }
 
-  setSceneTheme(active: boolean, glowIntensity: number | null): void {
-    this.environmentEffects.setThemeActive(active);
-    this.targetEffects.setGlowIntensity(glowIntensity);
+  setGlobalLightingControl(allowDayNightCycle: boolean): void {
+    this.environmentEffects.setGlobalLightingControl(allowDayNightCycle);
+
   }
 
-  setThemeFog(theme: SceneThemeSettings | null): void { this.environmentEffects.setThemeFog(theme); }
+  setAppearance(appearance: SceneAppearanceConfig): void {
+    this.environmentEffects.setAppearanceFog(appearance);
+    this.targetEffects.setGlowIntensity(appearance.glowIntensity);
+  }
+
+  isDayNightCycleActive(): boolean { return this.environmentEffects.isDayNightCycleActive(); }
 
   /** 放在设备运动回调之后，跟随读取同一帧的最终位置。 */
   moveFrameObserverToEnd(): void {

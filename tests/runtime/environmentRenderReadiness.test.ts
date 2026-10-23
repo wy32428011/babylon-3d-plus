@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 import {
   AssetContainer,
@@ -12,21 +12,17 @@ import {
 
 import type { SceneEnvironmentSettings } from '../../src/editor/model/SceneDocument.ts';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  logLevel: 'error',
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
+const viteServer = await createP4SsrTestModules([
+  '/src/runtime/babylon/SceneEnvironmentRuntime.ts',
+]);
+after(async () => {
+  await viteServer.close();
 });
 const { SceneEnvironmentRuntime } = await viteServer.ssrLoadModule(
   '/src/runtime/babylon/SceneEnvironmentRuntime.ts',
 ) as typeof import('../../src/runtime/babylon/SceneEnvironmentRuntime.ts');
 
-after(async () => {
-  await viteServer.close();
-});
+
 
 function createEnvironment(): SceneEnvironmentSettings {
   return {

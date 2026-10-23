@@ -1,6 +1,10 @@
-import { ArcRotateCamera, Color3, Scene, Vector3, type AbstractMesh, type Light, type TransformNode } from '@babylonjs/core';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { AbstractMesh, Light, TransformNode } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
-import type { SceneThemeSettings } from '../../../editor/model/sceneTheme';
+import type { SceneAppearanceConfig } from '../../../../electron/shared/sceneLightingConfig.ts';
 
 type Entry = { component: PoiEffectComponent; active: boolean; time: number };
 type CameraPose = { camera: ArcRotateCamera; alpha: number; beta: number; radius: number; target: Vector3 };
@@ -22,15 +26,20 @@ const safeColor = (value: unknown, fallback: string) => Color3.FromHexString(typ
 /** 仅拥有自己开启的全局效果；失效时恢复进入前状态，多个同类实例按登记顺序互斥。 */
 export class SceneEnvironmentEffects {
   private readonly entries = new Map<string, Entry>();
-  private fixedTheme = false;
-  /** 固定主题接管昼夜；显式雾组件仍可覆盖主题的雾，停用后恢复最新主题值。 */
-  setThemeActive(active: boolean): void {
-    this.fixedTheme = active;
-    if (active) this.restoreLight();
+  private dayNightAllowed = true;
+  /** 显式全局策略决定昼夜控制权，不从外观存在与否推断。 */
+  setGlobalLightingControl(allowDayNightCycle: boolean): void {
+    this.dayNightAllowed = allowDayNightCycle;
+    if (!allowDayNightCycle) this.restoreLight();
   }
-  private themeFog: Pick<SceneThemeSettings, 'fogEnabled' | 'fogColor' | 'fogStart' | 'fogEnd'> | null = null;
+
+  isDayNightCycleActive(): boolean {
+    return this.dayNightAllowed && [...this.entries.values()].some(entry => entry.active && entry.component.enabled
+      && entry.component.effectKind === 'day-night' && Boolean(entry.component.visual));
+  }
+  private themeFog: Pick<SceneAppearanceConfig, 'fogEnabled' | 'fogColor' | 'fogStart' | 'fogEnd'> | null = null;
   /** 雾只在此处保存一份原始基线；显式组件优先，主题次之，全部停用才恢复。 */
-  setThemeFog(theme: SceneThemeSettings | null): void {
+  setAppearanceFog(theme: Pick<SceneAppearanceConfig, 'fogEnabled' | 'fogColor' | 'fogStart' | 'fogEnd'> | null): void {
     this.themeFog = theme ? { fogEnabled: theme.fogEnabled, fogColor: theme.fogColor, fogStart: theme.fogStart, fogEnd: theme.fogEnd } : null;
     this.syncFog();
   }
@@ -63,12 +72,12 @@ export class SceneEnvironmentEffects {
     this.statuses.clear();
     for (const [id, entry] of this.entries) {
       const enabled = entry.active && entry.component.enabled;
-      const occupied = enabled && (first(entry.component.effectKind)?.[0] !== id || (entry.component.effectKind === 'day-night' && this.fixedTheme));
-      this.statuses.set(id, { status: !enabled ? 'inactive' : occupied ? 'occupied' : 'active', message: !enabled ? '组件未启用' : occupied ? '同类组件或固定主题已占用控制权' : '正在运行' });
+      const occupied = enabled && (first(entry.component.effectKind)?.[0] !== id || (entry.component.effectKind === 'day-night' && !this.dayNightAllowed));
+      this.statuses.set(id, { status: !enabled ? 'inactive' : occupied ? 'occupied' : 'active', message: !enabled ? '组件未启用' : occupied ? '同类组件或全局光照策略已占用控制权' : '正在运行' });
     }
     this.syncFog(deltaSeconds);
 
-    const day = this.fixedTheme ? undefined : first('day-night')?.[1];
+    const day = !this.dayNightAllowed ? undefined : first('day-night')?.[1];
     if (day?.component.visual) {
       this.lightBaseline ??= { environment: this.scene.environmentIntensity, lastEnvironment: this.scene.environmentIntensity, lights: new Map() };
       const v = day.component.visual;

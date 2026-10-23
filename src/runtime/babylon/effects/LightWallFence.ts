@@ -1,4 +1,9 @@
-import { Color3, Constants, Mesh, ShaderMaterial, VertexData, type Scene, type TransformNode } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
+import type { Scene, TransformNode } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 
 const VERTEX_SHADER = `

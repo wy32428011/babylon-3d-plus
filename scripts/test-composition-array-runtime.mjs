@@ -36,7 +36,9 @@ hooks.deregister();
 
 function fixture() {
   const engine = new NullEngine(), scene = new Scene(engine);
-  const runtime = Object.create(SceneRuntime.prototype);
+  const runtime = new SceneRuntime(scene);
+  // 本夹具只计数组预览几何；释放真实构造时附带的投影接收面，保持原来的隔离范围。
+  runtime.environment.shadowRuntime.dispose();
   const transform = (x = 0) => ({ position: { x, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } });
   const entities = {
     group: { id: 'group', name: '组合', isFolder: true, parentId: null, childrenIds: ['a', 'b'], components: { transform: transform() }, composition: { schemaVersion: 1, instanceId: 'i', libraryId: 'l', revision: 'r' } },
@@ -45,7 +47,16 @@ function fixture() {
   };
   const a = MeshBuilder.CreateBox('a', { width: 2, height: 2, depth: 2 }, scene);
   const b = MeshBuilder.CreateBox('b', { width: 4, height: 2, depth: 2 }, scene); b.position.x = 5;
-  Object.assign(runtime, { scene, shadowDocument: { entities, entityIds: Object.keys(entities) }, meshes: new Map([['a', a], ['b', b]]), models: new Map(), locators: new Map(), cadReferences: new Map(), modelArrayInstanceEntities: new Map(), modelArrayParameterVariantByEntityId: new Map(), poiEffectRuntime: { getEntityArraySource: () => null }, entityArrayPreview: null, compositionArrayPreview: null });
+  Object.assign(runtime, { scene });
+  Object.assign(runtime.document, { shadowDocument: { entities, entityIds: Object.keys(entities) } });
+  Object.assign(runtime.presentation, { meshes: new Map([['a', a], ['b', b]]) });
+  Object.assign(runtime.assets, { models: new Map() });
+  Object.assign(runtime.locators, { locators: new Map() });
+  Object.assign(runtime.cad, { cadReferences: new Map() });
+  Object.assign(runtime.arrays, { modelArrayInstanceEntities: new Map() });
+  Object.assign(runtime.variants, { modelArrayParameterVariantByEntityId: new Map() });
+  Object.assign(runtime.effects, { poiEffectRuntime: { getEntityArraySource: () => null } });
+  Object.assign(runtime.transforms, { entityArrayPreview: null, compositionArrayPreview: null });
   return { runtime, scene, engine, a, b, entities, transform, dispose() { runtime.clearEntityArrayPreview(); scene.dispose(); engine.dispose(); } };
 }
 
@@ -61,7 +72,7 @@ test('whole composition span covers all independent world transforms and all six
     f.b.rotation.y = Math.PI / 2; f.b.scaling.x = 2;
     assert.ok(Math.abs(f.runtime.getEntityArrayGeometry('group', { x: 1, y: 0, z: 0 }).spanMeters - 7) < 1e-6);
     assert.ok(Math.abs(f.runtime.getEntityArrayGeometry('group', { x: 0, y: 0, z: 1 }).spanMeters - 8) < 1e-6);
-    f.runtime.meshes.delete('b');
+    f.runtime.presentation.meshes.delete('b');
     assert.equal(f.runtime.getEntityArrayGeometry('group', { x: 1, y: 0, z: 0 }), null);
   } finally { f.dispose(); }
 });
@@ -85,14 +96,14 @@ test('composition matrix preview places both members at whole-group offsets with
 test('composition includes existing matrix model instance at its own world transform', () => {
   const f = fixture();
   try {
-    f.runtime.meshes.delete('b'); f.b.dispose();
+    f.runtime.presentation.meshes.delete('b'); f.b.dispose();
     const sourceRoot = new TransformNode('source', f.scene);
     const contentRoot = new TransformNode('content', f.scene); contentRoot.parent = sourceRoot;
     const mesh = MeshBuilder.CreateBox('model', { width: 4, height: 2, depth: 2 }, f.scene); mesh.parent = contentRoot;
     f.entities.b.components = { transform: f.transform(5), modelAsset: {}, modelArrayInstance: { sourceEntityId: 'outside' } };
     f.entities.outside = { id: 'outside', name: 'outside', parentId: null, childrenIds: [], components: { transform: f.transform(), modelAsset: {} } };
-    f.runtime.modelArrayInstanceEntities.set('b', f.entities.b);
-    f.runtime.models.set('outside', { root: sourceRoot, contentRoot, meshes: [mesh], assetHandle: {}, measurementReady: true, modelArraySuspendedMeshes: new Set() });
+    f.runtime.arrays.modelArrayInstanceEntities.set('b', f.entities.b);
+    f.runtime.assets.models.set('outside', { root: sourceRoot, contentRoot, meshes: [mesh], assetHandle: {}, measurementReady: true, modelArraySuspendedMeshes: new Set() });
     assert.equal(f.runtime.getEntityArrayGeometry('group', { x: 1, y: 0, z: 0 })?.spanMeters, 8);
     assert.equal(f.runtime.updateEntityArrayPreview('group', { x: -1, y: 0, z: 0 }, 1, 0), true);
     const batch = f.scene.meshes.find(m => m !== f.a && m !== mesh && m.thinInstanceCount > 0 && m.thinInstanceGetWorldMatrices()[0].getTranslation().x === -3);
@@ -108,8 +119,8 @@ test('bound locator fill and wire frame participate in preview without releasing
     const edgeLines = MeshBuilder.CreateLines('edge', { points: [new Vector3(-1, 0, 0), new Vector3(1, 0, 0)] }, f.scene); edgeLines.parent = root;
     f.entities.group.childrenIds.push('locator');
     f.entities.locator = { id: 'locator', name: 'locator', parentId: 'group', childrenIds: [], components: { transform: f.transform(), locator: {} } };
-    f.runtime.shadowDocument.entityIds.push('locator');
-    f.runtime.locators.set('locator', { root, fillMesh, edgeLines });
+    f.runtime.document.shadowDocument.entityIds.push('locator');
+    f.runtime.locators.locators.set('locator', { root, fillMesh, edgeLines });
     const material = edgeLines.material;
     assert.equal(f.runtime.updateEntityArrayPreview('group', { x: 1, y: 0, z: 0 }, 1, 0), true);
     assert.equal(f.scene.meshes.filter(m => m.thinInstanceCount > 0).length, 4);

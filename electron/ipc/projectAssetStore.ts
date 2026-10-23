@@ -52,6 +52,10 @@ const PROJECT_ASSET_INDEX_ERROR = '项目资产索引格式不正确。';
 
 let currentProjectRoot: string | null = null;
 let projectSessionGeneration = 0;
+
+/** 后台任务绑定工程会话，关闭后重开同一路径也不允许旧任务提交。 */
+export function getProjectSessionGeneration(): number { return projectSessionGeneration; }
+
 let sharedProjectAssetRoot: string | null = null;
 let sharedProjectSkyboxRoot: string | null = null;
 let sharedProjectEnvironmentRoot: string | null = null;
@@ -727,6 +731,7 @@ function getProjectAssetLibraryRoot(projectRoot: string, libraryKind: ModelAsset
 
 /** 授权普通模型、环境模型与天空盒三个项目资产目录。 */
 function authorizeProjectAssetRoots(projectRoot: string): void {
+  authorizeAssetRoot(path.join(projectRoot, 'Assets', 'LightingBakes'));
   authorizeAssetRoot(path.join(projectRoot, 'Assets', 'OpeningPackages'));
   authorizeAssetRoot(path.join(projectRoot, 'Assets', 'OpeningAssets'));
   authorizeAssetRoot(path.join(projectRoot, 'Assets', 'Compositions'));
@@ -768,7 +773,7 @@ export async function readProjectAssetIndex(projectRoot: string): Promise<Projec
     }
 
     if (error instanceof SyntaxError) {
-      throw new Error(PROJECT_ASSET_INDEX_ERROR);
+      throw new Error(PROJECT_ASSET_INDEX_ERROR, { cause: error });
     }
 
     throw error;
@@ -1128,7 +1133,7 @@ export async function importEnvironmentModelFileIntoProject(
 
     if (rollbackErrors.length > 0) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}；环境导入回滚不完整：${rollbackErrors.join('；')}`);
+      throw new Error(`${message}；环境导入回滚不完整：${rollbackErrors.join('；')}`, { cause: error });
     }
 
     throw error;

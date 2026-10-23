@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test, { after, beforeEach } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
-const server = await createServer({ configFile: false, appType: 'custom',
-  server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true },
-  ssr: { noExternal: ['@linkiez/dxf-renew'] } });
+const server = await createP4SsrTestModules([
+  '/src/editor/store/editorStore.ts',
+  '/src/editor/model/SceneDocument.ts',
+  '/src/editor/project/SceneSerializer.ts',
+]);
 after(() => server.close());
 const { useEditorStore } = await server.ssrLoadModule('/src/editor/store/editorStore.ts');
 const { createEmptySceneDocument } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');

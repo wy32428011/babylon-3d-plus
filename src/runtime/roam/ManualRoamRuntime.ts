@@ -1,22 +1,19 @@
-import '@babylonjs/loaders';
-import {
-  AbstractMesh,
-  type AnimationGroup,
-  ArcRotateCamera,
-  Camera,
-  Color3,
-  Engine,
-  Mesh,
-  MeshBuilder,
-  type Nullable,
-  type Observer,
-  Ray,
-  Scene,
-  SceneLoader,
-  StandardMaterial,
-  TransformNode,
-  Vector3,
-} from '@babylonjs/core';
+import '../babylon/babylonSideEffects.js';
+import '../babylon/babylonGltfLoader.js';
+import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Ray } from '@babylonjs/core/Culling/ray.js';
+import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import type { AnimationGroup, Nullable, Observer } from '@babylonjs/core';
 import { resolveDefaultManualRoamAvatarUrl, resolveManualRoamMotionUrls } from '../assets/manualRoamAvatarAsset';
 import { ManualRoamAvatarAnimator } from './ManualRoamAvatarAnimator';
 import { getManualRoamRigProfile, MANUAL_ROAM_RIG_PROFILE_V2 } from './manualRoamAvatarRig';

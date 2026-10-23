@@ -1,3 +1,4 @@
+import { containsAsciiControlCharacters, replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { ZipArchive } from 'archiver';
 import {
   app,
@@ -40,6 +41,7 @@ import {
   createAssetManifestContent,
   prepareDeploymentExport,
 } from './deploymentExportScene.js';
+import { writePrecompiledDeploymentScripts } from './deploymentPrecompiledScripts.js';
 
 const EXPORT_START_CHANNEL = 'deployment-export:start';
 const EXPORT_CANCEL_CHANNEL = 'deployment-export:cancel';
@@ -193,8 +195,8 @@ async function runDeploymentExport(
     throwIfDeploymentExportAborted(signal);
 
     await fs.mkdir(destination.stagingPath, { recursive: false });
-    const totalFiles = templateFiles.length + prepared.assetFiles.length;
-    const totalBytes = sumFileBytes([...templateFiles, ...prepared.assetFiles]);
+    let totalFiles = templateFiles.length + prepared.assetFiles.length;
+    let totalBytes = sumFileBytes([...templateFiles, ...prepared.assetFiles]);
     let copiedBaseFiles = 0;
     let copiedBaseBytes = 0;
 
@@ -227,6 +229,9 @@ async function runDeploymentExport(
       },
     );
 
+    copiedAssets.push(...await writePrecompiledDeploymentScripts(destination.stagingPath, prepared.precompiledScripts, copiedAssets, signal));
+    totalFiles = templateFiles.length + copiedAssets.length;
+    totalBytes = sumFileBytes([...templateFiles, ...copiedAssets]);
     emitProgress('write-metadata', '正在生成场景、运行配置和资产清单…', 80, totalFiles, totalFiles, totalBytes, totalBytes);
     await writeGeneratedDeploymentFiles(destination.stagingPath, prepared, copiedAssets, signal);
 
@@ -340,7 +345,7 @@ function validateDeploymentExportRequest(request: DeploymentExportRequest): Depl
   const requestId = validateRequestId(request.requestId);
   if (typeof request.suggestedName !== 'string') throw new Error('导出工程名称格式不正确。');
   const name = request.suggestedName.trim();
-  if (!name || name.length > 128 || /[\u0000-\u001f]/.test(name)) throw new Error('导出工程名称必须是 1 到 128 个有效字符。');
+  if (!name || name.length > 128 || containsAsciiControlCharacters(name)) throw new Error('导出工程名称必须是 1 到 128 个有效字符。');
   if (request.format !== 'directory' && request.format !== 'zip') throw new Error('导出格式只支持 directory 或 zip。');
   if (typeof request.sceneContent !== 'string' || !request.sceneContent) throw new Error('导出场景内容不能为空。');
   if (Buffer.byteLength(request.sceneContent, 'utf8') > MAX_REQUEST_CONTENT_BYTES) {
@@ -428,9 +433,8 @@ async function createUniqueDirectoryPath(parentPath: string, baseName: string): 
 
 /** 将用户工程名转换为兼容 Windows 的文件名片段。 */
 function createSafeExportFileName(name: string): string {
-  let safeName = name
-    .normalize('NFKC')
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  let safeName = replaceAsciiControlCharacters(name
+    .normalize('NFKC'), '_').replace(/[<>:"/\\|?*]/g, '_')
     .trim()
     .replace(/[. ]+$/g, '')
     .slice(0, 80);

@@ -3,10 +3,16 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 test('场景准备期间拦截编辑器全局快捷键和场景视图键盘操作', async () => {
-  const [layoutSource, sceneViewSource] = await Promise.all([
+  const [layoutSource, sceneViewPanelSource, keyboardSource] = await Promise.all([
     readFile(new URL('../../src/editor/layout/EditorLayout.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../../src/editor/panels/SceneViewPanel.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../../src/editor/panels/scene-view/useSceneKeyboardShortcuts.ts', import.meta.url), 'utf8'),
   ]);
+
+  // 快捷键实现已迁入 hook，同时校验真实视口接线，避免读取一份未使用的辅助实现。
+  assert.match(sceneViewPanelSource, /useSceneKeyboardShortcuts\(\{/);
+  assert.match(keyboardSource, /export function useSceneKeyboardShortcuts/);
+  const sceneViewSource = keyboardSource;
 
   assert.match(layoutSource, /isScenePreparationActive\(\)/);
   assert.match(

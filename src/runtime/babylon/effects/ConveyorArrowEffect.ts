@@ -1,4 +1,9 @@
-import { Color3, Constants, Mesh, MeshBuilder, ShaderMaterial, type Scene, type TransformNode } from '@babylonjs/core';
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
+import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import type { Scene, TransformNode } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { isConveyorArrowEffectKind, sanitizeConveyorArrowEffect } from '../../../editor/model/conveyorArrowEffect';
 import { CONVEYOR_ARROW_GLSL, CONVEYOR_ARROW_STYLE_IDS } from './ConveyorArrowShaders';

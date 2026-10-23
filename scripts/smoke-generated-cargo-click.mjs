@@ -218,7 +218,7 @@ try {
   runtime.beginTelemetryPreview();
 
   // 1. 按货箱模板生成输出，挂在承载设备的货物支撑点下
-  const generatorEntry = runtime.modelGenerators.get(GENERATOR_ENTITY_ID);
+  const generatorEntry = runtime.outputs.modelGenerators.get(GENERATOR_ENTITY_ID);
   assert.ok(generatorEntry, '模型生成器必须注册运行时条目');
   const cargoRoot = new TransformNode('smoke-cargo-root', scene);
   const snapshot = {
@@ -240,7 +240,7 @@ try {
     axialLengthCache: null,
     lockedWorldRotation: null,
   };
-  runtime.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, generatorEntry, HOST_ENTITY_ID);
+  runtime.outputs.syncGeneratedCargoVisual(cargo, 'conveyor', snapshot, generatorEntry, HOST_ENTITY_ID);
   assert.equal(cargo.hostEntityId, HOST_ENTITY_ID, '货物条目必须记录承运宿主实体');
 
   const cargoModel = await waitFor(() => {
@@ -325,7 +325,7 @@ try {
       },
     },
   };
-  const compositionGeneratorEntry = runtime.modelGenerators.get(COMPOSITION_GENERATOR_ENTITY_ID);
+  const compositionGeneratorEntry = runtime.outputs.modelGenerators.get(COMPOSITION_GENERATOR_ENTITY_ID);
   assert.ok(compositionGeneratorEntry, '组合生成器必须注册运行时条目');
   const compCargoRoot = new TransformNode('smoke-comp-cargo-root', scene);
   const compCargo = {
@@ -340,7 +340,7 @@ try {
     axialLengthCache: null,
     lockedWorldRotation: null,
   };
-  runtime.syncGeneratedCargoVisual(compCargo, 'conveyor', snapshot, compositionGeneratorEntry, HOST_ENTITY_ID);
+  runtime.outputs.syncGeneratedCargoVisual(compCargo, 'conveyor', snapshot, compositionGeneratorEntry, HOST_ENTITY_ID);
   const compOutput = await waitFor(() => {
     const output = compCargo.outputOwner?.output;
     return output?.kind === 'composition' ? output : null;

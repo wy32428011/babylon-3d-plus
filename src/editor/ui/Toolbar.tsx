@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react';
 import type {
   CameraOrientation,
   CameraProjection,
@@ -162,6 +162,7 @@ type ToolbarProps = {
   digitalTwinPublishBusy: boolean;
   digitalTwinPublishProgress: DigitalTwinPublishProgress | null;
   onOpenDeploymentExport: () => void;
+  onOpenLightingManager?: () => void;
   deploymentExportStatus: DeploymentExportStatus;
   deploymentExportProgress: DeploymentExportViewProgress | null;
   deploymentExportBusy: boolean;
@@ -245,6 +246,35 @@ export function Toolbar(props: ToolbarProps) {
     mqttRuntimeStatusStore.getSnapshot,
   );
 
+  const { onCloseMqttConfig } = props;
+  /** 将当前测试的物理清理串行化，供字段变化后的快速重测等待。 */
+  const queueMqttConnectionTestCancellation = useCallback((): Promise<void> => {
+    const previousHandle = mqttConnectionTestHandleRef.current;
+    mqttConnectionTestHandleRef.current = null;
+    if (!previousHandle) return mqttConnectionTestCleanupRef.current;
+
+    const previousCleanup = mqttConnectionTestCleanupRef.current;
+    const cleanup = (async () => {
+      await previousCleanup;
+      await previousHandle.cancel();
+    })();
+    mqttConnectionTestCleanupRef.current = cleanup.catch(() => undefined);
+    return mqttConnectionTestCleanupRef.current;
+  }, []);
+
+  /** 取消旧连接测试并恢复未测试状态，防止延迟结果覆盖新草稿。 */
+  const resetMqttConnectionTest = useCallback((): void => {
+    mqttConnectionTestGenerationRef.current += 1;
+    void queueMqttConnectionTestCancellation();
+    setMqttConnectionTestState(MQTT_CONNECTION_TEST_IDLE);
+  }, [queueMqttConnectionTestCancellation]);
+
+  /** 关闭弹窗前取消临时连接，保证遮罩、Esc、取消和保存路径行为一致。 */
+  const handleCloseMqttConfigDialog = useCallback((): void => {
+    resetMqttConnectionTest();
+    onCloseMqttConfig();
+  }, [onCloseMqttConfig, resetMqttConnectionTest]);
+
   useEffect(() => {
     if (props.mqttConfigDialogOpen) {
       resetMqttConnectionTest();
@@ -258,12 +288,12 @@ export function Toolbar(props: ToolbarProps) {
       setPreviewResult(null);
       setPreviewError('');
     }
-  }, [props.mqttConfig, props.mqttConfigDialogOpen]);
+  }, [props.mqttConfig, props.mqttConfigDialogOpen, resetMqttConnectionTest]);
 
   useEffect(() => () => {
     mqttConnectionTestGenerationRef.current += 1;
     void queueMqttConnectionTestCancellation();
-  }, []);
+  }, [queueMqttConnectionTestCancellation]);
 
   useEffect(() => {
     if (!props.mqttConfigDialogOpen) return;
@@ -275,7 +305,7 @@ export function Toolbar(props: ToolbarProps) {
 
     window.addEventListener('keydown', handleWindowKeyDown);
     return () => window.removeEventListener('keydown', handleWindowKeyDown);
-  }, [props]);
+  }, [handleCloseMqttConfigDialog, props.mqttConfigDialogOpen]);
 
   /** 将数字输入转为有效吸附步长，非法输入交由 store 保持原值。 */
   function handleSnapSettingChange(key: TransformSnapSettingKey, rawValue: string): void {
@@ -331,33 +361,6 @@ export function Toolbar(props: ToolbarProps) {
     }));
   }
 
-  /** 将当前测试的物理清理串行化，供字段变化后的快速重测等待。 */
-  function queueMqttConnectionTestCancellation(): Promise<void> {
-    const previousHandle = mqttConnectionTestHandleRef.current;
-    mqttConnectionTestHandleRef.current = null;
-    if (!previousHandle) return mqttConnectionTestCleanupRef.current;
-
-    const previousCleanup = mqttConnectionTestCleanupRef.current;
-    const cleanup = (async () => {
-      await previousCleanup;
-      await previousHandle.cancel();
-    })();
-    mqttConnectionTestCleanupRef.current = cleanup.catch(() => undefined);
-    return mqttConnectionTestCleanupRef.current;
-  }
-
-  /** 取消旧连接测试并恢复未测试状态，防止延迟结果覆盖新草稿。 */
-  function resetMqttConnectionTest(): void {
-    mqttConnectionTestGenerationRef.current += 1;
-    void queueMqttConnectionTestCancellation();
-    setMqttConnectionTestState(MQTT_CONNECTION_TEST_IDLE);
-  }
-
-  /** 关闭弹窗前取消临时连接，保证遮罩、Esc、取消和保存路径行为一致。 */
-  function handleCloseMqttConfigDialog(): void {
-    resetMqttConnectionTest();
-    props.onCloseMqttConfig();
-  }
 
   /** 使用未保存草稿测试 Broker 会话与全部有效 Topic 的 SUBACK。 */
   async function handleTestMqttConnection(): Promise<void> {
@@ -728,6 +731,13 @@ export function Toolbar(props: ToolbarProps) {
         label={props.sceneFullscreen ? '退出全屏 (F11)' : '全屏显示场景 (F11)'}
         onClick={props.onToggleSceneFullscreen}
       />
+      {props.onOpenLightingManager && <ToolbarIconButton
+        icon={<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+          <circle cx="12" cy="12" r="4" /><path d="M12 1v3m0 16v3M1 12h3m16 0h3M4.2 4.2l2.1 2.1m11.4 11.4 2.1 2.1m0-15.6-2.1 2.1M6.3 17.7l-2.1 2.1" />
+        </svg>}
+        label="光照与烘焙管理器"
+        onClick={props.onOpenLightingManager}
+      />}
       <ToolbarIconButton
         disabled={props.readOnly || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy}
         icon={TOOLBAR_ICONS.cad}

@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 test('CAD 任务进度提供取消按钮，失败状态保留可关闭的错误说明', async () => {
-  const server = await createServer({ configFile: false, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
+  const server = await createP4SsrTestModules([
+    '/src/editor/deployment/ToolbarTaskProgress.tsx',
+  ]);
   try {
     const { ToolbarTaskProgress } = await server.ssrLoadModule('/src/editor/deployment/ToolbarTaskProgress.tsx');
     const active = renderToStaticMarkup(createElement(ToolbarTaskProgress, { label: '解析 CAD', percent: 31, detail: '正在扫描', onCancel() {} }));

@@ -1,3 +1,4 @@
+import { containsAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -594,7 +595,7 @@ function normalizeRequiredText(value: unknown, label: string, maxLength: number)
 function normalizeOptionalText(value: unknown, maxLength = 1024): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim();
-  if (!normalized || normalized.length > maxLength || /[\x00-\x1f]/.test(normalized)) return undefined;
+  if (!normalized || normalized.length > maxLength || containsAsciiControlCharacters(normalized)) return undefined;
   return normalized;
 }
 
@@ -633,7 +634,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
       } catch (rollbackError) {
         const originalMessage = error instanceof Error ? error.message : String(error);
         const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
-        throw new Error(`替换图表索引失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`);
+        throw new Error(`替换图表索引失败且旧文件回滚失败：${originalMessage}；旧文件保留在 ${backupPath}；回滚错误：${rollbackMessage}`, { cause: rollbackError });
       }
     }
     throw error;

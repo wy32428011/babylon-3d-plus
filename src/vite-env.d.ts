@@ -610,6 +610,10 @@ type DeploymentExportRevealRequest = {
 };
 interface Window {
   editorApi: {
+    startLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput) => Promise<import('../electron/shared/sceneLightingBakeContract').SceneLightingBakeSnapshot>;
+    cancelLightingBake: (jobId: string) => Promise<boolean>;
+    getLightingBakeEngineStatus: () => Promise<import('../electron/shared/sceneLightingBakeContract').LightingBakeEngineStatus>;
+    onLightingBakeProgress: (handler: (progress: import('../electron/shared/sceneLightingBakeContract').LightingBakeProgress) => void) => (() => void);
     loadComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['loadComposition'];
     listCompositions: import('../electron/shared/compositionTypes').CompositionLibraryApi['listCompositions'];
     saveComposition: import('../electron/shared/compositionTypes').CompositionLibraryApi['saveComposition'];

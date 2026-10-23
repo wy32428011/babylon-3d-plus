@@ -12,7 +12,8 @@ type Props = {
 export function ConveyorSurfaceArrowDirectionInspector(props: Props) {
   const [draft, setDraft] = useState<DirectionBinding>(() => ({ ...props.value }));
   const savedSignature = JSON.stringify(props.value);
-  useEffect(() => { setDraft({ ...props.value }); }, [savedSignature]);
+  // 仅已保存内容变化时覆盖草稿；同内容的新 props 对象不丢失未应用输入。
+  useEffect(() => { setDraft(JSON.parse(savedSignature) as DirectionBinding); }, [savedSignature]);
   const error = getConveyorSurfaceArrowDirectionError(draft);
   const changed = JSON.stringify(draft) !== savedSignature;
 

@@ -50,7 +50,7 @@ async function loadSceneRuntimeModule(server) {
 /** 读取模型当前使用的选择效果，避免只检查颜色而漏掉高亮管线差异。 */
 function readSelectionMode(runtime, mesh) {
   const usesHighlightLayer = runtime.modelHighlightLayer?.hasMesh(mesh) ?? false;
-  const usesSelectionOutline = runtime.modelSelectionOutlineLayer.hasMesh(mesh);
+  const usesSelectionOutline = runtime.selection.modelSelectionOutlineLayer.hasMesh(mesh);
   if (usesHighlightLayer && !usesSelectionOutline) return 'highlight-layer';
   if (!usesHighlightLayer && usesSelectionOutline) return 'selection-outline';
   if (usesHighlightLayer && usesSelectionOutline) return 'mixed';
@@ -70,10 +70,10 @@ function createSelectionFixtureModel(mesh, assetKind) {
 
 /** 通过 SceneRuntime 的真实选择分流返回单个场景模型的高亮模式。 */
 function selectFixtureModel(runtime, entityId, model) {
-  runtime.models.set(entityId, model);
-  runtime.selectedEntityIds = new Set([entityId]);
-  runtime.applyModelSelection(model, true);
-  runtime.rebuildModelSelectionOutline();
+  runtime.assets.models.set(entityId, model);
+  runtime.selection.selectedEntityIds = new Set([entityId]);
+  runtime.selection.applyModelSelection(model, true);
+  runtime.selection.rebuildModelSelectionOutline();
   return readSelectionMode(runtime, model.meshes[0]);
 }
 
@@ -168,10 +168,10 @@ try {
     const draggedModel = createSelectionFixtureModel(draggedMesh, 'owned-container');
     const draggedSelectionMode = selectFixtureModel(runtime, 'dragged-model', draggedModel);
 
-    runtime.applyModelSelection(draggedModel, false);
-    runtime.models.clear();
-    runtime.selectedEntityIds = new Set();
-    runtime.rebuildModelSelectionOutline();
+    runtime.selection.applyModelSelection(draggedModel, false);
+    runtime.assets.models.clear();
+    runtime.selection.selectedEntityIds = new Set();
+    runtime.selection.rebuildModelSelectionOutline();
 
     const copiedMesh = MeshBuilder.CreateBox('copied-model', {}, scene);
     const copiedModel = createSelectionFixtureModel(copiedMesh, 'shared-instance');
@@ -184,7 +184,7 @@ try {
       '拖入场景的普通模型必须与复制/阵列后的模型使用相同高亮模式',
     );
   } finally {
-    runtime.models.clear();
+    runtime.assets.models.clear();
     runtime.dispose();
     scene.dispose();
     engine.dispose();

@@ -1,4 +1,4 @@
-import { getClickEventModelResourceKey } from './clickEventModelIdentity.js';
+import { getClickEventModelResourceKey } from './clickEventModelIdentity.ts';
 import type { DataPlatformModelIdentity } from './sceneModelUpdatePlan.js';
 
 type ModelSource = { sourcePath?: unknown; sourceUrl?: unknown; dataPlatformModel?: DataPlatformModelIdentity };

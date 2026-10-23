@@ -51,7 +51,7 @@ function deferred<T>() {
 }
 
 for (const channel of ['scene:load', 'scene:loadFile']) {
-  for (const phase of channel === 'scene:load' ? ['dialog', 'read', 'prepare'] : ['read', 'prepare']) {
+  for (const phase of channel === 'scene:load' ? ['dialog', 'read', 'opening', 'lighting'] : ['read', 'opening', 'lighting']) {
     test(channel + ' 在 ' + phase + ' 等待期间开始发布时不得授权或暂存迟到场景', { timeout: 10000 }, async () => {
       let publishing = false;
       const entered = deferred<void>();
@@ -65,27 +65,38 @@ for (const channel of ['scene:load', 'scene:loadFile']) {
       const context: Record<string, unknown> = {
         isDigitalTwinPublishActive: () => publishing,
         beginScenePublishScopeUpdate: () => 42,
+        getScenePublishScope: () => ({ generation: 0 }),
         dialog: { showOpenDialog: async () => { await boundary('dialog'); return { canceled: false, filePaths: ['scene.scene.json'] }; } },
         validateLoadSceneFileRequest: (value: unknown) => value,
         assertRecentSceneFile: async () => 'scene.scene.json',
         readUtf8File: async () => { await boundary('read'); return '{"scene":"original"}'; },
         prepareOpeningSceneContent: async (content: string, path: string) => {
           assert.equal(content, '{"scene":"original"}'); assert.equal(path, 'scene.scene.json');
-          await boundary('prepare'); return '{"scene":"prepared"}';
+          await boundary('opening'); return '{"scene":"opening"}';
         },
+        prepareLightingSceneContent: async (content: string, path: string) => {
+          assert.equal(content, '{"scene":"opening"}'); assert.equal(path, 'scene.scene.json');
+          await boundary('lighting'); return { content: '{"scene":"prepared"}', files: ['lighting.bin'] };
+        },
+        getCurrentProjectRoot: () => null, isAuthorizedAssetFile: () => false,
+        authorizeAssetFile: () => effects.push('lighting-authorize'),
         authorizeSceneFile: () => effects.push('authorize'),
         authorizeModelAssetsFromSceneContent: () => effects.push('model-authorize'),
         rememberRecentSceneFile: async () => { effects.push('recent'); },
         stageScenePublishScopeFile: () => { effects.push('staged'); return true; },
       };
       context.assertSceneSwitchAllowed = fn(0, 'assertSceneSwitchAllowed', context);
+      context.prepareSceneResourceContent = fn(0, 'prepareSceneResourceContent', context);
       const pending = handler(0, channel, context)({}, { filePath: 'scene.scene.json' });
       // 同时观察任务提前结束；VM 缺依赖等错误必须立即失败，不能无限等待门闩。
       await Promise.race([entered.promise, pending.then(() => assert.fail('尚未进入等待点即返回'))]);
       const rejected = assert.rejects(pending, /发布|恢复/);
       publishing = true; gate.resolve(); await rejected;
       assert.deepEqual(effects, []);
-      assert.deepEqual(steps, phase === 'dialog' ? ['dialog'] : channel === 'scene:load' ? ['dialog', 'read', 'prepare'] : ['read', 'prepare']);
+      const expectedSteps = phase === 'dialog' ? ['dialog'] : [
+        ...(channel === 'scene:load' ? ['dialog'] : []), 'read', 'opening', ...(phase === 'lighting' ? ['lighting'] : []),
+      ];
+      assert.deepEqual(steps, expectedSteps);
     });
   }
 }
@@ -93,26 +104,34 @@ for (const channel of ['scene:load', 'scene:loadFile']) {
 test('各异步打开边界关闭会话后，真实发布归属拒绝迟到 token', { timeout: 10000 }, async () => {
   const scopeSource = await readFile(new URL('../../electron/ipc/scenePublishScope.ts', import.meta.url), 'utf8');
   for (const channel of ['scene:load', 'scene:loadFile']) {
-    for (const phase of channel === 'scene:load' ? ['dialog', 'read', 'prepare'] : ['read', 'prepare']) {
+    for (const phase of channel === 'scene:load' ? ['dialog', 'read', 'opening', 'lighting'] : ['read', 'opening', 'lighting']) {
       // 使用真实 token/暂存/重置实现；磁盘与资源准备只提供可控异步边界。
       const scope = evaluate('(() => {' + scopeSource.replace(/^import .*$/gm, '').replace(/^export /gm, '')
         + '; return { beginScenePublishScopeUpdate, resetScenePublishScope, stageScenePublishScopeFile, getScenePublishScope, confirmScenePublishScopeFile }; })()', {});
       const gate = deferred<void>(); const entered = deferred<void>();
       const boundary = async (name: string) => { if (name === phase) { entered.resolve(); await gate.promise; } };
       const staged: boolean[] = [];
+      const effects: string[] = [];
       const context: Record<string, unknown> = {
         isDigitalTwinPublishActive: () => false,
         beginScenePublishScopeUpdate: scope.beginScenePublishScopeUpdate,
+        getScenePublishScope: scope.getScenePublishScope,
         stageScenePublishScopeFile: (token: number, path: string) => {
           const result = scope.stageScenePublishScopeFile(token, path); staged.push(result); return result;
         },
         dialog: { showOpenDialog: async () => { await boundary('dialog'); return { canceled: false, filePaths: ['scene.scene.json'] }; } },
         validateLoadSceneFileRequest: (value: unknown) => value, assertRecentSceneFile: async () => 'scene.scene.json',
         readUtf8File: async () => { await boundary('read'); return '{}'; },
-        prepareOpeningSceneContent: async () => { await boundary('prepare'); return '{}'; },
-        authorizeSceneFile() {}, authorizeModelAssetsFromSceneContent() {}, rememberRecentSceneFile: async () => {},
+        prepareOpeningSceneContent: async () => { await boundary('opening'); return '{}'; },
+        prepareLightingSceneContent: async () => { await boundary('lighting'); return { content: '{}', files: ['lighting.bin'] }; },
+        getCurrentProjectRoot: () => null, isAuthorizedAssetFile: () => false,
+        authorizeAssetFile: () => effects.push('lighting-authorize'),
+        authorizeSceneFile: () => effects.push('scene-authorize'),
+        authorizeModelAssetsFromSceneContent: () => effects.push('model-authorize'),
+        rememberRecentSceneFile: async () => { effects.push('recent'); },
       };
       context.assertSceneSwitchAllowed = fn(0, 'assertSceneSwitchAllowed', context);
+      context.prepareSceneResourceContent = fn(0, 'prepareSceneResourceContent', context);
       const pending = handler(0, channel, context)({}, { filePath: 'scene.scene.json' });
       await Promise.race([entered.promise, pending.then(() => assert.fail('尚未进入等待点即返回'))]);
       await handler(1, 'data-platform:closeProject', {
@@ -124,12 +143,48 @@ test('各异步打开边界关闭会话后，真实发布归属拒绝迟到 toke
       })();
       gate.resolve();
       assert.deepEqual({ ...await pending }, { canceled: true, filePath: null, content: null }, channel + ':' + phase);
-      assert.deepEqual(staged, [false]);
+      assert.deepEqual(staged, []);
+      assert.deepEqual(effects, [], channel + ':' + phase);
       assert.equal(scope.getScenePublishScope().kind, 'unspecified');
       assert.equal(await scope.confirmScenePublishScopeFile(1), false);
     }
   }
 });
+
+for (const channel of ['scene:load', 'scene:loadFile']) {
+  test(channel + ' 正常打开时完整准备并授权资源，保留场景内容和暂存 token', async () => {
+    const effects: string[] = [];
+    const context: Record<string, unknown> = {
+      isDigitalTwinPublishActive: () => false,
+      beginScenePublishScopeUpdate: () => 42, getScenePublishScope: () => ({ generation: 0 }),
+      dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: ['scene.scene.json'] }) },
+      validateLoadSceneFileRequest: (value: unknown) => value, assertRecentSceneFile: async () => 'scene.scene.json',
+      readUtf8File: async () => '{"scene":"original"}',
+      prepareOpeningSceneContent: async (content: string) => {
+        assert.equal(content, '{"scene":"original"}'); effects.push('opening'); return '{"scene":"opening"}';
+      },
+      prepareLightingSceneContent: async (content: string) => {
+        assert.equal(content, '{"scene":"opening"}'); effects.push('lighting');
+        return { content: '{"scene":"prepared"}', files: ['lighting.bin'] };
+      },
+      getCurrentProjectRoot: () => null, isAuthorizedAssetFile: () => false,
+      authorizeAssetFile: (file: string) => { assert.equal(file, 'lighting.bin'); effects.push('lighting-authorize'); },
+      authorizeSceneFile: () => effects.push('scene-authorize'),
+      authorizeModelAssetsFromSceneContent: (content: string) => {
+        assert.equal(content, '{"scene":"prepared"}'); effects.push('model-authorize');
+      },
+      rememberRecentSceneFile: async () => { effects.push('recent'); },
+      stageScenePublishScopeFile: (token: number, file: string) => {
+        assert.equal(token, 42); assert.equal(file, 'scene.scene.json'); effects.push('staged'); return true;
+      },
+    };
+    context.assertSceneSwitchAllowed = fn(0, 'assertSceneSwitchAllowed', context);
+    context.prepareSceneResourceContent = fn(0, 'prepareSceneResourceContent', context);
+    const result = await handler(0, channel, context)({}, { filePath: 'scene.scene.json' });
+    assert.deepEqual({ ...result }, { canceled: false, filePath: 'scene.scene.json', content: '{"scene":"prepared"}', sceneOpenToken: 42 });
+    assert.deepEqual(effects, ['opening', 'lighting', 'lighting-authorize', 'scene-authorize', 'model-authorize', 'recent', 'staged']);
+  });
+}
 
 test('确认 IPC 把发布检查传到归属最终提交边界', async () => {
   let publishing = false; let resume!: () => void; let committed = false;

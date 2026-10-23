@@ -1,32 +1,32 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 import type { AbstractEngine, Camera } from '@babylonjs/core';
-import { createSceneCameraPose } from '../../src/editor/model/autoPatrolInspection.ts';
 import type {
   AutoPatrolInspectionEvent,
   AutoPatrolInspectionRecord,
   AutoPatrolInspectionTrajectorySample,
 } from '../../src/runtime/babylon/AutoPatrolPlaybackController.ts';
-import {
-  AutoPatrolInspectionRecordStore,
-  MemoryAutoPatrolInspectionBackend,
-} from '../../src/runtime/patrol/AutoPatrolInspectionRecordStore.ts';
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
+const viteServer = await createP4SsrTestModules([
+  '/src/runtime/patrol/AutoPatrolRuntimeIntegration.ts',
+  '/src/runtime/patrol/AutoPatrolInspectionRecordStore.ts',
+  '/src/editor/model/autoPatrolInspection.ts',
+]);
+after(async () => {
+  await viteServer.close();
 });
+const { AutoPatrolInspectionRecordStore, MemoryAutoPatrolInspectionBackend } = await viteServer.ssrLoadModule(
+  '/src/runtime/patrol/AutoPatrolInspectionRecordStore.ts',
+) as typeof import('../../src/runtime/patrol/AutoPatrolInspectionRecordStore.ts');
+const { createSceneCameraPose } = await viteServer.ssrLoadModule(
+  '/src/editor/model/autoPatrolInspection.ts',
+) as typeof import('../../src/editor/model/autoPatrolInspection.ts');
 const { AutoPatrolRuntimeIntegration } = await viteServer.ssrLoadModule(
   '/src/runtime/patrol/AutoPatrolRuntimeIntegration.ts',
 ) as typeof import('../../src/runtime/patrol/AutoPatrolRuntimeIntegration.ts');
 
-after(async () => {
-  await viteServer.close();
-});
+
 
 test('异步截图始终写回事件触发时的巡检任务', async () => {
   const backend = new MemoryAutoPatrolInspectionBackend();
@@ -174,7 +174,7 @@ test('增量详情达到资源上限后最终记录仍会完成收尾', async ()
   recordStore.dispose();
 });
 
-test('底层截图超时后不会永久阻塞后续调用或并发堆积采集', async () => {
+test('底层截图超时后不会永久阻塞后续调用或并发堆积采集', async (context) => {
   const recordStore = new AutoPatrolInspectionRecordStore({
     backend: new MemoryAutoPatrolInspectionBackend(),
   });
@@ -196,6 +196,9 @@ test('底层截图超时后不会永久阻塞后续调用或并发堆积采集',
     },
   });
 
+  // 产品计时器刻意 unref；本用例自己持有既有 50ms 保护范围内的事件循环句柄。
+  const keepAlive = setTimeout(() => undefined, 50);
+  context.after(() => clearTimeout(keepAlive));
   await assert.rejects(integration.captureScreenshot(), /截图.*超时/);
   const skippedWhileNativeCaptureIsPending = await Promise.race([
     integration.captureScreenshot(),

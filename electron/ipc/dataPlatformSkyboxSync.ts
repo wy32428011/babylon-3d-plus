@@ -150,7 +150,6 @@ async function executeDataPlatformSkyboxSyncInternal(
   let completedDownloads = 0;
   let totalDownloads = 0;
   let stagingRoot: string | null = null;
-  let preserveStaging = false;
 
   updateSkyboxSyncProgress({
     runId,
@@ -300,7 +299,7 @@ async function executeDataPlatformSkyboxSyncInternal(
       error: null,
     });
   } catch (caughtError) {
-    preserveStaging = caughtError instanceof DataPlatformRollbackError;
+    const preserveStaging = caughtError instanceof DataPlatformRollbackError;
     let error = preserveStaging || !signal.aborted ? caughtError : createCanceledError();
     if (stagingRoot && !preserveStaging) {
       try {

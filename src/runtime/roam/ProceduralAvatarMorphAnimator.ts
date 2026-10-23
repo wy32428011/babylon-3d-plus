@@ -1,11 +1,8 @@
-import {
-  type AbstractMesh,
-  MorphTarget,
-  MorphTargetManager,
-  type Scene,
-  Vector3,
-  VertexBuffer,
-} from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { MorphTarget } from '@babylonjs/core/Morph/morphTarget.js';
+import { MorphTargetManager } from '@babylonjs/core/Morph/morphTargetManager.js';
+import type { AbstractMesh, Scene } from '@babylonjs/core';
 import {
   createConnectedLimbMask,
   createProceduralStrideTargets,

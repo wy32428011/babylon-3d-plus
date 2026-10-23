@@ -1,9 +1,6 @@
-import {
-  type AbstractMesh,
-  Matrix,
-  Mesh,
-  Vector3,
-} from '@babylonjs/core';
+import { Matrix } from '@babylonjs/core/Maths/math.vector.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import type { AbstractMesh } from '@babylonjs/core';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import { resolveManualRoamCollisionStyle } from './manualRoamCollisionPolicy.ts';
 

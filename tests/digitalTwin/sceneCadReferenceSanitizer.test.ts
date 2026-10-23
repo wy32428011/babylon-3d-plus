@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { stripCadReferencesFromSceneFile } from '../../electron/ipc/sceneCadReferenceSanitizer.ts';
+import { getSceneLightingBakeSignature } from '../../electron/shared/sceneLightingBakeContract.ts';
+import { normalizeSceneAppearanceConfig, normalizeSceneLightingConfig } from '../../electron/shared/sceneLightingConfig.ts';
 
 test('数字孪生发布快照剔除 CAD 组件并保留同一实体的其它组件', () => {
   const sceneFile = {
@@ -60,4 +62,29 @@ test('没有 CAD 组件的场景保持不变', () => {
 
   assert.equal(stripCadReferencesFromSceneFile(sceneFile), 0);
   assert.equal(JSON.stringify(sceneFile), snapshot);
+});
+
+test('仅移除CAD参考时迁移有效GI签名，混合真实模型的CAD实体不重新签名', () => {
+  const create = () => {
+    const scene: any = { entities: { cad: { components: { transform: { x: 1 }, cadReference: { sourcePath: 'layout.dxf' } } },
+      model: { components: { meshRenderer: { meshKind: 'cube' } } } }, sceneSettings: {
+      lighting: normalizeSceneLightingConfig({ version: 2 }), appearance: normalizeSceneAppearanceConfig({}) } };
+    scene.sceneSettings.lighting.result = { version: 1, signature: getSceneLightingBakeSignature(scene), createdAt: '2026-10-20T00:00:00Z', engineVersion: 'test',
+      assets: [{ id: 'g', kind: 'geometry', url: 'Assets/LightingBakes/job/g.json', byteLength: 1 },
+        { id: 'l', kind: 'lightmap', url: 'Assets/LightingBakes/job/l.png', byteLength: 1 },
+        { id: 'p', kind: 'probes', url: 'Assets/LightingBakes/job/p.json', byteLength: 1 }],
+      surfaces: [{ key: 'model/root', entityId: 'model', nodeKey: 'root', geometryAssetId: 'g', lightmapAssetId: 'l' }], probeAssetId: 'p',
+      statistics: { meshCount: 1, triangleCount: 1, atlasCount: 1, probeCount: 1, textureBytes: 1, durationMs: 1 } };
+    return { version: 5, scene };
+  };
+  const reference = create();
+  stripCadReferencesFromSceneFile(reference);
+  assert.equal(reference.scene.sceneSettings.lighting.result.signature, getSceneLightingBakeSignature(reference.scene));
+  const mixed = create();
+  mixed.scene.entities.cad.components.meshRenderer = { meshKind: 'cube' };
+  mixed.scene.sceneSettings.lighting.result.signature = getSceneLightingBakeSignature(mixed.scene);
+  const before = mixed.scene.sceneSettings.lighting.result.signature;
+  stripCadReferencesFromSceneFile(mixed);
+  assert.equal(mixed.scene.sceneSettings.lighting.result.signature, before);
+  assert.notEqual(before, getSceneLightingBakeSignature(mixed.scene));
 });

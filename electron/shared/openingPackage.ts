@@ -1,3 +1,4 @@
+import { containsAsciiControlCharactersOr } from './asciiControlCharacters.ts';
 /** 开场包仅声明数据和受支持的绘制能力，不包含可执行脚本。主进程与 Viewer 共用此协议。 */
 export type OpeningScalar = string | number | boolean;
 export type OpeningPoint = { x: number; y: number };
@@ -69,7 +70,7 @@ const color = (value: unknown) => typeof value === 'string' && /^#(?:[\da-f]{3}|
 const onlyKeys = (value: Record<string, unknown>, allowed: string[], label: string) => assert(Object.keys(value).every(key => allowed.includes(key)), `${label} 包含未支持的字段`);
 
 export function isSafeOpeningPackagePath(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length < 241 && !/[\\:%?#\x00-\x1f]/.test(value)
+  return typeof value === 'string' && value.length > 0 && value.length < 241 && !containsAsciiControlCharactersOr(value, "#%:?\\")
     && value.split('/').every(part => !!part && part !== '.' && part !== '..' && !/[. ]$/.test(part));
 }
 

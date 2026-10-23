@@ -83,7 +83,7 @@ export async function readDataPlatformModelIndex(editorRoot: string): Promise<Da
       return { version: DATA_PLATFORM_MODEL_INDEX_VERSION, sourceKey: '', entries: [] };
     }
     if (error instanceof SyntaxError) {
-      throw new Error(`数据中台模型同步索引 JSON 已损坏：${error.message}`);
+      throw new Error(`数据中台模型同步索引 JSON 已损坏：${error.message}`, { cause: error });
     }
     throw error;
   }

@@ -1,4 +1,6 @@
-import { Matrix, Vector3, VertexBuffer, type AbstractMesh, type AssetContainer, type TransformNode } from '@babylonjs/core';
+import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { AbstractMesh, AssetContainer, TransformNode } from '@babylonjs/core';
 
 export type ManualRoamSoleGeometry={points:Vector3[];sample:()=>Vector3[]};
 export type ManualRoamSoleOptions = { joints?: ReadonlyMap<string, TransformNode>; automatic?: boolean };

@@ -1,4 +1,5 @@
-import { Matrix, Quaternion, Vector3, type AssetContainer, type TransformNode } from '@babylonjs/core';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { AssetContainer, TransformNode } from '@babylonjs/core';
 import { measureManualRoamSole, type ManualRoamSoleGeometry } from './manualRoamSoleGeometry.ts';
 import { MANUAL_ROAM_MAX_STRIDE_SCALE } from './manualRoamAnimationState.ts';
 import { createManualRoamFootPhaseState, stepManualRoamFootPhase, type ManualRoamFootPhaseState } from './manualRoamFootPhase.ts';

@@ -29,8 +29,20 @@ const [{ focusArcRotateCameraViewOnBounds }, { ArcRotateCameraViewController },
 
 /** 从实际 UI 入口提取调用，避免测试另写一份聚焦参数而漏掉入口回归。 */
 function getFocusOptions(entry: 'preview' | 'viewer', cell = false, focusBounds?: unknown) {
-  const path = entry === 'preview' ? 'src/editor/panels/SceneViewPanel.tsx' : 'src/player/PlayerApp.tsx';
-  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let sourcePath = 'src/player/PlayerApp.tsx';
+  if (entry === 'preview') {
+    const panelPath = 'src/editor/panels/SceneViewPanel.tsx';
+    const panelText = readFileSync(panelPath, 'utf8');
+    const panel = ts.createSourceFile(panelPath, panelText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const hookImport = panel.statements.find(node => ts.isImportDeclaration(node)
+      && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+      && node.importClause.namedBindings.elements.some(binding => binding.name.text === 'useSceneSelectionHandlers'));
+    assert.ok(hookImport && ts.isImportDeclaration(hookImport) && ts.isStringLiteral(hookImport.moduleSpecifier), '预览拾取 Hook 必须由真实面板导入');
+    assert.match(panelText, /const \{[^}]*handleCanvasPointerUp[^}]*\} = useSceneSelectionHandlers\(/);
+    assert.match(panelText, /onPointerUp=\{handleCanvasPointerUp\}/, '实际 Canvas 必须消费此 Hook 的指针释放入口');
+    sourcePath = path.resolve(path.dirname(panelPath), hookImport.moduleSpecifier.text + '.ts');
+  }
+  const source = ts.createSourceFile(sourcePath, readFileSync(sourcePath, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let expression: string | undefined;
   function visit(node: ts.Node) {
     if (entry === 'preview' && ts.isCallExpression(node)

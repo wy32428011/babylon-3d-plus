@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 test('背景拖放通过同一图片登记表读取内置、同步网络和同步本地资源', async t => {
-  const server = await createServer({ configFile: false, logLevel: 'error', server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
+  const server = await createP4SsrTestModules([
+    '/src/editor/assets/chartMarkerBackground.ts',
+    '/src/assets/imageAssets.ts',
+    '/src/assets/syncedImageAssets.ts',
+  ]);
   t.after(() => server.close());
   const { loadChartMarkerLibraryBackground: load } = await server.ssrLoadModule('/src/editor/assets/chartMarkerBackground.ts');
   const { BUILT_IN_IMAGE_ASSETS } = await server.ssrLoadModule('/src/assets/imageAssets.ts');

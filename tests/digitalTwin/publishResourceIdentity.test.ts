@@ -169,6 +169,54 @@ test('精确映射验证目标身份及下载内容版本后返回替换，不�
   assert.equal(f.calls.length, beforeOrdinary, '后续常规模型恢复不得因缺少授权再次下载已校验的映射包');
 });
 
+test('version 6 经真实身份查询与精确映射恢复后模型就绪，业务字段和映射文件保持', async t => {
+  const f = await fixture(t), signal = new AbortController().signal;
+  const document = JSON.parse(content([{ id: '11', name: '六版设备' }]));
+  document.version = 6;
+  Object.assign(document.scene.entities.e0.components, { telemetryBinding: { enabled: false, field: 'speed', alias: '' },
+    transform: { position: { x: 0, y: 2, z: -3 } } });
+  document.scene.entities.e0.components.modelAsset.parameterValues = { height: 0, disabled: false, label: '' };
+  const sceneContent = JSON.stringify(document), originalBusiness = structuredClone(document.scene.entities.e0.components);
+  await identity.assertPublishResourceIdentities([sceneContent], f.baseUrl, signal);
+  assert.deepEqual(f.calls.map(call => [call.kind, call.id]), [['model', '11']]);
+  assert.equal(f.calls.some(call => call.kind === 'file'), false);
+  const seedRoot = path.join(f.root, 'seed-v6'); await fs.mkdir(seedRoot);
+  const [seed] = await sync.syncSceneDataPlatformModelAssets({ baseUrl: f.baseUrl, sharedResourcesRoot: seedRoot,
+    resources: [{ kind: 'model', resourceId: '101' }], signal });
+  assert.ok(seed.assetRevision);
+  const mappingFile = await f.writeMappings([f.entry({ targetRevision: seed.assetRevision })]);
+  const mappingBefore = await fs.readFile(mappingFile, 'utf8'); f.calls.length = 0;
+  const result = await identity.resolvePublishModelIdentityReplacements(sceneContent, f.context, signal);
+  assert.equal(result.replacements.length, 1);
+  const asset = result.replacements[0].asset;
+  assert.equal(asset.dataPlatformResourceId, '101'); assert.equal(asset.assetRevision, seed.assetRevision);
+  assert.deepEqual(await fs.readFile(asset.path), f.bytes);
+  assert.equal(f.calls.filter(call => call.kind === 'file').length, 1);
+  assert.ok(f.calls.every(call => !call.id || call.id === '101'));
+  assert.equal(await fs.readFile(mappingFile, 'utf8'), mappingBefore);
+  assert.equal(JSON.stringify(document), sceneContent);
+  const mapped = structuredClone(document), components = mapped.scene.entities.e0.components;
+  Object.assign(components.modelAsset, { sourcePath: asset.path, sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision,
+    packagePath: asset.packagePath, metadataPath: asset.metadataPath, scriptAssets: asset.scriptAssets, scriptPaths: asset.scriptPaths });
+  assert.deepEqual(components.modelAsset.parameterValues, originalBusiness.modelAsset.parameterValues);
+  assert.deepEqual(components.telemetryBinding, originalBusiness.telemetryBinding);
+  assert.deepEqual(components.transform, originalBusiness.transform);
+  const beforeReady = f.calls.length;
+  await ordinaryRecovery.assertPublishSceneModelsReady(JSON.stringify(mapped), signal, f.context);
+  assert.deepEqual(await ordinaryRecovery.recoverPublishSceneModels(JSON.stringify(mapped), async () => f.context, signal, () => {}),
+    { replacements: [] });
+  assert.equal(f.calls.length, beforeReady);
+});
+
+for (const version of [7, '6']) test(`身份恢复拒绝未支持或非数字的版本 ${JSON.stringify(version)}，且不发远端请求`, async t => {
+  const f = await fixture(t), document = JSON.parse(content([{ id: '11' }]));
+  document.version = version;
+  await f.writeMappings([f.entry()]);
+  await assert.rejects(identity.resolvePublishModelIdentityReplacements(JSON.stringify(document), f.context,
+    new AbortController().signal), /场景格式|版本/);
+  assert.equal(f.calls.length, 0);
+});
+
 test('目标不存在或服务端广告的内容版本变化时阻止下载', async t => {
   const f = await fixture(t); await f.writeMappings([f.entry()]);
   f.records.set('model:101', { success: false, code: 'MODEL_NOT_FOUND', message: '目标模型不存在' });

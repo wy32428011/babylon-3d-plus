@@ -1,4 +1,6 @@
-import { Bone, Matrix, Quaternion, TransformNode, Vector3 } from '@babylonjs/core';
+import { Bone } from '@babylonjs/core/Bones/bone.js';
+import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 
 export type ModelTelemetryPreviewBaseline = {
   nodes: ModelTelemetryPreviewNodeBaseline[];

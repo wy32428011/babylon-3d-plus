@@ -36,9 +36,9 @@ function environment() {
 async function setup(t, business = false) {
   const engine = new NullEngine(), scene = new Scene(engine), runtime = new SceneRuntime(scene);
   const config = environment(), imported = [];
-  runtime.waitForEnvironmentRenderReady = async () => {};
-  runtime.environmentRuntime.options.resolveAssetUrl = value => value;
-  runtime.loadEnvironmentAssetContainer = async () => {
+  runtime.environment.waitForEnvironmentRenderReady = async () => {};
+  runtime.environment.environmentRuntime.options.resolveAssetUrl = value => value;
+  runtime.environment.loadEnvironmentAssetContainer = async () => {
     const container = new AssetContainer(scene);
     for (const Material of [PBRMaterial, StandardMaterial]) {
       const mesh = MeshBuilder.CreateBox(Material.name, {}, scene), material = new Material(Material.name, scene);
@@ -55,23 +55,23 @@ async function setup(t, business = false) {
   let device;
   if (business) {
     device = MeshBuilder.CreateBox('device', {}, scene); device.material = new StandardMaterial('device', scene);
-    runtime.syncedEntities.set('device', { id: 'device', components: { meshRenderer: {}, visibility: { visible: true } } });
-    runtime.meshes.set('device', device);
+    runtime.document.syncedEntities.set('device', { id: 'device', components: { meshRenderer: {}, visibility: { visible: true } } });
+    runtime.presentation.meshes.set('device', device);
   }
-  await runtime.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
+  await runtime.environment.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
   const prepare = patch => runtime.prepareModelEntrance(normalize({ enabled: true, effect: 'scan', durationSeconds: .2, ...patch }));
   t.after(() => { runtime.dispose(); scene.dispose(); engine.dispose(); });
   return { runtime, scene, config, imported, device, prepare };
 }
 
-test('全部范围包含环境和业务模型，环境独占可播放；结束和取消恢复隔离原材质及纹理', async t => {
+test('全部范围包含环境和业务模型，环境独占可播放；结束和取消恢复受光原材质及纹理', async t => {
   const { runtime, imported, prepare } = await setup(t);
   for (const effect of ['fade', 'scan', 'dissolve', 'hologram', 'particles', 'assembly', 'radial', 'stagger']) {
     await prepare({ effect }); assert.equal(runtime.getModelEntranceSnapshot().targetCount, 1);
-    for (const { mesh, material } of imported) { assert.notEqual(mesh.material, material); assert.equal(material.disableLighting, true); assert.equal(material.isFrozen, true); }
-    runtime.startModelEntrance(); runtime.modelEntranceRuntime.tick(2);
+    for (const { mesh, material } of imported) { assert.notEqual(mesh.material, material); assert.equal(material.disableLighting, false); assert.equal(material.isFrozen, true); }
+    runtime.startModelEntrance(); runtime.effects.modelEntranceRuntime.tick(2);
     assert.equal(runtime.getModelEntranceSnapshot().status, 'completed');
-    for (const { mesh, material, texture } of imported) { assert.equal(mesh.material, material); assert.equal(material.disableLighting, true); if (material instanceof PBRMaterial) { assert.equal(material.unlit, true); assert.equal(material.albedoTexture, texture); } else assert.equal(material.diffuseTexture, texture); }
+    for (const { mesh, material, texture } of imported) { assert.equal(mesh.material, material); assert.equal(material.disableLighting, false); if (material instanceof PBRMaterial) { assert.equal(material.unlit, false); assert.equal(material.albedoTexture, texture); } else assert.equal(material.diffuseTexture, texture); }
     await prepare({ effect }); runtime.cancelModelEntrance();
     for (const { mesh, material } of imported) assert.equal(mesh.material, material);
   }
@@ -85,27 +85,28 @@ test('指定环境仅覆盖环境；隐藏、完全透明、加载中的环境�
   assert.equal(runtime.getModelEntranceSnapshot().targetCount, 1); assert.equal(device.material, original);
   runtime.cancelModelEntrance();
   for (const patch of [{ visible: false }, { opacity: 0 }]) {
-    await runtime.environmentRuntime.apply({ ...config, ...patch }, { requestId: null, autoAlign: false });
+    await runtime.environment.environmentRuntime.apply({ ...config, ...patch }, { requestId: null, autoAlign: false });
     await prepare(); assert.equal(runtime.getModelEntranceSnapshot().targetCount, 1);
     for (const { mesh, material } of imported) assert.equal(mesh.material, material);
     runtime.cancelModelEntrance();
   }
-  await runtime.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
-  runtime.environmentRuntime.snapshot = { ...runtime.environmentRuntime.getSnapshot(), phase: 'loading' };
+  await runtime.environment.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
+  runtime.environment.environmentRuntime.snapshot = { ...runtime.environment.environmentRuntime.getSnapshot(), phase: 'loading' };
   await prepare(); assert.equal(runtime.getModelEntranceSnapshot().targetCount, 1);
 });
 
-test('环境透明度及阴影换材质先取消环境入场，业务指定范围保持播放', async t => {
+test('环境透明度更新取消环境入场，投影开关和业务指定范围保持播放', async t => {
   const { runtime, scene, imported, prepare, config } = await setup(t, true);
   await prepare(); runtime.startModelEntrance(); const clone = imported[0].mesh.material;
-  await runtime.environmentRuntime.apply({ ...config, opacity: .4 }, { requestId: null, autoAlign: false });
+  await runtime.environment.environmentRuntime.apply({ ...config, opacity: .4 }, { requestId: null, autoAlign: false });
   assert.equal(runtime.getModelEntranceSnapshot().status, 'cancelled'); assert.equal(scene.materials.includes(clone), false);
   for (const { mesh, material } of imported) { assert.equal(mesh.material, material); assert.equal(material.alpha, .4); }
   await prepare(); runtime.startModelEntrance();
-  await runtime.environmentRuntime.setLightingMode('scene');
-  assert.equal(runtime.getModelEntranceSnapshot().status, 'cancelled');
+  await runtime.environment.environmentRuntime.syncLighting({ enabled: false });
+  assert.equal(runtime.getModelEntranceSnapshot().status, 'playing');
+  runtime.cancelModelEntrance();
   for (const { mesh, material } of imported) { assert.equal(mesh.material, material); assert.equal(material.disableLighting, false); }
   await prepare({ scope: 'selected', targetEntityIds: ['device'] }); runtime.startModelEntrance();
-  await runtime.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
+  await runtime.environment.environmentRuntime.apply(config, { requestId: null, autoAlign: false });
   assert.equal(runtime.getModelEntranceSnapshot().status, 'playing');
 });

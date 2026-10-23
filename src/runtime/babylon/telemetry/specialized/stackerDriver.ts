@@ -1,5 +1,6 @@
 import type { Scene } from '@babylonjs/core';
-import { TransformNode, Vector3 } from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   resolveLocatorBoxIndex,
   resolveLocatorCellSupportWorldPosition,
@@ -65,6 +66,12 @@ import {
 } from './types';
 
 export class StackerTelemetryDriver {
+  /** 只读暴露实际驱动解析的运动节点，光照分类不另建名称猜测规则。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
+    const forks = this.findStackerForkNodeGroups(model);
+    return { moving: [...new Set([...this.findStackerTravelNodes(model), ...this.findStackerLiftNodes(model), ...forks.frontNodes, ...forks.backNodes])], fixed: this.findStackerFixedNodes(model) };
+  }
+
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
   private get scene(): Scene {

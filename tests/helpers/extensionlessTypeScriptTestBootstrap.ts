@@ -6,6 +6,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,6 +34,8 @@ export async function importIsolatedTypeScriptModules<TModules extends readonly 
   }
 
   const tempRoot = mkdtempSync(join(tmpdir(), 'babylon-ts-test-'));
+  // 临时源码仍须使用本项目依赖；动态 import/createRequire 不受静态 specifier 重写覆盖。
+  symlinkSync(join(projectRoot, 'node_modules'), join(tempRoot, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
   const outDir = join(tempRoot, 'out');
   const tsconfigPath = join(tempRoot, 'tsconfig.json');
   writeFileSync(

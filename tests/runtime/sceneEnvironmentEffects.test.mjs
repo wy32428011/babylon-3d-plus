@@ -22,7 +22,8 @@ const hooks = registerHooks({
 const { SceneEnvironmentEffects } = await import('../../src/runtime/babylon/effects/SceneEnvironmentEffects.ts');
 const { createDefaultPoiEffectComponent } = await import('../../src/editor/model/poiEffect.ts');
 const { createTechBlueNightTheme, SCENE_THEME_PRESETS } = await import('../../src/editor/model/sceneTheme.ts');
-const { SceneThemeRuntime } = await import('../../src/runtime/babylon/SceneThemeRuntime.ts');
+const { SceneLightRigRuntime } = await import('../../src/runtime/babylon/SceneLightRigRuntime.ts');
+const { getSceneLightingConfig } = await import('../../electron/shared/sceneLightingConfig.ts');
 hooks.deregister();
 const { NullEngine, Scene, ArcRotateCamera, Vector3, MeshBuilder, HemisphericLight, Color3 } = await import('@babylonjs/core');
 function setup(t) {
@@ -78,25 +79,27 @@ test('昼夜效果激活期间编辑灯光，关闭后保留新配置', t => {
 });
 
 
-test('作业灯保持亮度，固定夜景接管旧昼夜，停用主题后恢复昼夜能力', t => {
+test('作业灯保持亮度，统一策略禁用及恢复昼夜能力', t => {
  const {scene,effects}=setup(t);
  const fill=new HemisphericLight('fill',Vector3.Up(),scene);fill.intensity=1;
  const work=new HemisphericLight('work',Vector3.Up(),scene);work.intensity=1.5;work.metadata={nightBehavior:'keep'};
  const day=createDefaultPoiEffectComponent('day-night');day.visual.progress=1;
  effects.sync('day',day,true);effects.tick(.1);
+ assert.equal(effects.isDayNightCycleActive(),true);
  assert.ok(fill.intensity<.1);assert.equal(work.intensity,1.5);
- effects.setThemeActive(true);fill.intensity=.42;scene.environmentIntensity=.3;effects.tick(.1);
+ effects.setGlobalLightingControl(false);fill.intensity=.42;scene.environmentIntensity=.3;effects.tick(.1);
+ assert.equal(effects.isDayNightCycleActive(),false);
  assert.equal(fill.intensity,.42);assert.equal(scene.environmentIntensity,.3);assert.equal(work.intensity,1.5);
- effects.setThemeActive(false);effects.tick(.1);assert.ok(fill.intensity<.05);assert.equal(work.intensity,1.5);
+ effects.setGlobalLightingControl(true);effects.tick(.1);assert.ok(fill.intensity<.05);assert.equal(work.intensity,1.5);
 });
 test('显式雾组件关闭后恢复最新的主题雾而非旧场景雾', t => {
   const { scene, effects } = setup(t);
   const fog = createDefaultPoiEffectComponent('environment-fog');
   effects.sync('fog', fog, true);
   effects.tick(.1);
-  effects.setThemeFog({ ...createTechBlueNightTheme(), fogStart: 180, fogEnd: 700 });
+  effects.setAppearanceFog({ ...createTechBlueNightTheme(), fogStart: 180, fogEnd: 700 });
   effects.tick(.1);
-  effects.setThemeFog({ ...createTechBlueNightTheme(), fogStart: 220, fogEnd: 900 });
+  effects.setAppearanceFog({ ...createTechBlueNightTheme(), fogStart: 220, fogEnd: 900 });
   effects.sync('fog', fog, false);
   effects.tick(.1);
   assert.equal(scene.fogStart, 220);
@@ -114,8 +117,8 @@ for (const order of ['fog-theme-clear-theme-clear-fog', 'fog-theme-clear-fog-cle
     const theme = { ...createTechBlueNightTheme(), fogEnabled: false };
     const startFog = () => { effects.sync('fog', fog, true); effects.tick(.1); };
     const stopFog = () => { effects.sync('fog', fog, false); effects.tick(.1); };
-    const startTheme = () => { effects.setThemeFog(theme); effects.tick(.1); };
-    const stopTheme = () => { effects.setThemeFog(null); effects.tick(.1); };
+    const startTheme = () => { effects.setAppearanceFog(theme); effects.tick(.1); };
+    const stopTheme = () => { effects.setAppearanceFog(null); effects.tick(.1); };
     if (order.startsWith('theme')) { startTheme(); startFog(); }
     else { startFog(); startTheme(); }
     assert.equal(scene.fogMode, Scene.FOGMODE_LINEAR, '显式雾优先于主题关闭雾的设置');
@@ -132,29 +135,29 @@ for (const order of ['fog-theme-clear-theme-clear-fog', 'fog-theme-clear-fog-cle
   });
 }
 
-test('五套固定主题暂停昼夜时间与亮度，停用主题恢复并最终还原场景基线', t => {
+test('旧场景迁移的照明参数配合显式策略暂停昼夜，重新允许后恢复基线', t => {
   const { scene, effects } = setup(t);
   const fill = new HemisphericLight('EditorLight', Vector3.Up(), scene); fill.intensity = 1.4;
   scene.environmentIntensity = .85;
-  const runtime = new SceneThemeRuntime(scene);
+  const runtime = new SceneLightRigRuntime(scene);
   t.after(() => runtime.dispose());
   const day = createDefaultPoiEffectComponent('day-night');
   day.visual.loop = true; day.visual.duration = 4;
   effects.sync('day', day, true);
   effects.tick(1);
   assert.ok(Math.abs(fill.intensity - 1.4 * .54) < 1e-6);
-  effects.setThemeActive(true);
+  effects.setGlobalLightingControl(false);
   for (const preset of SCENE_THEME_PRESETS) {
-    runtime.sync(preset.settings, preset.shadows);
-    effects.setThemeFog(preset.settings);
+    runtime.sync(getSceneLightingConfig({ sceneSettings: { theme: preset.settings, shadows: preset.shadows } }));
+    effects.setAppearanceFog(preset.settings);
     for (let i = 0; i < 3; i++) effects.tick(.5);
     assert.equal(fill.intensity, preset.shadows.fillIntensity);
     assert.equal(runtime.mainLight.intensity, preset.shadows.sunIntensity);
     assert.equal(scene.environmentIntensity, preset.settings.environmentIntensity);
     assert.equal(effects.getStatus('day').status, 'occupied');
   }
-  runtime.sync(null, SCENE_THEME_PRESETS[0].shadows);
-  effects.setThemeActive(false); effects.setThemeFog(null); effects.tick(1);
+  runtime.dispose();
+  effects.setGlobalLightingControl(true); effects.setAppearanceFog(null); effects.tick(1);
   assert.ok(Math.abs(fill.intensity - 1.4 * .08) < 1e-6);
   assert.ok(Math.abs(scene.environmentIntensity - .85 * .08) < 1e-6);
   assert.equal(effects.getStatus('day').status, 'active');
@@ -171,7 +174,7 @@ test('显式雾覆盖五套主题，释放后恢复每套最新雾配置且完�
   fog.primaryColor = '#eeaabb'; fog.visual.radius = 37;
   for (const preset of SCENE_THEME_PRESETS) {
     effects.sync('fog', fog, true); effects.tick(.1);
-    effects.setThemeFog(preset.settings); effects.tick(.1);
+    effects.setAppearanceFog(preset.settings); effects.tick(.1);
     assert.equal(scene.fogMode, Scene.FOGMODE_LINEAR);
     assert.equal(scene.fogStart, fog.visual.radius);
     assert.deepEqual(scene.fogColor.asArray(), Color3.FromHexString(fog.primaryColor).asArray());
@@ -181,6 +184,6 @@ test('显式雾覆盖五套主题，释放后恢复每套最新雾配置且完�
     assert.equal(scene.fogEnd, preset.settings.fogEnd);
     assert.deepEqual(scene.fogColor.asArray(), Color3.FromHexString(preset.settings.fogColor).asArray());
   }
-  effects.setThemeFog(null); effects.tick(.1);
+  effects.setAppearanceFog(null); effects.tick(.1);
   assert.deepEqual({ mode: scene.fogMode, color: scene.fogColor.asArray(), start: scene.fogStart, end: scene.fogEnd, density: scene.fogDensity }, baseline);
 });

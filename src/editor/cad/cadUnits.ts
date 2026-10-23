@@ -37,7 +37,7 @@ const DXF_INSUNITS_TO_METERS: Readonly<Record<number, DxfInsUnitsDefinition>> = 
   17: { name: 'gigameter', scaleToMeters: 1e9 },
   18: { name: 'astronomical-unit', scaleToMeters: 149_597_870_700 },
   19: { name: 'light-year', scaleToMeters: 9_460_730_472_580_800 },
-  20: { name: 'parsec', scaleToMeters: 30_856_775_814_913_673 },
+  20: { name: 'parsec', scaleToMeters: 30_856_775_814_913_670 },
   21: { name: 'us-survey-foot', scaleToMeters: 1200 / 3937 },
   22: { name: 'us-survey-inch', scaleToMeters: 100 / 3937 },
   23: { name: 'us-survey-yard', scaleToMeters: 3600 / 3937 },

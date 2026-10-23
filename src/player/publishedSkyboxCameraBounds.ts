@@ -1,10 +1,5 @@
-import {
-  type ArcRotateCamera,
-  type Camera,
-  type Observer,
-  type Scene,
-  Vector3,
-} from '@babylonjs/core';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import type { ArcRotateCamera, Camera, Observer, Scene } from '@babylonjs/core';
 import { isEntityEffectivelyVisible } from '../editor/model/entityHierarchy';
 import {
   getSceneSkyboxEntity,

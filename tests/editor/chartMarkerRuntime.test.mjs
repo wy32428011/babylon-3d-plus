@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FreeCamera, MeshBuilder, NullEngine, RawTexture, Scene, Vector3 } from '@babylonjs/core';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 const SCREEN_SOURCE = {
   projectId: '2040000000000000001',
@@ -11,14 +11,16 @@ const SCREEN_SOURCE = {
 };
 
 test('图表立标运行时与保存重开边界', async (context) => {
-  const server = await createServer({
-    configFile: false,
-    root: process.cwd(),
-    logLevel: 'silent',
-    server: { middlewareMode: true, hmr: false },
-    optimizeDeps: { noDiscovery: true },
-    ssr: { noExternal: ['@linkiez/dxf-renew'] },
-  });
+  const server = await createP4SsrTestModules([
+    '/src/runtime/babylon/SceneRuntime.ts',
+    '/src/editor/model/chartMarker.ts',
+    '/src/runtime/babylon/ChartMarkerPresentation.ts',
+    '/src/runtime/mqtt/deviceTelemetry.ts',
+    '/src/editor/model/dataPlatformScreen.ts',
+    '/src/editor/model/SceneDocument.ts',
+    '/src/editor/project/SceneSerializer.ts',
+    '/src/runtime/babylon/TransformGizmoController.ts',
+  ]);
   context.after(() => server.close());
   const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');
   const { createChartMarkerEntity } = await server.ssrLoadModule('/src/editor/model/chartMarker.ts');
@@ -379,7 +381,7 @@ test('图表立标运行时与保存重开边界', async (context) => {
     const thumbnailUrl = 'https://screen.example.com/thumbnail.png';
     const texture = RawTexture.CreateRGBATexture(new Uint8Array([255, 255, 255, 255]), 1, 1, scene);
     // 用已就绪的本地纹理模拟缓存，覆盖真实绑定与清空同步路径而不依赖网络。
-    runtime.dataPlatformScreenTextures.set(marker.id, { url: thumbnailUrl, texture });
+    runtime.effects.dataPlatformScreenTextures.set(marker.id, { url: thumbnailUrl, texture });
     runtime.sync(makeDocument([bindScreen(marker, { ...SCREEN_SOURCE, thumbnailUrl })]));
     const root = runtime.getGizmoTargetByEntityId(marker.id);
     assert.ok(root);
@@ -387,7 +389,7 @@ test('图表立标运行时与保存重开边界', async (context) => {
 
     runtime.sync(makeDocument([marker]));
     assert.equal(root.material.diffuseTexture, null, '空牌不得保留已经释放的缩略图纹理');
-    assert.equal(runtime.dataPlatformScreenTextures.has(marker.id), false);
+    assert.equal(runtime.effects.dataPlatformScreenTextures.has(marker.id), false);
     assert.equal(scene.textures.includes(texture), false);
     assert.equal(texture.getInternalTexture(), null);
     assert.equal(runtime.getDataPlatformScreenOverlayItems()[0].mesh, root);

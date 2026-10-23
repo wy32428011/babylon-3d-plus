@@ -19,6 +19,7 @@ export function useDigitalTwinFullscreen(
   elementRef: { current: HTMLElement | null },
 ): DigitalTwinFullscreenControls {
   const nativeFullscreen = useElementFullscreen(elementRef);
+  const toggleNativeFullscreen = nativeFullscreen.toggle;
   const isEmbedded = typeof window !== 'undefined' && window.parent !== window;
   const [hostFullscreen, setHostFullscreen] = useState(false);
 
@@ -35,11 +36,11 @@ export function useDigitalTwinFullscreen(
 
   const toggle = useCallback(async (): Promise<void> => {
     if (!isEmbedded) {
-      await nativeFullscreen.toggle();
+      await toggleNativeFullscreen();
       return;
     }
     window.parent.postMessage(createDigitalTwinHostFullscreenRequest(), '*');
-  }, [isEmbedded, nativeFullscreen.toggle]);
+  }, [isEmbedded, toggleNativeFullscreen]);
 
   return useMemo(() => ({
     isEmbedded,

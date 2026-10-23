@@ -495,7 +495,7 @@ async function readStoredDataPlatformConfig(): Promise<StoredDataPlatformConfig>
     }
 
     if (error instanceof SyntaxError) {
-      throw new Error('数据中台配置文件不是有效 JSON。');
+      throw new Error('数据中台配置文件不是有效 JSON。', { cause: error });
     }
 
     throw error;

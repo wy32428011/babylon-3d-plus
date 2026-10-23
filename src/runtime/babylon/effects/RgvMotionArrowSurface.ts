@@ -1,4 +1,8 @@
-import { AbstractMesh, Matrix, Mesh, TransformNode, Vector3, type Scene } from '@babylonjs/core';
+import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
+import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { Scene } from '@babylonjs/core';
 import type { RgvMotionArrowChannel, RgvMotionArrowChannelConfig } from '../../../editor/model/rgvMotionArrows';
 import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { getModelTransformNodes, getNodeMeshes, mergeWorldBounds, transformWorldBounds, type RuntimeWorldBounds } from '../runtimeNodeGeometry';
@@ -67,7 +71,7 @@ export function createRgvArrowSurface(model: ModelRuntimeEntry, channel: RgvMoti
   const fixed = fixedNames.length ? byNames(fixedNames)
     : nodes.filter(node => /^A(?:3[7-9]|4[0-6])(?:[._]|$)/.test(sourceName(node)));
   const containsFixed = (node: TransformNode) => fixed.some(part => part === node || part.isDescendantOf(node) || node.isDescendantOf(part));
-  let selected: TransformNode[] = [];
+  let selected: TransformNode[];
   let issue: string | null = null;
   if (config.surfaceNode) {
     selected = nodes.filter(node => matchesPath(node, host.root, config.surfaceNode));

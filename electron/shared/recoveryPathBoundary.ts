@@ -18,7 +18,7 @@ export async function assertRecoveryPathInsideRoot(root: string, target: string)
     } catch (error) {
       if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
       const parent = path.dirname(ancestor);
-      if (parent === ancestor || !inside(resolvedRoot, parent)) throw new Error('资源恢复路径没有可验证的根目录。');
+      if (parent === ancestor || !inside(resolvedRoot, parent)) throw new Error('资源恢复路径没有可验证的根目录。', { cause: error });
       ancestor = parent;
       continue;
     }

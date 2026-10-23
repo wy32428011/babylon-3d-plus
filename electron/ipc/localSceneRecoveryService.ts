@@ -1,8 +1,10 @@
+import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { LocalSceneResourceSyncRequest, LocalSceneResourceSyncResult, ProjectModelAssetEntry } from '../types.js';
 import { collectPublishModelReferences } from '../shared/publishModelRecovery.js';
-import { captureSceneShadowBakeRelocation } from '../shared/sceneShadowBakeContract.js';
+import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
 import { assertRecoveryPathInsideRoot } from '../shared/recoveryPathBoundary.js';
 import { recoverLocalSceneResourcePaths, type MissingLocalSceneResource } from './localSceneResourceRecovery.js';
 import { recoverPinnedLocalSceneModel } from './localSceneRemoteRecovery.js';
@@ -19,7 +21,7 @@ type Options = {
   request: LocalSceneResourceSyncRequest; baseUrl: string; workspaceRoot: string; projectRoot: string | null;
   signal: AbortSignal; isOriginalPathAllowed: (file: string) => boolean; onProgress?: (message: string) => void;
 };
-const object = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const pathKey = (file: string) => path.resolve(file).toLowerCase();
 const inside = (root: string, file: string) => { const relative = path.relative(root, file); return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); };
 
@@ -30,21 +32,24 @@ export async function recoverLocalSceneResourceTransaction(options: Options): Pr
     throw new Error('本地场景恢复内容无效或超过 64 MiB。');
   }
   const envelope: unknown = JSON.parse(request.sceneContent);
-  if (!object(envelope) || ![1, 2, 3, 4, 5].includes(envelope.version) || !object(envelope.scene)) throw new Error('本地场景恢复格式无效。');
+  if (!object(envelope) || !isSupportedSceneFileVersion(envelope.version) || !object(envelope.scene)) throw new Error('本地场景恢复格式无效。');
+  envelope.scene = migrateSceneLightingDocument(envelope.scene);
+  envelope.version = CURRENT_SCENE_FILE_VERSION;
+  const originalContent = JSON.stringify(envelope);
   if (request.acceptEnvironmentRevision && (!/^[1-9]\d{0,63}$/.test(request.acceptEnvironmentRevision.resourceId)
     || !/^[1-9]\d{0,63}$/.test(request.acceptEnvironmentRevision.fileRevision)
     || !/^[a-f\d]{64}$/.test(request.acceptEnvironmentRevision.sha256))) throw new Error('环境版本确认信息无效。');
   const sourceKey = options.baseUrl ? createDataPlatformSourceKey(options.baseUrl) : null;
-  const restoreBake = captureSceneShadowBakeRelocation(envelope.scene);
+  const restoreLighting = captureSceneLightingBakeRelocation(envelope.scene);
   let environmentVersionChanged = false;
   const sharedRoot = path.join(options.workspaceRoot, 'SharedResources');
   const allowed = new Set<string>();
   const mappings = new Map<string, string>();
   const resolve = (sceneContent: string) => recoverLocalSceneResourcePaths({ sceneContent, workspaceRoot: options.workspaceRoot,
     projectRoot: options.projectRoot, sceneFilePath: request.sceneFilePath, sourceKey, signal, additionalMappings: mappings,
-    isOriginalPathAllowed: file => allowed.has(pathKey(file)) || options.isOriginalPathAllowed(file), shadowBakeRelocation: 'defer' });
+    isOriginalPathAllowed: file => allowed.has(pathKey(file)) || options.isOriginalPathAllowed(file), lightingBakeRelocation: 'defer' });
   options.onProgress?.('正在核对本地场景的模型、脚本、环境和天空盒路径…');
-  let result = await resolve(request.sceneContent);
+  let result = await resolve(originalContent);
   signal.throwIfAborted();
   let restoredCount = result.restoredReferenceCount;
   for (const file of result.resolvedFiles) allowed.add(pathKey(file));
@@ -73,7 +78,7 @@ export async function recoverLocalSceneResourceTransaction(options: Options): Pr
       }
     }));
     if (mappings.size) {
-      result = await resolve(request.sceneContent); restoredCount = result.restoredReferenceCount;
+      result = await resolve(originalContent); restoredCount = result.restoredReferenceCount;
       for (const file of result.resolvedFiles) allowed.add(pathKey(file));
     }
   }
@@ -127,9 +132,9 @@ export async function recoverLocalSceneResourceTransaction(options: Options): Pr
   result = await resolve(content);
   restoredCount += result.restoredReferenceCount;
   const issues = [...result.issues, ...networkErrors];
-  if (!environmentVersionChanged && restoreBake && issues.length === 0) {
+  if (!environmentVersionChanged && restoreLighting && issues.length === 0) {
     const finalEnvelope = JSON.parse(result.sceneContent);
-    if (!restoreBake(finalEnvelope.scene)) throw new Error('资源恢复后的场景与原烘焙阴影不一致，已停止提交。');
+    if (!restoreLighting(finalEnvelope.scene)) throw new Error('资源恢复后的输入或产物与原光照烘焙不一致，已停止提交。');
     result.sceneContent = JSON.stringify(finalEnvelope);
   }
   if (choice) issues.push({ resourceKind: 'environment', resourceId: choice.resourceId,
@@ -155,7 +160,7 @@ async function freezeSharedModelPackages(content: string, sharedRoot: string, so
   const parsed = JSON.parse(content);
   const references = collectPublishModelReferences(parsed.scene);
   const sharedModelsRoot = path.join(sharedRoot, 'Assets', 'Models');
-  const pathOf = (asset: Record<string, any>) => {
+  const pathOf = (asset: Record<string, unknown>) => {
     if (typeof asset.sourcePath === 'string' && asset.sourcePath) return asset.sourcePath;
     if (typeof asset.sourceUrl === 'string' && asset.sourceUrl.startsWith('editor-asset://local/')) {
       try { return decodeURIComponent(new URL(asset.sourceUrl).pathname.slice(1)); }
@@ -207,7 +212,7 @@ async function freezeSharedModelPackages(content: string, sharedRoot: string, so
 }
 
 /** 仅资源对象自身字段和声明的脚本列表参与固定，参数/规则里的同名字符串保持原值。 */
-function rewriteModelOwnerPaths(owner: Record<string, any>, from: string, to: string): void {
+function rewriteModelOwnerPaths(owner: Record<string, unknown>, from: string, to: string): void {
   const rewrite = (value: unknown): unknown => {
     if (typeof value === 'string') {
       const url = value.startsWith('editor-asset://local/');
@@ -229,7 +234,7 @@ function rewriteModelOwnerPaths(owner: Record<string, any>, from: string, to: st
   if (Array.isArray(owner.scriptAssets)) for (const script of owner.scriptAssets) if (object(script)) rewriteModelOwnerPaths(script, from, to);
 }
 
-function readEnvironmentFileRevision(environment: Record<string, any>): string | undefined {
+function readEnvironmentFileRevision(environment: Record<string, unknown>): string | undefined {
   const location = String(environment.packagePath ?? '').replace(/\\/g, '/');
   return /\/data-platform-cache\/environments\/[a-f\d]{64}\/\d+\/(\d+)(?:\/|$)/i.exec(location)?.[1];
 }

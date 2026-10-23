@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
 import test, { after } from 'node:test';
-import { createServer } from 'vite';
+import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
 import type { SceneEnvironmentSettings } from '../../src/editor/model/SceneDocument.ts';
 
 const globalWithWindow = globalThis as typeof globalThis & { window?: Record<string, unknown> };
 globalWithWindow.window ??= {};
 
-const viteServer = await createServer({
-  appType: 'custom',
-  configFile: false,
-  root: process.cwd(),
-  server: { middlewareMode: true, hmr: false },
-  optimizeDeps: { noDiscovery: true },
-  ssr: { noExternal: ['@linkiez/dxf-renew'] },
+const viteServer = await createP4SsrTestModules([
+  '/src/editor/model/SceneDocument.ts',
+  '/src/editor/model/environmentRuntime.ts',
+  '/src/editor/project/SceneSerializer.ts',
+  '/src/editor/store/editorStore.ts',
+]);
+after(async () => {
+  await viteServer.close();
 });
 
 const {
@@ -29,9 +30,7 @@ const {
   useEditorStore,
 } = await viteServer.ssrLoadModule('/src/editor/store/editorStore.ts') as typeof import('../../src/editor/store/editorStore.ts');
 
-after(async () => {
-  await viteServer.close();
-});
+
 
 function createEnvironment(
   sourceKey: string,

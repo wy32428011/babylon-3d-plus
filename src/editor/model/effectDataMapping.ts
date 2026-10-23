@@ -191,7 +191,7 @@ export function evaluateEffectTrigger(binding: EffectDataBinding, result: Effect
   if (result.status !== 'online') return { active: false, state: { ...createEffectTriggerState(), key: result.key, signature }, issue: '触发条件等待有效数据。' };
   const value = field(result, trigger.field);
   if (value === undefined || value === null || typeof value === 'object') return { active: false, state: { ...createEffectTriggerState(), key: result.key, signature }, issue: `触发字段 ${trigger.field} 缺失或无效。` };
-  let matches = false;
+  let matches: boolean;
   if (trigger.operator === 'eq') matches = String(value) === trigger.value;
   else if (trigger.operator === 'ne') matches = String(value) !== trigger.value;
   else {

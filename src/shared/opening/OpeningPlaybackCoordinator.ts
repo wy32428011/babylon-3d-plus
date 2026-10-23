@@ -20,7 +20,7 @@ export class OpeningPlaybackCoordinator {
   private skipping = false;
   constructor(options: OpeningPlaybackOptions) { this.options = options; }
 
-  /** 每个场景会话仅启动一次；迟到的宿主握手不能复活已取消的开场。 */
+  /** 每个协调器实例仅启动一次；主动重播须新建实例，迟到握手不能复活旧开场。 */
   async start(): Promise<void> {
     if (this.started || this.ended) return;
     this.started = true;

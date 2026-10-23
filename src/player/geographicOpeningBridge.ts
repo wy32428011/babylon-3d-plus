@@ -49,6 +49,8 @@ export class GeographicOpeningBridge {
 
   setPhase(phase: GeographicOpeningPhase): void {
     if (this.disposed || this.phase === phase) return;
+    // 每轮重播重新等待宿主展示，不能把上一轮的可见确认用于新的开场。
+    if (phase === 'waiting') this.updateHostVisible(false);
     this.phase = phase;
     this.postState();
     if (phase === 'disabled' || phase === 'completed' || phase === 'skipped' || phase === 'failed') this.finishWait?.(false);

@@ -192,5 +192,5 @@ test('昼夜手动时刻、最低灯光与固定主题优先级', t => {
   const { environment, scene } = setup(t); const light = new HemisphericLight('light', Vector3.Up(), scene); light.intensity = 2;
   environment.sync('day', config('day-night', { dayMode: 'manual', hour: 0, lightFloor: .25 }), true); environment.tick(.1); assert.equal(light.intensity, .5);
   environment.sync('day', config('day-night', { dayMode: 'manual', hour: 12, lightFloor: .25 }), true); environment.tick(.1); assert.equal(light.intensity, 2);
-  environment.setThemeActive(true); light.intensity = .7; environment.tick(.1); assert.equal(light.intensity, .7);
+  environment.setGlobalLightingControl(false); light.intensity = .7; environment.tick(.1); assert.equal(light.intensity, .7);
 });

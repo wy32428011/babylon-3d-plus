@@ -1,6 +1,6 @@
 import type { Scene, Vector3 } from '@babylonjs/core';
 import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
-import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
+import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import {
   deviceTelemetryStore,
   type DeviceTelemetrySnapshot,
@@ -63,6 +63,17 @@ const EMPTY_TELEMETRY_FIELDS = {};
 
 /** 专用遥测运行时的门面类：组合各专用 Driver，并承担帧级调度与诊断状态管理。 */
 export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverContext {
+  /** 读取实际驱动目标，不注入遥测、不修改节点或动作状态。 */
+  getLightingMotionNodes(model: ModelRuntimeEntry): { moving: import('@babylonjs/core').Node[]; fixed: import('@babylonjs/core').Node[]; known: boolean } {
+    if (model.stackerCapable) return { ...this.stackerDriver.getLightingMotionNodes(model), known: true };
+    if (isHcliftRuntimeModel(model)) return { ...this.hcliftDriver.getLightingMotionNodes(model), known: true };
+    if (isShuttleRuntimeModel(model)) return { ...this.shuttleDriver.getLightingMotionNodes(model), known: true };
+    if (isRgvRuntimeModel(model)) return { ...this.rgvDriver.getLightingMotionNodes(model), known: true };
+    if (isLiftRuntimeModel(model)) return { ...this.liftDriver.getLightingMotionNodes(model), known: true };
+    if (isConveyorRuntimeModel(model)) return { moving: [], fixed: [], known: true };
+    return { moving: [], fixed: [], known: false };
+  }
+
   readonly scene: Scene;
   readonly state: SpecializedTelemetrySharedState;
   readonly host: SpecializedTelemetryHost;

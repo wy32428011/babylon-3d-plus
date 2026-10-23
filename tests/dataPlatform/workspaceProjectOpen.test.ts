@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
-test('真实 Electron：中台入口按远端恢复工程并保留发布失败的本地内容', { timeout: 60_000 }, async () => {
+test('真实 Electron：SOURCE版本1至6打开、未来7拒绝且用户内容保留', { timeout: 60_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-project-open-'));
   const env = { ...process.env, ZENDING_WORKSPACE_OPEN_TEST_ROOT: root };
   delete env.ELECTRON_RUN_AS_NODE;

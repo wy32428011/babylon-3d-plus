@@ -62,7 +62,7 @@ async function verifyTextureAssignments() {
   const asset = { assetCode: 'TEXTURE-CHAIN', sourcePath: 'C:/Model-123-device/model.gltf',
     sourceUrl: 'editor-asset://local/' + encodeURIComponent('C:/Model-123-device/model.gltf'), parameterValues: { preserved: 'unchanged' } };
   const wait = async predicate => { const started = performance.now(); while (!predicate()) { if (performance.now() - started > 10000) throw Error('texture regression timed out'); await new Promise(resolve => setTimeout(resolve, 20)); } };
-  const assign = value => runtime.applyModelParameterValueToTarget(material, 'baseTexture', value, asset, entry);
+  const assign = value => runtime.parameters.applyModelParameterValueToTarget(material, 'baseTexture', value, asset, entry);
   engine.runRenderLoop(() => scene.render());
   try {
     material.diffuseTexture = Texture.CreateFromBase64String('data:image/png;base64,${parameterPng.toString('base64')}', 'original', scene);

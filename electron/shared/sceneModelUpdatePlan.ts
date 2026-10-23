@@ -1,3 +1,4 @@
+import { replaceAsciiControlCharacters, containsAsciiControlCharactersOr } from './asciiControlCharacters.ts';
 import { getClickEventModelResourceKey } from './clickEventModelIdentity.js';
 import { collectPublishModelReferences } from './publishModelRecovery.js';
 import { getRequiredEnvironmentResourceIds } from './sceneEnvironmentReferences.js';
@@ -19,7 +20,7 @@ export type SceneModelCatalogEntry = { kind: 'model' | 'combo'; resourceId: stri
 
 /** 同步落盘和历史名称匹配共用，避免非法字符、长名称或 Windows 保留名造成关联失败。 */
 export function sanitizeSceneModelPackageName(value: string): string {
-  const normalized = value.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+  const normalized = replaceAsciiControlCharacters(value, '_').replace(/[<>:"/\\|?*]/g, '_')
     .replace(/\s+/g, ' ').trim().replace(/[. ]+$/g, '').slice(0, 80) || '未命名';
   const stem = normalized.split('.', 1)[0]?.toUpperCase() ?? '';
   return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem) ? `_${normalized}` : normalized;
@@ -88,7 +89,7 @@ export function normalizeDataPlatformModelIdentity(value: unknown): DataPlatform
     || (record.kind !== 'model' && record.kind !== 'combo')
     || typeof record.resourceId !== 'string' || !/^[1-9]\d{0,63}$/.test(record.resourceId)
     || typeof record.modelPath !== 'string' || !/\.(glb|gltf)$/i.test(record.modelPath)
-    || /[\\:?#\x00-\x1f]/.test(record.modelPath) || record.modelPath.startsWith('/')
+    || containsAsciiControlCharactersOr(record.modelPath, "#:?\\") || record.modelPath.startsWith('/')
     || record.modelPath.split('/').some(part => !part || part === '..' || part === '.')) {
     throw new Error('数据中台模型身份或包内引用无效。');
   }

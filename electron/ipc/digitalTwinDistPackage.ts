@@ -13,6 +13,7 @@ import {
   type DeploymentCopyFile,
 } from './deploymentExportFileSystem.js';
 import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
+import { writePrecompiledDeploymentScripts } from './deploymentPrecompiledScripts.js';
 import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } from './deploymentReleaseCacheManifest.js';
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
 import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
@@ -102,6 +103,7 @@ export async function buildDigitalTwinDistPackage(
       },
     );
 
+    copiedAssets.push(...await writePrecompiledDeploymentScripts(stagingRoot, prepared.precompiledScripts, copiedAssets, options.signal));
     options.onProgress?.('正在生成项目级运行配置入口…', 80);
     const cacheRevision = await writeGeneratedFiles(stagingRoot, prepared, copiedAssets, options.projectId, options.signal);
     options.onProgress?.('正在生成发布资源缓存清单…', 83);

@@ -179,11 +179,11 @@ export async function requestDataPlatformJson(options: {
       throw new Error(`${options.context}响应不是有效 JSON。`);
     }
   } catch (error) {
-    if (timedOut) throw new Error(`${options.context}超时，请稍后重试。`);
+    if (timedOut) throw new Error(`${options.context}超时，请稍后重试。`, { cause: error });
     if (options.signal.aborted) throw createCanceledError();
     if (error instanceof Error && error.message.startsWith(options.context)) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${options.context}失败：${message}`);
+    throw new Error(`${options.context}失败：${message}`, { cause: error });
   } finally {
     clearTimeout(timeout);
     options.signal.removeEventListener('abort', abortFromParent);
@@ -330,7 +330,7 @@ export async function downloadRemoteFile(options: DownloadRemoteFileOptions): Pr
         await fs.rm(metadataPath, { force: true }).catch(() => undefined);
       }
     }
-    if (timedOut) throw new Error(`${options.context}超时，请稍后重试。`);
+    if (timedOut) throw new Error(`${options.context}超时，请稍后重试。`, { cause: error });
     if (options.signal.aborted) throw createCanceledError();
     throw error;
   } finally {
@@ -357,7 +357,7 @@ export async function extractZipSecurely(archivePath: string, destinationRoot: s
     directory = await getUnzipper().Open.file(archivePath);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`工程包 ZIP 损坏或无法读取：${message}`);
+    throw new Error(`工程包 ZIP 损坏或无法读取：${message}`, { cause: error });
   }
 
   if (directory.files.length > MAX_ARCHIVE_ENTRY_COUNT) {
@@ -570,7 +570,7 @@ async function resolveDiskWriteBudget(rootPath: string, context: string): Promis
     fileSystem = await fs.statfs(rootPath, { bigint: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${context}无法检查磁盘可用空间：${message}`);
+    throw new Error(`${context}无法检查磁盘可用空间：${message}`, { cause: error });
   }
 
   const availableBytes = fileSystem.bavail * fileSystem.bsize;

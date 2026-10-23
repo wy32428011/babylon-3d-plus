@@ -93,7 +93,7 @@ function registerModel(
       modelAsset,
     },
   };
-  runtime.models.set(entityId, {
+  runtime.assets.models.set(entityId, {
     entitySnapshot,
     root,
     contentRoot,
@@ -101,8 +101,8 @@ function registerModel(
     modelArrayBatch: null,
     highlighted: false,
   });
-  runtime.entityStates.set(entityId, state);
-  runtime.syncedEntities.set(entityId, entitySnapshot);
+  runtime.document.entityStates.set(entityId, state);
+  runtime.document.syncedEntities.set(entityId, entitySnapshot);
 }
 
 /** 让场景 Mesh 具备编辑器模型实体元数据。 */

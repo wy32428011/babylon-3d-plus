@@ -16,7 +16,7 @@ import type {
   ListModelPackageVariantsRequest,
   ModelPackageVariant,
 } from '../types.js';
-import { authorizeAssetFile, authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
+import { authorizeAssetRoot, authorizeSceneFile, encodeAssetUrl, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { listModelPackageVariants, scanModelFolder, scanModelPackage } from './modelPackageScanner.js';
 import {
   ensureCurrentProjectRootWithDialog,
