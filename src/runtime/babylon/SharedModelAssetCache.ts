@@ -9,6 +9,11 @@ export type SharedModelInstantiation = {
   dispose: () => void;
 };
 
+/** 仅持有已解析模板；不创建业务实例，归还后才参与空闲预算淘汰。 */
+export type SharedModelTemplateLease = {
+  dispose: () => void;
+};
+
 type SharedModelSourceEntry = {
   promise: Promise<AssetContainer>;
   container: AssetContainer | null;
@@ -51,6 +56,34 @@ export class SharedModelAssetCache {
       instantiationCount: this.instantiationCount, instantiationMs: this.instantiationMs,
       ownedCloneCount: this.ownedCloneCount, ownedCloneMs: this.ownedCloneMs,
       idleEntries: idleEntries.length, idleBytes: idleEntries.reduce((bytes, entry) => bytes + entry.estimatedBytes, 0) };
+  }
+
+  /** 预先读取并驻留解析模板；取消只结束本次等待，不打断其他同源消费者。 */
+  async preload(
+    key: string,
+    loader: (signal: AbortSignal) => Promise<AssetContainer>,
+    signal?: AbortSignal,
+  ): Promise<SharedModelTemplateLease> {
+    this.assertAvailable(signal);
+    const entry = this.acquireEntry(key, loader);
+    try {
+      await this.waitForSource(entry, signal);
+      this.assertAvailable(signal);
+      if (entry.disposed || this.entries.get(key) !== entry) {
+        throw new Error('模型解析模板在预取完成前已失效。');
+      }
+      let released = false;
+      return {
+        dispose: () => {
+          if (released) return;
+          released = true;
+          this.releaseEntry(key, entry);
+        },
+      };
+    } catch (error) {
+      this.releaseEntry(key, entry);
+      throw error;
+    }
   }
 
   /** 参数模型共享解析结果，但其工作容器和脚本可变资源按实例完全隔离。 */

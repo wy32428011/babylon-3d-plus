@@ -133,7 +133,9 @@
     "test:contracts:resources": "npm run build:electron && node scripts/p4-test-domains.mjs resources",
     "test:contracts": "npm run test:contracts:editor && npm run test:contracts:effects && npm run test:contracts:motion && npm run test:contracts:observability && npm run test:contracts:opening && npm run test:contracts:resources",
     "test:optimization-p4": "node --experimental-transform-types --test --test-concurrency=1 tests/p4TestInventory.test.mjs tests/p4QualityGates.test.mjs tests/editor/p4EditorHookLifecycles.test.mjs",
-    "test:optimization-p2-r0": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/scenePerformanceMonitor.test.mjs tests/runtime/frameTimingWindow.test.ts tests/runtime/p2R0Diagnostics.test.mjs tests/editor/editorPerformanceRunSession.test.ts tests/digitalTwin/playerPerformanceDiagnostics.test.ts"
+    "test:optimization-p2-r0": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/scenePerformanceMonitor.test.mjs tests/runtime/frameTimingWindow.test.ts tests/runtime/p2R0Diagnostics.test.mjs tests/editor/editorPerformanceRunSession.test.ts tests/digitalTwin/playerPerformanceDiagnostics.test.ts",
+    "test:generated-cargo-preload": "node --experimental-strip-types --test --test-concurrency=1 tests/runtime/modelAssetTemplatePreload.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/modelGeneratorAssetPreloader.test.ts tests/runtime/generatedCargoPreload.integration.test.mjs",
+    "smoke:generated-cargo-preload": "node scripts/smoke-generated-cargo-preload.mjs"
   },
   "engines": {
     "node": "^22.15.0 || >=24.0.0"
