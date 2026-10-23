@@ -477,6 +477,8 @@ export type LiftStationState = {
   transferDirection: 1 | -1;
   /** 交接或排队平移插值进行中。 */
   transferActive: boolean;
+  /** 上一帧本工位载货台锚点：交接两端按逐帧台面位移一起搬走，货物以台面为参照系插值。 */
+  cargoAnchorPosition: Vector3 | null;
   /** task_num_fin_* 标注曾非零（PLC 确认货在该工位）：标注归零对账的前置条件，防止取货上台初期标注未刷新被误判已卸出。 */
   taskAnnotationSeen: boolean;
   /** 该货曾随载货台到位送料层：标注归零强制补交付的前置条件（未到过送料层的货标注归零只是取货侧标注滞后）。 */
@@ -505,6 +507,7 @@ export function createLiftStationState(): LiftStationState {
     transferProgress: 0,
     transferDirection: 1,
     transferActive: false,
+    cargoAnchorPosition: null,
     taskAnnotationSeen: false,
     reachedOutgoing: false,
     outgoingEntityId: null,

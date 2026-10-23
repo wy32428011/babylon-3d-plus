@@ -980,3 +980,35 @@ test('双货连续送第二箱错过窗口：latch 失效后标注归零触发�
     h.dispose();
   }
 });
+
+test('取货上台途中载货台提前升降：货箱以台面为参照系跟随，插值不因 work_state 回落停摆', () => {
+  const h = makeHarness();
+  try {
+    h.insertConveyorCargo('CIN', '901');
+    const incoming = { reference_upper_step: 1, level_upper: 1, work_state: 1 };
+    h.applyLift(incoming);
+    const back = h.liftModel.liftTelemetry.stations[1];
+    assert.ok(back.transferActive && !back.cargoOnBoard, '前置：取货上台插值必须进行中');
+    const cargo = h.state.liftCargoMeshes.get(JSON.stringify(['LIFT1', 1]))!;
+
+    // 取货未播完即切送料层（work_state=6 移动中）：载货台上升，货箱必须每帧与台面同高
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    for (let frame = 1; frame <= 5; frame += 1) {
+      h.applyLift(outgoing);
+      const deckTopY = DECK_TOP_BASE_Y + h.liftModel.liftTelemetry.liftOffset;
+      assert.ok(
+        Math.abs(cargo.root.position.y - deckTopY) < 1e-6,
+        `第 ${frame} 帧货箱必须随台面同高（台面 ${deckTopY}，货物 ${cargo.root.position.y}）`,
+      );
+    }
+    assert.ok(back.transferProgress > 0.3, `已开始的交接不得因 work_state=6 冻结，实际进度 ${back.transferProgress}`);
+
+    // 上台插值继续收敛：落到 step2 锚点；载货台到位后货箱仍在台面上
+    runUntil(h, outgoing, () => back.cargoOnBoard, 30);
+    assert.ok(Math.abs(cargo.root.position.x - STATION_OFFSET) < 1e-6, `上台后 x 必须为 step2 锚点 +${STATION_OFFSET}，实际 ${cargo.root.position.x}`);
+    runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2', 30);
+    assert.ok(Math.abs(cargo.root.position.y - 2.05) < 1e-6, `载货台到位后 y 必须为送料层台面 2.05，实际 ${cargo.root.position.y}`);
+  } finally {
+    h.dispose();
+  }
+});

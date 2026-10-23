@@ -76,6 +76,8 @@ export type TelemetryBindingComponent = {
   cargoTravelSpeed?: number;
   /** 堆垛机专用：货叉瞄准基点相对货格支撑位的竖直偏移（米）——只计入升降目标，叉顶面定位到支撑位 + 间隙（插入货物底部货槽）；货物在货格内落位保持支撑位不变；允许负值；缺省 0。 */
   stackerCargoGapY?: number;
+  /** 多穿小车专用：驶入/驶出换层提升机载货台的走行限速（米/秒）；缺省 0.5，不影响换层站台（x=-1）等待走行。 */
+  shuttleDeckTravelSpeed?: number;
 };
 
 type PlainObject = Record<string, unknown>;
@@ -274,5 +276,8 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
       ? { cargoTravelSpeed: Math.min(value.cargoTravelSpeed, 100) }
       : {}),
     ...(typeof value.stackerCargoGapY === 'number' ? { stackerCargoGapY: normalizeFiniteNumber(value.stackerCargoGapY, 0, -1, 1) } : {}),
+    ...(typeof value.shuttleDeckTravelSpeed === 'number' && Number.isFinite(value.shuttleDeckTravelSpeed) && value.shuttleDeckTravelSpeed > 0
+      ? { shuttleDeckTravelSpeed: Math.min(value.shuttleDeckTravelSpeed, 100) }
+      : {}),
   };
 }

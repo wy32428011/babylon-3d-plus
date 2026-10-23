@@ -338,7 +338,8 @@ export class LiftTelemetryDriver {
    * 送料侧接收方未空闲时货物滞留台上持续重试，不销毁。
    * work_state 存在时动作门控（doing/done 同为门控：允许执行或赶着到位，不死锁货箱）：
    * 1/2 允许取货、3/5 允许卸货（接收方被占用则货留 step2 锚点每帧重试，有人接立即给），2 同时补齐取货动画、
-   * 0/6/7/11 只移动不发起新交接；但 3/5 期间已启动的出站交接（outgoingHandoffActive）会继续完成队列平移与交付，
+   * 0/6/7/11 只移动不发起新交接；已开始的交接/排队平移在非急停时继续推进（载货台提前升降也能完成上台），
+   * 其中 3/5 期间已启动的出站交接（outgoingHandoffActive）继续完成队列平移与交付，
    * 避免出站窗口短于 1s 承接冷却 + 1.5s 排队平移时第二箱卡在台上；缺失（null）走兼容路径——到位即自动交接。
    */
   private applyLiftCargoHandoff(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
@@ -379,9 +380,9 @@ export class LiftTelemetryDriver {
     const forceFront = !frozen && this.isLiftStationForceReconcilable(snapshot, state, 0, 'task_num_fin_first_up');
     const forceReconciling = forceBack || forceFront;
 
-    const transferAdvancing = !frozen
-      && (workState === null || workState === 1 || workState === 2 || workState === 3 || workState === 5
-        || outgoingHandoffInProgress || forceReconciling);
+    // 已开始的交接/排队平移不受 work_state 回落（0/6/7/11）冻结：载货台提前升降时上台插值仍须收敛到工位锚点，
+    // 否则货箱会悬在台侧随台上升。仅急停/faulted（frozen）暂停。
+    const transferAdvancing = !frozen;
 
     if (pickupAllowed) {
       const stationIndex = state.stations[1].cargoKey === null ? 1 : state.stations[0].cargoKey === null ? 0 : null;
@@ -526,7 +527,8 @@ export class LiftTelemetryDriver {
     return true;
   }
 
-  /** 每帧刷新双工位货箱外观与位姿：台上跟随本工位锚点（台升货自升），交接/排队平移中在另一端与工位锚点间插值；朝向恒锁定朝向。 */
+  /** 每帧刷新双工位货箱外观与位姿：台上跟随本工位锚点（台升货自升），交接/排队平移中在另一端与工位锚点间插值，
+   *  两端随载货台位移逐帧搬走（货物以台面为参照系）；朝向恒锁定朝向。 */
   private updateLiftCargoPoses(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     const state = model.liftTelemetry;
     for (let stationIndex = 0 as 0 | 1; stationIndex < 2; stationIndex++) {
@@ -542,6 +544,16 @@ export class LiftTelemetryDriver {
         cargo, 'lift', snapshot, this.host.resolveCargoGeneratorForModel(model), model.entitySnapshot?.id ?? '',
       );
       const anchor = this.getLiftStationPose(model, stationIndex, cargo.lockedWorldRotation);
+      // 交接两端随载货台逐帧位移一起搬走：台面提前升降时货物以台面为参照系插值（整体被带走），
+      // 不会因只按进度比例跟随而被甩在台面下方追赶；台面静止时退化为原世界坐标插值。
+      const anchorDelta = station.cargoAnchorPosition
+        ? anchor.position.subtract(station.cargoAnchorPosition)
+        : null;
+      station.cargoAnchorPosition = anchor.position.clone();
+      if (anchorDelta && anchorDelta.lengthSquared() > 1e-12) {
+        if (station.cargoHoldPosition) station.cargoHoldPosition.addInPlace(anchorDelta);
+        if (cargo.handoff) cargo.handoff.fromPosition.addInPlace(anchorDelta);
+      }
       let targetPosition = anchor.position;
       if (!station.cargoOnBoard && station.cargoHoldPosition) {
         targetPosition = Vector3.Lerp(station.cargoHoldPosition, anchor.position, station.transferProgress);
@@ -818,6 +830,7 @@ export class LiftTelemetryDriver {
     station.transferProgress = 0;
     station.transferDirection = 1;
     station.transferActive = false;
+    station.cargoAnchorPosition = null;
     station.taskAnnotationSeen = false;
     station.reachedOutgoing = false;
     station.outgoingEntityId = null;

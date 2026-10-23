@@ -224,7 +224,8 @@ command 1 + movement 伸叉开始帧 → 当前格刷货 `beginStackerFetch`(:76
 |---|---|---|
 | 模型参数 `aisleCode` | 模型包 modelParameters / parameterValues | 巷道编号：设备绑定货格未命中时的回退匹配；空值不参与巷道匹配（一次性告警） |
 | Inspector `travelSpeed/forkSpeed` | parameterValues，shuttleDriver `readShuttleInspectorSpeed` | 速度覆盖，优先级最高（forkSpeed 为二段速度，一段减半） |
-| `dataDriven.motion.travel.speed` | 模型包脚本 | 走行速度缺省，常量兜底 1.0 m/s；**驶入/驶出换层站台与提升机载货台时统一限速到 `SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND`=0.5 m/s**（普通走线不受影响） |
+| `dataDriven.motion.travel.speed` | 模型包脚本 | 走行速度缺省，常量兜底 1.0 m/s；**驶入/驶出换层站台（x=-1）限速到 `SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND`=0.5 m/s**（普通走线不受影响） |
+| Inspector `shuttleDeckTravelSpeed` | telemetryBinding（数据驱动绑定，非模型包） | 驶入/驶出提升机载货台（x=-2 进梯、到层出梯）的走行限速；缺省 0.5 m/s，作用范围不含换层站台等待走行 |
 | `dataDriven.motion.fork.speed` | 模型包脚本 | 伸叉速度缺省 0.25 m/s |
 | `dataDriven.motion.fork.stage1Nodes` | 模型包脚本 | 一段叉节点（对象004/对象003），行程减半联动 |
 | `dataDriven.motion.fork.stage2Nodes` / `fallbackPattern` | 模型包脚本 | 二段叉节点（对象001/cha1/cha2/huocha1），货箱水平锚点 / 兜底正则 |
@@ -352,7 +353,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 **不消费 fetch**。
 
 ### 动画
-载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`（= 目标层 conveyor 支撑面世界 Y − 载货面顶面基线世界 Y，同投影到模型 Y 轴），写回载货台节点基线（`worldDeltaToParentLocalDelta` 转父级本地）。`work_state` 为 1（取货中）/3（卸货中）且载物台未到目标层时速度 ×4 赶位，到位恢复正常。货物锚定所属工位锚点（四分位），台升货自升（不 parent）。交接插值时长复用 `RGV_CARGO_TRANSFER_SECONDS`，`resolveCargoHandoffPose` 统一姿态；货箱全程 `lockedWorldRotation` 只平移不旋转。
+载货台 Y 速度插值：`liftOffset` 按 `moveNumberTowards(speed×Δt)` 逼近 `liftTargetOffset`（= 目标层 conveyor 支撑面世界 Y − 载货面顶面基线世界 Y，同投影到模型 Y 轴），写回载货台节点基线（`worldDeltaToParentLocalDelta` 转父级本地）。`work_state` 为 1（取货中）/3（卸货中）且载物台未到目标层时速度 ×4 赶位，到位恢复正常。货物锚定所属工位锚点（四分位），台升货自升（不 parent）。交接插值时长复用 `RGV_CARGO_TRANSFER_SECONDS`，`resolveCargoHandoffPose` 统一姿态；货箱全程 `lockedWorldRotation` 只平移不旋转。**插值两端随台面走**：交接/排队平移的起点（输送线货物实际位置/上一工位锚点）与承接平滑起点每帧按载货台锚点位移一起搬走，货物以台面为参照系插值——提升机在取货未播完时提前升降，货箱整体随台上升，不会被甩在下方追赶。**已开始的交接/排队平移不因 work_state 回落（0/6/7/11）冻结**，仅急停/faulted 暂停，保证提前升降时上台插值仍能收敛到工位锚点。
 
 ### 时序（work_state 存在时）
 `reference_upper_step/level_upper` 组合键 `${side}:${layer}` 决定去向并播放移动动画；交接由 `work_state` 门控：
@@ -360,14 +361,14 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - **2 取货完成**：同为取货门控（允许取货）；取货插值未播完则补齐到完成态（货物上台）。doing/done 都是「允许执行/赶着到位」的门控，不死锁货箱。
 - **3 卸货中**（送料层目标）：未到位先 ×4 赶位；到位后按序卸货——step2 有货先出；step2 空且 step1 有货时，step1 货先沿轨迹轴插值平移到 step2 锚点再出；**上一货离台后平移延迟一个承接时长（`CARGO_HANDOFF_SECONDS`，`outgoingHandoffCooldown`）再启动**——离台货在接收方侧还有承接平滑，两货动画须先后而非并发（否则视觉上 step1 先动）。交付无视 task 匹配、目标 conveyor 无货即可（接收方等待中的 task 仅在货物同 task，或匿名且接收方当前报文仍上报该 task 时由交付瞬间接管；否则保留货物身份并清残留等待）；**接收方被占用时货留 step2 锚点原位等待、每帧重试，不预播送出动画**（否则滑入输送线撞上在机货），接收方一空闲当帧交付，离台动画由接收方侧承接平滑承担；有人接立即给，**不销毁**。
 - **5 卸货完成**：同为卸货门控（允许交付，不等 doing 才撒手）；放货无台上插值，无需补齐。
-- **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；但 3/5 期间已启动的出站交接（`outgoingHandoffActive`）会继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
+- **6 移动中 / 7 移动完成 / 0 空闲 / 11 未知**：只按目标键移动，不发起新交接；**已开始的交接/排队平移继续推进**（仅急停/faulted 暂停），载货台提前升降时上台插值照常收敛到工位锚点；3/5 期间已启动的出站交接（`outgoingHandoffActive`）继续完成 step1→step2 排队平移与交付，避免出站窗口短于「承接冷却 + 排队平移」时第二箱卡在台上等下一轮。
 - **标注对账强制补交付（滞留自救）**：工位有货且 `task_num_fin_*` 曾非零、当前归零（PLC 已卸出），且该货曾随台到位过送料层 → 无视 work_state/latch/到位门控，向该工位记录的送料接收方（`outgoingEntityId`，到位送料层时逐工位登记，排队平移 step1→step2 时随货继承）强制补交付；此路径下 latch 已死、ws 非 3/5，排队平移推进改由对账状态驱动，否则第二箱卡死在平移起点。接收方仍占用则每帧重试并一次性告警。解决双货连续送时第二箱常错过短卸货窗口（实测 1.7–2.2s < 冷却 1s + 平移 1.5s）、latch 随新目标（ws=6）失效后 PLC 已卸而孪生永久滞留的问题。字段缺失不参与对账；急停/faulted 冻结期不补交付。
 - **10 急停**：并入 faulted 冻结（不动、不交接、一次性告警）。
 
 另：hclift 升降增加**小车上台门控**（work_state：0 待机/1 取小车中/2 取完/3 卸小车中/4 卸完/5 移动中/6 移动完）——本机同巷道存在 shuttle 时，必须收到该 hclift 的新鲜 `hcliftDeckOccupancies`（`phase='loaded'`、shuttle 未急停/faulted）才执行升降；占位缺失、入场中（entering）、过期（2000ms）时保持当前高度。**门控状态**：协议提供 work_state 时**仅 `5`（移动中）执行升降**；`1`（取小车中）/`3`（卸小车中）及 0/2/4/6 一律锁高度——小车进梯、出梯期间提升机不得升降。状态 5 仍保留占位可见的急停/故障否决。work_state 缺失的旧模型沿用原占位门控。`hcliftPlatformSurfaces` 同步发布载货台 `deckCenter`，供 shuttle x=-2 驶入载台。
 
 ### 状态机（LiftModelTelemetryState, types.ts）
-`liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetKey` / `arrivedTargetKey`（到位锁，防重复触发）/ `workState`（null=未提供，走兼容路径）/ `stations[2]`（index0=step1 前、index1=step2 后；每项 cargoKey/cargoOnBoard/transferProgress/transferActive/cargoHoldPosition/Rotation，cargoKey=`JSON.stringify([assetCode, stationIndex])`）/ `outgoingHandoffCooldown`（出站承接冷却，离台瞬间置 `CARGO_HANDOFF_SECONDS`，期内阻塞 step1→step2 排队平移）/ `outgoingHandoffActive`（出站交接已启动：work_state 回落后仍继续完成队列平移与交付，目标侧切换或无货时复位）/ `travelAxis` 缓存（axis/锚点偏移/绑定签名）/ `nodeBaselines`（载货台节点基线）。faulted 冻结；断流停摆（无 applyWhenStale）。
+`liftOffset`（当前）/ `liftTargetOffset`（目标）/ `targetKey` / `arrivedTargetKey`（到位锁，防重复触发）/ `workState`（null=未提供，走兼容路径）/ `stations[2]`（index0=step1 前、index1=step2 后；每项 cargoKey/cargoOnBoard/transferProgress/transferActive/cargoHoldPosition/Rotation/cargoAnchorPosition（上帧台面锚点，供插值两端随台面位移），cargoKey=`JSON.stringify([assetCode, stationIndex])`）/ `outgoingHandoffCooldown`（出站承接冷却，离台瞬间置 `CARGO_HANDOFF_SECONDS`，期内阻塞 step1→step2 排队平移）/ `outgoingHandoffActive`（出站交接已启动：work_state 回落后仍继续完成队列平移与交付，目标侧切换或无货时复位）/ `travelAxis` 缓存（axis/锚点偏移/绑定签名）/ `nodeBaselines`（载货台节点基线）。faulted 冻结；断流停摆（无 applyWhenStale）。
 
 ### 交接
 - **conveyor→lift（来料层取货）**：到位后 liftDriver 经门面 `adoptConveyorCargoForLift(entityId, liftAssetCode)` → 复用 conveyorDriver `adoptPlatformCargoForStacker`（无视 task 接管、发 taken 波），交接插值上台到分配工位。取货锚点 = **货物在来料输送线上的实际位置**（通常停在紧靠提升机的末端），不取输送线台面中心——否则插值起点落在货物后方半个机身，先向后滑再上台（后摇）。

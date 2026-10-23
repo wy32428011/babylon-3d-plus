@@ -488,6 +488,28 @@ function LiftLayerBindingsEditor(props: {
           <p className="muted">绑定巷道编号：MQTT 目标层靠它匹配同巷道多穿库的换层站台货格定高；留空时仅靠站台 deviceAssetCode 命中本机 assetCode。</p>
         </>
       ) : null}
+      {binding.deviceType === 'shuttle' ? (
+        <>
+          <label className="number-row">
+            <span>进出提升机速度(m/s)</span>
+            <input
+              type="number"
+              disabled={props.disabled}
+              min="0.001"
+              max="100"
+              step="0.01"
+              placeholder="默认 0.5"
+              value={binding.shuttleDeckTravelSpeed ?? ''}
+              onChange={(event) => {
+                const raw = event.target.value.trim();
+                const next = raw === '' ? undefined : Number(raw);
+                commit({ shuttleDeckTravelSpeed: next !== undefined && Number.isFinite(next) && next > 0 ? next : undefined });
+              }}
+            />
+          </label>
+          <p className="muted">驶入/驶出换层提升机载货台的走行限速；留空默认 0.5 m/s。换层站台（x=-1）等待走行仍按 0.5 m/s 限速。</p>
+        </>
+      ) : null}
       {binding.deviceType === 'lift' ? (
         <>
           <LiftLayerBindingsEditor

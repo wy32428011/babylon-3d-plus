@@ -57,6 +57,7 @@ import {
 /**
  * 小车驶入/驶出换层站台与提升机载货台的速度上限（m/s）。
  * 普通走线 2 m/s 直接上台对位过冲明显，进出载货台统一降到该速度；机内普通走行不受影响。
+ * 载货台进出可用数据驱动绑定 telemetryBinding.shuttleDeckTravelSpeed 覆盖，换层站台（x=-1）固定该常量。
  */
 const SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND = 0.5;
 
@@ -712,8 +713,12 @@ export class ShuttleTelemetryDriver {
       ?? SHUTTLE_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
     const targetSpeed = this.resolveShuttleCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
     // 进出换层站台/提升机载货台限速，避免 2m/s 直接上台造成对位过冲与视觉过快。
+    // 提升机载货台（x=-2 进梯 / 到层出梯）可由数据驱动绑定调速；换层站台（x=-1）固定常量。
+    const onHcliftDeck = cell.deckCenter !== undefined || cell.exitToPlatform === true;
     const motionSpeed = cell.isLayerChangePlatform
-      ? Math.min(targetSpeed, SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND)
+      ? Math.min(targetSpeed, onHcliftDeck
+        ? this.readShuttleDeckTravelSpeed(model)
+        : SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND)
       : targetSpeed;
     const previous = state.rootPosition;
     state.rootPosition = moveVectorTowards(
@@ -1580,6 +1585,11 @@ export class ShuttleTelemetryDriver {
     return this.readShuttleInspectorSpeed(model, 'forkSpeed')
       ?? this.readShuttleDataDrivenNumber(model, ['motion', 'fork', 'speed'])
       ?? SHUTTLE_DEFAULT_FORK_SPEED_METERS_PER_SECOND;
+  }
+
+  /** 驶入/驶出提升机载货台速度：数据驱动绑定覆盖优先，缺省回退平台限速常量。 */
+  private readShuttleDeckTravelSpeed(model: ModelRuntimeEntry): number {
+    return model.telemetryBinding?.shuttleDeckTravelSpeed ?? SHUTTLE_PLATFORM_TRAVEL_SPEED_METERS_PER_SECOND;
   }
 
   /** 读取模型脚本 dataDriven 配置中的数值字段。 */

@@ -1137,3 +1137,37 @@ test('小车进出提升机由 hclift work_state 门控：1 才允许进梯，3 
     h.dispose();
   }
 });
+
+test('进出提升机载货台速度由数据驱动绑定覆盖（换层站台仍走 0.5m/s 常量）', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+      rootPosition: new Vector3(0, 2, 11),
+      platformTrackEndWorld: new Vector3(0, 2, 10.5),
+    });
+    h.state.hcliftPlatformSurfaces.set('hclift1', {
+      assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+      deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 1, arrived: true, updatedAtMs: Date.now(),
+    });
+    h.model.telemetryBinding = {
+      enabled: true, sourceId: 'default', deviceType: 'shuttle',
+      expectedIntervalMs: 500, staleAfterMs: 2000, shuttleDeckTravelSpeed: 0.2,
+    } as never;
+    (h.model.entitySnapshot as { components: { modelAsset: { parameterValues: Record<string, number> } } })
+      .components.modelAsset.parameterValues.travelSpeed = 2;
+
+    const platformFrame = { x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+    h.apply(platformFrame, 0.1, 1);
+    const beforeEntry = h.model.shuttleTelemetry.rootPosition!.z;
+    h.apply({ ...platformFrame, x: -2 }, 0.1, 1);
+    const entryStep = beforeEntry - h.model.shuttleTelemetry.rootPosition!.z;
+    assert.ok(
+      entryStep > 0 && entryStep <= 0.2 * 0.1 + 1e-6,
+      `进梯须按绑定的 0.2m/s 限速，单帧位移 ${entryStep}`,
+    );
+  } finally {
+    h.dispose();
+  }
+});
