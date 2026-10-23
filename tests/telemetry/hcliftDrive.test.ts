@@ -277,3 +277,23 @@ test('换层提升机门控未满足与约束纠偏不产生箭头', () => {
     assert.equal(getLiftMotionFrame(h.hcliftModel)!.lift.direction, 0, '范围纠偏不能解释为运行');
   } finally { h.dispose(); }
 });
+
+test('首帧同时上报当前层与目标层：目标偏移按吸附前基线解析，不叠加入场吸附位移', () => {
+  const h = makeHarness({ withShuttle: false });
+  try {
+    // 展会实测首条报文：lift_current_level=4、task_target_level=1、work_state=1（取小车中）
+    h.apply({ lift_current_level: 4, task_target_level: 1, work_state: 1 });
+    const t = h.hcliftModel.hcliftTelemetry;
+    assert.ok(Math.abs(t.liftOffset - 2.45) < 1e-6, `首帧必须吸附到当前层 4（偏移 2.45），实际 ${t.liftOffset}`);
+    assert.equal(t.targetLevel, 1, '目标层必须记录为 1');
+    assert.ok(
+      t.liftTargetOffset !== null && Math.abs(t.liftTargetOffset) < 1e-6,
+      `目标层 1 偏移必须为 0（吸附位移不得重复扣除），实际 ${t.liftTargetOffset}`,
+    );
+
+    // 移动中放行后下降到层 1，而不是漂移到站台范围之外
+    h.apply({ lift_current_level: 4, task_target_level: 1, work_state: 5 }, 30);
+    assert.ok(Math.abs(t.liftOffset) < 1e-6, `必须下降到层 1（偏移 0），实际 ${t.liftOffset}`);
+    assert.ok(Math.abs(h.state.hcliftPlatformSurfaces.get('hclift1')!.supportY - 0.55) < 1e-6, '台面高度必须回到层 1');
+  } finally { h.dispose(); }
+});

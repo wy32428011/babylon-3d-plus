@@ -89,24 +89,31 @@ export class HcliftTelemetryDriver {
     if (!locator) return 0;
 
     const currentLevel = readIntegerField(snapshot.fields, 'lift_current_level');
-    if (!state.hasInitialLevel && currentLevel !== null && currentLevel >= 1) {
-      const offset = this.resolveLevelLiftOffset(model, locator, currentLevel, upAxis, snapshot);
-      if (offset !== null) {
-        // 首个实际层直接吸附，避免从导入姿态缓慢追赶
-        state.liftOffset = offset;
-        state.liftTargetOffset = offset;
-        state.targetLevel = currentLevel;
-        state.hasInitialLevel = true;
-      }
-    }
-
     const targetLevel = readIntegerField(snapshot.fields, 'task_target_level');
-    if (!frozen && targetLevel !== null && targetLevel >= 1 && targetLevel !== state.targetLevel) {
-      const offset = this.resolveLevelLiftOffset(model, locator, targetLevel, upAxis, snapshot);
-      if (offset !== null) {
-        state.targetLevel = targetLevel;
-        state.liftTargetOffset = offset;
-      }
+    // 偏移解析必须先于任何 liftOffset 改写：载货台基线 = 当前台面世界高度 − 当前已写回节点的位移，
+    // 首帧若先吸附当前层再解析目标层，吸附位移会被重复扣除，目标层偏移被放大到站台范围之外。
+    const initialLevel = !state.hasInitialLevel && currentLevel !== null && currentLevel >= 1 ? currentLevel : null;
+    const initialOffset = initialLevel === null
+      ? null
+      : this.resolveLevelLiftOffset(model, locator, initialLevel, upAxis, snapshot);
+    const levelAfterSnap = initialLevel !== null && initialOffset !== null ? initialLevel : state.targetLevel;
+    const nextTargetLevel = !frozen && targetLevel !== null && targetLevel >= 1 && targetLevel !== levelAfterSnap
+      ? targetLevel
+      : null;
+    const nextTargetOffset = nextTargetLevel === null
+      ? null
+      : this.resolveLevelLiftOffset(model, locator, nextTargetLevel, upAxis, snapshot);
+
+    if (initialLevel !== null && initialOffset !== null) {
+      // 首个实际层直接吸附，避免从导入姿态缓慢追赶
+      state.liftOffset = initialOffset;
+      state.liftTargetOffset = initialOffset;
+      state.targetLevel = initialLevel;
+      state.hasInitialLevel = true;
+    }
+    if (nextTargetLevel !== null && nextTargetOffset !== null) {
+      state.targetLevel = nextTargetLevel;
+      state.liftTargetOffset = nextTargetOffset;
     }
 
     // 初层吸附在此前完成，只观察其后真正执行的连续升降。
