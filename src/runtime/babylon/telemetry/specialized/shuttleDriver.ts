@@ -82,8 +82,6 @@ type ShuttleTargetCell = {
   deckCenter?: Vector3;
   /** 到层自动出梯（中/完成）：目标为目标层站台格而非载货台中心，Status=0 也走行。 */
   exitToPlatform?: boolean;
-  /** 匹配到的 hclift 台面是否已在目标层停稳：false 表示台面正在升降，进出梯须立即闪烁到目标端。 */
-  hcliftSettled?: boolean;
   /** 出梯目标层的站台支撑 Y：台面提前升降时闪出并锁定该高度，不再跟随移动中的台面。 */
   exitSupportY?: number;
 };
@@ -402,7 +400,6 @@ export class ShuttleTelemetryDriver {
             hcliftKey: hclift.key,
             hcliftWorkState: hclift.surface.workState,
             hcliftDeckCenter: hclift.surface.deckCenter.clone(),
-            hcliftSettled: hclift.surface.arrived,
           }
         : {}),
       ...(x === -2 && hclift && !exitToPlatform ? { deckCenter: hclift.surface.deckCenter.clone() } : {}),
@@ -669,9 +666,11 @@ export class ShuttleTelemetryDriver {
   // ===== 走行（仅 Status=5，Z 轴） =====
 
   /**
-   * 提升机提前升降兜底：进出梯途中台面一旦离开目标层（arrived=false），立即把小车闪到目标端——
-   * 进梯闪到载货台中心并随台升降；出梯闪到目标层站台并锁定该层站台高度，不再跟随移动中的台面被拖走。
-   * 出梯锁定保持到目标不再是出梯格（x 翻回 -1/正常列），避免台面到新层后把站台上的车垂直拽走。
+   * 提升机提前升降兜底：正常进出梯动画照常播放，只有台面**真正开始升降**时——
+   * hclift work_state=5（移动中）或发布的台面支撑高度本帧发生变化（兼容无 work_state 的旧模型）——
+   * 才立即把小车闪到目标端：进梯闪到载货台中心并随台升降；出梯闪到目标层站台并锁定该层站台高度，
+   * 不再跟随移动中的台面被拖走。进梯仅在车已真正驶离站台后生效（work_state 门控未放行时不抢跑）；
+   * 出梯锁定保持到目标不再是出梯格（x 翻回 -1/正常列）。
    */
   private applyHcliftDeckEarlyMotionFlash(
     model: ModelRuntimeEntry,
@@ -680,38 +679,46 @@ export class ShuttleTelemetryDriver {
   ): void {
     if (snapshot.faulted) return;
     const state = model.shuttleTelemetry;
-    if (!cell || !cell.isLayerChangePlatform || !cell.hcliftKey) {
+    const onHcliftDeck = cell?.isLayerChangePlatform === true && cell.hcliftKey !== undefined
+      && (cell.deckCenter !== undefined || cell.exitToPlatform === true);
+    if (!onHcliftDeck) {
       if (cell) {
         state.hcliftExitFlashOutY = null;
         state.hcliftEntryStartPosition = null;
       }
+      state.hcliftDeckSupportYKey = null;
+      state.hcliftDeckSupportY = null;
       return;
     }
+    const hcliftKey = cell.hcliftKey as string;
+    const upAxis = getModelAxis(model.root, 'y');
+    const supportY = Vector3.Dot(cell.supportPosition, upAxis);
+    const deckMoved = state.hcliftDeckSupportYKey === hcliftKey
+      && state.hcliftDeckSupportY !== null
+      && Math.abs(supportY - state.hcliftDeckSupportY) > 1e-4;
+    state.hcliftDeckSupportYKey = hcliftKey;
+    state.hcliftDeckSupportY = supportY;
+    const deckLifting = cell.hcliftWorkState === 5 || deckMoved;
     const travelAxis = getHorizontalModelAxis(model.root, 'z');
 
     if (cell.exitToPlatform !== true) {
       state.hcliftExitFlashOutY = null;
-      if (cell.deckCenter === undefined) {
-        state.hcliftEntryStartPosition = null;
-        return;
-      }
       state.hcliftEntryStartPosition ??= (state.rootPosition ?? state.rootBasePosition).clone();
       // 尚未真正开始进梯（被 work_state 门控在原地）时仍按原门控，不抢跑
       const entered = Vector3.Distance(state.rootPosition ?? state.rootBasePosition, state.hcliftEntryStartPosition)
         > SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
-      if (!entered || cell.hcliftSettled !== false) return;
-      // 进梯途中台面提前移动：闪入载货台中心，随后 Y 随台面升降
+      if (!entered || !deckLifting) return;
+      // 进梯途中台面开始升降：闪入载货台中心，随后 Y 随台面升降
       state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
       return;
     }
     state.hcliftEntryStartPosition = null;
 
     if (state.hcliftExitFlashOutY === null) {
-      if (cell.hcliftSettled !== false) return;
-      state.hcliftExitFlashOutY = cell.exitSupportY
-        ?? Vector3.Dot(cell.supportPosition, getModelAxis(model.root, 'y'));
+      if (!deckLifting) return;
+      state.hcliftExitFlashOutY = cell.exitSupportY ?? supportY;
     }
-    // 出梯途中台面提前移动：闪出到站台并锁定出梯层高
+    // 出梯途中台面开始升降：闪出到站台并锁定出梯层高
     cell.supportPosition.y = state.hcliftExitFlashOutY;
     state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
   }

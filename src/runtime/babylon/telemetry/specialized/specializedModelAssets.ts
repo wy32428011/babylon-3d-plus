@@ -224,6 +224,8 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     hcliftLoadedSawMoving: false,
     hcliftExitFlashOutY: null,
     hcliftEntryStartPosition: null,
+    hcliftDeckSupportYKey: null,
+    hcliftDeckSupportY: null,
     lastYFlashOffset: null,
   };
 }
@@ -260,6 +262,8 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.hcliftLoadedSawMoving = false;
   model.shuttleTelemetry.hcliftExitFlashOutY = null;
   model.shuttleTelemetry.hcliftEntryStartPosition = null;
+  model.shuttleTelemetry.hcliftDeckSupportYKey = null;
+  model.shuttleTelemetry.hcliftDeckSupportY = null;
   model.shuttleTelemetry.lastYFlashOffset = null;
 }
 
