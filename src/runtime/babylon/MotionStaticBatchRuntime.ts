@@ -90,14 +90,19 @@ export class MotionStaticBatchRuntime {
   private fallbackCount = 0;
   private fallbackReason = '';
   private candidateParts = 0;
-  private readonly observer: Observer<Scene>;
-  private readonly beforeAnimationsObserver: Observer<Scene>;
-  private readonly beforeTargetsObserver: Observer<Scene>;
+  private observer: Observer<Scene> | null = null;
+  private beforeAnimationsObserver: Observer<Scene> | null = null;
+  private beforeTargetsObserver: Observer<Scene> | null = null;
+  private enabled: boolean;
+  private installed = false;
+  private activationPending = false;
+  private activationGeneration = 0;
+  private transitioning = false;
 
-  constructor(private readonly scene: Scene, private readonly options: MotionStaticBatchOptions) {
+  constructor(private readonly scene: Scene, private readonly options: MotionStaticBatchOptions, enabled = true) {
+    this.enabled = enabled;
     this.sourceCandidateProvider = scene.getActiveMeshCandidates;
     this.candidateProvider = () => this.collectCandidates();
-    scene.getActiveMeshCandidates = this.candidateProvider;
     this.sourceFreezeActiveMeshes = scene.freezeActiveMeshes;
     this.sourceUnfreezeActiveMeshes = scene.unfreezeActiveMeshes;
     const delegateFreeze = this.delegateFreeze.bind(this);
@@ -109,25 +114,83 @@ export class MotionStaticBatchRuntime {
       // 仅响应用户调用；尚未ready的classic freeze不会被native unfreeze取消，pending须等原回调结算。
       return sourceUnfreeze.apply(this, args);
     };
-    scene.freezeActiveMeshes = this.freezeActiveMeshesEntry;
-    scene.unfreezeActiveMeshes = this.unfreezeActiveMeshesEntry;
+    if (enabled) this.installHooks();
+  }
+
+  /** 关闭时完全释放场景入口；显式重开在微任务边界检查原生异步freeze是否已结算。 */
+  setEnabled(enabled: boolean): void {
+    if (this.disposed || this.enabled === enabled) return;
+    this.enabled = enabled; this.activationGeneration++; this.activationPending = false;
+    if (enabled) { this.requestActivation(); return; }
+    // onChanged会同步刷新光照并可能重入sync，必须先关闭门禁再恢复源和撤销入口。
+    this.transitioning = true;
+    try { this.clear(); this.layoutKey = ''; this.candidateParts = 0; this.mutations.clear(); }
+    finally { this.uninstallHooks(); this.transitioning = false; }
+  }
+
+  private requestActivation(): void {
+    if (!this.enabled || this.installed || this.disposed || this.transitioning || this.activationPending) return;
+    this.activationPending = true;
+    const generation = this.activationGeneration;
+    // addOnce在native freeze回调前已标记删除，不能在同一调用栈仅凭hasObservers判定可接管。
+    // 不在关闭态轮询或安装观察器；尚有ready待办时由宿主下次既有sync再尝试。
+    queueMicrotask(() => {
+      if (generation !== this.activationGeneration) return;
+      this.activationPending = false;
+      if (!this.enabled || this.installed || this.disposed || this.transitioning || this.pendingFreezes > 0
+        || this.scene.onReadyObservable.hasObservers() || Reflect.get(this.scene, '_executeWhenReadyTimeoutId') != null
+        || this.scene._activeMeshesFrozen) return;
+      if (this.installHooks()) this.sync();
+    });
+  }
+
+  private installHooks(): boolean {
+    if (this.scene.getActiveMeshCandidates !== this.sourceCandidateProvider) this.candidateProviderRejected = true;
+    if (this.scene.freezeActiveMeshes !== this.sourceFreezeActiveMeshes
+      || this.scene.unfreezeActiveMeshes !== this.sourceUnfreezeActiveMeshes) this.freezeEntryRejected = true;
+    if (this.candidateProviderRejected || this.freezeEntryRejected) return false;
+    this.installed = true;
+    this.scene.getActiveMeshCandidates = this.candidateProvider;
+    this.scene.freezeActiveMeshes = this.freezeActiveMeshesEntry;
+    this.scene.unfreezeActiveMeshes = this.unfreezeActiveMeshesEntry;
+    const scene = this.scene;
     this.observer = scene.onBeforeActiveMeshesEvaluationObservable.add(() => this.beforeActive());
     // customRenderFunction/frameGraph可能绕过普通候选流程，须在Scene.render的分支选择前归还原件。
     this.beforeAnimationsObserver = scene.onBeforeAnimationsObservable.add(() => this.guardRenderPipeline());
     // early脚本可在beforeRender新增RTT；主相机provider晚于第一遍RTT，不能只靠候选校验。
     this.beforeTargetsObserver = scene.onBeforeRenderTargetsRenderObservable.add(() => this.beforeActive());
+    return true;
+  }
+
+  private uninstallHooks(): void {
+    this.installed = false;
+    this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.observer); this.observer = null;
+    this.scene.onBeforeAnimationsObservable.remove(this.beforeAnimationsObserver); this.beforeAnimationsObserver = null;
+    this.scene.onBeforeRenderTargetsRenderObservable.remove(this.beforeTargetsObserver); this.beforeTargetsObserver = null;
+    if (this.scene.getActiveMeshCandidates === this.candidateProvider) this.scene.getActiveMeshCandidates = this.sourceCandidateProvider;
+    if (this.scene.freezeActiveMeshes === this.freezeActiveMeshesEntry) this.scene.freezeActiveMeshes = this.sourceFreezeActiveMeshes;
+    if (this.scene.unfreezeActiveMeshes === this.unfreezeActiveMeshesEntry) this.scene.unfreezeActiveMeshes = this.sourceUnfreezeActiveMeshes;
+  }
+
+  private isActivationCurrent(generation: number): boolean {
+    return generation === this.activationGeneration && this.enabled && this.installed && !this.disposed && !this.transitioning;
   }
 
   sync(): void {
-    if (this.disposed || this.rebuilding) return;
+    if (this.disposed || !this.enabled || this.transitioning || this.rebuilding) return;
+    if (!this.installed) { this.requestActivation(); return; }
     this.rebuilding = true;
+    const generation = this.activationGeneration;
+    let unregisteredBatch: EntityArrayThinInstanceBatch | null = null;
     try {
       const document = this.options.getDocument();
       if (!document || this.suspended || document.sceneSettings.lighting?.result
         || Reflect.get(document.sceneSettings, 'lightingBakeResult') || getSceneLightingConfig(document).result || !this.sceneSafe()) {
         this.clear(); this.layoutKey = ''; return;
       }
+      if (!this.isActivationCurrent(generation)) return;
       const models = [...this.options.getModels()];
+      if (!this.isActivationCurrent(generation)) return;
       // 模型逐个异步初始化时，完整几何签名/批次构建会随ready变化反复重做；等待本轮全部正常宿主结束。
       // 失败宿主由eligibleModel继续排除，既不能冒充ready候选，也不能阻塞其余模型的源绘制/接管。
       if (models.some(([, model]) => !model.readinessError && !model.externalScriptRuntime?.getInitializationError?.()
@@ -141,17 +204,22 @@ export class MotionStaticBatchRuntime {
           model.parameterSignature, model.assetRevision, model.externalScriptSignature, this.optOut.has(model),
           model.meshes.map(mesh => mesh.uniqueId)];
       }));
+      if (!this.isActivationCurrent(generation)) return;
       if (key === this.layoutKey) { this.updateGroups(); return; }
       const previouslyBatched = this.groups.length > 0;
-      this.clear(false); this.layoutKey = key; this.candidateParts = 0;
+      this.clear(false);
+      if (!this.isActivationCurrent(generation)) return;
+      this.layoutKey = key; this.candidateParts = 0;
       const candidates = new Map<string, Part[]>();
       // 只在本次layout收集内共享实际Material对象；下一次build必须重新捕获，失败也不为每个part重复serialize。
       const materialCaptures = new Map<Material, MaterialCapture>();
       for (const [entityId, model] of models) {
+        if (!this.isActivationCurrent(generation)) return;
         if (!this.eligibleModel(model)) continue;
         const motion = this.options.getMotionTargets(model);
         if (!motion.known) continue;
         for (const mesh of new Set([...model.meshes, ...model.contentRoot.getChildMeshes(false)])) {
+          if (!this.isActivationCurrent(generation)) return;
           if (!(mesh instanceof Mesh) || !eligibleMesh(mesh) || under(mesh, motion.moving)
             || (motion.fixed.length > 0 && !under(mesh, motion.fixed))) continue;
           try {
@@ -180,33 +248,50 @@ export class MotionStaticBatchRuntime {
             const groupKey = JSON.stringify([nodePath(mesh, model.contentRoot), geometrySignature(mesh), captured.schema, captured.textureIdentities, presentation]);
             const part: Part = { entityId, model, mesh, geometry: mesh.geometry!, material, geometryCurrent: watchGeometryBuffers(mesh),
               localNodes, presentation, materialWatch: captured.read, materialState: captured.state };
+            if (!this.isActivationCurrent(generation)) return;
             this.candidateParts += 1;
             const group = candidates.get(groupKey) ?? []; group.push(part); candidates.set(groupKey, group);
           } catch (error) { this.fallbackReason = String(error); }
         }
       }
       for (const parts of candidates.values()) {
+        if (!this.isActivationCurrent(generation)) return;
         if (parts.length < 2) continue;
         const representative = parts[0].mesh;
+        const sourceRootWorldMatrix = representative.computeWorldMatrix(true).clone();
+        if (!this.isActivationCurrent(generation)) return;
         const batch = EntityArrayThinInstanceBatch.create(parts[0].entityId, [representative], {
-          interactive: true, mergeStaticMeshesByMaterial: false,
-          sourceRootWorldMatrix: representative.computeWorldMatrix(true).clone(),
+          interactive: true, mergeStaticMeshesByMaterial: false, sourceRootWorldMatrix,
           namePrefix: '__motionStatic', metadata: { motionStaticBatch: true },
         });
+        // create和宿主回调可同步关闭/重开；尚未登记的载体必须由本次sync负责当栈释放。
+        unregisteredBatch = batch;
+        if (!this.isActivationCurrent(generation)) return;
         if (!batch) continue;
         const group = { batch, parts, frameKey: '' };
-        if (!this.updateGroup(group, false)) { batch.dispose(); continue; }
-        this.groups.push(group);
+        const updated = this.updateGroup(group, false);
+        if (!this.isActivationCurrent(generation)) return;
+        if (!updated) { unregisteredBatch = null; batch.dispose(); continue; }
+        this.groups.push(group); unregisteredBatch = null;
         this.options.onBatchAdded(batch);
+        if (!this.isActivationCurrent(generation)) return;
         for (const part of parts) {
+          if (!this.isActivationCurrent(generation)) return;
           this.installGeometryHook(part);
+          if (!this.isActivationCurrent(generation)) return;
           this.suspendedMeshes.add(part.mesh);
         }
       }
-      if (previouslyBatched || this.groups.length) this.options.onChanged();
+      if (this.isActivationCurrent(generation) && (previouslyBatched || this.groups.length)) this.options.onChanged();
     } catch (error) {
       this.fallbackReason = String(error); this.clear(); this.layoutKey = '';
-    } finally { this.rebuilding = false; }
+    } finally {
+      try {
+        unregisteredBatch?.dispose();
+        // 订阅setter也可能重入关闭；旧代尾部不能留下clear之后新登记的hook或抑制记录。
+        if (!this.isActivationCurrent(generation)) { this.clear(); this.layoutKey = ''; this.candidateParts = 0; }
+      } finally { this.rebuilding = false; }
+    }
   }
 
   /** 外置脚本/参数即将改写模型时先退出接管；当前模型对象不再重新参与优化。 */
@@ -248,10 +333,15 @@ export class MotionStaticBatchRuntime {
   beginSceneSession(sessionId: string): void {
     if (this.disposed || sessionId === this.sceneSessionId) return;
     this.sceneSessionId = sessionId; this.clear(); this.suspended = false; this.layoutKey = '';
-    this.candidateProviderRejected = this.scene.getActiveMeshCandidates !== this.candidateProvider;
-    this.freezeEntryRejected = this.scene.freezeActiveMeshes !== this.freezeActiveMeshesEntry
-      || this.scene.unfreezeActiveMeshes !== this.unfreezeActiveMeshesEntry;
+    this.candidateProviderRejected = this.scene.getActiveMeshCandidates !== (this.installed ? this.candidateProvider : this.sourceCandidateProvider);
+    this.freezeEntryRejected = this.scene.freezeActiveMeshes !== (this.installed ? this.freezeActiveMeshesEntry : this.sourceFreezeActiveMeshes)
+      || this.scene.unfreezeActiveMeshes !== (this.installed ? this.unfreezeActiveMeshesEntry : this.sourceUnfreezeActiveMeshes);
     this.optOut = new WeakSet(); this.mutations.clear(); this.candidateParts = 0;
+  }
+
+  /** 仅向宿主登记本运行时自己安装的三个观察器，不授权其他脚本。 */
+  getControlledSceneObservers(): readonly Observer<Scene>[] {
+    return this.installed ? [this.observer!, this.beforeAnimationsObserver!, this.beforeTargetsObserver!] : [];
   }
 
   getBatchesForEntity(entityId: string): readonly EntityArrayThinInstanceBatch[] {
@@ -270,7 +360,7 @@ export class MotionStaticBatchRuntime {
   /** 保留宿主旧接口；候选过滤不再产生临时Mesh事件。 */
   isTemporaryMeshEvent(_mesh: AbstractMesh): boolean { return false; }
   getDiagnostics() {
-    return { groups: this.groups.length, batchMeshes: this.groups.reduce((sum, group) => sum + group.batch.meshes.length, 0),
+    return { enabled: this.enabled, installed: this.installed, groups: this.groups.length, batchMeshes: this.groups.reduce((sum, group) => sum + group.batch.meshes.length, 0),
       suspendedMeshes: this.suspendedMeshes.size, fallbackCount: this.fallbackCount,
       candidateParts: this.candidateParts, fallbackReason: this.fallbackReason, suspended: this.suspended, disposed: this.disposed,
       candidateProviderOwned: this.scene.getActiveMeshCandidates === this.candidateProvider, candidateProviderRejected: this.candidateProviderRejected,
@@ -280,17 +370,13 @@ export class MotionStaticBatchRuntime {
   }
   dispose(): void {
     if (this.disposed) return;
-    this.disposed = true; this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.observer);
-    this.scene.onBeforeAnimationsObservable.remove(this.beforeAnimationsObserver);
-    this.scene.onBeforeRenderTargetsRenderObservable.remove(this.beforeTargetsObserver);
-    this.clear(); this.mutations.clear();
-    if (this.scene.getActiveMeshCandidates === this.candidateProvider) this.scene.getActiveMeshCandidates = this.sourceCandidateProvider;
-    if (this.scene.freezeActiveMeshes === this.freezeActiveMeshesEntry) this.scene.freezeActiveMeshes = this.sourceFreezeActiveMeshes;
-    if (this.scene.unfreezeActiveMeshes === this.unfreezeActiveMeshesEntry) this.scene.unfreezeActiveMeshes = this.sourceUnfreezeActiveMeshes;
+    this.disposed = true; this.enabled = false; this.activationGeneration++; this.activationPending = false;
+    try { this.clear(); this.mutations.clear(); }
+    finally { this.uninstallHooks(); }
   }
 
   private delegateFreeze(receiver: Scene, args: Parameters<Scene['freezeActiveMeshes']>): Scene {
-    if (receiver !== this.scene || this.disposed) return this.sourceFreezeActiveMeshes.apply(receiver, args);
+    if (receiver !== this.scene || this.disposed || !this.enabled || !this.installed) return this.sourceFreezeActiveMeshes.apply(receiver, args);
     // FrameGraph始终不接管，保留其独有的retry/缺省错误日志实现。
     if (receiver.frameGraph) { this.clear(); this.layoutKey = ''; return this.sourceFreezeActiveMeshes.apply(receiver, args); }
     // freezeActiveMeshes会异步evaluate再冻结；先设pending再归还原件，onChanged重入也不得创建载体。
@@ -331,7 +417,7 @@ export class MotionStaticBatchRuntime {
   }
 
   private guardRenderPipeline(): void {
-    if (this.disposed) return;
+    if (this.disposed || !this.enabled || !this.installed || this.transitioning) return;
     try {
       if (!this.sceneSafe()) { this.clear(); this.layoutKey = ''; }
     } catch (error) { this.fallbackReason = String(error); this.clear(); this.layoutKey = ''; }
@@ -340,7 +426,7 @@ export class MotionStaticBatchRuntime {
   private collectCandidates(): ReturnType<Scene['getActiveMeshCandidates']> {
     // 保留原provider的this和调用次数；原返回可能就是scene.meshes，先快照有效前缀再做会dispose载体的核对。
     const original = this.sourceCandidateProvider.call(this.scene);
-    if (this.collectingCandidates) return original;
+    if (this.collectingCandidates || this.disposed || !this.enabled || !this.installed || this.transitioning) return original;
     this.collectingCandidates = true;
     try {
       const entries = original.data.slice(0, original.length);
@@ -379,7 +465,7 @@ export class MotionStaticBatchRuntime {
     return identity;
   }
   private beforeActive(): void {
-    if (this.disposed) return;
+    if (this.disposed || !this.enabled || !this.installed || this.transitioning) return;
     try {
       const document = this.options.getDocument();
       if (!document || this.suspended || document.sceneSettings.lighting?.result
@@ -415,13 +501,19 @@ export class MotionStaticBatchRuntime {
     const state = read(); states?.set(read, state); return state;
   }
   private updateGroups(allowNewCarriers = true): void {
-    for (const group of this.groups) if (!this.updateGroup(group, true, allowNewCarriers)) {
-      if (!this.deferredLayout) for (const part of group.parts) this.optOut.add(part.model);
-      this.clear(); this.layoutKey = ''; break;
+    const generation = this.activationGeneration;
+    for (const group of this.groups) {
+      const updated = this.updateGroup(group, true, allowNewCarriers);
+      if (!this.isActivationCurrent(generation)) { group.batch.dispose(); return; }
+      if (!updated) {
+        if (!this.deferredLayout) for (const part of group.parts) this.optOut.add(part.model);
+        this.clear(); this.layoutKey = ''; break;
+      }
     }
     this.deferredLayout = false;
   }
   private updateGroup(group: BatchGroup, notifyAdded = true, allowNewCarriers = true): boolean {
+    const generation = this.activationGeneration;
     const rows: EntityArrayThinInstanceTransform[] = [];
     for (const part of group.parts) {
       if (!this.options.isEntityVisible(part.entityId) || !part.mesh.isEnabled() || !part.mesh.isVisible) continue;
@@ -431,6 +523,7 @@ export class MotionStaticBatchRuntime {
       part.worldUpdateId = world.updateFlag; part.transform = transform;
       rows.push({ entityId: part.entityId, transform, pickable: this.options.isEntityPickable(part.entityId) && part.mesh.isPickable });
     }
+    if (!this.isActivationCurrent(generation)) return false;
     const key = JSON.stringify(rows);
     if (key === group.frameKey) return true;
     if (!allowNewCarriers) {
@@ -442,11 +535,14 @@ export class MotionStaticBatchRuntime {
       }
     }
     const beforeMeshes = new Set(group.batch.meshes);
-    if (!group.batch.updateEntityTransforms(currentWorld(group.parts[0].mesh).clone(), rows)) return false;
+    const updated = group.batch.updateEntityTransforms(currentWorld(group.parts[0].mesh).clone(), rows);
+    if (!this.isActivationCurrent(generation)) { group.batch.dispose(); return false; }
+    if (!updated) return false;
     group.frameKey = key;
     // 正负 determinant 或空间分片变化可能创建载体，宿主映射必须同帧刷新。
     if (notifyAdded && (group.batch.meshes.length !== beforeMeshes.size
       || group.batch.meshes.some(mesh => !beforeMeshes.has(mesh)))) this.options.onBatchAdded(group.batch);
+    if (!this.isActivationCurrent(generation)) { group.batch.dispose(); return false; }
     return true;
   }
   private installGeometryHook(part: Part): void {

@@ -235,15 +235,62 @@ function nodeMatches(target: LightingPolicyNodeTarget, context: LightingPolicyCo
 export function resolveSceneLightingPolicy(value: unknown, context: LightingPolicyContext): ResolvedLightingPolicy {
   return resolveNormalizedPolicy(normalizeSceneLightingPolicy(value) ?? emptyPolicy(), context);
 }
-/** 整轮复用策略与节点目录快照；策略或目录原地编辑后须重新创建，避免跨草稿读取陈旧结果。 */
-export function createSceneLightingPolicyResolver(value: unknown): (context: LightingPolicyContext) => ResolvedLightingPolicy {
-  const policy = normalizeSceneLightingPolicy(value) ?? emptyPolicy(), directoryIndex = createNodeDirectoryIndex();
-  return context => resolveNormalizedPolicy(policy, context, directoryIndex);
+type PolicyInitialState = {
+  requested: { mobility: LightingMobility; castShadows: boolean; receiveShadows: boolean; bakeIndirect: boolean };
+  fieldSources: LightingPolicyFieldSources;
+};
+const policyArrayPrototype = Array.prototype, policyObject = Object;
+const policyMap = policyArrayPrototype.map, policyIterator = policyArrayPrototype[Symbol.iterator], policyFromEntries = Object.fromEntries;
+const policyDescriptor = Object.getOwnPropertyDescriptor;
+function canUsePolicyInitialTemplate(): boolean {
+  // 只检查库自身原型；未知方法/访问器继续走原初始化，不增加业务对象的读取。
+  const map = policyDescriptor(policyArrayPrototype, 'map'), iterator = policyDescriptor(policyArrayPrototype, Symbol.iterator);
+  const entries = policyDescriptor(policyObject, 'fromEntries');
+  return !!map && 'value' in map && map.value === policyMap
+    && !!iterator && 'value' in iterator && iterator.value === policyIterator
+    && !!entries && 'value' in entries && entries.value === policyFromEntries;
 }
-function resolveNormalizedPolicy(policy: SceneLightingPolicy, context: LightingPolicyContext, directoryIndex?: NodeDirectoryIndex): ResolvedLightingPolicy {
+function createPolicyInitialState(): PolicyInitialState {
   const requested = { mobility: 'auto' as LightingMobility, castShadows: true, receiveShadows: true, bakeIndirect: true };
   const fieldSources = Object.fromEntries(LIGHTING_POLICY_FIELDS.map(field => [field,
     { kind: 'automatic', label: '自动分类', value: requested[field] }])) as LightingPolicyFieldSources;
+  return { requested, fieldSources };
+}
+function createPolicyInitialTemplate(policy: SceneLightingPolicy): PolicyInitialState {
+  const initial = createPolicyInitialState();
+  for (const field of LIGHTING_POLICY_FIELDS) if (policy.defaults[field] !== undefined) {
+    if (field === 'mobility') initial.requested.mobility = policy.defaults.mobility!;
+    else initial.requested[field] = policy.defaults[field]!;
+    initial.fieldSources[field] = { kind: 'scene-default', label: '场景默认', value: policy.defaults[field]! };
+  }
+  return initial;
+}
+function clonePolicyInitialState(template: PolicyInitialState): PolicyInitialState {
+  // 字段来源属于目录行；只复用纯模板，返回值仍全部独立，避免行间修改产生新别名。
+  return { requested: { ...template.requested }, fieldSources: {
+    mobility: { ...template.fieldSources.mobility }, castShadows: { ...template.fieldSources.castShadows },
+    receiveShadows: { ...template.fieldSources.receiveShadows }, bakeIndirect: { ...template.fieldSources.bakeIndirect },
+  } };
+}
+function hasScalarPolicyDefaults(policy: SceneLightingPolicy): boolean {
+  // 规范化访问器可能连续返回不同类型；模板只接收最终确认为标量的私有默认字段。
+  const defaults = policy.defaults;
+  return (defaults.mobility === undefined || defaults.mobility === 'auto' || defaults.mobility === 'static' || defaults.mobility === 'dynamic')
+    && (defaults.castShadows === undefined || typeof defaults.castShadows === 'boolean')
+    && (defaults.receiveShadows === undefined || typeof defaults.receiveShadows === 'boolean')
+    && (defaults.bakeIndirect === undefined || typeof defaults.bakeIndirect === 'boolean');
+}
+
+/** 整轮复用策略与节点目录快照；策略或目录原地编辑后须重新创建，避免跨草稿读取陈旧结果。 */
+export function createSceneLightingPolicyResolver(value: unknown): (context: LightingPolicyContext) => ResolvedLightingPolicy {
+  const policy = normalizeSceneLightingPolicy(value) ?? emptyPolicy(), directoryIndex = createNodeDirectoryIndex();
+  const initial = canUsePolicyInitialTemplate() && hasScalarPolicyDefaults(policy) ? createPolicyInitialTemplate(policy) : undefined;
+  return context => resolveNormalizedPolicy(policy, context, directoryIndex, initial);
+}
+function resolveNormalizedPolicy(policy: SceneLightingPolicy, context: LightingPolicyContext, directoryIndex?: NodeDirectoryIndex,
+  initial?: PolicyInitialState): ResolvedLightingPolicy {
+  const useTemplate = initial && canUsePolicyInitialTemplate();
+  const { requested, fieldSources } = useTemplate ? clonePolicyInitialState(initial) : createPolicyInitialState();
   const matchedRuleIds: string[] = [], mismatches: LightingPolicyMismatch[] = [], conflicts: LightingPolicyConflict[] = [];
   const preserved = new Set<LightingPolicyField>();
   const assign = (field: LightingPolicyField, fieldValue: LightingMobility | boolean, source: LightingPolicyFieldSource) => {
@@ -251,7 +298,7 @@ function resolveNormalizedPolicy(policy: SceneLightingPolicy, context: LightingP
     else requested[field] = fieldValue as boolean;
     fieldSources[field] = { ...source, value: fieldValue };
   };
-  for (const field of LIGHTING_POLICY_FIELDS) if (policy.defaults[field] !== undefined) {
+  if (!useTemplate) for (const field of LIGHTING_POLICY_FIELDS) if (policy.defaults[field] !== undefined) {
     assign(field, policy.defaults[field]!, { kind: 'scene-default', label: '场景默认', value: policy.defaults[field]! });
   }
   const claimed = new Set<LightingPolicyField>();

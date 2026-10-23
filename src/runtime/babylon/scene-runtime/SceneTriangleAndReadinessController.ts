@@ -508,14 +508,29 @@ export class SceneTriangleAndReadinessController {
       filePercent: currentFilePercent,
     };
   }
+  /** 保持mesh广播的同步时序；只由光照运行时决定已pending请求能否合并。 */
+  private notifyMeshLightingChange(reason: string): void {
+    const lighting = this.dependencies.environment.lightingRuntime;
+    const notify = lighting?.notifyMeshLifecycleChange ?? lighting?.markDirty;
+    if (notify) Reflect.apply(notify, lighting, [reason]);
+  }
+
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshAddedObserver(): void {
-    this.modelStatisticsMeshAddedObserver = this.context.scene.onNewMeshAddedObservable.add(mesh => { if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return; this.invalidateModelStatistics(); if (!mesh.metadata?.lightingDerived) this.dependencies.environment.lightingRuntime?.markDirty(); });
+    this.modelStatisticsMeshAddedObserver = this.context.scene.onNewMeshAddedObservable.add(mesh => {
+      if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
+      this.invalidateModelStatistics();
+      if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-added');
+    });
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshRemovedObserver(): void {
-    this.modelStatisticsMeshRemovedObserver = this.context.scene.onMeshRemovedObservable.add(mesh => { if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return; this.invalidateModelStatistics(); if (!mesh.metadata?.lightingDerived) this.dependencies.environment.lightingRuntime?.markDirty(); });
+    this.modelStatisticsMeshRemovedObserver = this.context.scene.onMeshRemovedObservable.add(mesh => {
+      if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
+      this.invalidateModelStatistics();
+      if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-removed');
+    });
   }
 
 }

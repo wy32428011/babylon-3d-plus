@@ -229,7 +229,7 @@ export class EnvironmentAndSkyboxController {
     if (!api?.preflightLightingBake) throw new Error('烘焙前检查需要桌面编辑器。');
     await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
     // 环境提交可能晚于最后一个 mesh 事件；显式检查必须读取当前完整源目录。
-    this.lightingRuntime.markDirty();
+    this.lightingRuntime.markDirty('bake-preflight');
     const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(crypto.randomUUID(), signal), signal);
     signal?.throwIfAborted();
     return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input)), signal);
@@ -262,7 +262,7 @@ export class EnvironmentAndSkyboxController {
       this.lightingRuntime.sync(document);
       await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
       this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
-      this.lightingRuntime.markDirty();
+      this.lightingRuntime.markDirty('bake-capture');
       const captured = await captureLightingInputWithMetrics(sample => this.lightingRuntime.captureBakeInput(jobId, signal, message => {
         sample(); progress?.(message, 0, 'preparing');
       }), signal);
@@ -399,7 +399,7 @@ export class EnvironmentAndSkyboxController {
       onSnapshot: snapshot => {
         this.context.notifyEnvironmentSnapshot(snapshot);
         this.dependencies.readiness.invalidateModelStatistics();
-        this.lightingRuntime?.markDirty();
+        this.lightingRuntime?.markDirty('environment-snapshot');
       },
       pushLog: this.context.pushLog,
     });

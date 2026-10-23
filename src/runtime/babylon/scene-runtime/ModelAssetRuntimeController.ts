@@ -468,7 +468,7 @@ export class ModelAssetRuntimeController {
       mesh.metadata = { ...(mesh.metadata ?? {}), ...metadata };
     }
     this.dependencies.readiness.invalidateModelStatistics();
-    this.dependencies.environment.lightingRuntime?.markDirty();
+    this.dependencies.environment.lightingRuntime?.markDirty('model-meshes-refresh-unknown');
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */

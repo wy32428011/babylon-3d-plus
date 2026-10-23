@@ -65,8 +65,9 @@ function fixture(options = {}) {
     indices: Array.from(fixed.getIndices()), uvs: Array.from(fixed.getVerticesData(VertexBuffer.UVKind)), bakeUvs: Array.from(fixed.getVerticesData(VertexBuffer.UVKind)) };
   let mode = 'normal', releaseLoader = null, disposedResources = 0, lastResources = null, roles = new Map(), failRoles = false;
   const log = [];
+  let sourceCalls = 0, sourceCallback = options.getSources;
   const runtime = new SceneLightingRuntime(scene, {
-    getSources: () => sources,
+    getSources: () => { sourceCalls++; return sourceCallback ? sourceCallback(sources) : sources; },
     setShadowRoles: next => { if (failRoles) { failRoles = false; throw new Error('test commit failure'); } roles = new Map(next); },
     pushLog: message => log.push(message),
     onBindingsChanged: options.onBindingsChanged,
@@ -97,6 +98,7 @@ function fixture(options = {}) {
   return { engine, scene, camera, hemi, document, staticEntity, dynamicEntity, fixed, moving, sources, geometry, runtime, snapshot, log,
     originalFixedMaterial, originalMovingMaterial, originalLayerMask,
     setMode(value) { mode = value; }, release() { releaseLoader?.(); },
+    setSourceCallback(callback) { sourceCallback = callback; }, get sourceCalls() { return sourceCalls; },
     failNextRoleUpdate() { failRoles = true; },
     get resources() { return lastResources; }, get disposedResources() { return disposedResources; }, get roles() { return roles; },
     tick() { scene.onBeforeRenderObservable.notifyObservers(scene); },
@@ -1074,5 +1076,280 @@ test('unindexed static receivers with zero indexCount retain complete GI primiti
     assert.equal(f.proxies().length, 1); assert.ok(f.runtime.state.records.find(record => !record.dynamic).binding.texture);
     assert.equal(f.fixed.geometry, originalGeometry); assert.deepEqual(Array.from(f.fixed.getIndices()), []);
     assert.equal(f.fixed.subMeshes[0].indexCount, 0); assert.equal(f.fixed.isUnIndexed, true);
+  } finally { f.dispose(); }
+});
+
+
+function useDynamicInstanceSources(f) {
+  const matrices = new Float32Array(32); Matrix.Identity().copyToArray(matrices, 0); Matrix.Translation(2, 0, 0).copyToArray(matrices, 16);
+  f.moving.thinInstanceSetBuffer('matrix', matrices, 16, false);
+  const batch = getNativeLightingInstances(f.moving, f.dynamicEntity.id), original = f.sources[1];
+  f.sources.splice(1, 1, ...batch.getLightingInstances().map((entry, index) => ({
+    mesh: f.moving, entry: { ...original.entry, key: original.entry.key + '/instance:' + index, nodeKey: '$mesh/instance:' + index },
+    instance: { batch, mesh: f.moving, sourceIndex: index }, getWorldMatrix: () => batch.getLightingInstanceWorldMatrix(f.moving, index),
+  })));
+  f.runtime.markDirty('test-instance-setup');
+}
+
+test('pose notification avoids catalog collection while dynamic proxy motion and static invalidation still run each frame', async () => {
+  const f = fixture();
+  try {
+    useDynamicInstanceSources(f); await f.runtime.applySnapshot(f.snapshot());
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    const calls = f.sourceCalls, before = f.proxies().filter(mesh => mesh.metadata.entityId === f.dynamicEntity.id).map(mesh => mesh.getWorldMatrix().m[12]);
+    f.moving.position.x += 2; f.runtime.notifyChange('pose', 'driver-transform'); f.tick();
+    const after = f.proxies().filter(mesh => mesh.metadata.entityId === f.dynamicEntity.id).map(mesh => mesh.getWorldMatrix().m[12]);
+    assert.deepEqual(after, before.map(value => value + 2)); assert.equal(f.sourceCalls, calls);
+    assert.equal(f.runtime.getInvalidationDiagnostics().collections.count, 0);
+    assert.equal(f.runtime.getInvalidationDiagnostics().marks.byReason['driver-transform'], 1);
+    f.fixed.position.x += 1; f.runtime.notifyChange('pose', 'static-transform'); f.tick();
+    assert.match(f.runtime.getError(), /静态对象.*姿态/); assert.equal(f.sourceCalls, calls);
+  } finally { f.dispose(); }
+});
+
+test('binding validation avoids collect and structure notification explicitly rebuilds an unchanged layout', async () => {
+  const f = fixture();
+  try {
+    await f.runtime.applySnapshot(f.snapshot()); f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    const proxy = f.proxies()[0], calls = f.sourceCalls;
+    f.runtime.notifyChange('bindings', 'material-values'); f.tick();
+    assert.equal(f.sourceCalls, calls); assert.equal(f.proxies()[0], proxy);
+    f.runtime.notifyChange('structure', 'replace-binding-input'); f.tick();
+    assert.equal(f.sourceCalls, calls + 1); assert.notEqual(f.proxies()[0], proxy); assert.equal(proxy.isDisposed(), true);
+    const info = f.runtime.getInvalidationDiagnostics(); assert.equal(info.bindings.refreshes, 2); assert.equal(info.bindings.forcedRebuilds, 1);
+    assert.equal(info.pending.bindings, false); assert.equal(f.runtime.getError(), null);
+  } finally { f.dispose(); }
+});
+
+test('classification query preserves pending bindings and legacy markDirty keeps the unknown full path', async () => {
+  const f = fixture();
+  try {
+    await f.runtime.applySnapshot(f.snapshot()); f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    const calls = f.sourceCalls;
+    f.runtime.notifyChange('classification', 'policy-change'); f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 1); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, true);
+    f.tick(); assert.equal(f.sourceCalls, calls + 1); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, false);
+    f.runtime.markDirty(); f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 2); const info = f.runtime.getInvalidationDiagnostics();
+    assert.equal(info.fallbacks.unknown, 1); assert.equal(info.collections.byEntry.query, 2); assert.equal(info.bindings.byEntry.frame, 1);
+  } finally { f.dispose(); }
+});
+
+test('synchronous classification invalidation during collect is not consumed by the older catalog revision', () => {
+  const f = fixture(); let once = false;
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    f.setSourceCallback(sources => { if (!once) { once = true; f.runtime.notifyChange('classification', 'inside-collect'); } return sources; });
+    const calls = f.sourceCalls; f.runtime.notifyChange('classification', 'outer-collect'); f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 1); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.runtime.getClassification(); assert.equal(f.sourceCalls, calls + 2); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false);
+    assert.equal(f.runtime.getInvalidationDiagnostics().reentrant.classification, 1);
+  } finally { f.dispose(); }
+});
+
+test('synchronous binding invalidation during a forced commit survives the older binding revision', async () => {
+  let armed = false;
+  const f = fixture({ onBindingsChanged() { if (armed) { armed = false; f.runtime.notifyChange('bindings', 'inside-binding'); } } });
+  try {
+    await f.runtime.applySnapshot(f.snapshot()); f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    armed = true; f.runtime.notifyChange('structure', 'outer-binding'); f.tick();
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, true);
+    f.tick(); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, false);
+    assert.equal(f.runtime.getInvalidationDiagnostics().reentrant.bindings, 1);
+  } finally { f.dispose(); }
+});
+
+test('diagnostics are opt-in and source changes during async activation remain pending after final validation', async () => {
+  const f = fixture();
+  try {
+    assert.equal(f.runtime.getInvalidationDiagnostics().enabled, false); f.runtime.notifyChange('pose', 'unmeasured');
+    assert.equal(f.runtime.getInvalidationDiagnostics().marks.total, 0);
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    let release; const validation = new Promise(resolve => { release = resolve; });
+    const applying = f.runtime.applySnapshot(f.snapshot(), undefined, () => validation);
+    await new Promise(resolve => setImmediate(resolve));
+    f.runtime.notifyChange('classification', 'during-activation'); f.runtime.getClassification();
+    release(); await applying;
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.tick(); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false); assert.equal(f.runtime.getError(), null);
+  } finally { f.dispose(); }
+});
+
+
+test('sync during collect advances the catalog revision and cannot be swallowed by the outer refresh', () => {
+  const f = fixture(); let once = false;
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    f.setSourceCallback(sources => { if (!once) { once = true; f.runtime.sync(f.document); } return sources; });
+    const calls = f.sourceCalls; f.runtime.notifyChange('classification', 'outer-sync'); f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 2); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.runtime.getClassification(); assert.equal(f.sourceCalls, calls + 3); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false);
+  } finally { f.dispose(); }
+});
+
+test('structure notification rebuilds shadow-only proxies when source keys and indexes stay unchanged', () => {
+  const f = fixture();
+  const removed = f.scene.onMeshRemovedObservable.add(() => f.runtime.markDirty('derived-removal'));
+  try {
+    useDynamicInstanceSources(f); f.sources[2].entry.receiveShadows = false;
+    f.runtime.notifyChange('structure', 'shadow-instance-setup'); f.tick();
+    const key = f.sources[1].entry.key, before = f.proxies().find(mesh => mesh.metadata.lightingSourceKey === key);
+    assert.ok(before);
+    f.sources[1] = { ...f.sources[1], getWorldMatrix: () => Matrix.Translation(9, 0, 0) };
+    f.runtime.notifyChange('structure', 'source-reference-replaced'); f.tick();
+    const after = f.proxies().find(mesh => mesh.metadata.lightingSourceKey === key);
+    assert.notEqual(after, before); assert.equal(before.isDisposed(), true); assert.equal(after.getWorldMatrix().m[12], 9);
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false, '移除自有代理不得重新失效业务分类');
+  } finally { f.scene.onMeshRemovedObservable.remove(removed); f.dispose(); }
+});
+
+test('bindings-only changes during activated validation remain pending without requiring another collect', async () => {
+  const f = fixture();
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    let release; const validation = new Promise(resolve => { release = resolve; });
+    const applying = f.runtime.applySnapshot(f.snapshot(), undefined, () => validation);
+    await new Promise(resolve => setImmediate(resolve));
+    f.runtime.notifyChange('bindings', 'validation-binding-change'); f.tick();
+    assert.ok(f.runtime.getInvalidationDiagnostics().skipped.pendingActivation > 0);
+    const calls = f.sourceCalls; release(); await applying;
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, true);
+    f.tick(); assert.equal(f.sourceCalls, calls); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, false);
+  } finally { f.dispose(); }
+});
+
+test('controlled mesh lifecycle coalesces only duplicate pending marks and UI collection preserves binding work', () => {
+  const f = fixture();
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.runtime.resetInvalidationDiagnostics();
+    const calls = f.sourceCalls;
+    assert.equal(f.runtime.notifyMeshLifecycleChange('scene-mesh-added'), 'full');
+    const revision = f.runtime.getInvalidationDiagnostics().revisions;
+    for (let i = 0; i < 48; i++) assert.equal(f.runtime.notifyMeshLifecycleChange('scene-mesh-removed'), 'coalesced');
+    assert.deepEqual(f.runtime.getInvalidationDiagnostics().revisions, revision);
+    assert.equal(f.sourceCalls, calls, '合并标记不提前读取目录，也不承诺减少既有collect');
+    f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 1); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, true);
+    assert.equal(f.runtime.notifyMeshLifecycleChange('scene-mesh-added-after-query'), 'full');
+    f.runtime.getClassification(); f.tick();
+    const info = f.runtime.getInvalidationDiagnostics();
+    assert.equal(f.sourceCalls, calls + 2); assert.equal(info.pending.bindings, false);
+    assert.deepEqual(info.meshLifecycle, { requests: 50, coalescedMarks: 48, fullRequests: 2 });
+    assert.equal(info.collections.count, 2); assert.equal(info.bindings.refreshes, 1);
+    const beforeLegacy = info.revisions;
+    f.runtime.markDirty('unknown-script-1'); f.runtime.markDirty('unknown-script-2');
+    assert.equal(f.runtime.getInvalidationDiagnostics().revisions.classification, beforeLegacy.classification + 2);
+  } finally { f.dispose(); }
+});
+
+test('mesh lifecycle keeps source provider getters, script callbacks and entry getter reads identical to legacy notifications', () => {
+  const run = controlled => {
+    const f = fixture(); let providerReads = 0, scriptCalls = 0, entryReads = 0;
+    const original = f.runtime.options.getSources;
+    Object.defineProperty(f.runtime.options, 'getSources', { get() { providerReads++; return original; } });
+    f.setSourceCallback(sources => { scriptCalls++; return sources; });
+    Object.defineProperty(f.sources[1].entry, 'reason', { enumerable: true, get() { entryReads++; return 'script-' + scriptCalls; } });
+    const notify = () => controlled ? f.runtime.notifyMeshLifecycleChange('scene-mesh-added') : f.runtime.markDirty('scene-mesh-added');
+    try {
+      const results = [];
+      for (let phase = 0; phase < 3; phase++) {
+        for (let i = 0; i < 8; i++) notify();
+        results.push(f.runtime.getClassification().map(entry => ({ ...entry })));
+        f.tick();
+      }
+      f.runtime.markDirty('unknown-script'); results.push(f.runtime.getClassification().map(entry => ({ ...entry })));
+      return { results, providerReads, scriptCalls, entryReads };
+    } finally { f.dispose(); }
+  };
+  const legacy = run(false), controlled = run(true);
+  assert.deepEqual(controlled, legacy); assert.equal(controlled.providerReads, 4); assert.equal(controlled.scriptCalls, 4);
+  assert.equal(controlled.entryReads, 4);
+});
+
+test('mesh lifecycle inside collect callbacks or entry getters takes the full revision path and collection errors release the guard', () => {
+  const f = fixture(); let armed = false, decision;
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true);
+    f.setSourceCallback(sources => { if (armed) { armed = false; decision = f.runtime.notifyMeshLifecycleChange('inside-provider'); } return sources; });
+    f.runtime.markDirty('outer-provider'); armed = true; const calls = f.sourceCalls;
+    f.runtime.getClassification(); assert.equal(decision, 'full'); assert.equal(f.sourceCalls, calls + 1);
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.runtime.getClassification(); assert.equal(f.sourceCalls, calls + 2);
+    Object.defineProperty(f.sources[0].entry, 'reason', { enumerable: true, get() {
+      if (armed) { armed = false; decision = f.runtime.notifyMeshLifecycleChange('inside-entry-getter'); }
+      return 'getter';
+    } });
+    f.runtime.markDirty('outer-entry'); armed = true; f.runtime.getClassification();
+    assert.equal(decision, 'full'); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.runtime.getClassification();
+    f.setSourceCallback(() => { throw new Error('provider failure'); }); f.runtime.markDirty('throwing-provider');
+    assert.throws(() => f.runtime.getClassification(), /provider failure/);
+    f.setSourceCallback(null);
+    assert.equal(f.runtime.notifyMeshLifecycleChange('after-provider-failure'), 'coalesced', '异常不能遗留消费深度');
+    f.runtime.getClassification(); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false);
+  } finally { f.dispose(); }
+});
+
+test('mesh lifecycle cannot coalesce while sync reads document getters or binding callbacks consume pending work', async () => {
+  let armed = false, bindingDecision;
+  const f = fixture({ onBindingsChanged() {
+    if (armed) { armed = false; f.runtime.markDirty('inside-binding-first'); bindingDecision = f.runtime.notifyMeshLifecycleChange('inside-binding-second'); }
+  } });
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true);
+    const settings = f.document.sceneSettings; let syncDecision, syncArmed = false;
+    Object.defineProperty(f.document, 'sceneSettings', { get() {
+      if (syncArmed) { syncArmed = false; syncDecision = f.runtime.notifyMeshLifecycleChange('inside-sync-getter'); }
+      return settings;
+    } });
+    f.runtime.markDirty('before-sync'); syncArmed = true; f.runtime.sync(f.document);
+    assert.equal(syncDecision, 'full');
+    await f.runtime.applySnapshot(f.snapshot());
+    f.runtime.notifyChange('structure', 'force-binding'); armed = true; f.tick();
+    assert.equal(bindingDecision, 'full'); assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, true);
+    f.tick(); assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, false);
+  } finally { f.dispose(); }
+});
+
+test('mesh lifecycle remains full throughout async resource loading even after cancellation clears the controller', async () => {
+  const f = fixture();
+  try {
+    f.runtime.setInvalidationDiagnosticsEnabled(true); f.setMode('pause');
+    const pending = assert.rejects(f.runtime.applySnapshot(f.snapshot()), error => error.name === 'AbortError');
+    f.runtime.markDirty('during-resource-await');
+    assert.equal(f.runtime.notifyMeshLifecycleChange('loading-mesh-event'), 'full');
+    f.document.sceneSettings.lighting.bake.enabled = false; f.runtime.sync(f.document);
+    assert.equal(f.runtime.controller, null); assert.equal(f.runtime.pendingActivation, null);
+    f.runtime.markDirty('after-cancel-before-settlement');
+    assert.equal(f.runtime.notifyMeshLifecycleChange('cancelled-loading-mesh-event'), 'full');
+    f.release(); await pending;
+    assert.equal(f.runtime.notifyMeshLifecycleChange('after-resource-finally'), 'coalesced');
+  } finally { f.release(); f.dispose(); }
+});
+
+test('mesh lifecycle remains full during candidate validation and completed snapshot scopes release the guard', async () => {
+  const f = fixture(); let release;
+  try {
+    let validate; const validation = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { validate = resolve; });
+    const applying = f.runtime.applySnapshot(f.snapshot(), undefined, () => { validate(); return validation; });
+    await started; f.runtime.markDirty('during-validation');
+    assert.equal(f.runtime.notifyMeshLifecycleChange('validating-mesh-event'), 'full');
+    release(); await applying;
+    assert.equal(f.runtime.notifyMeshLifecycleChange('after-snapshot-finally'), 'coalesced');
+  } finally { release?.(); f.dispose(); }
+});
+
+test('coalesced mesh marks still collect the actual sources and invalidate changed static geometry', async () => {
+  const f = fixture();
+  try {
+    await f.runtime.applySnapshot(f.snapshot()); f.tick();
+    const calls = f.sourceCalls;
+    assert.equal(f.runtime.notifyMeshLifecycleChange('geometry-first-event'), 'full');
+    assert.equal(f.runtime.notifyMeshLifecycleChange('geometry-duplicate-event'), 'coalesced');
+    const positions = f.fixed.getVerticesData(VertexBuffer.PositionKind).slice(); positions[0] += 0.25;
+    f.fixed.updateVerticesData(VertexBuffer.PositionKind, positions); f.tick();
+    assert.equal(f.sourceCalls, calls + 1); assert.equal(f.proxies().length, 0); assert.match(f.runtime.getError(), /几何/);
   } finally { f.dispose(); }
 });
