@@ -1,17 +1,17 @@
 import type { LightingBakeGeometry, LightingProbeData, SceneLightingBakeSnapshot } from './sceneLightingBakeContract.ts';
-function finiteNumbers(values: unknown[]): boolean { for (const value of values) if (typeof value !== 'number' || !Number.isFinite(value)) return false; return true; }
+function finiteNumbers(values: Iterable<unknown>): boolean { for (const value of values) if (typeof value !== 'number' || !Number.isFinite(value)) return false; return true; }
 /** 只接受完整有限的三角网格；错误结果不得覆盖当前可用的原几何。 */
 export function validateLightingGeometry(value: unknown): LightingBakeGeometry {
   if (!value || typeof value !== 'object') throw new Error('光照派生几何格式错误。');
   const geometry = value as LightingBakeGeometry;
-  if (geometry.version !== 1 || !Array.isArray(geometry.positions) || !geometry.positions.length || geometry.positions.length % 3) throw new Error('光照派生几何顶点无效。');
+  if ((geometry.version !== 1 && geometry.version !== 2) || !(Array.isArray(geometry.positions) || geometry.positions instanceof Float32Array) || !geometry.positions.length || geometry.positions.length % 3) throw new Error('光照派生几何顶点无效。');
   const count = geometry.positions.length / 3;
   for (const [key, length] of [['normals', count * 3], ['uvs', count * 2], ['bakeUvs', count * 2], ['uvs2', count * 2], ['colors', count * 4], ['tangents', count * 4]] as const) {
     const data = geometry[key];
     if ((key === 'uvs2' || key === 'colors' || key === 'tangents') && data === undefined) continue;
-    if (!Array.isArray(data) || data.length !== length || !finiteNumbers(data)) throw new Error(`光照派生几何的 ${key} 无效。`);
+    if (!(Array.isArray(data) || data instanceof Float32Array) || data.length !== length || !finiteNumbers(data)) throw new Error(`光照派生几何的 ${key} 无效。`);
   }
-  if (!finiteNumbers(geometry.positions) || !Array.isArray(geometry.indices) || !geometry.indices.length || geometry.indices.length % 3 || !finiteNumbers(geometry.indices)
+  if (!finiteNumbers(geometry.positions) || !(Array.isArray(geometry.indices) || geometry.indices instanceof Uint32Array) || !geometry.indices.length || geometry.indices.length % 3 || !finiteNumbers(geometry.indices)
     || geometry.indices.some(index => !Number.isInteger(index) || index < 0 || index >= count)) throw new Error('光照派生几何索引越界。');
   if (geometry.bakeUvs.some(value => value < -1e-5 || value > 1.00001)) throw new Error('光照 UV 超出图集范围。');
   return geometry;

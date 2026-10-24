@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { LightingBakeAsset, LightingBakeEngineStatus, LightingBakeInput, LightingBakeProgress, SceneLightingBakeSnapshot } from '../shared/sceneLightingBakeContract.js';
 import { matchLightingBakeSurfaceSources, safeLightingBakeChildPath } from './lightingBakeValidation.ts';
 import { inspectLightingBakeInput, assertLightingBakePreflight, type LightingBakePreflight } from '../shared/sceneLightingBakePreflight.ts';
-import { validateLightingGeometry, validateLightingProbes, validateLightingPng } from '../shared/sceneLightingBakeArtifacts.ts';
+import { decodeLightingGeometryResource } from '../shared/sceneLightingBakeGeometryBinary.ts';
+import { validateLightingProbes, validateLightingPng } from '../shared/sceneLightingBakeArtifacts.ts';
 import { encodeLightingBakeTransport, type LightingBakeBinaryMesh } from '../shared/sceneLightingBakeBinary.ts';
 import type { LightingBakeDevice, LightingBakeDeviceSelection } from '../shared/sceneLightingBakeDevices.ts';
 import { createLightingBakeTask } from './lightingBakeTaskHistory.ts';
@@ -296,7 +297,7 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
 type EngineResult = {
   version: number; signature: string; engineVersion: string;
   atlases: Array<{ file: string; width: number; height: number; rgbmRange: number }>;
-  meshes: Array<{ key: string; entityId: string; nodeKey: string; geometryFile: string; atlasIndex: number }>;
+  meshes: Array<{ key: string; entityId: string; nodeKey: string; geometryFile: string; geometryVersion?: 1 | 2; encoding?: LightingBakeAsset['encoding']; atlasIndex: number }>;
   probesFile: string; statistics: SceneLightingBakeSnapshot['statistics'];
 };
 
@@ -312,21 +313,25 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
   await fs.mkdir(pending);
   const assets: LightingBakeAsset[] = [];
   let validatedProbeCount = 0;
-  const copyOutput = async (name: string, kind: LightingBakeAsset['kind'], id: string, rgbmRange?: number) => {
+  const copyOutput = async (name: string, kind: LightingBakeAsset['kind'], id: string, rgbmRange?: number, expectedGeometryVersion?: 1 | 2, encoding?: LightingBakeAsset['encoding']) => {
+    if (encoding !== undefined && (kind !== 'geometry' || encoding !== 'json' && encoding !== 'binary-v1')) throw new Error('几何结果清单编码不正确。');
+    const expectedExtension = kind === 'lightmap' ? '.png' : kind === 'geometry' && encoding === 'binary-v1' ? '.bin' : '.json';
+    if (path.extname(name).toLowerCase() !== expectedExtension) throw new Error('烘焙产物扩展名与清单编码不一致。');
     const source = safeLightingBakeChildPath(staging, name);
     const info = await fs.lstat(source);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('烘焙产物不是有效文件。');
     const bytes = await fs.readFile(source, { signal: options.signal });
+    let geometryVersion: 1 | 2 | undefined;
     if (kind === 'lightmap') validateLightingPng(bytes, options.input.settings.atlasSize ** 2, { width: options.input.settings.atlasSize, height: options.input.settings.atlasSize });
     else {
-      const data = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
-      if (data.version !== 1) throw new Error('烘焙产物版本不正确。');
-      if (kind === 'geometry') validateLightingGeometry(data);
-      else validatedProbeCount = validateLightingProbes(data).probes.length;
+      if (kind === 'geometry') {
+        geometryVersion = decodeLightingGeometryResource(bytes, encoding).version;
+        if (expectedGeometryVersion !== undefined && expectedGeometryVersion !== geometryVersion) throw new Error('几何文件与结果清单版本不一致。');
+      } else validatedProbeCount = validateLightingProbes(JSON.parse(bytes.toString('utf8'))).probes.length;
     }
     await fs.writeFile(safeLightingBakeChildPath(pending, name), bytes, { flag: 'wx', signal: options.signal });
     assets.push({ id, kind, url: options.encodeAssetUrl(path.join(destination, name)), byteLength: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'), ...(rgbmRange !== undefined ? { rgbmRange } : {}) });
+      sha256: createHash('sha256').update(bytes).digest('hex'), ...(geometryVersion !== undefined ? { geometryVersion } : {}), ...(encoding !== undefined ? { encoding } : {}), ...(rgbmRange !== undefined ? { rgbmRange } : {}) });
   };
   try {
     for (const [index, atlas] of result.atlases.entries()) {
@@ -340,7 +345,8 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
       if (!original || seen.has(mesh.key) || original.receiver === false || original.entityId !== mesh.entityId || original.nodeKey !== mesh.nodeKey
         || !Number.isInteger(mesh.atlasIndex) || !result.atlases[mesh.atlasIndex]) throw new Error('烘焙表面映射不正确。');
       seen.add(mesh.key);
-      await copyOutput(mesh.geometryFile, 'geometry', `geometry-${index}`);
+      if (mesh.geometryVersion !== undefined && mesh.geometryVersion !== 1 && mesh.geometryVersion !== 2) throw new Error('几何结果清单版本不正确。');
+      await copyOutput(mesh.geometryFile, 'geometry', `geometry-${index}`, undefined, mesh.geometryVersion, mesh.encoding);
       surfaces.push({ key: mesh.key, entityId: mesh.entityId, nodeKey: mesh.nodeKey, geometryAssetId: `geometry-${index}`, lightmapAssetId: `lightmap-${mesh.atlasIndex}` });
     }
     await copyOutput(result.probesFile, 'probes', 'probes');
@@ -403,7 +409,7 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
     }
     await task.flush();
     let expandedGeometryBytes = 0;
-    for (const name of await fs.readdir(staging)) if (/^geometry-\d+\.json$/.test(name)) expandedGeometryBytes += (await fs.stat(path.join(staging, name))).size;
+    for (const name of await fs.readdir(staging)) if (/^geometry-\d+\.(?:json|bin)$/.test(name)) expandedGeometryBytes += (await fs.stat(path.join(staging, name))).size;
     await task.update({ expandedGeometryBytes });
     assertActive(options);
     tracked.onProgress({ jobId: options.input.jobId, phase: 'applying', progress: 0.97, message: '正在验证并保存独立光照资源' });

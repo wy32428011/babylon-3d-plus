@@ -48,6 +48,11 @@ export function registerTargetModelEffectSuspension(mesh: AbstractMesh, callback
   };
 }
 
+/** 只读查询已注册的外观所有者；资源池遇到未知绑定时退回原释放，不触发其回调。 */
+export function hasTargetModelEffectSuspensionCallbacks(mesh: AbstractMesh): boolean {
+  return (modelEffectSuspensionCallbacks.get(mesh)?.size ?? 0) > 0;
+}
+
 export function isTargetModelEffectSuspended(mesh: AbstractMesh): boolean {
   return modelEffectSuspensions.has(mesh);
 }

@@ -4,21 +4,37 @@ from __future__ import annotations
 import argparse
 import sys as _binary_sys
 from array import array
+import csv
+import io
 import json
 import math
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import struct
 import sys
 import time
 from typing import Any
 
 import bpy
 from mathutils import Matrix, Vector
+import numpy as np
 
 
 COORDINATES = Matrix(((1, 0, 0, 0), (0, 0, 1, 0), (0, 1, 0, 0), (0, 0, 0, 1)))
 REVERSE_COORDINATES = COORDINATES.inverted()
 PROGRESS_PREFIX = "LIGHTING_BAKE_PROGRESS "
 TEXTURE_IMAGES: dict[tuple[str, str], Any] = {}
+# 每面 4×4 像素，四边各留 1 像素；可单独调低批次以限制设备内存。
+PROBE_IMAGE_SIZE = 1024
+PROBE_BATCH_SIZE = (PROBE_IMAGE_SIZE // 6) ** 2 // 6
+# 预算不可读时采用 256²；OOM 最低退至原来的 128² / 64 探针布局。
+PROBE_GPU_UNKNOWN_IMAGE_SIZE = 256
+PROBE_GPU_MIN_IMAGE_SIZE = 128
+PROBE_GPU_RETRY_ACTIVE = False
+PROBE_BATCH_DIAGNOSTICS: dict | None = None
+BAKE_DEVICE_SELECTION: dict[str, Any] = {"actual": "CPU", "name": "CPU", "backend": "CPU"}
 
 
 
@@ -871,47 +887,78 @@ def attach_target(objects: list[Any], image: Any) -> None:
     activate(objects)
 
 
-def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str) -> array:
-    scene = bpy.context.scene
-    image = bpy.data.images.new(name, width=size, height=size, alpha=True, float_buffer=True)
-    image.colorspace_settings.name = "Non-Color"
-    attach_target(objects, image)
-    scene.render.bake.use_clear = True
-    scene.render.bake.margin = 3
-    # 不含表面颜色，运行时继续使用原材质基础色和金属度。
-    scene.render.bake.use_pass_color = False
-    scene.render.bake.use_pass_direct = False
-    scene.render.bake.use_pass_indirect = True
-    bake_diffuse()
-    pixels = array("f", [0]) * (size * size * 4)
-    image.pixels.foreach_get(pixels)
-    for light in lights:
-        light.hide_render = True
-    scene.render.bake.use_pass_direct = True
-    scene.render.bake.use_pass_indirect = False
-    bake_diffuse()
-    ambient = array("f", [0]) * len(pixels)
-    image.pixels.foreach_get(ambient)
-    for offset in range(0, len(pixels), 4):
-        for channel in range(3):
-            pixels[offset + channel] = max(0, pixels[offset + channel] + ambient[offset + channel])
-        pixels[offset + 3] = 1
-    for light in lights:
-        light.hide_render = False
-    bpy.data.images.remove(image)
+def merge_irradiance_pixels(pixels: np.ndarray, ambient: np.ndarray) -> np.ndarray:
+    """在 float32 缓冲内合并两遍结果，alpha 不参与光照运算。"""
+    rgba = pixels.reshape(-1, 4)
+    np.add(rgba[:, :3], ambient.reshape(-1, 4)[:, :3], out=rgba[:, :3])
+    # 原 max(0, value) 会把 NaN（包括正负无穷相消）归零；正无穷仍须保留并在 RGBM 拒绝。
+    np.fmax(rgba[:, :3], 0, out=rgba[:, :3])
+    rgba[:, 3] = 1
     return pixels
 
 
-def save_rgbm(pixels: array, size: int, destination: Path) -> float:
-    maximum = max((pixels[i] for i in range(len(pixels)) if i % 4 != 3), default=1)
-    dynamic_range = max(1, math.ceil(maximum))
-    encoded = array("f", [0]) * len(pixels)
-    for offset in range(0, len(pixels), 4):
-        rgb = pixels[offset:offset + 3]
-        multiplier = max(1 / 255, math.ceil(max(rgb) / dynamic_range * 255) / 255)
-        for channel in range(3):
-            encoded[offset + channel] = rgb[channel] / (multiplier * dynamic_range)
-        encoded[offset + 3] = multiplier
+def encode_rgbm_pixels(pixels: np.ndarray) -> tuple[int, np.ndarray]:
+    """向量化编码；乘数保留原 Python double 精度，避免 ceil 边界跳级。"""
+    rgba = pixels.reshape(-1, 4)
+    rgb = rgba[:, :3]
+    dynamic_range = max(1, math.ceil(float(np.max(rgb, initial=1))))
+    multiplier = rgb.max(axis=1).astype(np.float64)
+    multiplier /= dynamic_range
+    multiplier *= 255
+    np.ceil(multiplier, out=multiplier)
+    multiplier /= 255
+    np.maximum(multiplier, 1 / 255, out=multiplier)
+    encoded = np.empty_like(rgba)
+    np.divide(rgb, multiplier[:, None] * dynamic_range, out=encoded[:, :3])
+    encoded[:, 3] = multiplier
+    return dynamic_range, encoded.reshape(-1)
+
+
+def sample_probe_irradiance(pixels: np.ndarray, size: int, count: int) -> np.ndarray:
+    """读取原瓦片中心的 2×2；保留六面顺序与 dx/dy 求和顺序。"""
+    tiles = np.arange(count * 6)
+    columns = size // 6
+    x = tiles % columns * 6 + 2
+    y = tiles // columns * 6 + 2
+    indices = (y * size + x)[:, None] + np.array([0, size, 1, size + 1])
+    samples = pixels.reshape(-1, 4)[indices, :3]
+    # 原实现把四个 float32 转为 Python double 后求和，不能改为 float32 均值。
+    return samples.mean(axis=1, dtype=np.float64).reshape(count, 18)
+
+
+def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str) -> np.ndarray:
+    scene = bpy.context.scene
+    image = bpy.data.images.new(name, width=size, height=size, alpha=True, float_buffer=True)
+    light_visibility = [(light, light.hide_render) for light in lights]
+    try:
+        image.colorspace_settings.name = "Non-Color"
+        attach_target(objects, image)
+        scene.render.bake.use_clear = True
+        scene.render.bake.margin = 3
+        # 不含表面颜色，运行时继续使用原材质基础色和金属度。
+        scene.render.bake.use_pass_color = False
+        scene.render.bake.use_pass_direct = False
+        scene.render.bake.use_pass_indirect = True
+        bake_diffuse()
+        pixels = np.empty(size * size * 4, dtype=np.float32)
+        image.pixels.foreach_get(pixels)
+        for light in lights:
+            light.hide_render = True
+        scene.render.bake.use_pass_direct = True
+        scene.render.bake.use_pass_indirect = False
+        bake_diffuse()
+        ambient = np.empty_like(pixels)
+        image.pixels.foreach_get(ambient)
+        return merge_irradiance_pixels(pixels, ambient)
+    finally:
+        # 第二遍 OOM 后也必须恢复灯光并释放旧图，缩批才会降低下一次峰值。
+        for light, hidden in light_visibility:
+            light.hide_render = hidden
+        bpy.data.images.remove(image)
+
+
+def save_rgbm(pixels: np.ndarray, size: int, destination: Path) -> float:
+    dynamic_range, encoded = encode_rgbm_pixels(pixels)
     image = bpy.data.images.new(destination.stem, width=size, height=size, alpha=True)
     image.colorspace_settings.name = "Non-Color"
     image.alpha_mode = "CHANNEL_PACKED"
@@ -923,9 +970,9 @@ def save_rgbm(pixels: array, size: int, destination: Path) -> float:
     return dynamic_range
 
 
-def export_geometry(obj: Any, source: dict, destination: Path) -> None:
+def collect_export_geometry(obj: Any, source: dict) -> dict:
     mesh = obj.data
-    result: dict[str, Any] = {"version": 1, "key": source["key"], "positions": [], "normals": [],
+    result: dict[str, Any] = {"version": 2, "key": source["key"], "positions": [], "normals": [],
                              "indices": [], "uvs": [], "bakeUvs": []}
     if "uvs2" in source:
         result["uvs2"] = []
@@ -933,7 +980,11 @@ def export_geometry(obj: Any, source: dict, destination: Path) -> None:
         result["colors"] = []
     if "tangents" in source:
         result["tangents"] = []
-    # 按三角角点展开，UV 岛边界不会覆盖相邻面的顶点 UV。
+    channels = [(name, width) for name, width in (("positions", 3), ("normals", 3), ("uvs", 2),
+                ("uvs2", 2), ("colors", 4), ("tangents", 4), ("bakeUvs", 2)) if name in result]
+    channel_mask = sum(1 << index for index, name in enumerate(("uvs", "uvs2", "colors", "tangents")) if name in source)
+    vertices: dict[bytes, int] = {}
+    # 只合并本表面完整属性的 IEEE-754 字节；UV 岛、硬法线和正负零边界仍独立。
     flipped_faces = obj["source_winding_flipped"]
     for face in mesh.polygons:
         loops = list(face.loop_indices)
@@ -943,20 +994,93 @@ def export_geometry(obj: Any, source: dict, destination: Path) -> None:
         for loop_index in loops:
             loop = mesh.loops[loop_index]
             vertex = loop.vertex_index
-            result["positions"].extend(source["positions"][vertex * 3:vertex * 3 + 3])
-            result["normals"].extend(source["normals"][vertex * 3:vertex * 3 + 3])
-            result["indices"].append(len(result["indices"]))
-            result["bakeUvs"].extend(mesh.uv_layers["LightmapUV"].data[loop_index].uv)
-            if "uvs" not in source:
-                result["uvs"].extend((0, 0))
-            for channel in ("uvs", "uvs2"):
-                if channel in source:
-                    result[channel].extend(source[channel][vertex * 2:vertex * 2 + 2])
-            if "colors" in source:
-                result["colors"].extend(source["colors"][vertex * 4:vertex * 4 + 4])
-            if "tangents" in source:
-                result["tangents"].extend(source["tangents"][vertex * 4:vertex * 4 + 4])
-    write_json(destination, result)
+            values = []
+            for channel, width in channels:
+                values.extend(mesh.uv_layers["LightmapUV"].data[loop_index].uv if channel == "bakeUvs"
+                              else (0, 0) if channel == "uvs" and channel not in source
+                              else source[channel][vertex * width:vertex * width + width])
+            key = bytes((channel_mask,)) + struct.pack("<" + "d" * len(values), *values)
+            index = vertices.get(key)
+            if index is None:
+                index = len(result["positions"]) // 3
+                vertices[key] = index
+                offset = 0
+                for channel, width in channels:
+                    result[channel].extend(values[offset:offset + width])
+                    offset += width
+            result["indices"].append(index)
+    return result
+
+
+def export_geometry(obj: Any, source: dict, destination: Path) -> None:
+    """兼容原 JSON 导出入口；B6 逐角点 oracle 继续使用同一无损数据。"""
+    write_json(destination, collect_export_geometry(obj, source))
+
+
+def encode_export_geometry_binary(result: dict) -> bytes | None:
+    """只有完整几何 Float32 往返字节相等才输出二进制，不能量化 CPU 拾取输入。"""
+    key = result.get("key")
+    # 与浏览器小头的 UTF-16 字符预算一致；切片追加的长键仍能沿用旧 JSON。
+    if (result.get("version") != 2 or not isinstance(key, str) or not key or "\0" in key
+            or len(key.encode("utf-16-le", errors="surrogatepass")) // 2 > 4096):
+        return None
+    widths = {"positions": 3, "normals": 3, "uvs": 2, "uvs2": 2, "colors": 4,
+              "tangents": 4, "bakeUvs": 2, "indices": 1}
+    attributes, buffers = {}, []
+    for field, width in widths.items():
+        if field not in result:
+            continue
+        values = result[field]
+        if field == "indices":
+            if any(not isinstance(value, int) or value < 0 or value > 0xffffffff for value in values):
+                return None
+            encoded = array("I", values)
+        else:
+            try:
+                encoded = array("f", values)
+            except (OverflowError, ValueError):
+                return None
+            if any(not math.isfinite(value) or struct.pack("<d", value) != struct.pack("<d", actual)
+                   for value, actual in zip(values, encoded)):
+                return None
+        if encoded.itemsize != 4:
+            return None
+        if _binary_sys.byteorder != "little":
+            encoded.byteswap()
+        attributes[field] = {"type": "uint32" if field == "indices" else "float32",
+                             "components": width, "count": len(values), "byteOffset": 0}
+        buffers.append(encoded)
+    header = {"version": 1, "geometryVersion": result["version"], "key": key,
+              "vertexCount": len(result["positions"]) // 3, "indexCount": len(result["indices"]),
+              "attributes": attributes}
+    # 绝对偏移的位数会影响小头长度；固定点收敛后才写数据，避免头覆盖 payload。
+    start = 12
+    for _ in range(20):
+        offset = start
+        for attribute in attributes.values():
+            attribute["byteOffset"] = offset
+            offset += attribute["count"] * 4
+        text = json.dumps(header, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        aligned = (12 + len(text) + 3) // 4 * 4
+        if aligned == start:
+            break
+        start = aligned
+    else:
+        return None
+    if len(text) > 65536:
+        return None
+    return b"BLGOUT01" + struct.pack("<I", len(text)) + text + bytes(start - 12 - len(text)) + b"".join(buffers)
+
+
+def write_export_geometry(result: dict, destination_stem: Path) -> dict:
+    binary = encode_export_geometry_binary(result)
+    if binary is None:
+        destination = destination_stem.with_suffix(".json")
+        write_json(destination, result)
+        return {"geometryFile": destination.name, "geometryVersion": result["version"]}
+    destination = destination_stem.with_suffix(".bin")
+    destination.write_bytes(binary)
+    return {"geometryFile": destination.name, "geometryVersion": result["version"], "encoding": "binary-v1"}
 
 
 
@@ -1016,32 +1140,108 @@ def probe_positions(objects: list[Any], spacing: float, volumes: list[dict] | No
             for indices in [(x, y, z)]]
 
 
-def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Path,
-                positions: list[Vector] | None = None) -> int:
-    positions = positions if positions is not None else probe_positions(objects, spacing)
-    probes = []
-    # 每批 64 个探针、每面 4×4 像素，避免逐探针启动 Cycles；面法线按 Babylon 顺序记录。
-    for start in range(0, len(positions), 64):
-        batch = positions[start:start + 64]
-        vertices, faces, face_axes = [], [], []
-        axes = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
-        for position in batch:
-            for axis in axes:
-                normal = vector(list(axis))
-                tangent = normal.cross(Vector((0, 0, 1)) if abs(normal.z) < 0.9 else Vector((0, 1, 0))).normalized()
-                bitangent = normal.cross(tangent)
-                center = position + normal * 0.001
-                offset = len(vertices)
-                vertices.extend([center + tangent * a * 0.001 + bitangent * b * 0.001
-                                 for a, b in [(-1, -1), (1, -1), (1, 1), (-1, 1)]])
-                faces.append(tuple(offset + index for index in range(4)))
-                face_axes.append(axis)
-        mesh = bpy.data.meshes.new("ProbeMesh")
+def gpu_pci_address(identifier: str) -> tuple[int, int, int, int] | None:
+    """Cycles 的设备 ID 与 nvidia-smi 的 PCI 域补零长度不同，按数值比较。"""
+    match = re.search(r"(?<![0-9a-f])([0-9a-f]{4,8}):([0-9a-f]{2}):([0-9a-f]{2})(?:\.([0-7]))?(?![0-9a-f])",
+                      identifier.lower())
+    return tuple(int(part or "0", 16) for part in match.groups()) if match else None
+
+
+def query_selected_gpu_memory(selection: dict) -> dict:
+    """仅接受能对应到实际选中 GPU 的显存数据；其余后端明确使用未知预算。"""
+    unknown = {"source": "unavailable", "totalBytes": None, "freeBytes": None,
+               "reason": "当前 GPU 后端未提供可核验的空闲显存；使用保守 256² 探针图像。"}
+    if selection.get("backend") not in ("CUDA", "OPTIX"):
+        return unknown
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return {**unknown, "reason": "nvidia-smi 不可用；使用保守 256² 探针图像。"}
+    try:
+        result = subprocess.run(
+            [executable, "--query-gpu=uuid,pci.bus_id,name,memory.total,memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True, timeout=2,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        rows = [row for row in csv.reader(io.StringIO(result.stdout), skipinitialspace=True) if len(row) == 5]
+        identifier = selection.get("id", "")
+        address = gpu_pci_address(identifier)
+        matches = [row for row in rows if (row[0].strip() and row[0].strip() in identifier) or (
+            address is not None and gpu_pci_address(row[1]) == address)]
+        if not matches and address is None:
+            # 同名多卡不能猜测显存属于哪张；唯一精确名称才可作为兼容兜底。
+            matches = [row for row in rows if row[2].strip() == selection.get("name")]
+        if len(matches) != 1:
+            return {**unknown, "reason": "无法唯一对应 Cycles 选中的 GPU；使用保守 256² 探针图像。"}
+        row = matches[0]
+        total, free = (int(float(value.strip()) * 1024 * 1024) for value in row[3:])
+        if total <= 0 or free < 0 or free > total:
+            raise ValueError("显存计数无效")
+        return {"source": "nvidia-smi", "deviceUuid": row[0].strip(), "totalBytes": total,
+                "freeBytes": free, "reason": None}
+    except (OSError, subprocess.SubprocessError, ValueError, OverflowError) as error:
+        return {**unknown, "reason": f"显存查询不可用（{error}）；使用保守 256² 探针图像。"}
+
+
+def probe_batch_capacity(size: int, gpu: bool) -> int:
+    capacity = min(PROBE_BATCH_SIZE, (size // 6) ** 2 // 6)
+    return min(capacity, 64) if gpu and size <= PROBE_GPU_MIN_IMAGE_SIZE else capacity
+
+
+def probe_batch_plan() -> dict:
+    """只调整探针图像/批次容量，不改每面的像素数、采样数或光照配置。"""
+    gpu = bpy.context.scene.cycles.device == "GPU"
+    size = PROBE_IMAGE_SIZE
+    memory = {"source": "not-required", "totalBytes": None, "freeBytes": None, "reason": None}
+    reason = "CPU 保持配置的探针图像与容量。"
+    if gpu:
+        memory = query_selected_gpu_memory(BAKE_DEVICE_SELECTION)
+        if memory["freeBytes"] is None:
+            size = min(size, PROBE_GPU_UNKNOWN_IMAGE_SIZE)
+            reason = memory["reason"]
+        else:
+            # 至少预留 512 MiB 给场景/驱动，其余空闲显存仅用 1/16 估计图像预算。
+            # 64 B/像素覆盖两份 ndarray、Blender 图像与设备副本；不是整场景峰值保证。
+            budget = max(0, memory["freeBytes"] - 512 * 1024 * 1024) // 16
+            minimum = min(PROBE_GPU_MIN_IMAGE_SIZE, size)
+            while size > minimum and size * size * 64 > budget:
+                size = max(minimum, size // 2)
+            reason = f"按空闲显存 {memory['freeBytes']} bytes 保守选择；图像预算 {budget} bytes，OOM 时继续缩批。"
+    capacity = probe_batch_capacity(size, gpu)
+    if capacity < 1:
+        raise ValueError("探针批次与图像尺寸必须至少容纳一个探针。")
+    return {"imageSize": size, "batchSize": capacity, "gpu": gpu, "memory": memory, "reason": reason}
+
+
+def smaller_probe_batch(plan: dict) -> dict | None:
+    minimum = min(PROBE_GPU_MIN_IMAGE_SIZE, PROBE_IMAGE_SIZE)
+    if plan["imageSize"] <= minimum:
+        return None
+    size = max(minimum, plan["imageSize"] // 2)
+    return {**plan, "imageSize": size, "batchSize": min(plan["batchSize"], probe_batch_capacity(size, True)),
+            "reason": "仅因 GPU 显存不足缩小图像与探针批次，重做当前未提交批次。"}
+
+
+def bake_probe_batch(batch: list[Vector], lights: list[Any], size: int) -> np.ndarray:
+    """失败批次不导出；所有临时数据块在再次分配前释放。"""
+    columns = size // 6
+    vertices, faces = [], []
+    axes = [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+    # 六面顺序与原瓦片内采样位置保持不变，仅扩大同一张图的瓦片数量。
+    for position in batch:
+        for axis in axes:
+            normal = vector(list(axis))
+            tangent = normal.cross(Vector((0, 0, 1)) if abs(normal.z) < 0.9 else Vector((0, 1, 0))).normalized()
+            bitangent = normal.cross(tangent)
+            center = position + normal * 0.001
+            offset = len(vertices)
+            vertices.extend([center + tangent * a * 0.001 + bitangent * b * 0.001
+                             for a, b in [(-1, -1), (1, -1), (1, 1), (-1, 1)]])
+            faces.append(tuple(offset + index for index in range(4)))
+    mesh = bpy.data.meshes.new("ProbeMesh")
+    obj, material = None, None
+    try:
         mesh.from_pydata(vertices, [], faces)
         mesh.update()
         uv = mesh.uv_layers.new(name="LightmapUV")
-        size = 128
-        columns = size // 6
         for face in mesh.polygons:
             x, y = face.index % columns * 6, face.index // columns * 6
             for loop_index, (u, v) in zip(face.loop_indices, [(0, 0), (1, 0), (1, 1), (0, 1)]):
@@ -1053,21 +1253,83 @@ def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Pat
         material.node_tree.nodes.get("Principled BSDF").inputs["Base Color"].default_value = (1, 1, 1, 1)
         obj.data.materials.append(material)
         pixels = bake_irradiance([obj], lights, size, "ProbeBake")
-        for index, position in enumerate(batch):
-            irradiance = []
-            for face in range(6):
-                tile = index * 6 + face
-                x, y = tile % columns * 6 + 2, tile // columns * 6 + 2
-                for channel in range(3):
-                    irradiance.append(sum(pixels[((y + dy) * size + x + dx) * 4 + channel]
-                                          for dx in range(2) for dy in range(2)) / 4)
-            probes.append({"position": list(REVERSE_COORDINATES.to_3x3() @ position), "irradiance": irradiance})
-        bpy.data.objects.remove(obj, do_unlink=True)
+        return sample_probe_irradiance(pixels, size, len(batch))
+    finally:
+        if obj is not None:
+            bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.meshes.remove(mesh)
-        bpy.data.materials.remove(material)
-        progress("probes", min(start + 64, len(positions)), len(positions), "正在烘焙动态物体间接光探针")
-    write_json(root / "probes.json", {"version": 1, "encoding": "ambient-cube", "spacing": spacing, "probes": probes})
-    return len(probes)
+        if material is not None:
+            bpy.data.materials.remove(material)
+
+
+def bake_probes(objects: list[Any], lights: list[Any], spacing: float, root: Path,
+                positions: list[Vector] | None = None) -> int:
+    global PROBE_GPU_RETRY_ACTIVE, PROBE_BATCH_DIAGNOSTICS
+    positions = positions if positions is not None else probe_positions(objects, spacing)
+    plan = probe_batch_plan()
+    probes, start = [], 0
+    report = {"version": 1, "status": "running", "device": {**BAKE_DEVICE_SELECTION,
+              "actual": "GPU" if plan["gpu"] else "CPU"}, "initialPlan": plan, "oomRetries": 0, "bakeCalls": 0, "attempts": []}
+    previous_retry = PROBE_GPU_RETRY_ACTIVE
+    previous_diagnostics = PROBE_BATCH_DIAGNOSTICS
+    PROBE_GPU_RETRY_ACTIVE = plan["gpu"]
+    PROBE_BATCH_DIAGNOSTICS = report
+    try:
+        progress("probes", 0, len(positions), plan["reason"])
+        while start < len(positions):
+            batch = positions[start:start + plan["batchSize"]]
+            attempt = {"start": start, "count": len(batch), "imageSize": plan["imageSize"],
+                       "batchSize": plan["batchSize"], "status": "running"}
+            report["attempts"].append(attempt)
+            print("LIGHTING_BAKE_PROBE_BATCH " + json.dumps({"device": report["device"], **attempt}), flush=True)
+            before_calls = report["bakeCalls"]
+            try:
+                irradiances = bake_probe_batch(batch, lights, plan["imageSize"])
+            except RuntimeError as error:
+                attempt.update({"status": "failed", "reason": str(error)})
+                if not plan["gpu"]:
+                    raise
+                if not is_gpu_out_of_memory_error(error):
+                    # 设备丢失等不缩批，仍保留旧服务合同中的整任务 CPU 回退。
+                    if is_gpu_memory_error(error):
+                        print("LIGHTING_BAKE_GPU_FALLBACK " + str(error), file=sys.stderr, flush=True)
+                    raise
+                reduced = smaller_probe_batch(plan)
+                if reduced is None:
+                    # 仅最低布局仍 OOM 时通知主进程，沿用既有整任务 CPU 回退。
+                    print("LIGHTING_BAKE_GPU_FALLBACK " + str(error), file=sys.stderr, flush=True)
+                    raise
+                attempt["status"] = "oom-retry"
+                report["oomRetries"] += 1
+                plan = reduced
+                progress("probes", start, len(positions), f"GPU 显存不足，缩至 {plan['imageSize']}² / {plan['batchSize']} 探针后重试。")
+                continue
+            finally:
+                attempt["bakeCalls"] = report["bakeCalls"] - before_calls
+            attempt["status"] = "completed"
+            for position, irradiance in zip(batch, irradiances):
+                probes.append({"position": list(REVERSE_COORDINATES.to_3x3() @ position),
+                               "irradiance": irradiance.tolist()})
+            start += len(batch)
+            progress("probes", start, len(positions), "正在烘焙动态物体间接光探针")
+        write_json(root / "probes.json", {"version": 1, "encoding": "ambient-cube", "spacing": spacing, "probes": probes})
+        report["status"] = "completed"
+        return len(probes)
+    except BaseException as error:
+        report["status"] = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
+        report["reason"] = str(error)
+        raise
+    finally:
+        PROBE_GPU_RETRY_ACTIVE = previous_retry
+        PROBE_BATCH_DIAGNOSTICS = previous_diagnostics
+        # 汇总同时进入已有 cycles.log；整任务 CPU 回退重写 JSON 后仍可追溯 GPU 尝试。
+        print("LIGHTING_BAKE_PROBE_BATCHES " + json.dumps(report, ensure_ascii=False), flush=True)
+        try:
+            write_json(root / "probe-batches.json", report)
+        except OSError as error:
+            if report["status"] == "completed":
+                raise
+            print("LIGHTING_BAKE_PROBE_REPORT_ERROR " + str(error), file=sys.stderr, flush=True)
 
 
 
@@ -1092,6 +1354,7 @@ def discover_bake_devices() -> list[dict]:
 
 
 def configure_bake_device(preference: str) -> None:
+    global BAKE_DEVICE_SELECTION
     requested = preference if preference in ("auto", "gpu") else "cpu"
     selection = {"requested": requested, "actual": "CPU", "name": "CPU", "backend": "CPU"}
     bpy.context.scene.cycles.device = "CPU"
@@ -1106,11 +1369,12 @@ def configure_bake_device(preference: str) -> None:
                 for device in preferences.devices:
                     device.use = device.id == selected["id"] and device.type != "CPU"
                 bpy.context.scene.cycles.device = "GPU"
-                selection.update({"actual": "GPU", "name": selected["name"], "backend": selected["backend"]})
+                selection.update({"actual": "GPU", "id": selected["id"], "name": selected["name"], "backend": selected["backend"]})
             except (TypeError, ValueError, RuntimeError) as error:
                 selection["fallbackReason"] = f"GPU 配置不可用，已回退 CPU：{error}"
         else:
             selection["fallbackReason"] = "未发现可用 GPU，已使用 CPU。"
+    BAKE_DEVICE_SELECTION = selection
     print("LIGHTING_BAKE_DEVICE " + json.dumps(selection, ensure_ascii=False), flush=True)
 
 
@@ -1122,11 +1386,26 @@ def is_gpu_memory_error(error: Exception) -> bool:
                                                 "failed to create cuda", "failed to create optix"))
 
 
+def is_gpu_out_of_memory_error(error: Exception) -> bool:
+    """缩批只处理内存不足；无效分配与设备故障保留原服务回退分类。"""
+    text = str(error).lower()
+    if any(token in text for token in (
+            "invalid argument", "invalid value", "invalid allocation", "invalid size", "illegal address",
+            "device lost", "invalid device", "no kernel image")):
+        return False
+    return any(token in text for token in (
+        "out of memory", "out of gpu memory", "out of device memory", "insufficient memory",
+        "cuda_error_out_of_memory", "hiperroroutofmemory", "memory allocation failed", "memory allocation failure",
+        "failed to allocate memory", "failed to allocate gpu memory", "failed to allocate device memory"))
+
+
 def bake_diffuse() -> None:
+    if PROBE_BATCH_DIAGNOSTICS is not None:
+        PROBE_BATCH_DIAGNOSTICS["bakeCalls"] += 1
     try:
         bpy.ops.object.bake(type="DIFFUSE")
     except RuntimeError as error:
-        if bpy.context.scene.cycles.device == "GPU" and is_gpu_memory_error(error):
+        if bpy.context.scene.cycles.device == "GPU" and not PROBE_GPU_RETRY_ACTIVE and is_gpu_memory_error(error):
             print("LIGHTING_BAKE_GPU_FALLBACK " + str(error), file=sys.stderr, flush=True)
         raise
 
@@ -1183,10 +1462,9 @@ def main() -> None:
     for obj in receivers:
         index = obj["input_index"]
         source = data["meshes"][index]
-        name = f"geometry-{index}.json"
-        export_geometry(obj, source, root / name)
+        geometry = write_export_geometry(collect_export_geometry(obj, source), root / f"geometry-{index}")
         mesh_results.append({"key": source["key"], "entityId": source["entityId"], "nodeKey": source["nodeKey"],
-                             "geometryFile": name, "atlasIndex": obj["atlas"]})
+                             **geometry, "atlasIndex": obj["atlas"]})
     count = bake_probes(objects, lights, settings["probeSpacing"], root, positions)
     write_json(root / "result.json", {"version": 1, "signature": data["signature"], "engineVersion": bpy.app.version_string,
                                     "atlases": atlas_results, "meshes": mesh_results, "probesFile": "probes.json",

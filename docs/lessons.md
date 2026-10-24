@@ -231,6 +231,8 @@
 - 原因：只比较方法而不比较parent/底层父级或继承的typed-array元数据getter，会改变副作用、异常和迭代结果；在getHash内部创建disposer会共享捕获mesh的环境。
 - 修复：只对完整已知原生链使用快路；覆盖/访问器/循环父级/iterator.next变化保守执行原表达式；内部复制使用捕获的内建函数。Disposer在独立工厂创建，快照预算不足时避免同Geometry重复部分分配。
 - 预防：以修改前独立表达式比较返回引用/顺序/签名与异常；补原位改写、继承覆盖、单observer、预算和独立--expose-gc对照；构造场景像素一致与现场FPS分别报告。
+- 2026-10-24补充：模块初始化捕获的Set引用不自动等于可信NativeSet。pre-import Proxy/子类会被同引用检查误认证，global getter还会观察新增捕获读取；普通Editor/Viewer先于.model.ts初始化的链路不能替代通用认证。claimed惰性分配在18例oracle的3个pre-import反例处停止，不能改skip或扩大探测求绿。
+- 精确字节循环展开须先保留原Math.floor和两个视图构造；Math.floor可返回带副作用的对象，bulk条件会改变ToPrimitive次数。仅构造后对有界primitive number进入展开，其余旧循环回退，逐对读取和首差短路不变；语义GREEN仍须真实完整collector净收益，不能以kernel局部收益代验。
 
 
 ## 预取句柄归还不能依赖进度观察者成功（2026-10-23）
@@ -265,7 +267,7 @@
 - 触发：内部Set复用后，脚本接管has可清空或保留this并污染下一来源。修复：保留动态方法和访问器求值顺序，未知has一旦暴露，本collect停止复用；不能强制nativeHas掩盖脚本行为。第二次target getter前已捕获adder的JS顺序也需差分回归；构造次数应在原生has路径观察。
 - 触发：创建批次回调同步关闭或重开后，旧sync在clear后继续登记carrier与hook。修复：生命周期代次贯穿create/update/注册边界，未登记对象由finally回收，失代当栈清理；以两候选组和真实批次回调验证。
 
-- 性能候选兼容正确仍可能更慢：角色Set缓存加入每祖先descriptor/prototype检查后虽少分配Set，完整collect反而退化，最终撤回；只保留通过完整collect净收益验证的纯编码值/私有标量模板复用。隔离微基准必须每版本独立Scene/Mesh/Geometry，避免几何观察器互相使缓存失效制造假收益；原始失败和无效结果保留。
+- 性能候选兼容正确仍可能更慢：角色Set缓存加入每祖先descriptor/prototype检查后虽少分配Set，完整collect反而退化，最终撤回；只保留通过完整collect净收益验证的纯编码值/私有标量模板复用。隔离微基准必须每版本独立Scene/Mesh/Geometry，避免几何观察器互相使缓存失效制造假收益；原始失败和无效结果保留。 2026-10-24再次出现物化微测降低38%–76%，但42856来源的完整getSources反而增加8.75%与7.20%的案例；最终按两次停止规则撤回。判断必须包含资格检查、caller参数对象、完整收集及GC影响，局部计时不能越过真实场景验收。
 
 ### 2026-10-23：重复失效标记不等于重复分类
 
@@ -273,3 +275,57 @@
 - 原因：dirty原本已合并同一消费前的请求；减少mark/revision并不会自动减少collect，异步add与UI query还可能分开消费。
 - 本轮证据：相同4157次输入请求，候选合并4047次重复标记，但实际getSources仍94→95次。保留真实目录计数、嵌套耗时口径和前后同条件实测，不把减少通知数量宣称为卡顿修复。
 - 安全边界：未知脚本/getter仍完整路径；不接入覆盖率为零却增加全场审计开销的快路径。异步取消后controller清空也不代表消费事务结束。
+
+
+## 2026-10-24：净Mesh成员变化不能证明分类输入未变
+
+- 触发：为阵列宿主重复add/remove跳过全量光照分类，成员状态最终相同。
+- 原因：positions/indices返回数组可原地改写且没有onGeometryUpdated；祖先改名、改挂或同名兄弟顺序也会改变完整nodeKey，宿主自身引用/name/parent可保持不变。
+- 处理：最小反例复现后撤回L2快路径，保留原有全量失效；主路线正确性优先。证据见docs/tasks/2026-10-24-render-optimization.md及其独立审查JSON。
+- 预防：跳过collect前须证明完整分类输入的写入协议，不能仅凭Geometry/Material引用、成员往返或局部节点字段；无可靠版本号时保留全量路径。
+
+## 同资源key的异步任务也必须按操作代次约束错误提交
+
+- 触发：场景先同步空实体再同步实际实体，同一GI snapshot key的旧失败Promise在新任务已成功后才进入outer catch；快速内存缓存更易复现，慢路径可能掩盖。
+- 原因与修复：只比较资源key不能证明仍持有本次任务；在applySnapshot同步递增操作代次后捕获operation，outer catch同时核对operation/key/disposed。保留真正几何不匹配与取消控制，不清空所有错误、不加容差。
+- 预防：实际入口覆盖慢加载与即时缓存两种调度；用完整HEAD反例及实际Viewer新构建证明，不能只看最终一帧错误偶然消失。
+
+## 预编译数量与原生API调用次数都不能代替实际工作量或净收益
+
+- 触发：图集合批降低bpy.ops.object.bake次数，但Cycles原生逐对象调用不变且两次ABBA更慢；模板shader准备成功也未必匹配后来shadow receiver/GI代理的完整Effect key。
+- 原因与修复：外层API计数和programReady只说明入口调用。记录原生调用、真实后续Effect命中、准备增量、正式窗口longtask与ready耗时，保留全部负样本；未通过的候选默认关闭，两次无收益按方案撤回。
+- 预防：性能前冻结全部任务源、构建及子进程并确认排空；将功能、覆盖、性能分别验收，原始失败不由后续单次通过抹除。
+
+## 脱离依赖关系的浏览器开发模块图可能改变生产单例配置
+
+- 触发：Viewer缓存smoke通过Vite dev多路径导入Babylon loader/Draco，配置的单例与真实loader使用的实例不同，误走CDN；workspace巨量output又放大开发watch成本。
+- 原因与修复：功能夹具先构建成唯一生产模块图，再以本任务静态server服务；生产安装顺序先配置cache/本地decoder再创建Engine，记录实际decoder与网络请求。
+- 预防：实际有效GLB、KTX采样、冷/热/新版本/回滚与离线拒CDN共同检查；不以白板截图、单例配置赋值或mock worker替代真实解码证明。
+
+## 真实业务录制覆盖须按驱动与身份轨迹核对
+
+- 触发：原录制containerCode为空/0，静态查看容易误判没有货物。实际conveyor以task边沿生成/复用并跨1003→RGV1→1004交接。
+- 修复与预防：先查原驱动合同，再按真实cargo/root/owner/model/mesh追踪；补充故障必须用合法完整模板与递增时标，先确认fresh无旧货。模板ready后的尺寸clamp不能单独当走行，按实际诊断阶段证明clamp之后仍位移、故障冻结和恢复。
+
+## 窗口截图与渲染缓冲必须分开验收
+
+- 触发：engine buffer2560×1440但实际窗口1920×1080，element截图包含UI与窗口外黑边；原LED滚动和HUD也令同Q0重跑有像素差。
+- 修复与预防：记录两种尺寸，保留A/A控制及raw A/B误差；没有DOM依据不猜mask，不把局部窗口当全buffer pixel0，也不用同源码替代逐时刻画面证明。
+
+## 自定义图片URI失败不能直接推断文件缺失
+
+- 触发：两版均报editor-image平台Logo失败，但PNG和同步索引缓存实际存在。
+- 修复与预防：分别核物理文件、索引、renderer注册及发布重写路径；记录原始URL/console位置再分类。不能补假图或宽泛忽略unknown-scheme错误，既有失败与新增回归须分开。
+
+## 渲染排序必须核实际比较器与距离键
+
+- 触发：SDK默认按材质分组，但项目interactive薄实例对整个render group改为frontToBack；注释称利用Early-Z，实际SDK只在transparent队列更新_distanceToCamera。
+- 证据与预防：冻结B真实快照确认opaque/alpha-test距离键全0；排序前先核实际group、比较器、键分布和基础材质连续段，不把SDK默认或注释当成运行事实。基础材质序列与真实pass绑定miss分开，不能按转换数线性推CPU收益。
+- 等价边界：恢复材质排序会改变相同距离对象的遍历顺序，公开render observer和共面像素可能受影响；离线比较器顺序反例仅证明合同风险，不冒充真实observer/像素验收。没有完整证明就保留原排序。
+
+## 绑定失效统计须保留失败入口、短路与Scene范围
+
+- 触发：delegate捕获一次base异常再重试成功，若只在return记base调用会把两次入口误成一次；aggregate保守unknown但event仅按length1会误标base-observed。
+- 修复：入口即计、return/throw只补状态，aggregate和event复用同一资格；保留旧失败后，真实sink142例复验。base-observed不认证outer callee，first-winner不等于all-causes，未读visibility不能写成“未变化”。
+- 预防：检查所有Scene的bucket和真实计数包络；1278个入口由3个Scene各426构成，不能当主帧数。完整aggregate与first5000事件前缀分开；shadow只见部分consumer，不证明私有写未被其他API观察。
+- 严格边界：shadow-null跳三写的纯VM反例保留2次公共reset和最终null，却将setter日志6次减成3次；同值写入不是自动可删冗余，不能为优化收益放宽脚本合同。

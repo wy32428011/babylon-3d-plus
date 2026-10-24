@@ -2,6 +2,7 @@ export type SceneLoadStage = 'assetQueue' | 'assetReadDecode' | 'environmentQueu
   | 'environmentReadDecode' | 'environmentClone' | 'environmentRenderReady'
   | 'modelInitialize' | 'modelScriptRefresh' | 'presentationRefresh' | 'progressNotify'
   | 'modelClone' | 'scriptInitialize' | 'entrancePrepare' | 'firstFrameValidation'
+  | 'gpuCapabilityProbe' | 'shaderWarmup'
   | 'rawCacheRead' | 'networkRequest' | 'networkBodyRead' | 'integrityCheck' | 'cacheWrite';
 
 type StageMetric = { count: number; failedCount: number; totalMs: number; maxMs: number; activeCount: number };

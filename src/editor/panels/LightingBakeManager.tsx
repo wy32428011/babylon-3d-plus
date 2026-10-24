@@ -35,6 +35,7 @@ function LightingBakeManagerSession() {
   const sessionId = useEditorStore(state => state.sceneSessionId);
   const tab = useEditorStore(state => state.lightingManagerTab);
   const focus = useEditorStore(state => state.lightingManagerFocus);
+  const gpuProfile = useEditorStore(state => state.lightingGpuCapabilityProfile);
   const preview = useEditorStore(state => state.lightingManagerPreview);
   const previewError = useEditorStore(state => state.lightingManagerPreviewError);
   const classification = useEditorStore(state => state.lightingClassification);
@@ -249,7 +250,7 @@ function LightingBakeManagerSession() {
             { icon: 'warning' as const, label: '待检查', value: impact.mismatchCount + impact.conflictCount, tone: 'is-warning' }].map(metric =>
             <div key={metric.label} className={metric.tone}><LightingManagerIcon name={metric.icon} size={35} /><span>{metric.label}<strong>{metric.value.toLocaleString()}</strong></span></div>)}
         </div>
-        <LightingBakeManagerOverview scene={draft.baseScene} lighting={draft.lighting} appearance={draft.appearance} result={result} resultLabel={resultLabel}
+        <LightingBakeManagerOverview gpuProfile={gpuProfile} scene={draft.baseScene} lighting={draft.lighting} appearance={draft.appearance} result={result} resultLabel={resultLabel}
           disabled={editingDisabled} dirty={dirty} engineStatus={engineStatus} engineStatusLoading={engineStatusLoading} onRefreshDevices={() => void refreshDevices()} onConfigureEngine={() => setEngineConfigurationOpen(true)} probeBounds={preflight.report?.bounds} previewDraftActive={Boolean(draftPreview)} previewDraftSuppressed={draftPreview?.suppressIndirect ?? false} previewDraftRules={changes.rulesChanged || changes.exceptionsChanged} preflightBusy={preflight.phase === 'checking'} onPreviewDraft={previewDraft} onCheck={check} preview={preview} debug={debug} comparison={comparison} motionPreview={runtimeMode === 'preview'} busy={busy}
           onLightingChange={lighting => { setDraft(previous => ({ ...previous, lighting })); setNotice(null); }}
           onAppearanceChange={appearance => { setDraft(previous => ({ ...previous, appearance })); setNotice(null); }}

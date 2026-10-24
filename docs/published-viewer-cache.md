@@ -54,6 +54,33 @@ Draco、Meshopt 的 CPU 几何数组和 KTX2 mipmap 转码数据继续复用原�
 
 IndexedDB 保留 10 秒打开超时、30 秒无请求进展超时、只读数据事务与批量 LRU 元信息更新。若 30 秒计时器因渲染长任务晚交付超过 1 秒，先给排队的 IndexedDB 事件一次 1 秒宽限；该宽限不会递归续期，仍无进展则中止。真实请求成功后才重新计算停滞周期，页面关闭仍即时取消。已完成事务的晚到事件不会被重复 abort。存储错误不阻断三维首帧，页面销毁会释放事务、计时器、临时 URL、资源等待与版本租约。
 
+## DIST 预压缩与静态服务
+
+数字孪生 DIST 打包在原始文件和 `release-cache-manifest.json` 完整写入后，为清单中的 JS/MJS、CSS、JSON（包含场景与 GI 几何）及 WASM 生成可选的 `.br`、`.gz` 传输侧车。原始文件逐字保留；原清单的 SHA-256、大小、`totalBytes`、存储归属及本次 `cacheRevision` 不受侧车影响，侧车本身不加入缓存清单。浏览器按原 URL 请求，HTTP 解压后的原始字节继续由现有缓存校验；无需更换资源 URL 或缓存键。
+
+控制入口 `runtime-config.json`、`release-cache-manifest.json` 和 `published-cache-worker.js` 不生成侧车。比原文件大的压缩结果、已存在同名路径以及最终侧车名称超过文件系统组件长度的表示均跳过，既有文件不覆盖；预压缩失败或取消会排空所有在途流并清理本次产物，打包不会输出半成品。
+
+侧车与原包的全部文件共同计入接收端既有的 2 GiB 解压总量、100000 ZIP 条目预算，计数包含控制入口、完整清单、子目录和空目录；超出余量的侧车被跳过并给出诊断。原包本身已超过该预算时仅跳过预压缩，不新增原流程之外的硬失败。由于 ZIP 条目本身也有开销，若增加侧车触及既有 2 GiB ZIP 上限，会只移除本次生成的侧车并重新打包原文件；原包仍须通过既有 ZIP 大小校验。上述机制不会提高服务端上传、解压或 ZIP 条目上限。
+
+需要静态服务器支持才能减少传输量；未配置时仍按原文件正常服务。中台由另一个仓库的 Nginx 模板及 JAR 同步流程管理，本仓库不自动修改或重载该服务。以下是供运维审查的配置片段，应合并到现有 release **静态文件** location，保留原有 `alias`、`try_files =404`、类型映射和 immutable 缓存头：
+
+```nginx
+# 仅在 nginx -V 确认具备 http_gzip_static_module 后启用
+gzip_static on;
+gzip_vary on;
+```
+
+Brotli 需要已安装并加载与当前 Nginx 二进制匹配的 Brotli static 模块；标准 Nginx 不保证包含此第三方模块。模块条件和指令分别以 [Nginx gzip_static 官方说明](https://nginx.org/en/docs/http/ngx_http_gzip_static_module.html) 与 [ngx_brotli 项目说明](https://github.com/google/ngx_brotli#configuration-directives) 为准。在确认 `nginx -t` 支持该指令后，才可在同一个静态 location 增加：
+
+```nginx
+# 前提：相应 Brotli 模块已加载；不能在缺模块环境无条件写入
+brotli_static on;
+# 如现有配置尚未合并 Vary，按当前 add_header 继承规则同时保留缓存头
+add_header Vary Accept-Encoding;
+```
+
+控制入口的原有 `no-cache, no-store, must-revalidate` location 保持不变。客户端未接受对应编码、侧车被预算跳过或缺少模块时应回到原文件；不得把不存在的资源回退为 HTML，也不得为 `.br/.gz` 改写原资源 Content-Type。启用后分别用支持 `br`、`gzip` 和 identity 的请求检查 `Content-Encoding`、`Vary: Accept-Encoding`、解压后 SHA-256 及原始资源 MIME，再验证同版刷新零重复静态传输。本地 Node HTTP 验证不等同 Nginx、线上 HTTPS 或已安装编辑器部署验收。
+
 ## 本地验证
 
 ```powershell
@@ -62,6 +89,7 @@ npm run build:viewer
 npm run build:electron
 node --test tests/digitalTwin/deploymentReleaseCacheManifest.test.mjs tests/digitalTwin/publishedResponseCache.test.mjs
 node --experimental-strip-types --test --test-concurrency=1 tests/digitalTwin/publishedCacheSetup.test.ts tests/digitalTwin/publishedAssetCache.test.ts tests/digitalTwin/publishedCacheStore.test.ts tests/digitalTwin/publishedCacheVersion.test.ts tests/digitalTwin/publishedReleaseManifest.test.ts tests/digitalTwin/publishedReleasePrefetch.test.ts tests/digitalTwin/publishedReleaseStorage.test.ts tests/digitalTwin/publishedRawStore.test.ts tests/digitalTwin/publishedBlobHash.test.ts
+node --experimental-strip-types --test --test-concurrency=1 tests/digitalTwin/deploymentPrecompression.test.mjs
 node node_modules/electron/cli.js tests/digitalTwin/releaseCacheManifestPackages.integration.mjs
 node tests/digitalTwin/publishedReleaseStorage.browser.test.mjs
 node --test tests/digitalTwin/publishedReleaseHttp.browser.test.mjs
@@ -73,4 +101,6 @@ node scripts/smoke-published-cache-storage.mjs
 
 完整生产 Viewer 回归使用真实 Chrome、本地独立发布目录、宿主页 iframe 和 WebGL；服务端静态响应统一 no-store，以请求计数区分真实持久缓存与普通 HTTP 缓存。覆盖首次完整缓存、刷新、同 profile 浏览器重启、仅改变宿主参数、延迟资源、单文件缓存损坏、新旧版本并存和回到已缓存版本；另用非安全 HTTP origin 验证普通模型、环境模型、天空盒和未使用模型的冷启动、刷新零重复下载、数字孪生重发重新缓存及页面无缓存警告。报告与截图保存到 `output/playwright/published-release-cache/run-*/`。
 
-响应缓存专项另外覆盖 Range、Worker 冷启动、存活 helper 重建会话、配额故障与跨会话取消。存储专项覆盖页面租约、旧版清理与大于 512 MiB 的合成文件分块保存。这些结果证明本地实现，不代表实际业务场景、线上反向代理、HTTPS 证书或已安装编辑器已经升级。
+响应缓存专项另外覆盖实际打包 helper 生成的 Brotli/gzip 侧车、解压后 SHA/大小、原始资源与 JSON 解码缓存冷热命中、传输字节，以及 Range、Worker 冷启动、存活 helper 重建会话、配额故障与跨会话取消。存储专项覆盖页面租约、旧版清理与大于 512 MiB 的合成文件分块保存。这些结果证明本地实现，不代表实际业务场景、线上反向代理、HTTPS 证书或已安装编辑器已经升级。
+
+B7 的原精度 `.bin` 几何也生成可选 `.br`/`.gz`；服务器仍以原 `.bin` URL 和 `application/octet-stream` 返回，HTTP 解压后的字节必须匹配原清单。侧车不进入 `release-cache-manifest.json`，原文件仍是无预压缩支持时的回退。

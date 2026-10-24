@@ -19,9 +19,14 @@ export const DEFAULT_LIGHTING_BAKE_SETTINGS: SceneLightingBakeSettings = {
   enabled: true, quality: 'standard', atlasSize: 2048, texelsPerMeter: 32,
   probeSpacing: 4, maxTextureMiB: 256, cacheStaticShadows: true, dynamicShadows: true,
 };
+export type LightingGeometryEncoding = 'json' | 'binary-v1';
 export type LightingBakeAsset = {
   id: string;
   kind: 'geometry' | 'lightmap' | 'probes';
+  /** 缺省为旧产物；显式版本必须与几何文件一致。 */
+  geometryVersion?: 1 | 2;
+  /** 仅几何资源使用；旧省略继续读取 JSON。 */
+  encoding?: LightingGeometryEncoding;
   url: string;
   byteLength: number;
   sha256?: string;
@@ -79,9 +84,13 @@ export function validateSceneLightingBakeSnapshot(value: unknown): SceneLighting
       || !['geometry', 'lightmap', 'probes'].includes(String(a.kind))
       || typeof a.url !== 'string' || !a.url || /^(?:javascript|data|blob):/i.test(a.url)
       || typeof a.byteLength !== 'number' || !Number.isSafeInteger(a.byteLength) || a.byteLength < 0) return null;
+    if (a.geometryVersion !== undefined && (a.kind !== 'geometry' || (a.geometryVersion !== 1 && a.geometryVersion !== 2))) return null;
+    if (a.encoding !== undefined && (a.kind !== 'geometry' || (a.encoding !== 'json' && a.encoding !== 'binary-v1'))) return null;
     if (a.rgbmRange !== undefined && (typeof a.rgbmRange !== 'number' || !Number.isFinite(a.rgbmRange) || a.rgbmRange <= 0)) return null;
     const asset: LightingBakeAsset = {
       id: a.id, kind: a.kind as LightingBakeAsset['kind'], url: a.url, byteLength: a.byteLength,
+      ...(a.geometryVersion === 1 || a.geometryVersion === 2 ? { geometryVersion: a.geometryVersion } : {}),
+      ...(a.encoding === 'json' || a.encoding === 'binary-v1' ? { encoding: a.encoding } : {}),
       ...(typeof a.sha256 === 'string' ? { sha256: a.sha256 } : {}),
       ...(typeof a.rgbmRange === 'number' ? { rgbmRange: a.rgbmRange } : {}),
     };

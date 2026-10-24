@@ -13,6 +13,7 @@ import {
   type DeploymentCopyFile,
 } from './deploymentExportFileSystem.js';
 import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
+import { precompressDeploymentFiles, type DeploymentPrecompressionResult } from './deploymentPrecompression.js';
 import { writePrecompiledDeploymentScripts } from './deploymentPrecompiledScripts.js';
 import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } from './deploymentReleaseCacheManifest.js';
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
@@ -38,6 +39,10 @@ export type BuildDigitalTwinDistPackageOptions = {
   skyboxCacheContext?: DeploymentSkyboxCacheContext;
   skyboxValidationCache?: DeploymentSkyboxValidationCache;
   sourceResourceFiles?: readonly SourceResourceFile[];
+  /** 内部验收开关，默认生成可选传输侧车；不改变原文件或缓存清单。 */
+  precompress?: boolean;
+  /** 仅允许收紧原有 ZIP 上限，供近上限回退验证使用。 */
+  maxPackageBytes?: number;
   onProgress?: (detail: string, percent: number) => void;
 };
 
@@ -49,6 +54,7 @@ export type DigitalTwinDistPackageResult = {
   fileCount: number;
   externalAssetCount: number;
   warnings: string[];
+  precompression?: { generatedFiles: number; zipBudgetFallback: boolean; budget: DeploymentPrecompressionResult['budget'] };
 };
 
 /** 静默生成供数据中台部署的自包含 Viewer ZIP，压缩包根目录直接包含 index.html。 */
@@ -56,6 +62,10 @@ export async function buildDigitalTwinDistPackage(
   options: BuildDigitalTwinDistPackageOptions,
 ): Promise<DigitalTwinDistPackageResult> {
   throwIfDeploymentExportAborted(options.signal);
+  const maxPackageBytes = options.maxPackageBytes ?? MAX_DIST_PACKAGE_BYTES;
+  if (!Number.isSafeInteger(maxPackageBytes) || maxPackageBytes <= 0 || maxPackageBytes > MAX_DIST_PACKAGE_BYTES) {
+    throw new Error('dist ZIP 验收预算无效；不能扩大原有 2 GB 限制。');
+  }
   const outputRoot = path.resolve(options.outputRoot);
   await fs.mkdir(outputRoot, { recursive: true });
   const token = randomUUID();
@@ -110,10 +120,37 @@ export async function buildDigitalTwinDistPackage(
     const cacheManifest = await createDeploymentReleaseCacheManifest(stagingRoot, cacheRevision, options.signal);
     await fs.writeFile(resolveDeploymentDestination(stagingRoot, RELEASE_CACHE_MANIFEST_PATH),
       `${JSON.stringify(cacheManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', signal: options.signal });
+    let precompression: DeploymentPrecompressionResult | undefined;
+    if (options.precompress !== false) {
+      options.onProgress?.('正在生成可选传输压缩文件…', 84);
+      precompression = await precompressDeploymentFiles(stagingRoot, cacheManifest, options.signal, {
+        onProgress: progress => options.onProgress?.('正在生成可选传输压缩文件…',
+          progress.phase === 'compressing' ? 84 + progress.completed / Math.max(1, progress.total) : 85),
+      });
+      prepared.warnings.push(...precompression.diagnostics);
+    }
     options.onProgress?.('正在压缩 dist ZIP…', 86);
     await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
-    const stat = await fs.stat(archivePath);
-    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_DIST_PACKAGE_BYTES) {
+    let stat = await fs.stat(archivePath);
+    let zipBudgetFallback = false;
+    if (stat.size > maxPackageBytes && precompression?.files.length) {
+      // ZIP 自身有条目元数据开销；可选侧车不得使原本可发布的包越过既有上传上限。
+      for (const file of precompression.files) {
+        throwIfDeploymentExportAborted(options.signal);
+        await fs.rm(resolveDeploymentDestination(stagingRoot, file.path));
+      }
+      await fs.rm(archivePath);
+      throwIfDeploymentExportAborted(options.signal);
+      options.onProgress?.('传输压缩文件触及 ZIP 上限，正在回退原包…', 90);
+      await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
+      stat = await fs.stat(archivePath);
+      zipBudgetFallback = true;
+      precompression.budget.finalBytes = precompression.budget.originalBytes;
+      precompression.budget.finalFiles = precompression.budget.originalFiles;
+      precompression.budget.finalEntries = precompression.budget.originalEntries;
+      prepared.warnings.push('可选传输侧车触及 ZIP 大小预算，已回退原包；原文件与缓存清单未改动。');
+    }
+    if (!stat.isFile() || stat.size <= 0 || stat.size > maxPackageBytes) {
       throw new Error('dist ZIP 大小无效或超过 2 GB 限制。');
     }
     options.onProgress?.('dist ZIP 已生成。', 100);
@@ -122,9 +159,12 @@ export async function buildDigitalTwinDistPackage(
       fileName,
       fileSize: stat.size,
       sha256: await sha256File(archivePath, options.signal),
-      fileCount: templateFiles.length + copiedAssets.length + GENERATED_TEMPLATE_PATHS.size,
+      fileCount: templateFiles.length + copiedAssets.length + GENERATED_TEMPLATE_PATHS.size
+        + (zipBudgetFallback ? 0 : precompression?.files.length ?? 0),
       externalAssetCount: prepared.externalAssetCount,
       warnings: prepared.warnings,
+      ...(precompression ? { precompression: { generatedFiles: zipBudgetFallback ? 0 : precompression.files.length,
+        zipBudgetFallback, budget: precompression.budget } } : {}),
     };
   } catch (error) {
     await fs.rm(archivePath, { force: true }).catch(() => undefined);

@@ -66,6 +66,8 @@ export class EnvironmentAndSkyboxController {
   public allowDayNightCycle: boolean | null = null;
   public shadowRuntime!: SceneShadowRuntime;
   public lightingRuntime!: SceneLightingRuntime;
+  /** 内部完整分类A/B诊断；不写入场景，不改变失效或业务输入。 */
+  public lightingContextAssemblyMode: 'direct' | 'legacy' = 'direct';
   public lightingBakeRunning = false;
   public skyboxRuntime!: SceneSkyboxRuntime;
   public environmentRuntime!: SceneEnvironmentRuntime;
@@ -175,6 +177,8 @@ export class EnvironmentAndSkyboxController {
       sunIntensity: lighting.main.intensity, fillIntensity: lighting.fill.intensity, iblIntensityMax: lighting.environmentIntensity });
     return this.environmentRuntime.syncLighting(lighting.shadows);
   }
+
+  peekLightingClassificationForEntities(entityIds: readonly string[]) { return this.lightingRuntime.peekClassificationForEntities(entityIds); }
 
   getLightingClassification(): LightingClassificationEntry[] { return this.lightingRuntime.getClassification(); }
   setLightingPreview(debugVisible: boolean, beforeBake: boolean): void { this.lightingRuntime.setPreview(debugVisible, beforeBake); }
@@ -426,7 +430,7 @@ export class EnvironmentAndSkyboxController {
           isModelMeshRenderSuppressed: mesh => this.dependencies.telemetry.motionStaticBatchRuntime.isSuspended(mesh),
           getMotionTargets: model => this.dependencies.telemetry.specializedTelemetryRuntime.getLightingMotionNodes(model),
           readEntityId: mesh => this.dependencies.selection.readEntityIdFromMesh(mesh),
-        });
+        }, { contextAssembly: this.lightingContextAssemblyMode });
       },
       setShadowRoles: (roles, settings) => this.shadowRuntime.setHybridMeshRoles(roles, settings),
       onBindingsChanged: () => this.dependencies.selection.rebuildModelSelectionOutline(),

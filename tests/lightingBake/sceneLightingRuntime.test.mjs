@@ -1039,7 +1039,8 @@ test('resource validation errors carry manifest identity and cause without parsi
     const snapshot = f.snapshot(), geometryAsset = snapshot.assets.find(asset => asset.id === 'geometry');
     const content = JSON.stringify({ version: 1, positions: [] });
     geometryAsset.url = 'data:application/json,' + encodeURIComponent(content); geometryAsset.byteLength = Buffer.byteLength(content);
-    await assert.rejects(loadLightingResources(snapshot, f.scene), error => {
+    // 本用例固定geometry诊断；并发时多个不可读资源以真实首错为准，另有队列失败测试。
+    await assert.rejects(loadLightingResources(snapshot, f.scene, undefined, { concurrency: 1, textureDecoder: 'image' }), error => {
       assert.ok(error instanceof LightingResourceError); assert.ok(error.cause instanceof Error);
       assert.deepEqual(error.diagnostic, { kind: 'resource', message: error.message, assetId: 'geometry', entityId: 'fixed-entity', nodeKey: '$mesh' });
       assert.equal(error.assetKind, 'geometry'); return true;
@@ -1352,4 +1353,40 @@ test('coalesced mesh marks still collect the actual sources and invalidate chang
     f.fixed.updateVerticesData(VertexBuffer.PositionKind, positions); f.tick();
     assert.equal(f.sourceCalls, calls + 1); assert.equal(f.proxies().length, 0); assert.match(f.runtime.getError(), /几何/);
   } finally { f.dispose(); }
+});
+
+
+test('Inspector entity cache is ordered, stable and stale without consuming dirty classification', () => {
+  const f = fixture();
+  try {
+    const calls = f.sourceCalls;
+    const one = f.runtime.peekClassificationForEntities(['moving-entity', 'fixed-entity']);
+    assert.deepEqual(one.entries.map(entry => entry.entityId), ['fixed-entity', 'moving-entity']);
+    assert.equal(one.stale, false);
+    assert.equal(f.runtime.peekClassificationForEntities(['moving-entity', 'fixed-entity']).entries, one.entries);
+    f.runtime.markDirty('unknown-script');
+    assert.equal(f.runtime.peekClassificationForEntities(['fixed-entity']).stale, true);
+    assert.equal(f.sourceCalls, calls);
+    f.runtime.getClassification();
+    assert.equal(f.runtime.peekClassificationForEntities(['fixed-entity']).stale, false);
+  } finally { f.dispose(); }
+});
+
+
+test('net-zero native lifecycle still detects raw position/index edits that emit no geometry event', async () => {
+  for (const kind of ['positions', 'indices']) {
+    const f = fixture();
+    try {
+      await f.runtime.applySnapshot(f.snapshot()); f.tick();
+      const calls = f.sourceCalls;
+      if (kind === 'positions') f.fixed.getVerticesData(VertexBuffer.PositionKind)[0] += .125;
+      else f.fixed.getIndices()[0] = f.fixed.getIndices()[1];
+      f.runtime.notifyMeshLifecycleChange('scene-mesh-removed');
+      f.runtime.notifyMeshLifecycleChange('scene-mesh-added');
+      f.tick();
+      assert.equal(f.sourceCalls, calls + 1, kind);
+      assert.equal(f.runtime.state, null, kind);
+      assert.match(f.runtime.getError(), /几何/, kind);
+    } finally { f.dispose(); }
+  }
 });

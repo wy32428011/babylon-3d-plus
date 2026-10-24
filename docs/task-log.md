@@ -1,5 +1,11 @@
 # 任务记录
 
+## 2026-10-24 渲染与烘焙优化 Git 交付
+
+- 已拉取远端，当前分支无需额外合并；提交现有渲染、加载、烘焙及相关文档用例改动，Python 字节码缓存保留本地不提交。
+- 本次按用户要求不运行测试、构建或代码验证；历史结果与未验收边界保持不变，不以 Git 交付代替功能或性能验收。
+- 使用中文标题及四项编号说明提交推送，最终结果以本次交付回复为准。
+
 ## 2026-10-23 光照失效与帧开销 Git 交付
 
 - 已快进合并远端 0.4.1 版本和小车出梯等待修复，恢复本地光照失效及帧开销改动，无冲突。
@@ -336,3 +342,110 @@
 - 按授权完成默认OFF原因诊断、pose/bindings/classification/structure/unknown消费合同、受控Mesh事件已pending标记合并、分类/绑定重入与异步snapshot保护。未知脚本与refreshModelMeshes继续full；原生增删广播、脚本/遥测/UI定时周期保持。撤出零实际覆盖率的纯度守卫实验并保留证据。
 - 验证：135项定向回归通过、独立审查无阻塞、独立候选完整build通过、6姿态真实WebGL像素差0；同条件工厂A/B/A严格3次均通过，FPS5.47/5.73/6.12。候选合并4047次重复标记，但真实getSources95次，未确认稳定FPS收益，主要约450ms分类卡顿未解决，不推进P2。
 - 记录与边界见[结果报告](tasks/2026-10-23-lighting-invalidation-result.md)；冻结源码/构建、失败实验、原始回放和审计保留于output/lighting-invalidation-20261023。测试app/broker均关闭，未提交推送或发布，保留全部既有并发改动。
+
+## 2026-10-24 全项目渲染光照烘焙加载优化 Q0 首批
+
+- 按方案阶段推进，保留L1按需UI分类、B1 NumPy像素处理、B2探针1024²批次、LD8四并发/Bitmap加载、S1阴影数值签名。画质、外置脚本、设备算法及MQTT频率未改；未提交推送发布或生成安装包。
+- L2候选因原始positions/indices写入和祖先nodeKey变化没有可靠事件的反例撤回，原full失效保持；新增相关GI回归及lessons。Q0未完整通过，不进入Q1，B2 GPU自适应/缩批仍是缺口。
+- 最终相关回归215+78+80+42项全通过，P2 201通过/1可选基准skip（另已测量）；类型/build/lint/入口、真实Cycles交付/取消超时、硬件阴影/材质/Bitmap context restore及60秒真实UI通过。完整CI的2项Viewer旧失败在初始HEAD独立复现，未扩大修复。
+- 工厂固定60秒ABBA四轮有效：A均5.6917FPS、B均6.25（+9.81%），P95 -5.52%、P99 -33.54%、分类累计31.836→28.594秒；UI collect34.5→0，unknown刷新四轮均66。长任务累计仅-1.51%，主要卡顿未解决。仅本地工厂Intel UHD630，不代表展会独显、现场或线上Viewer。
+- 详细清单、输入/产物SHA、原始证据、五项子流程收益与下一步见[实施记录](tasks/2026-10-24-render-optimization.md)及output/render-optimization-20261024。所有本任务app/broker/浏览器/Blender进程已结束，诊断记录保留。
+
+## 2026-10-24 Q0续作：B2 GPU本地完成，L2仍在验收
+
+- B2补齐实际GPU设备显存匹配/保守计划、确认OOM后1024→512→256→128图像与容量缩批；最低失败才发旧CPU回退标记，非OOM设备故障保留旧回退，其他错误原样失败。灯光和临时数据块finally恢复；失败当前批次不覆盖正式探针。默认设备/采样/脚本/MQTT不变。
+- 最终源/交付Python SHA2810faf1...a51一致；11条真实Blender数据块故障注入及旧marker合同、CPU图集4,194,304分量差0/探针73,728值差0，统一Cycles入口exit0；用户确认暂时没有独显，先完成本地实现与回归，硬件恢复与显存峰值未验证。文档docs/hybrid-lighting.md同步。
+- L2不可靠净成员跳过继续保留原full；同pass memo两次负收益已撤出。只改条目构造的新候选微测虽正，实际42856行完整collector反而274.2→298.2ms，已拒绝收益结论；正在验证最后更小变体，不提前激活Q1。详见原实施记录及output/render-optimization-l2-20261024。
+
+- 续作最终L2裁决：两次完整collector诊断分别+8.75%/+7.20%（行为差分相同），按方案停止并彻底撤回物化/内部诊断/入口，保留原full；不运行未达标候选的visual/ABBA，不进入Q1。回退后TypeScript/Editor/Viewer构建、lint及入口检查通过，完整光照烘焙回归215/215、0失败/取消/跳过；B2最终统一Cycles入口通过。B2是本轮唯一新增产品功能，其他首批五项保留；回退与1010文件输入审计见delivered-integrity.json。
+
+## 2026-10-24 用户确认L2安全替代口径后的续作
+
+- 用户明确同意full分类次数可不变，以实际分类耗时下降且行为一致验收；Q0其余满足后才进Q1。两轮旧物化候选继续撤回，真实GPU按前次答复暂缓。
+- 独立非压缩行级CPU诊断完成，仅定位不作FPS比较；policyContext固定字段构建占create self ticks35.49%，非整个collector比例。Matrix descriptor-only因全局seed/tracking副作用否决。
+- 新实验只展开policyContext可选owner字段为两个固定literal，保留所有读取/失效/结果行为；先实际collector语义差分与错误变体RED，再真实完整收集计时。尚未达到Q0门槛，不提前进Q1。记录在原实施记录及output/render-optimization-l2-approved-20261024。
+
+
+- 2026-10-24 渲染优化Q0本地验收：用户批准L2完整检查安全替代。新policyContext ABBA累计分类-10.63%、per-call-14.10%、FPS+10.19%，完整分类次数+4.02%、P50+2.30%及长任务仅-0.67%如实保留。硬件六姿态零像素差异、源对齐MQTT1151完整；独立审计112项通过；build/lint/entries、lighting-bake224、manager78、unified42通过，optimization79+1skip另补真实PNG分支5通过。B2同SHA统一Cycles/11注入有效。真实GPU按用户答复暂缓、2项旧Viewer CI失败单列。进入Q1逐项核对，L4仍须30分钟影子零差异；证据见output/render-optimization-l2-approved-20261024/verification.json及docs/tasks/2026-10-24-render-optimization.md。
+
+- 2026-10-24 全项目优化Q1组合：B3遵用户选择仅新场景auto；B7冻结独立审查通过，最终DIST/Viewer正在收束。LD1 36unit、真实三Worker/像素、正式ABBA2和原发布缓存smoke组合6通过（阻塞下降，ready约慢2ms）；LD7补BIN侧车16unit+20HTTP检查通过，原清单/SHA/预算保持。完整build3通过，但LD5新callback准入修复仍需重构建/最终集成。L3/L4/L5/L6/L9冲突路线未降级验收，Q1未全完成，详见本任务记录。
+
+- 2026-10-24 用户确认Q1严格等价收束：L3/L4/L5/L6/L9保留原实现与证据，完成其余条目；B7最终混合实际ZIP/Viewer通过，另最小修复HEAD已有快速缓存启动竞态待统一新build复验。R1本机T0+缓存+manager真UI通过独立审查；LD5净收益与LD6候选仍待验收。
+
+### 2026-10-24 Q1严格等价与build5组合冻结
+
+- 用户批准L3/L4/L5/L6/L9冲突路线保留原实现；L8真实SDK公开API反例也按严格等价优先保留，原文方案不修改。
+- 实际业务托盘LD5零命中由原生wrapper copied metadata被保守guard拒绝；未清空metadata或放松检查。Controller补默认off并新增真实两轮原生生命周期回归。LD6也保持defaultoff，33项局部修复通过但完整变体/收益尚未验。
+- build4/build5 full均exit0，最终源/交付Python SHA a6b9cc8a…相同。root独立审查记录8输入与默认off边界；统一Node、Cycles、新ZIP/Viewer正在最终功能验收，不作并行性能结论。Q1尚非全项完成，Q2未进入；无提交推送外部发布。
+
+### 2026-10-24 Q1最终Node与新DIST Viewer
+
+- build5组合新ZIP/Viewer通过：2BIN+1JSON、3GI实际shader、拾取、br/gzip/SHA及启动旧错误清除，代表PNG已实际打开。复用真实bake但重新打ZIP；无新bake/旧ZIP冒充/生产发布。
+- 九条最终命令exit0；570项569pass+1optional skip，entries106/0missing；受影响ESLint修三处smoke browser global后exit0。真实Cycles与真实PNG分支正在收尾。
+- LD5旧引用构成严格语义反例；LD6仅模板effect覆盖成立，receiver/GI/probe/alarm及净收益缺口明确。两候选保持defaultoff，已就新边界请求用户选择。Q2未进入。
+
+### 2026-10-24 用户批准LD5/LD6保留原路径
+
+两个候选继续defaultoff，不计入验收收益；其余Q1按本地实现/回归交付，原现场/组合GPU性能边界保留，不进入Q2。实际Cycles旧UV展开布局断言已按B6逐角点IEEE64合同修正并定向通过，未改变产品或容差；完整实际Cycles及真实PNG补跑收尾。
+
+### 2026-10-24 本地最终交付完成
+
+按用户调整范围交付：build5/受影响lint/入口审计/570项定向回归及真实Cycles通过；真实PNG分支补跑5/5，旧失败保留。最终Viewer冻结输入全部重核一致，专属资源清理由各实际runner记录。详见总任务最终检查点及output/render-optimization-q1-20261024/final-delivery.json；候选off、硬件/现场边界及Q2门槛保留。
+
+最终补核lighting-unified42/42通过，已同步各子任务真实完成清单；不重复运行已通过组，不对未完成或用户批准保留项假勾通过。
+
+最后统计更新：补入最终lighting-unified42/42后，共10条定向命令全部exit0，TAP612项=611pass+1标准真实PNG分支skip；该分支已用本轮新Cycles产物5/5补齐。此为各命令TAP计数，不是全仓CI或互不重叠的独立用例数。最终完整汇总final-regression-20261024/final-summary.json；专属Node/Blender/浏览器/服务均已收束。
+
+### 2026-10-24 工厂Q1组合验收启动
+
+用户授权使用现有工厂完成真实业务流程与最终组合ABBA，维持质量/脚本/MQTT、候选关闭且不进Q2。A明确为已含L2的candidate-1-app，B为最终Q1组合；业务与正式计时分开，原录制缺少货物/报警活跃状态须另核实际配置和合法受控功能报文。验收清单见docs/tasks/2026-10-24-factory-q1-acceptance.md，原证据只读，新结果写独立目录。
+
+### 2026-10-24 工厂Q1业务与最终ABBA报告交付
+
+本轮仅增加验收工具/文档，产品代码、原场景116资源/脚本与原录制未改；关闭候选保持关闭，未进入Q2。A=accepted Q0含L2，B=冻结final Q1。两臂各2业务循环、每轮21项主业务检查通过，task201三host同root/owner/模型lineage；fresh900201实际故障冻结/恢复、拾取与stop/reopen通过。完整逐时刻姿态、全生命周期每帧角色及全buffer pixel0未建立，raw差异保留。
+
+正式A1/B1/B2/A2各60s全部有效，独立119项复算通过。FPS6.8583→6.8167(-0.6075%)，P95 414.65→415.10ms(+0.1085%)，P99 478.20→469.60ms(-1.7984%)；未复现新增steady收益，不宣称统计非劣性或卡顿解决。source-t0各1151 pub/delivery/callback完整/pending0，正式窗边界计数另列。原Logo在两Editor版均解析失败但PNG本地存在，非本轮新增，未扩修。真实发布入口因原bake.enabled=true/result=null拒绝，Viewer成功路径未达到；已发范围选择，未CPU烘焙/切模式/绕过。
+
+主报告docs/tasks/2026-10-24-factory-q1-acceptance-report.md；完整数据output/render-optimization-q1-factory-20261024/{comparison.json,final-acceptance-summary.json,analysis/,performance-audit/,runs/}。所有实际app/broker/发布子进程已收束，精确任务进程查询无残留；旧失败保留，无提交、推送或外部部署。
+
+### 2026-10-24 工厂验收交付范围最终确认
+
+用户明确选择保留真实发布阻塞证据，先交付Editor业务与ABBA。已同步主报告、验收清单和机读总摘要，将Viewer从待选择改为用户批准延期；保留原发布门禁失败与NOT_REACHED，不计成功，不启动全厂CPU烘焙、不切模式或绕过、不进入Q2。原业务/性能数据与独立审计文件未改，也不因范围确认重跑已完成检查。
+
+### 2026-10-24 工厂剩余主线程热点分析
+
+按用户“先分析”要求，在当前冻结final Q1上分别完成CPU profile和GC trace，未实施产品优化。原正式B仍为getSources约282.738ms/次、91次/60s、FPS6.8167；诊断包络不作新ABBA。互斥CPU归属：getSources36.77%、camera/render26.39%、LED独立observer8.14%，HUD/telemetry不是主要预算；create self约7.917s仍需当前版本行级拆分。GC主线程60.955s观察跨度内并集2.852s，Minor516次/2.487s、Major3次/69.271ms；嵌套不相加，缺completion元数据不称loss-free。
+
+新增方案限定为先定位create，再分别小范围验证未使用claimed原生空Set惰性分配、精确字节比较展开；两个候选均未实现/未验收益，不承诺显著提帧。已关闭候选及用户脚本保持原路径，不进入Q2。独立CPU/GC复算和诊断代码审查完成，14产品源码SHA与冻结manifest一致；两次app/broker关闭，精确任务目录进程0。报告docs/tasks/2026-10-24-factory-main-thread-hotspots.md，原始证据output/render-optimization-factory-hotspots-20261024；不因只读分析重跑构建、全套回归或发布。
+
+### 2026-10-24 当前create归因与内核候选执行启动
+
+用户明确授权按顺序执行。新输出目录render-optimization-create-kernels-20261024，先复制冻结B并做仅诊断的非压缩行级CPU+短命对象allocation采样，两个oracle独立准备且不提前跑候选。首个副本build漏两raw示例JSON已保留失败，并通过冻结B主bundle literal核实原文后补入副本，第二次构建中。产品/原资产未修改，关闭候选和Q2边界不变；后续行为/完整collector门槛及停止规则见docs/tasks/2026-10-24-create-kernel-execution.md。
+
+### 2026-10-24 create归因及两内核候选止损交付
+
+当前冻结B的行级CPU与含已回收对象的heap采样完成并独立复算；create6121 line ticks、self8.726s，代表组件copy16.48%、thin展开11.86%，不把诊断或多TS映射当生产精确耗时。候选1旧oracle18/18、3个错误变体RED，实际候选3个pre-import行为反例失败，停止且不跑性能。候选2guarded4实际源码231/231、naive4四反例RED；真实完整provider/getSources两组各7对、14对内容/引用一致，中位数278.1→281.8ms(+1.3305%)与273.4→269.5ms(-1.4265%)，均值方向也相反、较快7/14，无可复现净收益，停止保留原实现。没有第三变体或真实ABBA，后者为门槛未达NOT_REACHED。
+
+全部1024冻结B源码/配置最终SHA一致，原场景/录制/116资源未变；产品未加入实验代码，旧候选保持关闭，Q2未进入。两app及broker正常关闭、精确任务进程0。诊断和probe构建exit0、独立静态/数据审查无HIGH/CRITICAL；未以5s断连前静止窗或带profile FPS宣称收益。完整结论docs/tasks/2026-10-24-create-kernel-execution.md，证据output/render-optimization-create-kernels-20261024；未提交推送或发布。
+
+### 2026-10-24 camera/render只读分析启动
+
+按用户要求转向active评估、矩阵、材质绑定和GL，两个内核与所有旧关闭路线保持停止，不改产品、不进Q2。复用当前B生产与同源非压缩原始profile，三路只读SDK/产品分析与root互斥分区独立开展。发现项目interactive批次覆盖SDK默认材质排序为frontToBack，而SDK仅透明队列更新distance；准备冻结B独立20s原录制状态快照核实实际组/距离/材质，不改排序、不作FPS收益。计划及门槛见docs/tasks/2026-10-24-camera-render-analysis.md。
+
+### 2026-10-24 camera/render只读分析交付
+
+已独立复算camera16.495541s互斥操作：material ready/bind扣matrix/GL5.501955s、dispatch/sort余量4.823421s、active余量3.383265s、matrix/bounds1.658220s、nativeGL1.128680s；不是GPU时间或可省预算。SDK与现场UBO/VAO/ready缓存已有，camera view/projection本身约12ms。20s冻结B原MQTT状态诊断passed：group0确为frontToBack，opaque1282/1284及alpha10距离键全0；基础材质771/773种、连续段801/803，简单材质分组理论仅再少30段且会改公开遍历顺序，不直接修排序。真实mustRebind分支仍未测，下一步方案限定保持绘制序列做force/effect/material/visibility第一触发原因归因，确认私有冗余后才形成候选。
+
+1024产品源码/配置与依赖锁最终全同，原场景/录制/116资产未改，app/broker正常关闭、精确任务进程0；未产品构建、未候选/ABBA/烘焙/发布，关闭路线和Q2边界保持。快照force字段初版读错得到null，已修正工具并封存20份实际脚本SHA，不重写raw或当成零次重绑，修正版未追加硬件运行。独立profile/state/SDK审查及限制见docs/tasks/2026-10-24-camera-render-analysis.md与output/render-optimization-camera-analysis-20261024。
+
+### 2026-10-24 保持绘制顺序的绑定来源诊断启动
+
+用户继续授权隔离诊断force/effect/material/visibility，未授权产品优化。新输出binding-diagnostic目录，静态核SDK5 force+7 cache写及宿主1 force写，虚拟Vite transform只改独立构建，不写node_modules/src或排序/脚本/MQTT。消费者实际转换137例语义GREEN、六类错误变体RED；producer/reset与真实counter另验。计数保留first-winner原短路、未知callee/委托边界和最后write提示，不把相等写直接当可删冗余。计划/门槛见docs/tasks/2026-10-24-binding-invalidation-diagnostic.md。
+
+### 2026-10-24 绑定失效来源实测与严格等价止损
+
+完整sink新增caught-base-throw反例发现v1漏计入口及事件误标；run-1在计数窗口前关闭标INVALID，旧失败/副本保留。v2入口即计并统一资格，真实sink142例+producer98例及RED通过后，用新app2完成有效原工厂60s诊断。probe61.3165s内Push561932、force-first4全初始化；base effect166261/material194620/visibility0/hit201047，无throw/mismatch。原非null对象键不匹配占truthy约99.834%，不冒称GL program/相邻draw可省。
+
+reset2731来源清楚，shadow-all-null2134且混合3 Scene各426 render entry；真实SDK VM反例保留公共2调用和最终null，但跳第二次private写会使setter日志6→3，严格合同不成立。未找到可安全移除的有效私有冗余，按用户要求停止，无产品候选/ABBA/Q2，旧关闭路线不重启。独立71计数/9来源检查及5 witness断言通过。
+
+产品1024行、SDK相关31源与依赖锁全同，原场景/录制/116资产不变；source-t0 MQTT1151发布/交付/callback完整无缺口pending0。两app/broker已关闭、任务进程0；诊断FPS不作收益。主报告docs/tasks/2026-10-24-binding-invalidation-diagnostic.md，证据output/render-optimization-binding-diagnostic-20261024。

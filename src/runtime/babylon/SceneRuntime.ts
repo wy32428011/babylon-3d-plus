@@ -1,5 +1,7 @@
 import './babylonSideEffects.js';
 import './babylonGltfLoader.js';
+import type { Engine } from '@babylonjs/core/Engines/engine.js';
+import { getGpuCapabilityProfile as readGpuCapabilityProfile } from './gpuCapabilityProfile';
 import { SceneDocumentController } from './scene-runtime/SceneDocumentController';
 import { ModelAssetRuntimeController } from './scene-runtime/ModelAssetRuntimeController';
 import { ModelParameterBindingController } from './scene-runtime/ModelParameterBindingController';
@@ -535,6 +537,14 @@ export class SceneRuntime {
 
   getPerformanceMetrics(): SceneRuntimePerformanceMetrics { return this.readiness.getPerformanceMetrics(); }
 
+  /** 只读已完成的准备诊断；打开管理器不会启动离屏检测或分类。 */
+  getGpuCapabilityProfile() { return readGpuCapabilityProfile(this.scene.getEngine() as Engine); }
+
+  getShaderWarmupMetrics() { return this.assets.shaderWarmup.getMetrics(); }
+
+  /** 准备阶段shader预热内部A/B入口；不写入场景或修改任何画质默认值。 */
+  setPreparationShaderWarmupEnabled(enabled: boolean): void { this.assets.shaderWarmup.setEnabled(enabled); }
+
   syncSkybox(document: SceneDocument): void { return this.environment.syncSkybox(document); }
 
   syncEnvironment(environment: SceneEnvironmentSettings | null): void { return this.environment.syncEnvironment(environment); }
@@ -548,6 +558,8 @@ export class SceneRuntime {
   preflightLightingBake(document: SceneDocument, signal?: AbortSignal) { return this.environment.preflightLightingBake(document, signal); }
 
   setLightingDraftPreview(preview: import('../../editor/store/lightingManagementState').LightingDraftPreview | null) { return this.environment.setLightingDraftPreview(preview); }
+
+  peekLightingClassificationForEntities(entityIds: readonly string[]) { return this.environment.peekLightingClassificationForEntities(entityIds); }
 
   getLightingClassification(): LightingClassificationEntry[] { return this.environment.getLightingClassification(); }
 
@@ -693,6 +705,7 @@ export class SceneRuntime {
     this.effects.alarmRuntime.dispose();
     this.environment.shadowRuntime.dispose();
     this.environment.skyboxRuntime.dispose();
+    this.assets.shaderWarmup.dispose();
     this.assets.sharedModelAssetCache.dispose();
     this.selection.modelSelectionOutlineLayer.dispose();
     this.presentation.meshes.clear();

@@ -296,6 +296,8 @@ export type EditorState = {
   lightingDraftPreview: import('../lightingManagementState').LightingDraftPreview | null;
   setLightingDraftPreview: (draft: import('../lightingManagementState').LightingManagementDraft | null) => LightingManagementResult;
   lightingBakeRequest: { id: string } | null;
+  lightingGpuCapabilityProfile: import('../../../runtime/babylon/gpuCapabilityProfile').GpuCapabilityProfile | null;
+  setLightingGpuCapabilityProfile: (profile: import('../../../runtime/babylon/gpuCapabilityProfile').GpuCapabilityProfile | null) => void;
   lightingManagerOpen: boolean;
   lightingManagerTab: LightingManagerTab;
   lightingManagerFocus: LightingManagerFocus | null;
@@ -318,6 +320,10 @@ export type EditorState = {
   updateEntityLightingSettings: (entityIds: string[], patch: Partial<EntityLightingSettings>) => void;
   updateLightingNodeOverride: (entityId: string, nodeKey: string, patch: Partial<LightingNodeOverride> | null) => void;
   lightingClassification: LightingClassificationEntry[];
+  lightingInspectorEntityIds: string[];
+  lightingInspectorClassification: LightingClassificationEntry[];
+  lightingInspectorClassificationStale: boolean;
+  setLightingInspectorEntityIds: (entityIds: string[]) => void;
   setLightingClassification: (entries: LightingClassificationEntry[]) => void;
   lightingDebugVisible: boolean;
   setLightingDebugVisible: (visible: boolean) => void;

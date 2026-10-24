@@ -66,12 +66,14 @@ test('新环境字段校验范围，保留扩展，环境选择与旋转改变 G
   assert.equal(getSceneLightingBakeSignature(backgroundOnly), rotated, '内置环境选中时，背景资源不是 GI 照明输入');
 });
 
-test('新建编辑场景仅增加内置环境，保留旧主补光与其它默认值，不污染旧归一化默认', () => {
+test('新建编辑场景增加内置环境与自动烘焙，保留旧主补光和其它默认，不污染旧归一化默认', () => {
   const original = normalizeSceneLightingConfig(undefined);
   const lighting = createDefaultEditorLightingConfig();
   const { environment, ...remaining } = lighting;
   assert.deepEqual(environment, { source: 'sandbox', rotationDegrees: GLB_STANDARD_ENVIRONMENT_ROTATION_DEGREES });
-  assert.deepEqual(remaining, original);
+  const { device, ...bake } = remaining.bake;
+  assert.equal(device, 'auto');
+  assert.deepEqual({ ...remaining, bake }, original);
   assert.equal(lighting.main.source, 'managed');
   assert.equal(lighting.main.enabled, true);
   assert.equal(lighting.fill.intensity, 0.8);

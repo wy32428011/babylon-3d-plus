@@ -19,7 +19,8 @@ import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { type DeviceTelemetrySnapshot } from '../../mqtt/deviceTelemetry';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
-import { createModelAssetTemplateKey } from '../SharedModelAssetCache';
+import { createModelAssetTemplateKey, resolveModelAssetSharedInstancingPolicy } from '../SharedModelAssetCache';
+import { GeneratedCargoInstancePool, type GeneratedCargoPoolEntry } from './GeneratedCargoInstancePool';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceKey, type DeviceSpawnerConfig, type SpawnedDeviceKey } from '../telemetry/spawner/DeviceSpawnerRuntime';
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
@@ -38,10 +39,10 @@ import { MODEL_GENERATOR_MARKER_COLOR, MODEL_GENERATOR_MARKER_ALPHA, DEVICE_SPAW
 type Dependencies = {
   readonly telemetry: Pick<SceneTelemetryController, 'specializedTelemetryRuntime' | 'telemetryPreviewActive' | 'createExternalScriptTelemetrySnapshot' | 'updateModelExternalScriptRuntimeContext'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'readColor'>;
-  readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics' | 'modelStatisticsFallbackMeshes' | 'notifyModelLoadProgressChanged'>;
+  readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics' | 'modelStatisticsFallbackMeshes' | 'notifyModelLoadProgressChanged' | 'modelStatisticsMeshAddedObserver'>;
   readonly parameters: Pick<ModelParameterBindingController, 'applyModelUnitScale' | 'applyModelAssetParameters'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'createModelAssetSignature' | 'modelLoadSequence' | 'loadModelRuntimeAssets' | 'preloadModelRuntimeAsset' | 'parentTopLevelModelNodes' | 'refreshModelGeneratorModelMeshes' | 'normalizeModelContentOrigin' | 'syncModelGeneratorExternalScripts' | 'splitAssetUrl' | 'resolveVersionedRuntimeAssetUrl' | 'loadAssetContainer' | 'refreshModelMeshes' | 'models' | 'syncModelAssetExternalScripts'>;
-  readonly selection: Pick<ScenePickingAndSelectionController, 'applyModelSelection'>;
+  readonly selection: Pick<ScenePickingAndSelectionController, 'applyModelSelection' | 'selectedEntityIds' | 'localHighlightedEntityIds' | 'externalHighlightedEntityIds'>;
   readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable' | 'shadowDocument'>;
 };
 
@@ -49,6 +50,9 @@ type Dependencies = {
 /** GeneratedModelOutputController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class GeneratedModelOutputController {
   constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {
+    this.generatedCargoInstancePool = new GeneratedCargoInstancePool(this.context.scene);
+    // 真实业务等价与净收益尚未验收；默认保留原生创建/释放，仅内部A/B可启用候选。
+    this.generatedCargoInstancePool.setEnabled(false);
     this.generatorAssetPreloader = new ModelGeneratorAssetPreloader({
       preload: (asset, signal) => this.dependencies.assets.preloadModelRuntimeAsset(asset, signal),
       getAssetKey: createModelAssetTemplateKey,
@@ -71,6 +75,12 @@ export class GeneratedModelOutputController {
   }
 
   public readonly generatorAssetPreloader: ModelGeneratorAssetPreloader;
+  private readonly generatedCargoInstancePool: GeneratedCargoInstancePool;
+  private readonly generatedCargoPoolEntries = new WeakMap<ModelRuntimeEntry, GeneratedCargoPoolEntry>();
+
+  /** 仅供固定输入验收使用的内部A/B开关；关闭时排空idle，活动资源仍由原model释放。 */
+  public setGeneratedCargoPoolingEnabled(enabled: boolean): void { this.generatedCargoInstancePool.setEnabled(enabled); }
+  public getGeneratedCargoPoolMetrics() { return this.generatedCargoInstancePool.getMetrics(); }
 
   public readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
   /** 设备产生器标记（编辑态可视），按实体 ID 组织。 */
@@ -123,6 +133,7 @@ export class GeneratedModelOutputController {
     if (runtimeEntry.runtimeConfigSignature && runtimeEntry.runtimeConfigSignature !== runtimeConfigSignature) {
       this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForGenerator(entity.id);
       this.disposeModelGeneratorOutput(runtimeEntry);
+      this.generatedCargoInstancePool.clearGenerator(entity.id);
       runtimeEntry.activeTargetSignature = null;
       runtimeEntry.activeSnapshot = null;
       runtimeEntry.readinessError = undefined;
@@ -138,6 +149,7 @@ export class GeneratedModelOutputController {
 
   /** 在编辑态与运行态切换时允许全部生成输出重新尝试失败目标。 */
   public clearModelGeneratorLoadFailureCache(): void {
+    this.generatedCargoInstancePool.clear();
     clearCompositionCache();
     this.generatorAssetPreloader.retryFailed();
     for (const owner of this.generatedOutputOwners.values()) {
@@ -290,7 +302,11 @@ export class GeneratedModelOutputController {
     const generatorLoadToken = runtimeEntry.loadToken;
     this.applyGeneratedOutputPresentation(runtimeEntry);
 
-    void this.dependencies.assets.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name)
+    const identity = this.getGeneratedCargoPoolIdentity(runtimeEntry, modelAsset, model);
+    const pooled = identity ? this.generatedCargoInstancePool.take(identity.generatorId, identity.key) : null;
+    const loading = pooled ? Promise.resolve(pooled.assets)
+      : this.dependencies.assets.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name);
+    void loading
       .then((loadedAssets) => {
         const activeEntry = this.generatedOutputOwners.get(runtimeEntry.entityId);
         const activeOutput = activeEntry?.output;
@@ -301,11 +317,15 @@ export class GeneratedModelOutputController {
           || activeOutput?.kind !== 'model'
           || activeOutput.model !== model
         ) {
-          loadedAssets.handle.dispose();
+          if (pooled) this.generatedCargoInstancePool.discard(pooled);
+          else loadedAssets.handle.dispose();
           return;
         }
 
+        // 四个原提交身份检查通过后先接管原句柄；可选基线捕获抛错时也由原catch完整释放。
         model.assetHandle = loadedAssets.handle;
+        const candidate = pooled ?? (identity ? this.generatedCargoInstancePool.capture(identity.generatorId, identity.key, loadedAssets) : null);
+        if (candidate) this.generatedCargoPoolEntries.set(model, candidate);
         if (loadedAssets.kind === 'owned-container') {
           model.meshes = loadedAssets.meshes;
           this.dependencies.assets.parentTopLevelModelNodes(model, loadedAssets.transformNodes);
@@ -315,6 +335,7 @@ export class GeneratedModelOutputController {
           }
         }
 
+        if (candidate) this.generatedCargoInstancePool.activate(candidate, model.contentRoot);
         this.dependencies.assets.refreshModelGeneratorModelMeshes(activeEntry);
         this.dependencies.assets.normalizeModelContentOrigin(model);
         this.dependencies.parameters.applyModelAssetParameters(modelAsset, model);
@@ -332,6 +353,13 @@ export class GeneratedModelOutputController {
           || activeOutput.model !== model
         ) return;
 
+        // 失败提交不是合格的退役实例，必须释放而非重新进入idle。
+        const failedEntry = this.generatedCargoPoolEntries.get(model);
+        if (failedEntry) {
+          this.generatedCargoPoolEntries.delete(model);
+          model.assetHandle = null;
+          this.generatedCargoInstancePool.discard(failedEntry);
+        }
         this.disposeModelGeneratorOutput(activeEntry);
         this.handleModelGeneratorLoadFailure(activeEntry, targetSignature, resolution, error);
       });
@@ -880,20 +908,67 @@ export class GeneratedModelOutputController {
   public disposeModelGeneratorOutput(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     const output = runtimeEntry.output;
     if (!output) return;
-    this.disposeModelGeneratorOutputValue(output);
-    runtimeEntry.output = null;
-    this.dependencies.readiness.invalidateModelStatistics();
+    try {
+      if (output.kind === 'model') this.tryRetainGeneratedCargoModel(runtimeEntry, output.model);
+    } finally {
+      // 可选复位发生异常时也沿原路径释放wrapper/未移交句柄，保留异常传播。
+      this.disposeModelGeneratorOutputValue(output);
+      runtimeEntry.output = null;
+      this.dependencies.readiness.invalidateModelStatistics();
+    }
+  }
+
+  /** 限定普通货物、当前生成器配置与标准静态共享策略；其它所有权保持原加载/释放路径。 */
+  private getGeneratedCargoPoolIdentity(owner: GeneratedOutputOwnerRuntimeEntry, asset: ModelAssetComponent, model: ModelRuntimeEntry) {
+    if (!this.generatedCargoInstancePool.getMetrics().enabled || owner.metadata.generatedCargo !== true) return null;
+    const generatorId = owner.metadata.generatorEntityId;
+    const generator = typeof generatorId === 'string' ? this.modelGenerators.get(generatorId) : undefined;
+    if (!generator || resolveModelAssetSharedInstancingPolicy(asset).mode !== 'shared-instance') {
+      this.generatedCargoInstancePool.recordRejection('non-static-policy-or-generator'); return null;
+    }
+    const selection = this.dependencies.selection;
+    if (model.highlighted || selection.selectedEntityIds.has(owner.entityId) || selection.localHighlightedEntityIds.has(owner.entityId)
+      || selection.externalHighlightedEntityIds.has(owner.entityId)) {
+      this.generatedCargoInstancePool.recordRejection('selected-or-highlighted'); return null;
+    }
+    // 复用不会重发物理mesh/TransformNode added；未知订阅者可能持有旧业务身份，因此保守走新实例。
+    if (this.context.scene.onNewTransformNodeAddedObservable.hasObservers()
+      || this.context.scene.onNewMeshAddedObservable.observers.some(observer => observer !== this.dependencies.readiness.modelStatisticsMeshAddedObserver)) {
+      this.generatedCargoInstancePool.recordRejection('unknown-scene-added-observer'); return null;
+    }
+    const templateKey = createModelAssetTemplateKey(asset);
+    if (!templateKey) return null;
+    return { generatorId: generator.entityId, key: JSON.stringify([generator.runtimeConfigSignature, templateKey, model.assetSignature]) };
+  }
+
+  private tryRetainGeneratedCargoModel(owner: GeneratedOutputOwnerRuntimeEntry, model: ModelRuntimeEntry): void {
+    const entry = this.generatedCargoPoolEntries.get(model);
+    if (!entry || !model.resolvedModelAsset || model.assetHandle !== entry.assets.handle) return;
+    const identity = this.getGeneratedCargoPoolIdentity(owner, model.resolvedModelAsset, model);
+    if (!identity || identity.generatorId !== entry.generatorId || identity.key !== entry.key) return;
+    if (model.externalScriptRuntime || model.externalScriptStarting || model.externalScriptSignature || model.parameterBaseline.size
+      || model.textureCache.size || model.modelArrayBatch || model.modelArraySuspendedMeshes.size || model.telemetryProxySource) {
+      this.generatedCargoInstancePool.recordRejection('dynamic-model-state'); return;
+    }
+    if (!this.generatedCargoInstancePool.put(entry, model.contentRoot)) return;
+    // 先断开原model所有权，空刷新显式通知lighting dirty；随后原contentRoot.dispose释放分类scope。
+    this.generatedCargoPoolEntries.delete(model);
+    model.assetHandle = null;
+    this.dependencies.assets.refreshModelMeshes(model, {});
   }
 
   /** 释放单个生成模型条目，普通生成模型与组合成员模型共用。 */
   public disposeGeneratedModelEntry(model: ModelRuntimeEntry): void {
+    const poolEntry = this.generatedCargoPoolEntries.get(model);
+    this.generatedCargoPoolEntries.delete(model);
     model.telemetryPreviewBaseline = null;
     this.dependencies.selection.applyModelSelection(model, false);
     model.externalScriptRuntime?.dispose();
     for (const texture of model.textureCache.values()) {
       texture.dispose();
     }
-    model.assetHandle?.dispose();
+    if (poolEntry && model.assetHandle === poolEntry.assets.handle) this.generatedCargoInstancePool.discard(poolEntry);
+    else model.assetHandle?.dispose();
     model.contentRoot.dispose();
     model.root.dispose();
   }
@@ -933,6 +1008,7 @@ export class GeneratedModelOutputController {
     runtimeEntry.loadToken += 1;
     this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForGenerator(entityId);
     this.disposeModelGeneratorOutput(runtimeEntry);
+    this.generatedCargoInstancePool.clearGenerator(entityId);
     runtimeEntry.marker.material.dispose();
     runtimeEntry.marker.mesh.dispose();
     runtimeEntry.markerRoot.dispose();

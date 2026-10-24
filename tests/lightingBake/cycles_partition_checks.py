@@ -209,7 +209,7 @@ def main() -> None:
                     u = sum(uv.data[loop].uv.x for loop in face.loop_indices) / 3
                     v = sum(uv.data[loop].uv.y for loop in face.loop_indices) / 3
                     offset = (min(255, int(v * 256)) * 256 + min(255, int(u * 256))) * 4
-                    values.append(list(pixels[offset:offset + 3]))
+                    values.append([float(value) for value in pixels[offset:offset + 3]])
                 original = parts[obj["input_index"]]
                 geometry_path = output / f"geometry-{obj['input_index']}.json"
                 BAKE.export_geometry(obj, original, geometry_path)
@@ -217,8 +217,9 @@ def main() -> None:
                 for name, width in (("positions", 3), ("normals", 3), ("uvs", 2), ("uvs2", 2), ("colors", 4), ("tangents", 4)):
                     expected = [value for vertex in original["indices"]
                                 for value in original[name][vertex * width:vertex * width + width]]
-                    assert exported[name] == expected, f"导出切片必须保留 {name}"
-                assert exported["indices"] == list(range(len(original["indices"])))
+                    expanded = [value for vertex in exported["indices"] for value in exported[name][vertex * width:vertex * width + width]]
+                    assert expanded == expected, f"导出切片必须保留 {name}"
+                assert len(exported["indices"]) == len(original["indices"])
                 density = exported_minimum_density(exported, original["worldMatrix"], 256)
                 assert density >= 16 * (1 - 1e-5), f"实际采样密度 {density} 小于16px/m"
                 densities.append(density)

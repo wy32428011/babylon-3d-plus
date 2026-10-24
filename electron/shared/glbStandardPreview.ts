@@ -6,9 +6,10 @@ export const GLB_STANDARD_PREVIEW_PRESET_ID = 'glb-standard-preview';
 export const GLB_STANDARD_ENVIRONMENT_ID = 'sandbox-default-v1';
 export const GLB_STANDARD_ENVIRONMENT_ROTATION_DEGREES = 5.54 * 180 / Math.PI;
 
-/** 新建工作场景只补齐 IBL；保留已配置主光和补光，确保 StandardMaterial 基础对象正常受光。 */
+/** 新建场景使用自动烘焙设备并补齐 IBL；旧文档继续由共享迁移器保留原设备缺省。 */
 export function createDefaultEditorLightingConfig(): SceneLightingConfig {
-  return { ...normalizeSceneLightingConfig(undefined),
+  const lighting = normalizeSceneLightingConfig(undefined);
+  return { ...lighting, bake: { ...lighting.bake, device: 'auto' },
     environment: { source: 'sandbox', rotationDegrees: GLB_STANDARD_ENVIRONMENT_ROTATION_DEGREES } };
 }
 

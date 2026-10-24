@@ -1,3 +1,4 @@
+import { HybridShadowNumericSignature, legacyHybridShadowSignature } from './hybridShadowSignatures.ts';
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
 import { Constants } from '@babylonjs/core/Engines/constants.js';
 import { CascadedShadowGenerator } from '@babylonjs/core/Lights/Shadows/cascadedShadowGenerator.js';
@@ -41,7 +42,9 @@ export class HybridShadowMeshState {
   readonly dynamicMeshes = new Set<AbstractMesh>();
   revision = 0;
   private readonly signatures = new Map<AbstractMesh, string>();
-  private readonly geometrySignatures = new Map<AbstractMesh, string>();
+  private readonly numericSignatures = new Map<AbstractMesh, HybridShadowNumericSignature>();
+  private signatureMode: 'numeric' | 'legacy' = 'numeric';
+  private readonly geometrySignatures = new Map<AbstractMesh, { id: number | undefined; version: number }>();
   private readonly geometries = new Map<Geometry, GeometryWatch>();
   private refreshedFrame = -1;
 
@@ -71,8 +74,9 @@ export class HybridShadowMeshState {
     this.dynamicMeshes.clear();
     for (const mesh of nextStatic) this.staticMeshes.add(mesh);
     for (const mesh of nextDynamic) this.dynamicMeshes.add(mesh);
-    for (const mesh of this.signatures.keys()) if (!nextStatic.has(mesh)) {
+    for (const mesh of this.geometrySignatures.keys()) if (!nextStatic.has(mesh)) {
       this.signatures.delete(mesh);
+      this.numericSignatures.delete(mesh);
       this.geometrySignatures.delete(mesh);
     }
     this.syncGeometryWatches();
@@ -81,6 +85,15 @@ export class HybridShadowMeshState {
   }
 
   isStatic(mesh: AbstractMesh): boolean { return this.staticMeshes.has(mesh); }
+
+  /** @internal 在等价性测试与诊断中切回旧签名；切换后的首帧重新建立快照。 */
+  setSignatureMode(mode: 'numeric' | 'legacy'): void {
+    if (this.signatureMode === mode) return;
+    this.signatureMode = mode;
+    this.signatures.clear();
+    this.numericSignatures.clear();
+    this.refreshedFrame = -1;
+  }
 
   /** 每帧只读取静态网格的矩阵、几何版本及透明裁剪条件，不遍历顶点数据。 */
   refresh(): void {
@@ -95,40 +108,19 @@ export class HybridShadowMeshState {
       if (watch && geometry.onGeometryUpdated !== watch.callback) {
         this.watchGeometry(geometry, watch.version + 1);
       }
-      const material = mesh.material;
-      // 原生 ShadowGenerator 仅在 alpha test/blend 路径采样该贴图。普通屏幕的
-      // DynamicTexture 只改变表面颜色，不能因此让全部静态深度每帧失效。
-      const materialSignatures = (mesh.subMeshes ?? []).map(subMesh => {
-        const effectiveMaterial = subMesh.getMaterial(), renderingMesh = subMesh.getMesh();
-        const alphaTest = effectiveMaterial?.needAlphaTestingForMesh(renderingMesh) ?? false;
-        const alphaBlend = effectiveMaterial?.needAlphaBlendingForMesh(renderingMesh) ?? false;
-        const alphaTexture = alphaTest || alphaBlend ? effectiveMaterial?.getAlphaTestTexture() : null;
-        return [
-          subMesh.materialIndex, subMesh.verticesStart, subMesh.verticesCount, subMesh.indexStart, subMesh.indexCount,
-          effectiveMaterial?.uniqueId, effectiveMaterial?.alpha, effectiveMaterial?.backFaceCulling, effectiveMaterial?.cullBackFaces,
-          effectiveMaterial?.transparencyMode, effectiveMaterial?.fillMode, effectiveMaterial?.sideOrientation,
-          alphaTest, alphaBlend, (effectiveMaterial as { alphaCutOff?: number } | null)?.alphaCutOff,
-          alphaTexture?.uniqueId, alphaTexture?.isReady(), alphaTexture?.coordinatesIndex,
-          ...(alphaTexture?.getTextureMatrix().asArray() ?? []),
-          // 真正采样动态 alpha 时没有稳定内容版本，继续按帧失效，避免保留旧裁剪形状。
-          alphaTexture?.getClassName() === 'DynamicTexture' ? mesh.getScene().getFrameId() : 0,
-        ].join(',');
-      });
-      const geometrySignature = `${geometry?.uniqueId}:${geometry ? this.geometries.get(geometry)?.version : 0}`;
-      const geometryChanged = geometrySignature !== this.geometrySignatures.get(mesh);
-      this.geometrySignatures.set(mesh, geometrySignature);
+      const version = geometry ? this.geometries.get(geometry)?.version ?? 0 : 0;
+      const previousGeometry = this.geometrySignatures.get(mesh);
+      const geometryChanged = !previousGeometry || previousGeometry.id !== geometry?.uniqueId || previousGeometry.version !== version;
+      if (geometryChanged) this.geometrySignatures.set(mesh, { id: geometry?.uniqueId, version });
       // 同一 renderId 内编辑变换/顶点时 Babylon 的快速返回会留下旧矩阵或世界包围盒。
       const world = mesh.computeWorldMatrix(geometryChanged || !mesh.isSynchronized());
-      const signature = [
-        mesh.isDisposed(), mesh.isEnabled(), mesh.isVisible, mesh.visibility, mesh.renderingGroupId,
-        ...world.asArray(),
-        geometry?.uniqueId, geometry ? this.geometries.get(geometry)?.version : 0,
-        source?.getTotalVertices(), source?.getTotalIndices(),
-        material?.uniqueId, ...materialSignatures,
-      ].join(',');
-      if (signature !== this.signatures.get(mesh)) {
-        this.signatures.set(mesh, signature);
-        changed = true;
+      if (this.signatureMode === 'legacy') {
+        const signature = legacyHybridShadowSignature(mesh, source, geometry, version, world);
+        if (signature !== this.signatures.get(mesh)) { this.signatures.set(mesh, signature); changed = true; }
+      } else {
+        let signature = this.numericSignatures.get(mesh);
+        if (!signature) { signature = new HybridShadowNumericSignature(); this.numericSignatures.set(mesh, signature); }
+        if (signature.update(mesh, source, geometry, version, world)) changed = true;
       }
     }
     for (const [geometry, watch] of this.geometries) {
@@ -147,6 +139,7 @@ export class HybridShadowMeshState {
   dispose(): void {
     for (const [geometry, watch] of this.geometries) this.unwatchGeometry(geometry, watch);
     this.signatures.clear();
+    this.numericSignatures.clear();
     this.geometrySignatures.clear();
     this.staticMeshes.clear();
     this.dynamicMeshes.clear();

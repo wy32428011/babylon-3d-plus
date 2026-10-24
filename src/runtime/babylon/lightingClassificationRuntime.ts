@@ -422,7 +422,9 @@ function deviceType(model: ModelRuntimeEntry | undefined, entity: Entity | undef
 }
 
 /** 使用真实驱动解析目标；分类只生成读取模型的视图，不改动作、父子链或业务变换。 */
-export function collectLightingRuntimeSources(context: LightingClassificationContext): LightingRuntimeSource[] {
+export function collectLightingRuntimeSources(context: LightingClassificationContext,
+  options?: { contextAssembly?: 'legacy' | 'direct' }): LightingRuntimeSource[] {
+  const legacyContextAssembly = options?.contextAssembly === 'legacy';
   const { document, scene } = context;
   if (!context.environment.length) environmentIdentities.get(scene)?.release();
   const output: LightingRuntimeSource[] = [];
@@ -543,8 +545,21 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     const ownerLighting = entity ? entity.components.lighting : model?.entitySnapshot?.components.lighting;
     const entityLighting = ownerLighting ? { ...ownerLighting,
       nodeOverrides: ownerLighting.nodeOverrides?.[nodeKey] ? { [nodeKey]: ownerLighting.nodeOverrides[nodeKey] } : {} } : undefined;
-    const policyContext: LightingPolicyContext = {
+    const policyContext: LightingPolicyContext = legacyContextAssembly ? {
       entityId, ...(ownership?.ownerEntityId ? { ownerEntityId: ownership.ownerEntityId } : {}),
+      ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
+      deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
+      nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,
+      entityLighting,
+    } : ownership?.ownerEntityId ? {
+      // 真值仍读取第二次owner值；不缓存getter结果，不改变后续祖先和deviceType读取时点。
+      entityId, ownerEntityId: ownership.ownerEntityId,
+      ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
+      deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
+      nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,
+      entityLighting,
+    } : {
+      entityId,
       ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
       deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
       nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,

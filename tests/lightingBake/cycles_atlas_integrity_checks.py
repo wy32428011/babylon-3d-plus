@@ -28,19 +28,20 @@ def read_centers(pixels, obj, size: int) -> list[list[float]]:
         x = max(0, min(size - 1, int(u * size)))
         y = max(0, min(size - 1, int(v * size)))
         offset = (y * size + x) * 4
-        values.append(list(pixels[offset:offset + 3]))
+        values.append([float(value) for value in pixels[offset:offset + 3]])
     return values
 
 
 def validate_exported_source(obj, source: dict, output: Path) -> None:
     BAKE.export_geometry(obj, source, output)
     exported = json.loads(output.read_text(encoding="utf-8"))
-    assert exported["indices"] == list(range(len(source["indices"])))
+    assert len(exported["indices"]) == len(source["indices"])
     for name, width in (("positions", 3), ("normals", 3), ("uvs", 2), ("uvs2", 2), ("colors", 4), ("tangents", 4)):
         if name not in source:
             continue
         expected = [component for index in source["indices"] for component in source[name][index * width:index * width + width]]
-        assert exported[name] == expected, f"{source['name']} 的 {name} 或原三角形绕序发生变化"
+        expanded = [component for index in exported["indices"] for component in exported[name][index * width:index * width + width]]
+        assert expanded == expected, f"{source['name']} 的 {name} 或原三角形绕序发生变化"
 
 
 def orientation_checks(template: dict, output: Path) -> list[dict]:

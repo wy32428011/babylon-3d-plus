@@ -115,6 +115,8 @@ export class SceneLightingRuntime {
   private document: SceneDocument | null = null;
   private sources: LightingRuntimeSource[] = [];
   private classification: LightingClassificationEntry[] = [];
+  private classificationByEntity = new Map<string, { entry: LightingClassificationEntry; order: number }[]>();
+  private selectedClassificationCache: { ids: string; entries: LightingClassificationEntry[] } | null = null;
   private dirty = true;
   private bindingsDirty = true;
   private state: LightingState | null = null;
@@ -189,8 +191,11 @@ export class SceneLightingRuntime {
       }
       if (this.desiredSnapshotKey === key && this.controller) return;
       this.desiredSnapshotKey = key;
-      this.ready = this.applySnapshot(snapshot).catch(error => {
-        if (!this.disposed && this.desiredSnapshotKey === key) this.reportError(error);
+      const pending = this.applySnapshot(snapshot);
+      // applySnapshot 的同步阶段会取消旧任务并递增代次，必须在调用后记录。
+      const operation = this.operation;
+      this.ready = pending.catch(error => {
+        if (!this.disposed && this.operation === operation && this.desiredSnapshotKey === key) this.reportError(error);
       });
     } finally { this.dirtyConsumptionDepth--; }
   }
@@ -234,6 +239,17 @@ export class SceneLightingRuntime {
     };
   }
   getClassification(): LightingClassificationEntry[] { this.refreshSources('query'); return this.classification; }
+  /** 不消费dirty、不遍历来源；用于Inspector展示缓存及“待刷新”状态。 */
+  peekClassificationForEntities(entityIds: readonly string[]): { entries: LightingClassificationEntry[]; stale: boolean } {
+    const ids = JSON.stringify(entityIds);
+    if (this.selectedClassificationCache?.ids !== ids) {
+      const selected = new Set(entityIds), rows: { entry: LightingClassificationEntry; order: number }[] = [];
+      for (const id of selected) rows.push(...(this.classificationByEntity.get(id) ?? []));
+      rows.sort((a, b) => a.order - b.order);
+      this.selectedClassificationCache = { ids, entries: rows.map(row => row.entry) };
+    }
+    return { entries: this.selectedClassificationCache.entries, stale: this.dirty || this.disposed };
+  }
   getError(): string | null { return this.error; }
   getDiagnostic(): LightingRuntimeDiagnostic | null { return this.diagnostic ? { ...this.diagnostic } : null; }
   whenReady(): Promise<void> { return this.ready; }
@@ -399,12 +415,12 @@ export class SceneLightingRuntime {
     if (this.disposed) return;
     this.disposed = true; this.cancelPending();
     this.scene.onBeforeRenderObservable.remove(this.observer);
-    this.clearDebug(); this.clearState(); this.shadowInstances.clear(); this.sources = []; this.classification = [];
+    this.clearDebug(); this.clearState(); this.shadowInstances.clear(); this.sources = []; this.classification = []; this.classificationByEntity.clear(); this.selectedClassificationCache = null;
     this.options.setShadowRoles(new Map(), getSceneLightingConfig(this.document).bake);
   }
 
   private snapshotKey(snapshot: SceneLightingBakeSnapshot): string {
-    return `${snapshot.signature}:${lightingContentHash(snapshot.assets.map(asset => [asset.id, asset.url, asset.sha256]))}`;
+    return `${snapshot.signature}:${lightingContentHash(snapshot.assets.map(asset => [asset.id, asset.url, asset.sha256, ...(asset.kind === 'geometry' && asset.geometryVersion !== undefined ? [asset.geometryVersion] : []), ...(asset.kind === 'geometry' && asset.encoding !== undefined ? [asset.encoding] : [])]))}`;
   }
   private cancelPending(): void {
     this.operation++; this.controller?.abort(); this.controller = null;
@@ -476,6 +492,13 @@ export class SceneLightingRuntime {
           keys.add(source.entry.key);
         }
         this.sources = next; this.classification = next.map(source => ({ ...source.entry }));
+        this.classificationByEntity = new Map(); this.selectedClassificationCache = null;
+        for (let order = 0; order < this.classification.length; order++) {
+          const entry = this.classification[order], id = entry.policyContext?.ownerEntityId ?? entry.entityId;
+          let rows = this.classificationByEntity.get(id);
+          if (!rows) { rows = []; this.classificationByEntity.set(id, rows); }
+          rows.push({ entry, order });
+        }
         // 同步getter/回调可在collect内再次失效；旧代结果不能吞掉新一代请求。
         this.dirty = revision !== this.sourceRevision;
         if (this.dirty) this.invalidationDiagnostics.reentrant('classification');

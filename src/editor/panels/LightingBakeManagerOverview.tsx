@@ -2,6 +2,7 @@ import type { LightingBakeEngineStatus, SceneLightingBakeSettings, SceneLighting
 import type { SceneAppearanceConfig, SceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { SceneDocument } from '../model/SceneDocument';
 import type { LightingManagerPresetId } from './lightingBakeManagerModel';
+import type { GpuCapabilityProfile } from '../../runtime/babylon/gpuCapabilityProfile';
 import type { LightingProbeBounds } from '../../../electron/shared/sceneLightingProbeVolumes';
 import { LightingBakeManagerProbeVolumes } from './LightingBakeManagerProbeVolumes';
 import { LightingBakeManagerAppearance } from './LightingBakeManagerAppearance';
@@ -23,6 +24,7 @@ export type LightingBakeManagerOverviewProps = {
   probeBounds?: LightingProbeBounds;
   engineStatus: LightingBakeEngineStatus | null;
   engineStatusLoading: boolean;
+  gpuProfile: GpuCapabilityProfile | null;
   onRefreshDevices: () => void;
   onConfigureEngine: () => void;
   onPreviewDraft: () => void;
@@ -49,6 +51,20 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
   const onShadowChange = (patch: Partial<SceneLightingConfig['shadows']>) => onLightingChange({ ...lighting, shadows: { ...shadows, ...patch } });
   return <div className="lighting-manager-overview">
     <div className="lighting-manager-overview-settings">
+      <section className="lighting-manager-card" aria-labelledby="lighting-overview-gpu-title">
+        <h3 id="lighting-overview-gpu-title">本机图形能力</h3>
+        <p className="lighting-manager-note" role="status" aria-live="polite">{props.gpuProfile?.status === 'measured'
+          ? <>建议档位 <strong>{props.gpuProfile.tier}</strong> · {props.gpuProfile.source === 'cache' ? '已读取本机缓存' : '已完成本机检测'}</>
+          : props.gpuProfile?.status === 'unavailable' ? '本机检测不可用，增强效果建议保留默认。' : '尚无本机检测结果，增强效果建议保留默认。'}</p>
+        {props.gpuProfile?.driver && <p className="lighting-manager-note">{props.gpuProfile.driver.renderer}</p>}
+        <p className="lighting-manager-note">{props.gpuProfile?.tier === 'T2' ? '可按场景需要手动尝试增强阴影与高质量间接光。'
+          : props.gpuProfile?.tier === 'T1' ? '建议先使用标准效果，再按场景需要手动尝试增强项。' : '建议保持现有画质，增强项按实际场景手动选择。'} 当前设置未作任何调整。</p>
+        <details className="lighting-manager-advanced"><summary>检测范围与建议说明</summary>
+          {props.gpuProfile?.measurement && <p className="lighting-manager-note">固定离屏负载：3 帧预热、12 帧测量；中位 {props.gpuProfile.measurement.medianMs.toFixed(2)} ms，P95 {props.gpuProfile.measurement.p95Ms.toFixed(2)} ms。</p>}
+          <p className="lighting-manager-note">计时包含 CPU 提交与同步等待，不是 GPU 计时器或整场景帧率。建议阈值尚未跨显卡校准，不会自动降低或切换画质。</p>
+          {props.gpuProfile?.reason && <p className="lighting-manager-note">{props.gpuProfile.reason}</p>}
+        </details>
+      </section>
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-shadow-title">
         <h3 id="lighting-overview-shadow-title">光照与阴影</h3>
         <LightingManagerToggle label="启用阴影" checked={shadows.enabled} disabled={disabled} onChange={enabled => onShadowChange({ enabled })} />
@@ -71,7 +87,7 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
         </select></label>
         <label className="lighting-manager-field"><span>计算设备</span><select aria-label="烘焙计算设备" value={bake.device ?? 'cpu'} disabled={disabled}
           onChange={event => onBakeChange({ device: event.target.value as SceneLightingBakeSettings['device'] })}>
-          <option value="cpu">CPU（默认）</option><option value="auto">自动选择可用设备</option><option value="gpu">GPU（需要可用设备）</option>
+          <option value="cpu">CPU</option><option value="auto">自动选择可用设备（新场景默认）</option><option value="gpu">GPU（需要可用设备）</option>
         </select></label>
         <div className="lighting-manager-device-status"><p className="lighting-manager-note">{props.engineStatusLoading ? '正在检测烘焙引擎与设备…' : props.engineStatus?.available
           ? (props.engineStatus.devices?.length ? props.engineStatus.devices.map(device => device.type + ' · ' + device.name + ' (' + device.backend + ')').join('；') : '引擎可用，尚未提供设备清单。')

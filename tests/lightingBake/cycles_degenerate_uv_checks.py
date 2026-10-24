@@ -6,6 +6,7 @@ from fractions import Fraction
 import importlib.util
 import json
 import math
+import struct
 from pathlib import Path
 import sys
 import bpy
@@ -80,7 +81,13 @@ def check_positive_sliver(output: Path) -> dict:
     for name, width in (("positions", 3), ("normals", 3), ("uvs", 2), ("uvs2", 2), ("colors", 4), ("tangents", 4)):
         if name in source:
             expected = [value for index in source["indices"] for value in source[name][index * width:index * width + width]]
-            assert geometry[name] == expected, f"细面修复不能改变原始 {name}"
+            # B6允许复用相同顶点；合同保留原三角角点各通道的逐位值，而非展开存储布局。
+            assert len(geometry["positions"]) % 3 == 0
+            assert len(geometry[name]) == len(geometry["positions"]) // 3 * width
+            assert all(type(index) is int and 0 <= index < len(geometry[name]) // width for index in geometry["indices"])
+            actual = [value for index in geometry["indices"] for value in geometry[name][index * width:index * width + width]]
+            assert len(actual) == len(expected)
+            assert [struct.pack(">d", value) for value in actual] == [struct.pack(">d", value) for value in expected], f"细面修复不能改变原始 {name}"
     assert source == before
     minimum_density = assert_world_density(geometry, source["worldMatrix"], 1024, 4)
     return {"minimumMeasuredDensity": minimum_density, "sourceTriangles": len(source["indices"]) // 3, "outputTriangles": len(geometry["indices"]) // 3,
@@ -126,7 +133,13 @@ def main() -> None:
     for name, width in (("positions", 3), ("normals", 3), ("uvs", 2), ("uvs2", 2), ("colors", 4), ("tangents", 4)):
         if name in source:
             expected = [value for index in source["indices"] for value in source[name][index * width:index * width + width]]
-            assert geometry[name] == expected, f"不得改变原始 {name} 或删除共线角点"
+            # B6允许复用相同顶点；合同保留原三角角点各通道的逐位值，而非展开存储布局。
+            assert len(geometry["positions"]) % 3 == 0
+            assert len(geometry[name]) == len(geometry["positions"]) // 3 * width
+            assert all(type(index) is int and 0 <= index < len(geometry[name]) // width for index in geometry["indices"])
+            actual = [value for index in geometry["indices"] for value in geometry[name][index * width:index * width + width]]
+            assert len(actual) == len(expected)
+            assert [struct.pack(">d", value) for value in actual] == [struct.pack(">d", value) for value in expected], f"不得改变原始 {name} 或删除共线角点"
     assert source == before
     # 真正有面积的细三角面仍必须得到有效 UV，主动破坏 UV 后必须继续报错。
     thin = fixture()
