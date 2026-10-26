@@ -1,5 +1,16 @@
 # 任务记录
 
+## 2026-10-26 输入校验修复 Git 交付
+
+- 已拉取远端，无需额外合并；提交 TypedArray 输入校验修复及原任务记录。
+- 本次不运行测试或验证；`_staging/` 与 Python 字节码缓存保留本地不提交。中文编号提交及推送结果见本次交付回复。
+
+## 2026-10-26 修复烘焙 TypedArray 输入校验编译错误
+
+- 核查最新提交 `dfee81f`，确认 `lightingBakeValidation.ts` 将 `ArrayBufferView` 直接读取 `length`、将 `ArrayLike<number>` 用于 `for...of`，导致 `TS2339` 和 `TS2488`。
+- 输入校验明确排除 `DataView`，使用下标遍历普通数组或 TypedArray，保留长度及有限数值检查与零拷贝输入。
+- 按现有前端、Electron TypeScript 配置执行不输出产物的类型检查：前端 0 条诊断，Electron 修复前 2 条、修复后 0 条。已审阅修改 diff；未运行测试、完整构建或启动验证，未提交或推送。
+
 ## 2026-10-26 烘焙 TypedArray 传输 Git 交付
 
 - 已快进合并远端 0.4.2、资源修订审计和漫游碰撞相关更新，保留本地烘焙几何与传输改动，无冲突。

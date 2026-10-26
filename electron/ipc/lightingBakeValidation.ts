@@ -15,9 +15,11 @@ function finite(value: unknown, label: string, min = -Infinity, max = Infinity):
 }
 function numbers(value: unknown, label: string, size?: number): ArrayLike<number> {
   // 二进制传输在 main 侧零拷贝为 TypedArray 视图；旧 JSON 路径仍是 number[]，两者都走同一逐项校验。
-  if (!(Array.isArray(value) || ArrayBuffer.isView(value)) || (size !== undefined && value.length !== size)) throw new Error(`${label}长度不正确。`);
-  for (const entry of value as ArrayLike<number>) finite(entry, label);
-  return value as ArrayLike<number>;
+  if (!(Array.isArray(value) || (ArrayBuffer.isView(value) && !(value instanceof DataView)))) throw new Error(`${label}长度不正确。`);
+  const values = value as ArrayLike<number>;
+  if (size !== undefined && values.length !== size) throw new Error(`${label}长度不正确。`);
+  for (let index = 0; index < values.length; index++) finite(values[index], label);
+  return values;
 }
 function text(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value || value.length > 4096 || value.includes('\0')) throw new Error(`${label}格式不正确。`);
