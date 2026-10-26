@@ -584,3 +584,39 @@ reset2731来源清楚，shadow-all-null2134且混合3 Scene各426 render entry�
 - P1 main/API同ID、owner只读门、四await阶段与固定M1/M2包络26/26、strict/lint通过，原caller/错误/取消不变；renderer实际点击/提交/资源与runtime阶段接线继续。中型ROI已离线复制原env与所有灯、bake=false且未绑定，原scene/env/plan全SHA保持；未运行Editor身份观察或烘焙。
 - 调度复核发现completed代理只收到消息而未真正触发renderer后续执行，先前“接线中”状态不准确，已明确纠正并拆分Editor与runtime非重叠写域。runtime/cache半批现已实际完成9源+2tests：57/57（原47+新10）、完整SceneRuntime依赖strict/lint/diffcheck通过，证据`artifacts/phase2-project-open-trace-runtime/verification.json`。同ID精确queue/read/clone/init/batch/ready、共享producer/wait/link与异步captured scope已接；发布asset-cache网络/原始缓存细分未接，不伪0ms。Editor/Home半批待实际集成，尚无真实七阶段通过。
 - 冷暖前追加只读输入审计确认18个活跃纹理参数槽（15 platform logo+3 builtin logo）对应2张图，原71file未覆盖其字节；图库updatedAt及无SHA的index不能替代校验。现准备只读actual脚本注入URL→当前cache/bundled bytes的独立冻结，原scene/raw/resolved字段仍不删改，不追认旧cohort输入完整。
+
+## 2026-10-26 2026cemat展会低FPS原因排查（仅诊断）
+
+- 用户指定中台 `http://172.16.3.27:38087` 与 `2026cemat展会`。使用独立用户配置的实际Electron开发实例、既有Vite5173及原场景，未保存场景、修改产品代码、重新烘焙或发布。
+- 已复现RTX4060Ti约15.6FPS/CPU60.8ms/1809DC。10.85s CPU profile中sync路径约6.62s，签名walk自身约4.24s；3.5s失效诊断56次document-sync，无结构变化。
+- 根因：旧烘焙签名不匹配，tick在无state且result存在时反复sync；sync重新标记bindingsDirty，失效分支只refreshSources，形成下一帧重试循环。每次重复场景签名及939项光照分类；result存在又绕过分类合并窗口。
+- 824x440同视角短时隔离：原15.60FPS；仅诊断阻断同一失效sync后58.29FPS（阴影/DC保持）；再关阴影60FPS/435DC。恢复原函数后dirty已被消费，须恢复原dirty重试状态才重新复现15.33FPS；不把这一状态差异隐藏为简单A/B。
+- 原文件保存签名ecb8bae89fd86c64、当前代码计算4db0bc7d121c08a9、打开后e0e1654870977a04。只能确认旧结果不匹配，未追溯历史编辑/烘焙操作。原场景SHA一致，诊断进程已关闭。5s对照不代表全屏/发布Viewer性能验收。
+- 原始报告、cpuprofile、临时对照及签名证据：`output/cemat-fps-diagnosis-20261026/`。本次排查完成，正式修复尚未实施。
+
+## 2026-10-26 修复展会场景的失效烘焙逐帧重试
+
+- 用户授权修复重复校验，要求保留过期提示、正确失效判断与原画质，并用2026cemat展会验证FPS。
+- `SceneLightingRuntime.sync`的关闭/失效/已失效快照分支改走现有`refreshBindingsForSources`，完成分类及绑定待办；沿用revision保护回调重入，不直接清空dirty。复用本次documentSignature，消除一次sync内重复哈希。签名、recipe、几何、材质、真实光照与异步提交校验均保留，未调整画质。
+- 既有定向回归9/9通过，覆盖静态姿态失效、动态几何与恢复、分类/绑定重入和已应用GI即时校验。未新增测试。真实场景新失效通知触发恰好1次document-sync，随后pending全false；临时文档主光变化改变签名，恢复原文档签名与过期提示均一致。
+- 实际Electron/Vite5173重新打开原场景，读回已加载修复代码，无运行时方法替换：824×440同保存视角20秒1169帧、58.4088FPS、CPU均16.3964ms、GPU均11.7904ms、帧间隔P95=19.5ms；1809DC、2048×2048三级高质量阴影保持，20秒分类收集0次、pending全false。此前同尺寸原状态5秒15.6046FPS/CPU60.7882ms；窗口时长不同，不冒称严格基准或发布版验收。
+- 原场景SHA保持，未保存/烘焙/发布，任务诊断实例已关闭。证据`output/cemat-fps-fix-20261026/summary.json`、`fps-824x440.json`、`invalidation-check.json`、`regression.log`及截图；同步更新混合光照指南。源码修复与本地开发入口实测完成，未做发行包构建或外部部署。
+
+## 2026-10-26 正式编辑器与Viewer重建（Viewer兼容选择待确认）
+
+- 用户要求重建编辑器/Viewer，以2026cemat展会验证且不降低画质、不发布中台；后续已明确同意只读取线上v20原DIST并本地替换Viewer，保持场景资产。
+- `npm run build`及补齐异步几何/资源失败重试后的最终build均exit0。产物为dist、dist-electron、dist-viewer-template。sync异步失败只在当前operation/key与source/binding revision一致且没有有效/待激活状态时完成本代绑定待办；新变更仍保留。相关旧加载恢复/异步变更/真失配回归7/7通过。
+- 最终file://正式编辑器实际打开原场景20秒58.7077FPS、CPU16.4782ms、1809DC，824×440、原高质量2048三级阴影保持；过期错误保留、分类收集0。原scene SHA仍1f407994…8dcf，诊断进程已关闭。
+- 本地正常DIST导出按原规则拒绝过期烘焙，未绕过。已通过只读GET导出线上v20（versionId2114548950415089666）的原始DIST，31,649,582B；平台返回的192.168.50.34:8080静态地址不可达，使用172.16.3.27:38087已验证下载接口。无prepare/上传/commit/部署请求。
+- 原v20在本地Chrome/RTX4060Ti运行12.7373FPS、CPU77.0314ms、20s重复document-sync256次，错误为几何/姿态与烘焙不一致。直接换新Viewer保留project全字节后被旧HDR无ENV的兼容门阻断；真实失败证据保留，未关天空/改画质/冒称通过。
+- 已向用户提出二选一，当前尚无回复：推荐只回补v20原Viewer内相同修复，保留旧天空实现与场景资产；或在独立副本转换天空资源以验证最新Viewer。未执行依赖该选择的后续操作。当前只完成构建及正式编辑器验收，发布场景最终验收未完成。
+- 全部证据及原始zip在`output/cemat-production-fix-20261026/`，断点`progress.json`。本次Chrome和loopback4570已关闭，临时数据及失败产物保留。主工程无commit/push/中台发布。
+
+## 2026-10-26 v20 Viewer兼容回补完成（不发布中台）
+
+- 用户明确选择“仅回补原Viewer，保持原画面”。以已冻结v20原包为基础，仅替换其一个sync方法，等价回补源码中的绑定待办收束、单次签名计算和有revision保护的异步失败收束；保留旧天空/材质/渲染实现。
+- 回补脚本`output/cemat-production-fix-20261026/backport-v20.cjs`严格绑定原程序SHA与唯一方法形状；语法解析通过。更新程序及对应br/gz、runtime-config缓存版本、release-cache-manifest共5文件；其余848文件相同，122个project文件全字节不变。压缩侧车解压等于程序；缓存清单327条全SHA/大小校验。
+- 实际本地Chrome/RTX4060Ti、同保存相机/824×440各20s：原12.7373FPS/CPU77.0314ms/P95=86.4ms；回补59.9952FPS/CPU11.5808ms/P95=18ms。1863DC、2048×2048三级quality阴影、原HDR512天空保持。稳态document-sync0、分类0；新失效通知仅同步1次并消费pending，几何/姿态失配提示仍在。
+- 原v20 GPU计时器不可用，不补造GPU数据。局部/favicon.ico404及加载期缓存ERR_ABORTED原始观察保存在network-observations；实际模型全部就绪，未把旧烘焙失配标成有效或另起烘焙。
+- 交付`2026cemat-v20-viewer-fps-fixed.zip`，31,664,779B；853文件归档读回与已验目录逐字节一致。SHA和完整结果见同目录summary.json及.sha256。最新通用dist/dist-electron/dist-viewer-template与正式编辑器58.7077FPS验收均保留；新模板直接替换旧HDR的失败记录也保留。
+- 原工程scene SHA保持，未上传/部署/commit/push。任务浏览器及loopback5087已关闭；进度已更新COMPLETE_LOCAL_ONLY。

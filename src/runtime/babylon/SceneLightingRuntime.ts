@@ -193,19 +193,20 @@ export class SceneLightingRuntime {
       const settings = getSceneLightingConfig(document).bake;
       if (!settings.enabled) {
         this.cancelPending(); this.desiredSnapshotKey = null; this.clearState(); this.setError(null);
-        this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return;
+        this.refreshBindingsForSources('sync'); return;
       }
       const raw = getSceneLightingConfig(document).result;
       const snapshot = raw ? validateSceneLightingBakeSnapshot(raw) : null;
       const recipeMatches = snapshot && isLightingLightmapRecipeCompatible(settings.lightmapEncoding, snapshot.assets, settings.lightmapMipLevels);
-      if (!snapshot || snapshot.signature !== getSceneLightingBakeSignature(document) || !recipeMatches) {
+      if (!snapshot || snapshot.signature !== documentSignature || !recipeMatches) {
         this.cancelPending(); this.desiredSnapshotKey = null; this.clearState();
         this.setError(raw ? snapshot && !recipeMatches ? '光照贴图编码与当前烘焙设置不匹配，请重新烘焙。'
           : '静态对象、材质或灯光已变化，光照结果已过期，请重新烘焙。' : null);
-        this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return;
+        // 失效结果也要消费本次绑定待办，否则 tick 会逐帧重新 sync；版本检查仍保留回调重入的新变更。
+        this.refreshBindingsForSources('sync'); return;
       }
       const key = this.snapshotKey(snapshot);
-      if (this.invalidatedSnapshotKey === key) { this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return; }
+      if (this.invalidatedSnapshotKey === key) { this.refreshBindingsForSources('sync'); return; }
       if (this.state && this.snapshotKey(this.state.snapshot) === key) {
         this.desiredSnapshotKey = key;
         if (!this.pendingActivation) this.refreshBindingsForSources('sync');
@@ -213,11 +214,18 @@ export class SceneLightingRuntime {
       }
       if (this.desiredSnapshotKey === key && this.controller) return;
       this.desiredSnapshotKey = key;
+      const sourceRevision = this.sourceRevision, bindingsRevision = this.bindingsRevision;
       const pending = this.applySnapshot(snapshot);
       // applySnapshot 的同步阶段会取消旧任务并递增代次，必须在调用后记录。
       const operation = this.operation;
       this.ready = pending.catch(error => {
-        if (!this.disposed && this.operation === operation && this.desiredSnapshotKey === key) this.reportError(error);
+        if (!this.disposed && this.operation === operation && this.desiredSnapshotKey === key) {
+          this.reportError(error);
+          // 几何/资源校验失败同样结束本代重试；异步期间有新变更或已恢复有效状态时保留其待办。
+          if (!this.state && !this.pendingActivation && this.sourceRevision === sourceRevision && this.bindingsRevision === bindingsRevision) {
+            this.refreshBindingsForSources('sync');
+          }
+        }
       });
     } finally { this.dirtyConsumptionDepth--; }
   }
