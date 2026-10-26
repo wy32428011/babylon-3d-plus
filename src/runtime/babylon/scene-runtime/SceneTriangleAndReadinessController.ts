@@ -16,6 +16,7 @@ import { prepareGpuCapabilityProfile } from '../gpuCapabilityProfile';
 import type { Engine } from '@babylonjs/core/Engines/engine.js';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { SceneWorldBoundsController } from './SceneWorldBoundsController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
@@ -80,17 +81,45 @@ export class SceneTriangleAndReadinessController {
     reportedAt: number;
   }>();
 
+  private updatesStopped = false;
+  private readonly lifetime = new AbortController();
+
+  /** 网格销毁会发布事件；先退订统计和通知，再开始释放其它控制器的节点。 */
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    this.lifetime.abort();
+    this.onModelStatisticsChanged = undefined;
+    this.modelStatisticsNotificationPending = false;
+    this.progressNotificationPending = false;
+    this.context.scene.onNewMeshAddedObservable.remove(this.modelStatisticsMeshAddedObserver);
+    this.context.scene.onMeshRemovedObservable.remove(this.modelStatisticsMeshRemovedObserver);
+    this.modelStatisticsMeshAddedObserver = this.modelStatisticsMeshRemovedObserver = null;
+  }
+
+  dispose(): void {
+    this.stopUpdates();
+    runSceneRuntimeCleanup(this.context, '场景加载记录', () => this.loadDiagnostics.completeProjectOpenRuntime('cancelled', 'aborted'));
+    this.modelStatisticsFallbackMeshes.clear();
+    this.modelReadinessErrors.clear();
+    this.activeModelLoadProgress.clear();
+    this.modelStatisticsSnapshot = null;
+    this.modelStatisticsEnvironmentSourceUrl = undefined;
+  }
+
   /** 入场准备完成后仍需验证材质就绪与实际渲染；两个阶段独立计量。 */
   async waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
+    signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+    signal.throwIfAborted();
     const traceScope = this.loadDiagnostics.captureTrace();
     do {
       await this.loadDiagnostics.measureAsync('cargoReady', () => this.dependencies.outputs.generatorAssetPreloader.waitForReady(signal), undefined, traceScope);
-      if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
+      if ((this.updatesStopped || this.dependencies.document.disposed)) throw new DOMException('场景准备已取消。', 'AbortError');
       await this.loadDiagnostics.measureAsync('gpuCapabilityProbe', () => prepareGpuCapabilityProfile(this.context.scene.getEngine() as Engine, signal), undefined, traceScope);
       if (this.dependencies.assets.shaderWarmup.getMetrics().enabled) {
         await this.loadDiagnostics.measureAsync('shaderWarmup', () => this.dependencies.assets.shaderWarmup.prepare(signal), undefined, traceScope);
       }
-      if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
+      if ((this.updatesStopped || this.dependencies.document.disposed)) throw new DOMException('场景准备已取消。', 'AbortError');
       await this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal), undefined, traceScope);
       // 等首帧期间配置仍可变化；新目标也必须完成预取才能结算当前准备。
     } while (this.dependencies.outputs.generatorAssetPreloader.getMetrics().pendingCount > 0);
@@ -108,11 +137,11 @@ export class SceneTriangleAndReadinessController {
   /** 同步事务与异步加载共享一个微任务通知，避免同一批网格创建触发多次汇总。 */
   public invalidateModelStatistics(): void {
     this.modelStatisticsDirty = true;
-    if (this.dependencies.document.disposed || !this.onModelStatisticsChanged || this.modelStatisticsNotificationPending) return;
+    if ((this.updatesStopped || this.dependencies.document.disposed) || !this.onModelStatisticsChanged || this.modelStatisticsNotificationPending) return;
     this.modelStatisticsNotificationPending = true;
     queueMicrotask(() => {
       this.modelStatisticsNotificationPending = false;
-      if (this.dependencies.document.disposed || !this.onModelStatisticsChanged) return;
+      if ((this.updatesStopped || this.dependencies.document.disposed) || !this.onModelStatisticsChanged) return;
       const previous = this.modelStatisticsSnapshot;
       const snapshot = this.getModelStatistics();
       if (previous && Object.keys(snapshot).every(key => snapshot[key as keyof SceneModelStatisticsSnapshot] === previous[key as keyof SceneModelStatisticsSnapshot])) return;
@@ -286,6 +315,7 @@ export class SceneTriangleAndReadinessController {
   /** 登记一个模型或环境加载进度单元（按文件名跟踪当前下载目标）。 */
   public beginModelLoadProgressUnit(fileName: string): number {
     const sequence = ++this.modelLoadProgressSequence;
+    if (this.updatesStopped) return sequence;
     this.modelLoadProgressStartedCount += 1;
     this.activeModelLoadProgress.set(sequence, {
       fileName,
@@ -318,7 +348,7 @@ export class SceneTriangleAndReadinessController {
   /** 有订阅方时重新计算并推送模型加载进度快照。 */
   public notifyModelLoadProgressChanged(): void {
     this.invalidateModelStatistics();
-    if (!this.context.onModelLoadProgress || this.dependencies.document.disposed) return;
+    if (!this.context.onModelLoadProgress || (this.updatesStopped || this.dependencies.document.disposed)) return;
     if (this.activeModelLoadProgress.size === 0) {
       this.progressNotificationPending = false;
       this.loadDiagnostics.measure('progressNotify', () => this.emitModelLoadProgress());
@@ -327,7 +357,7 @@ export class SceneTriangleAndReadinessController {
     if (this.progressNotificationPending) return;
     this.progressNotificationPending = true;
     queueMicrotask(() => {
-      if (!this.progressNotificationPending || this.dependencies.document.disposed) return;
+      if (!this.progressNotificationPending || (this.updatesStopped || this.dependencies.document.disposed)) return;
       this.progressNotificationPending = false;
       this.loadDiagnostics.measure('progressNotify', () => this.emitModelLoadProgress());
     });
@@ -359,7 +389,7 @@ export class SceneTriangleAndReadinessController {
 
   /** 每轮显式资源恢复后重试失败项；重建脚本宿主以避免在半初始化几何上重复执行 onStart。 */
   retryFailedSceneResources(document: SceneDocument, hierarchySelectionIds?: readonly string[]): number {
-    if (this.dependencies.document.disposed) return 0;
+    if ((this.updatesStopped || this.dependencies.document.disposed)) return 0;
     const failedEntities = new Set<string>();
     const failedScript = (model: ModelRuntimeEntry): boolean => !model.externalScriptStarting
       && Boolean(model.readinessError || model.externalScriptRuntime?.getInitializationError());
@@ -466,11 +496,11 @@ export class SceneTriangleAndReadinessController {
   /** 同批异步模型就绪只刷新一次选区与分组目标；直接选择/拖拽路径仍同步执行。 */
   public scheduleModelPresentationRefresh(): void {
     this.invalidateModelStatistics();
-    if (this.dependencies.document.disposed || this.dependencies.assets.modelPresentationRefreshPending) return;
+    if ((this.updatesStopped || this.dependencies.document.disposed) || this.dependencies.assets.modelPresentationRefreshPending) return;
     this.dependencies.assets.modelPresentationRefreshPending = true;
     const traceScope = this.loadDiagnostics.captureTrace();
     queueMicrotask(() => {
-      if (!this.dependencies.assets.modelPresentationRefreshPending || this.dependencies.document.disposed) return;
+      if (!this.dependencies.assets.modelPresentationRefreshPending || (this.updatesStopped || this.dependencies.document.disposed)) return;
       this.dependencies.assets.modelPresentationRefreshPending = false;
       try {
         this.loadDiagnostics.measure('presentationRefresh', () => {
@@ -528,7 +558,9 @@ export class SceneTriangleAndReadinessController {
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshAddedObserver(): void {
+    if (this.updatesStopped || this.modelStatisticsMeshAddedObserver) return;
     this.modelStatisticsMeshAddedObserver = this.context.scene.onNewMeshAddedObservable.add(mesh => {
+      if (this.updatesStopped) return;
       if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
       this.invalidateModelStatistics();
       if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-added');
@@ -537,7 +569,9 @@ export class SceneTriangleAndReadinessController {
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshRemovedObserver(): void {
+    if (this.updatesStopped || this.modelStatisticsMeshRemovedObserver) return;
     this.modelStatisticsMeshRemovedObserver = this.context.scene.onMeshRemovedObservable.add(mesh => {
+      if (this.updatesStopped) return;
       if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
       this.invalidateModelStatistics();
       if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-removed');

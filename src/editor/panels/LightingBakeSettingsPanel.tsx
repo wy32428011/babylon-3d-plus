@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { getSceneLightingBakeSignature, requiresSceneLightingBake } from '../../../electron/shared/sceneLightingBakeContract';
+import { getSceneLightingBakeSignatureCached, requiresSceneLightingBake } from '../../../electron/shared/sceneLightingBakeContract';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import { useEditorStore } from '../store/editorStore';
 import { CollapsibleFieldset } from '../ui/CollapsibleFieldset';
@@ -13,7 +13,7 @@ export function LightingBakeSettingsPanel({ readOnly = false }: { readOnly?: boo
   const request = useEditorStore(state => state.lightingBakeRequest);
   const open = useEditorStore(state => state.openLightingManager);
   const lighting = useMemo(() => getSceneLightingConfig(scene), [scene]);
-  const signature = useMemo(() => getSceneLightingBakeSignature(scene), [scene]);
+  const signature = useMemo(() => getSceneLightingBakeSignatureCached(scene), [scene]);
   const result = lighting.result;
   const label = request ? '任务进行中' : !requiresSceneLightingBake(scene) ? '无需静态烘焙'
     : result && result.signature !== signature ? '已过期'

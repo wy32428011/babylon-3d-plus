@@ -111,6 +111,106 @@ export function resolveModelParameterOnlySceneChangeEntityId(
 }
 
 /**
+ * 合批计划只读取模型资产、合批关系、内置货格绑定、告警与特效目标引用以及层级/组合关系；
+ * 下列组件（以及实体名称）的增删改不进入分组、源选择和独立实体判定。
+ */
+const PLAN_NEUTRAL_COMPONENT_KEYS: ReadonlySet<string> = new Set(['transform', 'meshRenderer', 'light', 'camera', 'lighting']);
+
+/** 稀疏覆盖累计超过该数量后回到完整重建，避免长时间编辑让覆盖表无限增长。 */
+const MAX_PLAN_OVERRIDE_COUNT = 256;
+
+function isPlanNeutralEntityChange(previous: Entity, next: Entity): boolean {
+  const previousFields = previous as unknown as Record<string, unknown>;
+  const nextFields = next as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(previousFields), ...Object.keys(nextFields)])) {
+    if (key === 'name' || key === 'components') continue;
+    if (previousFields[key] !== nextFields[key]) return false;
+  }
+  const previousComponents = previous.components as unknown as Record<string, unknown>;
+  const nextComponents = next.components as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(previousComponents), ...Object.keys(nextComponents)])) {
+    if (previousComponents[key] !== nextComponents[key] && !PLAN_NEUTRAL_COMPONENT_KEYS.has(key)) return false;
+  }
+  return true;
+}
+
+/**
+ * 运行时局部同步的实体级条件：在计划无关变更的基础上，组件集合（键）也必须保持不变，
+ * 因此各组件 ID 集合、遥测箭头开关和资源销毁判定都不会受影响。
+ */
+export function isEntityLocalSyncChange(previous: Entity, next: Entity): boolean {
+  const previousKeys = Object.keys(previous.components);
+  const nextKeys = Object.keys(next.components);
+  if (previousKeys.length !== nextKeys.length) return false;
+  for (const key of previousKeys) if (!Object.hasOwn(next.components, key)) return false;
+  return isPlanNeutralEntityChange(previous, next);
+}
+
+/** 单次局部处理的实体数量上限；超过后（如整批阵列、大范围导入）完整同步更稳妥。 */
+export const MAX_LOCAL_CHANGE_ENTITY_COUNT = 64;
+
+/**
+ * 识别两次发布之间一组只改动“不影响合批计划”内容的实体（数量不超过上限）。
+ * 要求实体 ID 列表引用不变，且每个变化实体的层级、显隐、锁定、组合及全部计划相关组件均未变。
+ */
+export function resolvePlanNeutralSceneChangeEntityIds(
+  previousScene: Pick<SceneDocument, 'entityIds' | 'entities'> | null | undefined,
+  nextScene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+): string[] | null {
+  if (
+    !previousScene
+    || previousScene.entities === nextScene.entities
+    || previousScene.entityIds !== nextScene.entityIds
+  ) {
+    return null;
+  }
+
+  const changedEntityIds: string[] = [];
+  for (const entityId of nextScene.entityIds) {
+    const previousEntity = previousScene.entities[entityId];
+    const nextEntity = nextScene.entities[entityId];
+    if (previousEntity === nextEntity) continue;
+    if (!previousEntity || !nextEntity || changedEntityIds.length >= MAX_LOCAL_CHANGE_ENTITY_COUNT) return null;
+    if (!isPlanNeutralEntityChange(previousEntity, nextEntity)) return null;
+    changedEntityIds.push(entityId);
+  }
+  return changedEntityIds.length > 0 ? changedEntityIds : null;
+}
+
+/**
+ * 在上一份计划上只替换这组实体。调用方须已通过 resolvePlanNeutralSceneChangeEntityIds 确认变更不影响分组；
+ * 每个实体在上一份计划中的派生形态（原实体、合批实例或解除合批）沿用到新实体上。覆盖表容量不足时整体完整重建。
+ */
+export function patchEditModeModelThinInstancePlanForPlanNeutralChanges(
+  scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+  previousPlan: EditModeModelThinInstancePlan,
+  previousScene: Pick<SceneDocument, 'entityIds' | 'entities'>,
+  entityIds: readonly string[],
+): EditModeModelThinInstancePlan {
+  const overrideCount = entityOverrideRecordState.get(previousPlan.entities)?.overrides.size ?? 0;
+  if (overrideCount + entityIds.length > MAX_PLAN_OVERRIDE_COUNT) {
+    return createEditModeModelThinInstancePlan(scene, previousPlan);
+  }
+
+  let entities = previousPlan.entities;
+  for (const entityId of entityIds) {
+    const entity = scene.entities[entityId];
+    const previousEntity = previousScene.entities[entityId];
+    const previousPlanEntity = entities[entityId];
+    if (!entity || !previousEntity || !previousPlanEntity) return createEditModeModelThinInstancePlan(scene, previousPlan);
+
+    const previousSourceEntityId = previousPlanEntity.components.modelArrayInstance?.sourceEntityId;
+    const nextEntity = previousPlanEntity === previousEntity
+      ? entity
+      : previousSourceEntityId
+        ? getOrCreateThinInstanceEntity(entity, previousSourceEntityId)
+        : getOrCreateIndependentModelEntity(entity);
+    if (previousPlanEntity !== nextEntity) entities = createEntityOverrideRecord(entities, entityId, nextEntity);
+  }
+  return entities === previousPlan.entities ? previousPlan : { ...previousPlan, entities };
+}
+
+/**
  * 参数值由 SceneRuntime 的参数变体承载，不改变编辑态源/实例拓扑。
  * 只创建一个稀疏实体覆盖，避免高频预览重新扫描和复制完整场景实体表。
  */

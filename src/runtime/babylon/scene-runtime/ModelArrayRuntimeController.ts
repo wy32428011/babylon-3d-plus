@@ -21,6 +21,7 @@ import type { SceneTelemetryController } from './SceneTelemetryController';
 import type { SceneWorldBoundsController } from './SceneWorldBoundsController';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { SceneTransformPreviewController } from './SceneTransformPreviewController';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import { type ModelRuntimeEntry, type ModelArrayParameterVariantRuntimeEntry, type SceneRuntimeModelArrayIdentityMode } from './sceneRuntimeTypes';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
@@ -48,14 +49,62 @@ export class ModelArrayRuntimeController {
   public readonly pendingModelArraySourceResyncs = new Map<string, string | null>();
   public readonly pendingModelArrayVariantRenderSuppressions = new Set<TransformNode>();
   public readonly suppressedModelArrayVariantRootsThisFrame = new Set<TransformNode>();
-  public readonly modelArrayJsonSignatureCache = new WeakMap<object, string>();
-  public readonly modelArrayTransientJsonSignatureCache = new WeakMap<object, string>();
+  public modelArrayJsonSignatureCache = new WeakMap<object, string>();
+  public modelArrayTransientJsonSignatureCache = new WeakMap<object, string>();
   public readonly modelArrayCanonicalSignatureIds = new Map<string, number>();
   public modelArrayCanonicalSignatureSequence = 0;
   public readonly modelArrayBatchByMeshUniqueId = new Map<number, EntityArrayThinInstanceBatch>();
-  public modelArrayVariantRenderSuppressionObserver!: Nullable<Observer<Scene>>;
-  public modelArrayVariantRenderRestoreObserver!: Nullable<Observer<Scene>>;
+  public modelArrayVariantRenderSuppressionObserver: Nullable<Observer<Scene>> = null;
+  public modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>> = null;
   public modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
+  private updatesStopped = false;
+  private disposed = false;
+
+  /** 先停渲染观察器与微任务，再恢复本帧禁用的宿主；释放模型时仍需读取宿主原状态。 */
+  public stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    const suppressionObserver = this.modelArrayVariantRenderSuppressionObserver;
+    const restoreObserver = this.modelArrayVariantRenderRestoreObserver;
+    this.modelArrayVariantRenderSuppressionObserver = null;
+    this.modelArrayVariantRenderRestoreObserver = null;
+    if (suppressionObserver) {
+      runSceneRuntimeCleanup(this.context, '阵列宿主渲染抑制观察器', () => {
+        this.context.scene.onBeforeActiveMeshesEvaluationObservable.remove(suppressionObserver);
+      });
+    }
+    if (restoreObserver) {
+      runSceneRuntimeCleanup(this.context, '阵列宿主渲染恢复观察器', () => {
+        this.context.scene.onAfterRenderObservable.remove(restoreObserver);
+      });
+    }
+    this.pendingModelArraySourceResyncs.clear();
+    this.pendingModelArrayVariantRenderSuppressions.clear();
+    const suppressedRoots = [...this.suppressedModelArrayVariantRootsThisFrame];
+    this.suppressedModelArrayVariantRootsThisFrame.clear();
+    for (const root of suppressedRoots) {
+      runSceneRuntimeCleanup(this.context, `阵列宿主恢复 ${root.name}`, () => {
+        if (!root.isDisposed()) root.setEnabled(true);
+      });
+    }
+  }
+
+  /** 模型与参数变体全部释放后调用；网格索引仅借用 batch，不拥有第二次销毁权。 */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopUpdates();
+    for (const [entityId, proxy] of [...this.modelArrayTelemetryProxies]) {
+      runSceneRuntimeCleanup(this.context, `阵列遥测代理 ${entityId}`, () => this.disposeModelArrayTelemetryProxy(entityId, proxy));
+    }
+    this.modelArrayTelemetryProxies.clear();
+    this.modelArrayInstanceEntities.clear();
+    this.modelArrayCanonicalSignatureIds.clear();
+    this.modelArrayCanonicalSignatureSequence = 0;
+    this.modelArrayJsonSignatureCache = new WeakMap<object, string>();
+    this.modelArrayTransientJsonSignatureCache = new WeakMap<object, string>();
+    this.modelArrayBatchByMeshUniqueId.clear();
+  }
 
   /** 在文档实体完成同步后，按源模型统一刷新全部独立逻辑实例的矩阵批次。 */
   public syncAllModelArrayBatches(
@@ -63,6 +112,7 @@ export class ModelArrayRuntimeController {
     sourceEntityIds: ReadonlySet<string>,
     parameterOnlyChangedEntityId?: string,
   ): void {
+    if (this.updatesStopped) return;
     for (const sourceEntityId of sourceEntityIds) {
       const model = this.dependencies.assets.models.get(sourceEntityId);
       if (!model) continue;
@@ -82,6 +132,7 @@ export class ModelArrayRuntimeController {
    * 换算回宿主模型，链路协议与货物走行无需拆批即可逐设备运行。
    */
   public syncModelArrayTelemetryProxies(): void {
+    if (this.updatesStopped) return;
     const desired = new Map<string, { entity: Entity; host: ModelRuntimeEntry }>();
     for (const instanceEntity of this.modelArrayInstanceEntities.values()) {
       const modelAsset = instanceEntity.components.modelAsset;
@@ -134,6 +185,7 @@ export class ModelArrayRuntimeController {
 
   /** 创建合批 conveyor 实例的遥测代理：加载/就绪门控通过访问器跟随宿主，避免异步时序两处各写一份。 */
   public createModelArrayTelemetryProxy(entity: Entity, host: ModelRuntimeEntry): ModelRuntimeEntry {
+    if (this.updatesStopped) throw new Error('阵列运行时已停止，无法创建遥测代理。');
     const modelAsset = entity.components.modelAsset;
     const root = new TransformNode(`__telemetryProxy_${sanitizeBabylonName(entity.id)}`, this.context.scene);
     const contentRoot = new TransformNode(`__telemetryProxyContent_${sanitizeBabylonName(entity.id)}`, this.context.scene);
@@ -189,7 +241,9 @@ export class ModelArrayRuntimeController {
   public disposeModelArrayTelemetryProxy(entityId: string, proxy: ModelRuntimeEntry): void {
     if (this.modelArrayTelemetryProxies.get(entityId) !== proxy) return;
     this.modelArrayTelemetryProxies.delete(entityId);
-    if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
+    runSceneRuntimeCleanup(this.context, `阵列遥测代理节点 ${entityId}`, () => {
+      if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
+    });
   }
 
   /**
@@ -201,6 +255,7 @@ export class ModelArrayRuntimeController {
     model: ModelRuntimeEntry,
     parameterOnlyChangedEntityId?: string,
   ): void {
+    if (this.updatesStopped) return;
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
 
@@ -463,6 +518,7 @@ export class ModelArrayRuntimeController {
 
   /** 脚本异步刷新期间只保留宿主的脚本可见性，禁止它和上一份有效批次同时参与绘制。 */
   public beginModelArrayHostRenderSuppression(model: ModelRuntimeEntry): void {
+    if (this.updatesStopped) return;
     if (!model.root.isDisposed()) this.pendingModelArrayVariantRenderSuppressions.add(model.root);
   }
 
@@ -477,6 +533,7 @@ export class ModelArrayRuntimeController {
 
   /** 在 onBeforeActiveMeshesEvaluation 中临时禁用 pending 宿主；脚本编译和生命周期在帧间仍读取完整启用状态。 */
   public suppressPendingModelArrayVariantHostsForRender(): void {
+    if (this.updatesStopped) return;
     this.restoreSuppressedModelArrayVariantHostsAfterRender();
     for (const root of this.pendingModelArrayVariantRenderSuppressions) {
       if (root.isDisposed() || !root.isEnabled(false)) continue;
@@ -498,6 +555,7 @@ export class ModelArrayRuntimeController {
     sourceEntityId: string,
     parameterOnlyChangedEntityId?: string,
   ): void {
+    if (this.updatesStopped) return;
     const nextChangedEntityId = parameterOnlyChangedEntityId ?? null;
     if (this.pendingModelArraySourceResyncs.has(sourceEntityId)) {
       const pendingChangedEntityId = this.pendingModelArraySourceResyncs.get(sourceEntityId) ?? null;
@@ -510,6 +568,7 @@ export class ModelArrayRuntimeController {
 
     this.pendingModelArraySourceResyncs.set(sourceEntityId, nextChangedEntityId);
     queueMicrotask(() => {
+      if (this.updatesStopped || !this.pendingModelArraySourceResyncs.has(sourceEntityId)) return;
       const changedEntityId = this.pendingModelArraySourceResyncs.get(sourceEntityId) ?? undefined;
       this.pendingModelArraySourceResyncs.delete(sourceEntityId);
       const sourceModel = this.dependencies.assets.models.get(sourceEntityId);
@@ -523,6 +582,7 @@ export class ModelArrayRuntimeController {
 
   /** 在运行态脚本或遥测修改前恢复当前阵列宿主；返回是否需要在修改后重提批次。 */
   public prepareModelArrayRuntimeMutation(model: ModelRuntimeEntry): boolean {
+    if (this.updatesStopped) return false;
     if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return false;
     const variant = [...this.dependencies.variants.modelArrayParameterVariants.values()].find((item) => item.model === model);
     if (variant) this.dependencies.variants.restoreModelArrayParameterVariantHost(variant);
@@ -536,6 +596,7 @@ export class ModelArrayRuntimeController {
    * Geometry/网格集合未变时仅改写矩阵和材质，不重复创建批次。
    */
   public refreshModelArrayRuntimeRepresentation(model: ModelRuntimeEntry): void {
+    if (this.updatesStopped) return;
     if (!model.modelArrayBatch && model.modelArraySuspendedMeshes.size === 0) return;
     const variant = [...this.dependencies.variants.modelArrayParameterVariants.values()].find((item) => item.model === model);
     if (variant) {
@@ -614,6 +675,7 @@ export class ModelArrayRuntimeController {
       parameterOnlyChangedEntityId?: string;
     },
   ): void {
+    if (this.updatesStopped) return;
     const totalInstanceCount = instanceEntities.length + legacyItems.length;
     if (totalInstanceCount === 0) {
       this.disposeModelArrayBatch(model);
@@ -785,7 +847,7 @@ export class ModelArrayRuntimeController {
     for (const mesh of modelArrayBatch.meshes) {
       this.modelArrayBatchByMeshUniqueId.delete(mesh.uniqueId);
     }
-    modelArrayBatch.dispose();
+    runSceneRuntimeCleanup(this.context, '模型阵列批次', () => modelArrayBatch.dispose());
   }
 
   public disposeModelArrayBatch(model: ModelRuntimeEntry): void {
@@ -798,7 +860,7 @@ export class ModelArrayRuntimeController {
     model.modelArrayBatch = null;
     model.modelArraySourceSignature = '';
     this.disposeModelArrayBatchResources(modelArrayBatch);
-    this.dependencies.transforms.refreshGroupTransformPreviewTargets();
+    if (!this.updatesStopped) this.dependencies.transforms.refreshGroupTransformPreviewTargets();
   }
 
   /** 根据逻辑实体直接定位所属矩阵批次，避免选择变化扫描全部源模型和参数变体。 */
@@ -815,6 +877,7 @@ export class ModelArrayRuntimeController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelArrayVariantRenderSuppressionObserver(): void {
+    if (this.updatesStopped || this.modelArrayVariantRenderSuppressionObserver) return;
     this.modelArrayVariantRenderSuppressionObserver = this.context.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
       this.suppressPendingModelArrayVariantHostsForRender();
     });
@@ -822,6 +885,7 @@ export class ModelArrayRuntimeController {
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelArrayVariantRenderRestoreObserver(): void {
+    if (this.updatesStopped || this.modelArrayVariantRenderRestoreObserver) return;
     this.modelArrayVariantRenderRestoreObserver = this.context.scene.onAfterRenderObservable.add(() => {
       this.restoreSuppressedModelArrayVariantHostsAfterRender();
     });

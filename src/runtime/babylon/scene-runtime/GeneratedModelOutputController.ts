@@ -26,6 +26,7 @@ import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceK
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
 import type { GeneratedCargoKind, GeneratedCargoRuntimeEntry } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneTelemetryController } from './SceneTelemetryController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
 import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
@@ -43,7 +44,7 @@ type Dependencies = {
   readonly parameters: Pick<ModelParameterBindingController, 'applyModelUnitScale' | 'applyModelAssetParameters'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'createModelAssetSignature' | 'modelLoadSequence' | 'loadModelRuntimeAssets' | 'preloadModelRuntimeAsset' | 'parentTopLevelModelNodes' | 'refreshModelGeneratorModelMeshes' | 'normalizeModelContentOrigin' | 'syncModelGeneratorExternalScripts' | 'splitAssetUrl' | 'resolveVersionedRuntimeAssetUrl' | 'loadAssetContainer' | 'refreshModelMeshes' | 'models' | 'syncModelAssetExternalScripts'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'applyModelSelection' | 'selectedEntityIds' | 'localHighlightedEntityIds' | 'externalHighlightedEntityIds'>;
-  readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable' | 'shadowDocument'>;
+  readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable' | 'shadowDocument' | 'disposed'>;
 };
 
 
@@ -79,7 +80,9 @@ export class GeneratedModelOutputController {
   private readonly generatedCargoPoolEntries = new WeakMap<ModelRuntimeEntry, GeneratedCargoPoolEntry>();
 
   /** 仅供固定输入验收使用的内部A/B开关；关闭时排空idle，活动资源仍由原model释放。 */
-  public setGeneratedCargoPoolingEnabled(enabled: boolean): void { this.generatedCargoInstancePool.setEnabled(enabled); }
+  public setGeneratedCargoPoolingEnabled(enabled: boolean): void {
+    if (!this.updatesStopped) this.generatedCargoInstancePool.setEnabled(enabled);
+  }
   public getGeneratedCargoPoolMetrics() { return this.generatedCargoInstancePool.getMetrics(); }
 
   public readonly modelGenerators = new Map<string, ModelGeneratorRuntimeEntry>();
@@ -96,9 +99,58 @@ export class GeneratedModelOutputController {
   public defaultCargoGeneratorId: string | null = null;
   public readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   public readonly reportedCargoIssues = new Set<string>();
+  private deviceSpawningStopped = false;
+  private updatesStopped = false;
+  private disposed = false;
+
+  /** 产物在模型/变体之后、共享资产缓存之前释放；货物支撑根由遥测货物所有者管理。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopUpdates();
+    for (const [entityId, generator] of [...this.modelGenerators]) {
+      runSceneRuntimeCleanup(this.context, `模型生成器 ${entityId}`, () => this.disposeModelGenerator(entityId, generator));
+    }
+    for (const [entityId, owner] of [...this.generatedOutputOwners]) {
+      this.generatedOutputOwners.delete(entityId);
+      owner.loadToken += 1;
+      runSceneRuntimeCleanup(this.context, `生成输出 ${entityId}`, () => this.disposeModelGeneratorOutput(owner));
+      owner.failedTargetSignatures.clear();
+      owner.reportedLoadFailureKeys.clear();
+      owner.onTerminalLoadFailure = undefined;
+    }
+    for (const entityId of [...this.deviceSpawnerMarkers.keys()]) {
+      runSceneRuntimeCleanup(this.context, `设备产生器标记 ${entityId}`, () => this.disposeDeviceSpawnerMarker(entityId));
+    }
+    this.modelGenerators.clear();
+    this.generatedOutputOwners.clear();
+    this.deviceSpawnerMarkers.clear();
+    this.reportedCargoIssues.clear();
+    this.defaultCargoGeneratorId = null;
+  }
+
+  /** 最终销毁前停止预取与新设备；先关闭复用池，使后续归还的活动句柄直接释放。 */
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    runSceneRuntimeCleanup(this.context, '生成器资产预取', () => this.generatorAssetPreloader.dispose());
+    runSceneRuntimeCleanup(this.context, '生成货物复用池', () => this.generatedCargoInstancePool.setEnabled(false));
+    this.stopDeviceSpawning();
+  }
+
+  /** 动态设备只属于预览；先退订消息，再使在途模型加载失效，不销毁编辑态标记或共享资产。 */
+  stopDeviceSpawning(): void {
+    this.deviceSpawningStopped = true;
+    runSceneRuntimeCleanup(this.context, '设备产生器订阅', () => this.deviceSpawnerRuntime.disposeAll());
+    for (const key of [...this.spawnedDeviceModels.keys()]) this.disposeSpawnedDeviceModel(key);
+    this.spawnedDeviceRevealPending.clear();
+    this.spawnedDeviceHiddenLayerMasks.clear();
+    if (!this.dependencies.document.disposed) this.syncDeviceSpawnerMarkerVisibility();
+  }
 
   /** 同步模型生成器配置标记；实体 Transform 只影响 markerRoot，不影响任何自动货物。 */
   public syncModelGeneratorEntity(entity: Entity, selected: boolean): void {
+    if (this.updatesStopped) return;
     const component = entity.components.modelGenerator;
     if (!component) return;
 
@@ -170,6 +222,7 @@ export class GeneratedModelOutputController {
     runtimeEntry: GeneratedOutputOwnerRuntimeEntry,
     resolution: ResolvedModelGeneratorTarget,
   ): void {
+    if (this.updatesStopped) return;
     runtimeEntry.activeSnapshot = resolution.snapshot;
     const target = resolution.target;
     runtimeEntry.activeModelTarget = target?.kind === 'model' ? target : null;
@@ -908,13 +961,13 @@ export class GeneratedModelOutputController {
   public disposeModelGeneratorOutput(runtimeEntry: GeneratedOutputOwnerRuntimeEntry): void {
     const output = runtimeEntry.output;
     if (!output) return;
+    runtimeEntry.output = null;
     try {
       if (output.kind === 'model') this.tryRetainGeneratedCargoModel(runtimeEntry, output.model);
     } finally {
-      // 可选复位发生异常时也沿原路径释放wrapper/未移交句柄，保留异常传播。
-      this.disposeModelGeneratorOutputValue(output);
-      runtimeEntry.output = null;
-      this.dependencies.readiness.invalidateModelStatistics();
+      // 即使释放异常，宿主也不再持有待释放输出，避免重入或迟到回调再次使用。
+      try { this.disposeModelGeneratorOutputValue(output); }
+      finally { this.dependencies.readiness.invalidateModelStatistics(); }
     }
   }
 
@@ -1004,25 +1057,26 @@ export class GeneratedModelOutputController {
 
   /** 释放模型生成器配置标记、独立输出根节点、以其为模板的货物和异步资源。 */
   public disposeModelGenerator(entityId: string, runtimeEntry: ModelGeneratorRuntimeEntry): void {
-    this.generatorAssetPreloader.remove(entityId);
     runtimeEntry.loadToken += 1;
-    this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForGenerator(entityId);
-    this.disposeModelGeneratorOutput(runtimeEntry);
-    this.generatedCargoInstancePool.clearGenerator(entityId);
-    runtimeEntry.marker.material.dispose();
-    runtimeEntry.marker.mesh.dispose();
-    runtimeEntry.markerRoot.dispose();
-    runtimeEntry.root.dispose();
-    runtimeEntry.failedTargetSignatures.clear();
-    runtimeEntry.reportedLoadFailureKeys.clear();
     this.generatedOutputOwners.delete(runtimeEntry.entityId);
     this.modelGenerators.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `生成器预取 ${entityId}`, () => this.generatorAssetPreloader.remove(entityId));
+    runSceneRuntimeCleanup(this.context, `生成器货物 ${entityId}`, () => this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForGenerator(entityId));
+    runSceneRuntimeCleanup(this.context, `生成器输出 ${entityId}`, () => this.disposeModelGeneratorOutput(runtimeEntry));
+    runSceneRuntimeCleanup(this.context, `生成器复用池 ${entityId}`, () => this.generatedCargoInstancePool.clearGenerator(entityId));
+    runSceneRuntimeCleanup(this.context, `生成器标记材质 ${entityId}`, () => runtimeEntry.marker.material.dispose());
+    runSceneRuntimeCleanup(this.context, `生成器标记网格 ${entityId}`, () => runtimeEntry.marker.mesh.dispose());
+    runSceneRuntimeCleanup(this.context, `生成器标记根 ${entityId}`, () => runtimeEntry.markerRoot.dispose());
+    runSceneRuntimeCleanup(this.context, `生成器根 ${entityId}`, () => runtimeEntry.root.dispose());
+    runtimeEntry.failedTargetSignatures.clear();
+    runtimeEntry.reportedLoadFailureKeys.clear();
   }
 
   // ===== 设备产生器（deviceSpawner）=====
 
   /** 同步设备产生器编辑态标记；实例产生逻辑仅在运行预览时由 DeviceSpawnerRuntime 驱动。 */
   public syncDeviceSpawnerEntity(entity: Entity, selected: boolean): void {
+    if (this.updatesStopped) return;
     if (!entity.components.deviceSpawner) return;
 
     let marker = this.deviceSpawnerMarkers.get(entity.id);
@@ -1075,8 +1129,10 @@ export class GeneratedModelOutputController {
 
   /** 运行预览开始时从文档解析产生器配置并注册；模板无效的产生器跳过并提示。 */
   public configureDeviceSpawnersFromDocument(): void {
+    if (this.updatesStopped || this.dependencies.document.disposed) return;
     const document = this.dependencies.document.shadowDocument;
     if (!document) return;
+    this.deviceSpawningStopped = false;
 
     const configs: DeviceSpawnerConfig[] = [];
     for (const entityId of document.entityIds) {
@@ -1132,6 +1188,7 @@ export class GeneratedModelOutputController {
 
   /** 基于模板实体派生一台动态设备实例；模板模型未加载完成时返回 false，等待下一条消息重试。 */
   public spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string): boolean {
+    if (this.deviceSpawningStopped || this.dependencies.document.disposed) return false;
     const key = createSpawnedDeviceKey(spawner.spawnerCode, assetCode);
     if (this.spawnedDeviceModels.has(key)) return true;
 
@@ -1317,13 +1374,14 @@ export class GeneratedModelOutputController {
       this.spawnedDeviceHiddenLayerMasks.delete(mesh.uniqueId);
     }
     model.loadToken += 1;
-    model.externalScriptRuntime?.dispose();
+    runSceneRuntimeCleanup(this.context, `动态设备脚本 ${key}`, () => model.externalScriptRuntime?.dispose());
     for (const texture of model.textureCache.values()) {
-      texture.dispose();
+      runSceneRuntimeCleanup(this.context, `动态设备纹理 ${key}`, () => texture.dispose());
     }
-    model.assetHandle?.dispose();
-    model.contentRoot.dispose();
-    model.root.dispose();
+    model.textureCache.clear();
+    runSceneRuntimeCleanup(this.context, `动态设备资产 ${key}`, () => model.assetHandle?.dispose());
+    runSceneRuntimeCleanup(this.context, `动态设备内容节点 ${key}`, () => model.contentRoot.dispose());
+    runSceneRuntimeCleanup(this.context, `动态设备根节点 ${key}`, () => model.root.dispose());
   }
 
   /** 仅同步模型生成器配置标记；自动货物不继承实体显隐、锁定或选中状态。 */

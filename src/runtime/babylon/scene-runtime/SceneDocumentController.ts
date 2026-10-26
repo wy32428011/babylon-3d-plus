@@ -5,6 +5,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js'
 
 import type { Entity } from '../../../editor/model/Entity';
 import { createEntityHierarchyStateMap } from '../../../editor/model/entityHierarchy';
+import { isEntityLocalSyncChange } from '../../../editor/model/editModeModelThinInstances';
 import type { TransformComponent } from '../../../editor/model/components';
 import { getCompositionArrayInfo } from '../../../editor/model/modelArray';
 import { type SceneDocument } from '../../../editor/model/SceneDocument';
@@ -60,10 +61,26 @@ export class SceneDocumentController {
   public lastFullSyncDurationMs = 0;
   public maxFullSyncDurationMs = 0;
 
+  /** 先关闭所有协作者共同检查的入口，最后再释放文档引用，供清理阶段读取必要的归属信息。 */
+  beginDisposal(): boolean {
+    if (this.disposed) return false;
+    this.disposed = true;
+    this.singleTransformPreview = null;
+    return true;
+  }
+
+  dispose(): void {
+    this.beginDisposal();
+    this.entityStates.clear();
+    this.syncedEntities.clear();
+    this.shadowDocument = null;
+    this.singleTransformPreview = null;
+  }
+
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
   /** 单体拖拽只保持运行时预览；普通节点由 Babylon 直接更新，阵列代理沿原同步路径更新矩阵。 */
   beginSingleTransformPreview(entityId: string, before: TransformComponent): boolean {
-    if (this.dependencies.telemetry.telemetryPreviewActive || !this.shadowDocument || !this.dependencies.transforms.getGizmoTargetByEntityId(entityId)) return false;
+    if (this.disposed || this.dependencies.telemetry.telemetryPreviewActive || !this.shadowDocument || !this.dependencies.transforms.getGizmoTargetByEntityId(entityId)) return false;
     this.singleTransformPreview = { entityId, before, after: null, sceneId: this.shadowDocument.id,
       document: this.shadowDocument, derived: null, pending: false };
     return true;
@@ -108,6 +125,7 @@ export class SceneDocumentController {
     hierarchySelectionIds?: readonly string[],
     options: SceneRuntimeSyncOptions = {},
   ): void {
+    if (this.disposed) return;
     document = this.applySingleTransformPreview(document);
     const nextModelArrayIdentityMode = options.modelArrayIdentityMode ?? 'device';
     const modelArrayIdentityModeChanged = this.dependencies.arrays.modelArrayIdentityMode !== nextModelArrayIdentityMode;
@@ -126,6 +144,94 @@ export class SceneDocumentController {
     }
   }
 
+  public localSyncCount = 0;
+  public lastLocalSyncDurationMs = 0;
+
+  /**
+   * 只同步一组“局部可同步”的实体变更：每个实体的层级、显隐、锁定、组合与组件集合不变，
+   * 且仅 transform、meshRenderer、light、camera、lighting 或名称变化。此时各组件 ID 集合、遥测箭头开关、
+   * 告警、天空盒、定位器索引及其它实体的运行时状态都不受影响，只需重新应用光照与阴影、刷新这些实体及其阵列批次。
+   * 任一前置条件不满足时不做任何运行时修改并返回 false，调用方必须回退完整同步。
+   */
+  syncEntitiesLocally(
+    document: SceneDocument,
+    entityIds: readonly string[],
+    hierarchySelectionIds?: readonly string[],
+    options?: SceneRuntimeSyncOptions,
+  ): boolean {
+    const shadow = this.shadowDocument;
+    const nextModelArrayIdentityMode = options?.modelArrayIdentityMode ?? this.dependencies.arrays.modelArrayIdentityMode;
+    if (
+      this.disposed || entityIds.length === 0 || !shadow || shadow === document || this.singleTransformPreview
+      || this.dependencies.telemetry.telemetryPreviewActive
+      || nextModelArrayIdentityMode !== this.dependencies.arrays.modelArrayIdentityMode
+      || shadow.id !== document.id || shadow.entityIds !== document.entityIds
+      || this.syncedEntities.size !== document.entityIds.length
+    ) return false;
+    for (const key of new Set([...Object.keys(shadow), ...Object.keys(document)])) {
+      if (key === 'entities' || key === 'selectedEntityId') continue;
+      if ((shadow as Record<string, unknown>)[key] !== (document as Record<string, unknown>)[key]) return false;
+    }
+    const targets = new Set(entityIds);
+    const changes: { previous: Entity; entity: Entity }[] = [];
+    for (const entityId of targets) {
+      const previous = this.syncedEntities.get(entityId);
+      const entity = document.entities[entityId];
+      if (!previous || !entity || !this.entityStates.has(entityId) || !isEntityLocalSyncChange(previous, entity)
+        || !this.hasCompleteRuntimeEntity(entity)) return false;
+      changes.push({ previous, entity });
+    }
+    // 以运行时实际已同步的实体为基准核对，确保除目标外没有其它实体变化。
+    for (const id of document.entityIds) {
+      if (!targets.has(id) && this.syncedEntities.get(id) !== document.entities[id]) return false;
+    }
+
+    this.dependencies.selection.setHierarchySelectionIds(document, hierarchySelectionIds);
+    const selectedEntityIds = this.dependencies.selection.resolveSelectedEntityIds(document);
+    const currentSelectedEntityIds = this.dependencies.selection.selectedEntityIds;
+    // 选区同时变化时其它实体的高亮也要刷新，交给完整同步处理。
+    if (selectedEntityIds.size !== currentSelectedEntityIds.size
+      || [...selectedEntityIds].some(id => !currentSelectedEntityIds.has(id))) return false;
+
+    const startedAt = readRuntimeTimestampMs();
+    this.dependencies.transforms.cancelFolderGroupTransforms();
+    this.shadowDocument = document;
+    this.dependencies.effects.poiEffectRuntime.setDocument(document);
+    if (this.dependencies.transforms.compositionArrayPreview) {
+      const preview = this.dependencies.transforms.compositionArrayPreview;
+      const info = getCompositionArrayInfo(document, [preview.sourceEntityId], 1);
+      const validMemberIds = new Set(info?.entityIds);
+      if (!info || info.error || preview.entityIds.some(id => !validMemberIds.has(id))) this.dependencies.transforms.clearEntityArrayPreview();
+    }
+    // 与完整同步保持同一顺序：光照失效判断、灯光/阴影重新应用（含阴影接收面按场景网格重算）先于实体同步。
+    this.dependencies.environment.syncLighting(document);
+
+    const nextHighlightSet = mergeSceneRuntimeHighlightEntityIds(
+      selectedEntityIds,
+      this.dependencies.selection.localHighlightedEntityIds,
+      this.dependencies.selection.externalHighlightedEntityIds,
+    );
+    const dirtyModelArraySourceIds = new Set<string>();
+    for (const { previous, entity } of changes) {
+      const previousSourceId = previous.components.modelArrayInstance?.sourceEntityId;
+      const nextSourceId = entity.components.modelArrayInstance?.sourceEntityId;
+      if (previousSourceId) dirtyModelArraySourceIds.add(previousSourceId);
+      if (nextSourceId) dirtyModelArraySourceIds.add(nextSourceId);
+      if (entity.components.modelAsset && !entity.components.modelArrayInstance) dirtyModelArraySourceIds.add(entity.id);
+      this.syncEntity(entity, this.dependencies.selection.isEntityHighlighted(entity.id, selectedEntityIds), nextHighlightSet);
+      this.syncedEntities.set(entity.id, entity);
+    }
+    this.dependencies.arrays.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
+    this.dependencies.arrays.syncModelArrayTelemetryProxies();
+    this.dependencies.transforms.disposeStaleModelArrayGizmoProxy();
+    this.dependencies.selection.selectedEntityIds = selectedEntityIds;
+    this.dependencies.selection.rebuildModelSelectionOutline();
+    this.dependencies.readiness.invalidateModelStatistics();
+    this.localSyncCount += 1;
+    this.lastLocalSyncDurationMs = Math.max(0, readRuntimeTimestampMs() - startedAt);
+    return true;
+  }
+
   /**
    * 只同步一个实体的模型参数值。调用方已确认 Store 本次原子更新未改变其它场景内容；
    * 因此这里不重建层级状态、组件 ID 集合或 Locator 索引，只刷新目标及其所属矩阵源。
@@ -136,6 +242,7 @@ export class SceneDocumentController {
     hierarchySelectionIds?: readonly string[],
     options?: SceneRuntimeSyncOptions,
   ): void {
+    if (this.disposed) return;
     const nextModelArrayIdentityMode = options?.modelArrayIdentityMode ?? this.dependencies.arrays.modelArrayIdentityMode;
     if (nextModelArrayIdentityMode !== this.dependencies.arrays.modelArrayIdentityMode) {
       this.sync(document, hierarchySelectionIds, { modelArrayIdentityMode: nextModelArrayIdentityMode });
@@ -178,6 +285,7 @@ export class SceneDocumentController {
    * 不重新扫描 entityIds、加载模型、执行参数脚本或重建 Locator 索引。
    */
   syncSelection(document: SceneDocument, hierarchySelectionIds?: readonly string[]): void {
+    if (this.disposed) return;
     this.dependencies.selection.setHierarchySelectionIds(document, hierarchySelectionIds);
     this.dependencies.transforms.cancelFolderGroupTransforms();
     const startedAt = readRuntimeTimestampMs();
@@ -223,6 +331,7 @@ export class SceneDocumentController {
 
   /** 完整同步文档内容；调用方负责统计耗时。 */
   public syncDocument(document: SceneDocument, forceModelArrayResync = false): void {
+    if (this.disposed) return;
     if (this.shadowDocument?.id !== document.id
       || this.shadowDocument?.sceneSettings.environment?.activeVariantUrl !== document.sceneSettings.environment?.activeVariantUrl) {
       this.dependencies.readiness.modelStatisticsEnvironmentSourceUrl = undefined;
@@ -235,24 +344,6 @@ export class SceneDocumentController {
       const validMemberIds = new Set(info?.entityIds);
       if (!info || info.error || preview.entityIds.some(id => !validMemberIds.has(id))) this.dependencies.transforms.clearEntityArrayPreview();
     }
-    const hasSurfaceArrows = document.entityIds.some(id => {
-      const components = document.entities[id]?.components;
-      if (!components?.modelAsset || components.telemetryBinding?.surfaceArrows?.enabled === false) return false;
-      return components.telemetryBinding?.deviceType === 'conveyor'
-        || components.modelAsset.dataDrivenConfig?.device.devType === 'conveyor'
-        || isConveyorModelAsset(components.modelAsset);
-    });
-    if (this.dependencies.telemetry.hasConveyorSurfaceArrows && !hasSurfaceArrows) this.dependencies.telemetry.conveyorSurfaceArrowSystem.clear();
-    this.dependencies.telemetry.hasConveyorSurfaceArrows = hasSurfaceArrows;
-    const hasStackerArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.stackerMotionArrows?.enabled);
-    if (this.dependencies.telemetry.hasStackerMotionArrows && !hasStackerArrows) this.dependencies.telemetry.stackerMotionArrowSystem.clear();
-    this.dependencies.telemetry.hasStackerMotionArrows = hasStackerArrows;
-    const hasRgvArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.rgvMotionArrows?.enabled);
-    if (this.dependencies.telemetry.hasRgvMotionArrows && !hasRgvArrows) this.dependencies.telemetry.rgvMotionArrowSystem.clear();
-    this.dependencies.telemetry.hasRgvMotionArrows = hasRgvArrows;
-    const hasLiftArrows = document.entityIds.some(id => document.entities[id]?.components.telemetryBinding?.liftMotionArrows?.enabled);
-    if (this.dependencies.telemetry.hasLiftMotionArrows && !hasLiftArrows) this.dependencies.telemetry.liftMotionArrowSystem.clear();
-    this.dependencies.telemetry.hasLiftMotionArrows = hasLiftArrows;
     for (const [key, failure] of this.dependencies.readiness.modelReadinessErrors) {
       if (!failure.entityIds.some(entityId => document.entities[entityId]?.components.modelAsset)) this.dependencies.readiness.modelReadinessErrors.delete(key);
     }
@@ -264,8 +355,6 @@ export class SceneDocumentController {
       document = { ...document, entities };
     }
     this.dependencies.effects.alarmRuntime.sync(document);
-    this.dependencies.effects.alarmManagerIds.clear();
-    for (const id of document.entityIds) if (document.entities[id]?.components.alarmManager) this.dependencies.effects.alarmManagerIds.add(id);
     this.dependencies.outputs.defaultCargoGeneratorId = document.sceneSettings.defaultCargoGeneratorId ?? null;
     this.dependencies.effects.poiEffectRuntime.setDocument(document);
     for (const [id, node] of this.dependencies.effects.effectPoseNodes) if (!document.entities[id]) { node.dispose(); this.dependencies.effects.effectPoseNodes.delete(id); }
@@ -283,55 +372,67 @@ export class SceneDocumentController {
     const hierarchyStates = createEntityHierarchyStateMap(document.entityIds, document.entities);
     for (const [entityId, state] of hierarchyStates) this.entityStates.set(entityId, state);
 
-    const primitiveMeshIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.meshRenderer)),
-    );
-    const locatorIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.locator)),
-    );
-    const cadReferenceIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.cadReference)),
-    );
-    const modelArrayInstanceIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(
-        document.entities[entityId]?.components.modelAsset
-        && document.entities[entityId]?.components.modelArrayInstance,
-      )),
-    );
-    const modelIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(
-        document.entities[entityId]?.components.modelAsset
-        && !document.entities[entityId]?.components.modelArrayInstance,
-      )),
-    );
-    const modelGeneratorIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.modelGenerator)),
-    );
-    const deviceSpawnerIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.deviceSpawner)),
-    );
+    // 一次遍历完成全部组件集合与遥测箭头开关的分类，避免对 entityIds 重复扫描。
+    const primitiveMeshIds = new Set<string>();
+    const locatorIds = new Set<string>();
+    const cadReferenceIds = new Set<string>();
+    const modelArrayInstanceIds = new Set<string>();
+    const modelIds = new Set<string>();
+    const modelGeneratorIds = new Set<string>();
+    const deviceSpawnerIds = new Set<string>();
+    const lightIds = new Set<string>();
+    const poiEffectIds = new Set<string>();
+    const autoPatrolIds = new Set<string>();
+    const manualRoamSpawnIds = new Set<string>();
+    const clickEventBindingIds = new Set<string>();
+    const dataPlatformScreenIds = new Set<string>();
+    let hasSurfaceArrows = false;
+    let hasStackerArrows = false;
+    let hasRgvArrows = false;
+    let hasLiftArrows = false;
+    this.dependencies.effects.alarmManagerIds.clear();
+    for (const entityId of document.entityIds) {
+      const entity = document.entities[entityId];
+      if (!entity) continue;
+      const components = entity.components;
+      if (components.meshRenderer) primitiveMeshIds.add(entityId);
+      if (components.locator) locatorIds.add(entityId);
+      if (components.cadReference) cadReferenceIds.add(entityId);
+      if (components.modelAsset) {
+        (components.modelArrayInstance ? modelArrayInstanceIds : modelIds).add(entityId);
+        if (!hasSurfaceArrows && components.telemetryBinding?.surfaceArrows?.enabled !== false) {
+          hasSurfaceArrows = components.telemetryBinding?.deviceType === 'conveyor'
+            || components.modelAsset.dataDrivenConfig?.device.devType === 'conveyor'
+            || isConveyorModelAsset(components.modelAsset);
+        }
+      }
+      if (components.modelGenerator) modelGeneratorIds.add(entityId);
+      if (components.deviceSpawner) deviceSpawnerIds.add(entityId);
+      if (components.light) lightIds.add(entityId);
+      if (components.poiEffect) poiEffectIds.add(entityId);
+      if (components.autoPatrol) autoPatrolIds.add(entityId);
+      if (components.manualRoamSpawn) manualRoamSpawnIds.add(entityId);
+      if (this.isClickEventBindingMarkerEntity(entity)) clickEventBindingIds.add(entityId);
+      if (components.alarmManager) this.dependencies.effects.alarmManagerIds.add(entityId);
+      if (components.dataPlatformScreen) dataPlatformScreenIds.add(entityId);
+      const binding = components.telemetryBinding;
+      if (binding?.stackerMotionArrows?.enabled) hasStackerArrows = true;
+      if (binding?.rgvMotionArrows?.enabled) hasRgvArrows = true;
+      if (binding?.liftMotionArrows?.enabled) hasLiftArrows = true;
+    }
+    const telemetry = this.dependencies.telemetry;
+    if (telemetry.hasConveyorSurfaceArrows && !hasSurfaceArrows) telemetry.conveyorSurfaceArrowSystem.clear();
+    telemetry.hasConveyorSurfaceArrows = hasSurfaceArrows;
+    if (telemetry.hasStackerMotionArrows && !hasStackerArrows) telemetry.stackerMotionArrowSystem.clear();
+    telemetry.hasStackerMotionArrows = hasStackerArrows;
+    if (telemetry.hasRgvMotionArrows && !hasRgvArrows) telemetry.rgvMotionArrowSystem.clear();
+    telemetry.hasRgvMotionArrows = hasRgvArrows;
+    if (telemetry.hasLiftMotionArrows && !hasLiftArrows) telemetry.liftMotionArrowSystem.clear();
+    telemetry.hasLiftMotionArrows = hasLiftArrows;
     if (forceModelArrayResync) {
       for (const modelId of modelIds) dirtyModelArraySourceIds.add(modelId);
     }
 
-    const lightIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.light)),
-    );
-    const poiEffectIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.poiEffect)),
-    );
-    const autoPatrolIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.autoPatrol)),
-    );
-    const manualRoamSpawnIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.manualRoamSpawn)),
-    );
-    const clickEventBindingIds = new Set(
-      document.entityIds.filter((entityId) => {
-        const entity = document.entities[entityId];
-        return Boolean(entity && this.isClickEventBindingMarkerEntity(entity));
-      }),
-    );
     const previewSourceId = this.dependencies.transforms.entityArrayPreview?.sourceEntityId;
     if (previewSourceId && this.dependencies.effects.poiEffectRuntime.has(previewSourceId) && !poiEffectIds.has(previewSourceId)) {
       this.dependencies.transforms.clearEntityArrayPreview();
@@ -340,9 +441,6 @@ export class SceneDocumentController {
     this.dependencies.patrol.autoPatrolMarkerRuntime.disposeMissing(autoPatrolIds);
     this.dependencies.patrol.manualRoamSpawnRuntime.disposeMissing(manualRoamSpawnIds);
     this.dependencies.effects.clickEventBindingRuntime.disposeMissing(clickEventBindingIds);
-    const dataPlatformScreenIds = new Set(
-      document.entityIds.filter((entityId) => Boolean(document.entities[entityId]?.components.dataPlatformScreen)),
-    );
     for (const [entityId, entry] of this.dependencies.effects.dataPlatformScreenTextures.entries()) {
       if (dataPlatformScreenIds.has(entityId)) continue;
       const material = this.dependencies.presentation.meshes.get(entityId)?.material;

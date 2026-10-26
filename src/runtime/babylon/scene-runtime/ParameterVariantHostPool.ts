@@ -11,6 +11,7 @@ import type { ModelParameterBindingController } from './ModelParameterBindingCon
 import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
 import type { SceneLocatorController } from './SceneLocatorController';
 import type { ScenePickingAndSelectionController } from './ScenePickingAndSelectionController';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import { type ModelRuntimeEntry, type ModelArrayParameterVariantRuntimeEntry } from './sceneRuntimeTypes';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
@@ -31,6 +32,18 @@ export class ParameterVariantHostPool {
 
   public readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
   public readonly modelArrayParameterVariantByEntityId = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
+  private disposed = false;
+
+  /** 所有异步回调先失效，再逐宿主释放；两个索引都只由宿主池负责清空。 */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const variant of [...this.modelArrayParameterVariants.values()]) {
+      runSceneRuntimeCleanup(this.context, `参数变体 ${variant.representativeEntityId}`, () => this.disposeModelArrayParameterVariant(variant));
+    }
+    this.modelArrayParameterVariants.clear();
+    this.modelArrayParameterVariantByEntityId.clear();
+  }
 
   /** 单实体或整组连续调参时复用已就绪宿主，避免每次滑块变化都重新加载并启动脚本。 */
   public rekeyReusableModelArrayParameterVariant(
@@ -40,7 +53,7 @@ export class ParameterVariantHostPool {
     entities: readonly Entity[],
     reservedKeys: ReadonlySet<string>,
   ): void {
-    if (this.modelArrayParameterVariants.has(nextKey)) return;
+    if (this.disposed || this.modelArrayParameterVariants.has(nextKey)) return;
     const entityIds = new Set(entities.map((entity) => entity.id));
     const reusable = [...this.modelArrayParameterVariants.values()].find((variant) => (
       variant.sourceEntityId === sourceEntityId
@@ -66,6 +79,7 @@ export class ParameterVariantHostPool {
     entities: Entity[],
     parameterOnlyChangedEntityId?: string,
   ): ModelArrayParameterVariantRuntimeEntry | null {
+    if (this.disposed) return null;
     const representative = entities[0];
     const modelAsset = representative?.components.modelAsset;
     if (!representative || !modelAsset) return null;
@@ -127,6 +141,7 @@ export class ParameterVariantHostPool {
     assetSignature: string,
     parameterOnlyChangedEntityId?: string,
   ): ModelArrayParameterVariantRuntimeEntry {
+    if (this.disposed) throw new Error('参数变体宿主池已释放，无法创建宿主。');
     this.dependencies.readiness.modelReadinessErrors.delete(`variant:${key}`);
     const variantSequence = ++this.dependencies.assets.modelLoadSequence;
     const root = new TransformNode(`__modelArrayParameterVariant_${sourceEntity.id}_${variantSequence}`, this.context.scene);
@@ -189,8 +204,8 @@ export class ParameterVariantHostPool {
     void this.dependencies.assets.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal, sourceEntity.id)
       .then((loadedAssets) => {
         const activeVariant = this.modelArrayParameterVariants.get(key);
-        if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) {
-          loadedAssets.handle.dispose();
+        if (this.disposed || !activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) {
+          runSceneRuntimeCleanup(this.context, `过期参数变体资产 ${representative.id}`, () => loadedAssets.handle.dispose());
           return;
         }
 
@@ -221,7 +236,7 @@ export class ParameterVariantHostPool {
       })
       .catch((error) => {
         const activeVariant = this.modelArrayParameterVariants.get(key);
-        if (!activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) return;
+        if (this.disposed || !activeVariant || activeVariant.model !== model || model.loadToken !== variantSequence) return;
         this.disposeModelArrayParameterVariant(activeVariant);
         const message = error instanceof Error ? error.message : String(error);
         this.dependencies.readiness.modelReadinessErrors.set(`variant:${key}`, {
@@ -239,9 +254,10 @@ export class ParameterVariantHostPool {
     variant: ModelArrayParameterVariantRuntimeEntry,
     modelAsset: ModelAssetComponent,
   ): void {
+    if (this.disposed || this.modelArrayParameterVariants.get(variant.key) !== variant) return;
     this.dependencies.assets.syncModelAssetExternalScripts(modelAsset, variant.model, (current) => {
       const activeVariant = this.modelArrayParameterVariants.get(variant.key);
-      if (!activeVariant || activeVariant.model !== current) return;
+      if (this.disposed || !activeVariant || activeVariant.model !== current) return;
 
       this.dependencies.assets.refreshModelMeshes(current, {
         modelArrayParameterVariant: true,
@@ -282,6 +298,7 @@ export class ParameterVariantHostPool {
 
   /** 新参数宿主异步初始化时保留脚本可见状态，只在每帧 Active Mesh 评估阶段禁止绘制。 */
   public beginModelArrayParameterVariantRenderSuppression(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    if (this.disposed) return;
     this.dependencies.arrays.beginModelArrayHostRenderSuppression(variant.model);
   }
 
@@ -292,6 +309,7 @@ export class ParameterVariantHostPool {
 
   /** 先保存脚本宿主的原渲染层；批次创建期间仍需读取完整世界矩阵和视觉状态。 */
   public hideModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
+    if (this.disposed) return;
     const activeMeshIds = new Set<number>();
     for (const mesh of variant.model.meshes) {
       if (mesh.isDisposed()) continue;
@@ -331,29 +349,43 @@ export class ParameterVariantHostPool {
   public disposeModelArrayParameterVariant(variant: ModelArrayParameterVariantRuntimeEntry): void {
     if (this.modelArrayParameterVariants.get(variant.key) !== variant) return;
     this.modelArrayParameterVariants.delete(variant.key);
-    for (const entity of variant.entities) {
-      if (this.modelArrayParameterVariantByEntityId.get(entity.id) === variant) {
-        this.modelArrayParameterVariantByEntityId.delete(entity.id);
-      }
+    // 旧批次可能临时承载已离开参数组的实体；按所有权清除全部借用索引，而不只看当前 entities。
+    for (const [entityId, current] of this.modelArrayParameterVariantByEntityId) {
+      if (current === variant) this.modelArrayParameterVariantByEntityId.delete(entityId);
     }
 
     const model = variant.model;
-    this.endModelArrayParameterVariantRenderSuppression(variant);
-    model.cancelLoad?.();
+    model.loadToken = 0;
+    const cleanup = (resource: string, action: () => void): void => {
+      runSceneRuntimeCleanup(this.context, `参数变体 ${variant.representativeEntityId} ${resource}`, action);
+    };
+    cleanup('渲染抑制', () => this.endModelArrayParameterVariantRenderSuppression(variant));
+    const cancelLoad = model.cancelLoad;
     model.cancelLoad = null;
-    this.restoreModelArrayParameterVariantHost(variant);
-    this.dependencies.assets.restoreModelArrayHostMeshes(model);
-    model.root.setEnabled(true);
-    model.externalScriptRuntime?.dispose();
+    cleanup('在途加载', () => cancelLoad?.());
+    cleanup('渲染层恢复', () => this.restoreModelArrayParameterVariantHost(variant));
+    cleanup('宿主网格恢复', () => this.dependencies.assets.restoreModelArrayHostMeshes(model));
+    cleanup('宿主启用状态', () => { if (!model.root.isDisposed()) model.root.setEnabled(true); });
+    const scriptRuntime = model.externalScriptRuntime;
     model.externalScriptRuntime = null;
-    for (const texture of model.textureCache.values()) texture.dispose();
+    model.externalScriptStarting = false;
+    cleanup('外置脚本', () => scriptRuntime?.dispose());
+    const textures = [...model.textureCache.values()];
     model.textureCache.clear();
-    this.dependencies.arrays.disposeModelArrayBatch(model);
-    model.assetHandle?.dispose();
+    for (const texture of textures) cleanup('参数纹理', () => texture.dispose());
+    // 阵列仅借用源材质；先释放批次，再归还共享模型资产句柄。
+    cleanup('阵列批次', () => this.dependencies.arrays.disposeModelArrayBatch(model));
+    const assetHandle = model.assetHandle;
     model.assetHandle = null;
-    model.contentRoot.dispose();
-    model.root.dispose();
+    cleanup('资产句柄', () => assetHandle?.dispose());
+    cleanup('内容节点', () => { if (!model.contentRoot.isDisposed()) model.contentRoot.dispose(); });
+    cleanup('根节点', () => { if (!model.root.isDisposed()) model.root.dispose(); });
     model.modelArraySuspendedMeshes.clear();
-    for (const entity of variant.entities) Reflect.apply(this.context.onModelMeasurementChanged, this.context.callbackReceiver, [entity.id]);
+    model.parameterBaseline.clear();
+    model.meshes = [];
+    variant.sourceLayerMasks.clear();
+    for (const entity of variant.entities) {
+      cleanup(`测量通知 ${entity.id}`, () => Reflect.apply(this.context.onModelMeasurementChanged, this.context.callbackReceiver, [entity.id]));
+    }
   }
 }

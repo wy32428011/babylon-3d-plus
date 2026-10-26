@@ -27,6 +27,7 @@ import { AssetLoadScheduler } from '../AssetLoadScheduler';
 import { EnvironmentAssetContainerCache } from '../environmentAssetContainerCache';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { ScenePickingAndSelectionController } from './ScenePickingAndSelectionController';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
@@ -79,7 +80,42 @@ export class EnvironmentAndSkyboxController {
   private readonly environmentTraceScopes = new WeakMap<AbortSignal, SceneLoadTraceScope | null>();
   private skyboxTrace: { token: ProjectOpenSpanToken; sourceUrl: string | null; scope: SceneLoadTraceScope | null } | null = null;
   private skyboxOperationScope: SceneLoadTraceScope | null = null;
+  private readonly lifetime = new AbortController();
+  private updatesStopped = false;
+  private environmentDisposed = false;
+  private disposed = false;
 
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    this.draftPreviewGeneration += 1;
+    this.lifetime.abort();
+    runSceneRuntimeCleanup(this.context, '环境加载队列', () => this.environmentLoadScheduler.dispose());
+    runSceneRuntimeCleanup(this.context, '天空加载记录', () => this.endProjectOpenSkyboxTrace('cancelled', 'aborted'));
+  }
+
+  /** GI 派生资源先于业务模型归还；阴影与天空仍供灯光及材质清理使用，留到最终阶段。 */
+  disposeEnvironment(): void {
+    if (this.environmentDisposed) return;
+    this.environmentDisposed = true;
+    this.stopUpdates();
+    runSceneRuntimeCleanup(this.context, '场景外观', () => this.appearanceRuntime.dispose());
+    runSceneRuntimeCleanup(this.context, '场景光源组', () => this.lightRigRuntime.dispose());
+    runSceneRuntimeCleanup(this.context, '光照烘焙运行时', () => this.lightingRuntime.dispose());
+    runSceneRuntimeCleanup(this.context, '环境运行时', () => this.environmentRuntime.dispose());
+    runSceneRuntimeCleanup(this.context, '环境资产缓存', () => this.environmentAssetCache.dispose());
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.disposeEnvironment();
+    runSceneRuntimeCleanup(this.context, '场景阴影', () => this.shadowRuntime.dispose());
+    runSceneRuntimeCleanup(this.context, '场景天空', () => this.skyboxRuntime.dispose());
+    this.appearanceSignature = this.skyboxLightingSignature = '';
+    this.allowDayNightCycle = null;
+    this.skyboxTrace = this.skyboxOperationScope = null;
+  }
 
   /** 同步球形天空盒实体；没有实体时兼容旧 sceneSettings.skybox。 */
   syncSkybox(document: SceneDocument): void {
@@ -127,6 +163,7 @@ export class EnvironmentAndSkyboxController {
 
   /** 同步场景级环境底座模型；环境不写入实体索引，也不能被场景点击选中。 */
   syncEnvironment(environment: SceneEnvironmentSettings | null): void {
+    if (this.updatesStopped) return;
     this.dependencies.readiness.modelStatisticsEnvironmentSourceUrl = environment?.activeVariantUrl ?? null;
     this.environmentRuntime.sync(environment);
     this.dependencies.readiness.invalidateModelStatistics();
@@ -134,11 +171,13 @@ export class EnvironmentAndSkyboxController {
 
   /** 单独同步场景级默认模型生成器：该设置只改 sceneSettings，不触发实体全量同步，须由编辑器显式推送。 */
   syncDefaultCargoGenerator(defaultCargoGeneratorId: string | null): void {
+    if (this.updatesStopped) return;
     this.dependencies.outputs.defaultCargoGeneratorId = defaultCargoGeneratorId ?? null;
   }
 
   /** 纯外观独立于光照签名；改变曝光、雾、光晕不重建灯光。 */
   syncAppearance(document: SceneDocument): void {
+    if (this.updatesStopped) return;
     const appearance = getSceneAppearanceConfig(document), signature = JSON.stringify(appearance);
     if (signature === this.appearanceSignature) return;
     this.appearanceSignature = signature;
@@ -148,6 +187,7 @@ export class EnvironmentAndSkyboxController {
   }
 
   public syncSkyboxLighting(document: SceneDocument): void {
+    if (this.updatesStopped) return;
     const appearance = getSceneAppearanceConfig(document), lighting = getSceneLightingConfig(document);
     const signature = JSON.stringify([appearance.skyboxVisible, lighting.environmentIntensity, lighting.environment]);
     if (signature === this.skyboxLightingSignature) return;
@@ -158,6 +198,7 @@ export class EnvironmentAndSkyboxController {
 
   /** 统一光照是唯一参数来源；旧扁平字段仅在阴影算法边界临时派生。 */
   syncLighting(document: SceneDocument): void {
+    if (this.updatesStopped) return;
     this.dependencies.document.shadowDocument = document;
     void this.syncLightingPresentation(document).catch(error => {
       Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['环境光照显示失败：' + (error instanceof Error ? error.message : String(error))]);
@@ -202,6 +243,7 @@ export class EnvironmentAndSkyboxController {
   private draftPreviewGeneration = 0;
 
   async setLightingDraftPreview(preview: LightingDraftPreview | null): Promise<void> {
+    if (this.updatesStopped) throw new DOMException('场景光照预览已取消。', 'AbortError');
     const document = this.dependencies.document.shadowDocument;
     if (!document) return;
     if (preview && this.dependencies.effects.poiEffectRuntime.isDayNightCycleActive()) throw new Error('昼夜周期正在改变照明，请先暂停周期，再临时预览草稿。');
@@ -215,6 +257,7 @@ export class EnvironmentAndSkyboxController {
       const synchronization = this.syncLightingPresentation(source);
       this.syncAppearance(source);
       await synchronization;
+      if (this.updatesStopped) throw new DOMException('场景光照预览已取消。', 'AbortError');
       // 资源来源切换是异步的；原环境真正就绪后才重新启用原 GI。
       if (!preview) {
         const started = Date.now();
@@ -238,6 +281,8 @@ export class EnvironmentAndSkyboxController {
   }
 
   async preflightLightingBake(document: SceneDocument, signal?: AbortSignal): Promise<LightingBakePreflight> {
+    signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+    signal.throwIfAborted();
     this.assertSkyboxReadyForBake();
     if (this.lightingBakeRunning) throw new Error('请等待当前烘焙任务结束，再检查预算。');
     if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
@@ -255,6 +300,8 @@ export class EnvironmentAndSkyboxController {
 
   /** 后台任务只读取稳定快照；结果仍匹配当前场景后才应用，文档提交由编辑器事务负责。 */
   async bakeLighting(document: SceneDocument, signal?: AbortSignal, progress?: (message: string, fraction?: number, phase?: string) => void): Promise<SceneLightingBakeSnapshot> {
+    signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+    signal.throwIfAborted();
     this.assertSkyboxReadyForBake();
     if (this.lightingBakeRunning) throw new Error('已有光照烘焙正在进行。');
     if (this.dependencies.effects.poiEffectRuntime.isDayNightCycleActive()) throw new Error('昼夜周期正在改变照明，请先停用昼夜组件或关闭允许昼夜周期，再烘焙间接光。');
@@ -270,8 +317,14 @@ export class EnvironmentAndSkyboxController {
       signal?.throwIfAborted();
       if (getSceneLightingBakeSignature(this.dependencies.document.shadowDocument ?? document) !== signature) throw new Error('烘焙期间静态场景已变化，候选结果未提交。');
     };
-    const cancel = () => { void api.cancelLightingBake(jobId).catch(error => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['取消后台烘焙失败：' + String(error)])); };
-    const unsubscribe = api.onLightingBakeProgress(event => { if (event.jobId === jobId) progress?.(event.message, event.progress, event.phase); });
+    let unsubscribe: (() => void) | null = api.onLightingBakeProgress(event => {
+      if (!this.updatesStopped && !signal?.aborted && event.jobId === jobId) progress?.(event.message, event.progress, event.phase);
+    });
+    const releaseProgress = () => { const release = unsubscribe; unsubscribe = null; release?.(); };
+    const cancel = () => {
+      runSceneRuntimeCleanup(this.context, '烘焙进度订阅', releaseProgress);
+      void api.cancelLightingBake(jobId).catch(error => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['取消后台烘焙失败：' + String(error)]));
+    };
     signal?.addEventListener('abort', cancel, { once: true });
     this.lightingBakeRunning = true;
     let applied = false, uploadStarted = false, uploadFinished = false;
@@ -282,7 +335,7 @@ export class EnvironmentAndSkyboxController {
       await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
       this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
       this.lightingRuntime.markDirty('bake-capture');
-      const budget = await api.lightingBakeResourceBudget(); check();
+      const budget = await awaitLightingTaskStep(api.lightingBakeResourceBudget(), signal); check();
       const admission = await this.lightingRuntime.inspectBakeAdmission(budget, signal);
       assertLightingBakePreflight(admission); check();
       const header = { version: 1 as const, jobId, signature, sceneName: document.name,
@@ -319,8 +372,10 @@ export class EnvironmentAndSkyboxController {
       }
       throw error;
     } finally {
-      signal?.removeEventListener('abort', cancel); unsubscribe(); this.lightingBakeRunning = false;
-      if (!applied) this.lightingRuntime.sync(this.dependencies.document.shadowDocument ?? document);
+      signal?.removeEventListener('abort', cancel);
+      runSceneRuntimeCleanup(this.context, '烘焙进度订阅', releaseProgress);
+      this.lightingBakeRunning = false;
+      if (!applied && !this.updatesStopped) this.lightingRuntime.sync(this.dependencies.document.shadowDocument ?? document);
     }
   }
 
@@ -329,6 +384,7 @@ export class EnvironmentAndSkyboxController {
     environment: SceneEnvironmentSettings,
     options: SceneEnvironmentApplyOptions,
   ): Promise<EnvironmentApplyResult> {
+    if (this.updatesStopped) return Promise.reject(new DOMException('环境事务已取消。', 'AbortError'));
     this.dependencies.readiness.modelStatisticsEnvironmentSourceUrl = environment.activeVariantUrl;
     this.dependencies.readiness.invalidateModelStatistics();
     return this.environmentRuntime.apply(environment, options);
@@ -363,8 +419,11 @@ export class EnvironmentAndSkyboxController {
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
+    const originalLoadSignal = loadSignal;
+    loadSignal = loadSignal ? AbortSignal.any([loadSignal, this.lifetime.signal]) : this.lifetime.signal;
+    loadSignal.throwIfAborted();
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
-    if (loadSignal) this.environmentTraceScopes.set(loadSignal, traceScope);
+    if (originalLoadSignal) this.environmentTraceScopes.set(originalLoadSignal, traceScope);
     const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope);
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     const queuedAt = readRuntimeTimestampMs();
@@ -379,6 +438,7 @@ export class EnvironmentAndSkyboxController {
           cacheKey: `${rootUrl}${fileName}`,
           scene: this.context.scene,
           loadSource: () => this.dependencies.readiness.loadDiagnostics.measureAsync('environmentReadDecode', () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, (event) => {
+            if (this.updatesStopped || loadSignal?.aborted) return;
             this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
             onProgress?.(event);
           }), diagnosticContext, traceScope),
@@ -388,6 +448,10 @@ export class EnvironmentAndSkyboxController {
         },
         loadSignal,
       );
+      if (this.updatesStopped || loadSignal.aborted) {
+        container.dispose();
+        throw new DOMException('环境加载已取消。', 'AbortError');
+      }
       this.environmentLoadProgressUnits.set(container, loadSequence);
       return container;
     } catch (error) {
@@ -402,6 +466,7 @@ export class EnvironmentAndSkyboxController {
   public waitForEnvironmentRenderReady(loadSignal?: AbortSignal): Promise<void> {
     const scope = loadSignal && this.environmentTraceScopes.has(loadSignal)
       ? this.environmentTraceScopes.get(loadSignal)! : this.dependencies.readiness.loadDiagnostics.captureTrace();
+    loadSignal = loadSignal ? AbortSignal.any([loadSignal, this.lifetime.signal]) : this.lifetime.signal;
     return this.dependencies.readiness.loadDiagnostics.measureAsync('environmentRenderReady', () => waitForSceneRenderReady(this.context.scene, loadSignal), undefined, scope);
   }
 
@@ -430,12 +495,14 @@ export class EnvironmentAndSkyboxController {
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeSkyboxRuntime(): void {
     this.skyboxRuntime = new SceneSkyboxRuntime(this.context.scene, this.context.pushLog, state => {
+      if (this.updatesStopped) return;
       this.observeSkyboxTrace(state);
       this.dependencies.readiness.notifyModelLoadProgressChanged();
     });
   }
 
   private syncSkyboxTarget(target: Parameters<SceneSkyboxRuntime['sync']>[0]): void {
+    if (this.updatesStopped) return;
     this.skyboxOperationScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     this.skyboxRuntime.sync(target);
     // 同源在途复用会直接return，不产生readiness事件；本次消费者仍有真实等待边界。
@@ -480,6 +547,7 @@ export class EnvironmentAndSkyboxController {
       waitForRenderReady: (signal) => this.waitForEnvironmentRenderReady(signal),
       onAssetContainerSettled: (container) => this.settleEnvironmentAssetContainerLoad(container),
       onSnapshot: snapshot => {
+        if (this.updatesStopped) return;
         this.context.notifyEnvironmentSnapshot(snapshot);
         this.dependencies.readiness.invalidateModelStatistics();
         this.lightingRuntime?.markDirty('environment-snapshot');

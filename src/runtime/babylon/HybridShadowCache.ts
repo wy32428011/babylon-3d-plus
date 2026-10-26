@@ -86,6 +86,9 @@ export class HybridShadowMeshState {
 
   isStatic(mesh: AbstractMesh): boolean { return this.staticMeshes.has(mesh); }
 
+  /** 场景内容可能已变化；下一次 refreshForFrame 重新检测，多次失效只在渲染绑定时合并为一次全量签名检查。 */
+  markStale(): void { this.refreshedFrame = -1; }
+
   /** @internal 在等价性测试与诊断中切回旧签名；切换后的首帧重新建立快照。 */
   setSignatureMode(mode: 'numeric' | 'legacy'): void {
     if (this.signatureMode === mode) return;

@@ -381,7 +381,10 @@ export class SceneShadowRuntime {
     const qualityChanged = settings.quality !== this.settings.quality;
     const enabledChanged = settings.enabled !== this.settings.enabled;
     const modeChanged = settings.mode !== this.settings.mode;
-    this.settings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
+    const nextSettings = { ...DEFAULT_SHADOW_SETTINGS, ...settings };
+    const settingsUnchanged = (Object.keys(nextSettings) as (keyof SceneShadowSettings)[])
+      .every(key => nextSettings[key] === this.settings[key]);
+    this.settings = nextSettings;
     if (modeChanged) {
       this.disposePrimaryGenerator();
       this.disposeLocalGenerators();
@@ -422,9 +425,15 @@ export class SceneShadowRuntime {
     this.applyGeneratorTuning();
 
     this.updateShadowDistance();
-    this.syncSceneMeshes(true);
+    // 设置未变且接收面未启用（无需按网格重算包围盒）时，网格集合变化由每帧的数量/末尾 uniqueId 检测登记，
+    // 这里只标记缓存过期；否则强制同步网格（其末尾已执行 invalidateCachedShadow）。
+    if (settingsUnchanged && !(this.settings.enabled && this.settings.catcherEnabled)) {
+      this.syncSceneMeshes();
+      this.invalidateCachedShadow();
+    } else {
+      this.syncSceneMeshes(true);
+    }
     this.refreshReceiverLightDefines();
-    this.invalidateCachedShadow();
   }
 
   /** 方向光实体删除后选择剩余有效方向光，不创建替代光源。 */
@@ -471,7 +480,8 @@ export class SceneShadowRuntime {
   /** 缓存档只在场景内容确实变化时重绘一帧阴影贴图。 */
   invalidateCachedShadow(): void {
     if (this.isHybrid()) {
-      this.hybridMeshState.refresh();
+      // 缓存在每次绑定阴影贴图前调用 refreshForFrame，因此这里只标记过期，避免每次失效都全量检查静态网格。
+      this.hybridMeshState.markStale();
       return;
     }
     if (!this.isCachedProfile()) return;
@@ -509,7 +519,6 @@ export class SceneShadowRuntime {
 
     if (this.isHybrid()) {
       this.hybridMeshState.setMeshes(meshes.filter(mesh => !this.renderSuppressedMeshes.has(mesh) && isShadowCaster(mesh)), this.hybridMeshRoles);
-      this.hybridMeshState.refresh();
     }
     for (const mesh of meshes) {
       this.knownMeshes.add(mesh);
@@ -880,6 +889,11 @@ export class SceneShadowRuntime {
   }
 
   private updateCatcherBounds(): void {
+    // 接收面未启用时包围盒无人读取；启用只能经 applySettings 写入设置后强制同步网格，届时会重新计算。
+    if (!this.settings.enabled || !this.settings.catcherEnabled) {
+      this.catcher.setEnabled(false);
+      return;
+    }
     let minX = Infinity;
     let minY = Infinity;
     let minZ = Infinity;

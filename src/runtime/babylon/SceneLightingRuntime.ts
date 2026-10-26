@@ -27,7 +27,7 @@ import type {
   LightingBakeInput, LightingClassificationEntry, SceneLightingBakeSettings, SceneLightingBakeSnapshot,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
 import {
-  getSceneLightingBakeSignature, lightingContentHash, validateSceneLightingBakeSnapshot, isLightingLightmapRecipeCompatible,
+  getSceneLightingBakeSignature, getSceneLightingBakeSignatureCached, lightingContentHash, validateSceneLightingBakeSnapshot, isLightingLightmapRecipeCompatible,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import { BakedLightingMaterialPlugin, LIGHTING_UV_ATTRIBUTE, type BakedLightingBinding } from './BakedLightingMaterialPlugin';
@@ -188,7 +188,7 @@ export class SceneLightingRuntime {
     this.dirtyConsumptionDepth++;
     try {
       if (this.disposed) return;
-      const documentSignature = getSceneLightingBakeSignature(document);
+      const documentSignature = getSceneLightingBakeSignatureCached(document);
       if (documentSignature !== this.documentSignature) this.invalidatedSnapshotKey = null;
       this.documentSignature = documentSignature;
       this.document = document;

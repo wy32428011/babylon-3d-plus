@@ -24,6 +24,7 @@ import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import { EntityGroupTranslationPreview, type EntityGroupTranslationTarget } from '../EntityGroupTranslationPreview';
 import { EntityGroupRotationPreview, type EntityGroupRotationTarget } from '../EntityGroupRotationPreview';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
@@ -77,10 +78,28 @@ export class SceneTransformPreviewController {
   public pendingGroupTranslationDelta: Vector3Data | null = null;
   public groupRotationPreview: EntityGroupRotationPreview | null = null;
   public pendingGroupRotationMatrix: number[] | null = null;
+  private disposed = false;
+
+  /** 预览会归还模型姿态，必须在实体与阵列批次释放之前完成。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.context.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.groupTransformPreviewObserver);
+    this.groupTransformPreviewObserver = null;
+    runSceneRuntimeCleanup(this.context, '阵列预览', () => this.clearEntityArrayPreview());
+    runSceneRuntimeCleanup(this.context, '群组平移预览', () => this.cancelFolderGroupTranslation());
+    runSceneRuntimeCleanup(this.context, '群组旋转预览', () => this.cancelFolderGroupRotation());
+    const groupProxy = this.entityGroupGizmoProxy, arrayProxy = this.modelArrayGizmoProxy;
+    this.entityGroupGizmoProxy = this.modelArrayGizmoProxy = null;
+    this.groupTranslationPreview = this.groupRotationPreview = null;
+    this.pendingGroupTranslationDelta = this.pendingGroupRotationMatrix = null;
+    runSceneRuntimeCleanup(this.context, '群组变换代理', () => groupProxy?.node.dispose(false, false));
+    runSceneRuntimeCleanup(this.context, '阵列变换代理', () => arrayProxy?.node.dispose(false, false));
+  }
 
   /** 根据实体 ID 获取当前运行时中可被 Gizmo 绑定的 Babylon 节点。 */
   getGizmoTargetByEntityId(entityId: string | null): AbstractMesh | TransformNode | null {
-    if (!entityId) return null;
+    if (this.disposed || !entityId) return null;
     if (!this.dependencies.document.isEntityTransformEditable(entityId)) return null;
 
     const modelArrayInstance = this.dependencies.arrays.modelArrayInstanceEntities.get(entityId);
@@ -118,6 +137,7 @@ export class SceneTransformPreviewController {
     tool: 'translate' | 'rotate' = 'translate',
     compositionPivot?: Vector3Data,
   ): TransformNode | null {
+    if (this.disposed) return null;
     const uniqueEntityIds = [...new Set(entityIds)].filter((entityId) => Boolean(entityId));
     if (uniqueEntityIds.length === 0) {
       this.entityGroupGizmoProxy?.node.setEnabled(false);
@@ -203,7 +223,7 @@ export class SceneTransformPreviewController {
     entityIds: readonly string[],
     beforePositions: Readonly<Record<string, Vector3Data>>,
   ): boolean {
-    if (this.dependencies.telemetry.telemetryPreviewActive) return false;
+    if (this.disposed || this.dependencies.telemetry.telemetryPreviewActive) return false;
     this.cancelFolderGroupTransforms();
 
     const validEntityIds = [...new Set(entityIds)].filter((entityId) => {
@@ -271,7 +291,7 @@ export class SceneTransformPreviewController {
     entityIds: readonly string[],
     beforeTransforms: Readonly<Record<string, TransformComponent>>,
   ): boolean {
-    if (this.dependencies.telemetry.telemetryPreviewActive) return false;
+    if (this.disposed || this.dependencies.telemetry.telemetryPreviewActive) return false;
     this.cancelFolderGroupTransforms();
 
     this.groupRotationPreview = new EntityGroupRotationPreview(
@@ -355,6 +375,7 @@ export class SceneTransformPreviewController {
 
   /** 异步模型或批次就绪后重新解析群组变换目标，并保持上一帧已应用的绝对结果。 */
   public refreshGroupTransformPreviewTargets(): void {
+    if (this.disposed) return;
     const translationPreview = this.groupTranslationPreview;
     const rotationPreview = this.groupRotationPreview;
     translationPreview?.refresh();
@@ -618,6 +639,7 @@ export class SceneTransformPreviewController {
     copyCount: number,
     spacingMeters: number,
   ): boolean {
+    if (this.disposed) return false;
     if (this.dependencies.document.shadowDocument?.entities[entityId]?.composition) {
       return this.updateCompositionArrayPreview(entityId, worldDirection, copyCount, spacingMeters);
     }
@@ -757,18 +779,20 @@ export class SceneTransformPreviewController {
 
   /** 清除当前全部临时阵列批次或克隆，不释放源实体的材质、纹理或几何资源。 */
   clearEntityArrayPreview(): void {
-    if (this.compositionArrayPreview) {
-      for (const { batch } of this.compositionArrayPreview.members.values()) batch.dispose();
-      this.compositionArrayPreview = null;
+    const compositionPreview = this.compositionArrayPreview;
+    const preview = this.entityArrayPreview;
+    this.compositionArrayPreview = this.entityArrayPreview = null;
+    if (compositionPreview) {
+      for (const { batch } of compositionPreview.members.values()) {
+        runSceneRuntimeCleanup(this.context, '组合阵列预览批次', () => batch.dispose());
+      }
     }
-    if (!this.entityArrayPreview) return;
-
-    for (const clone of this.entityArrayPreview.clones) {
-      clone.dispose(false, false);
+    if (!preview) return;
+    for (const clone of preview.clones) {
+      runSceneRuntimeCleanup(this.context, '阵列预览克隆', () => clone.dispose(false, false));
     }
-    this.entityArrayPreview.matrixPreview?.dispose();
-    this.entityArrayPreview.poiBoundsMaterial?.dispose(false, false);
-    this.entityArrayPreview = null;
+    runSceneRuntimeCleanup(this.context, '阵列矩阵预览', () => preview.matrixPreview?.dispose());
+    runSceneRuntimeCleanup(this.context, '阵列边界材质', () => preview.poiBoundsMaterial?.dispose(false, false));
   }
 
   /** 文件夹仅承载层级；组合成员的几何和预览按各自世界变换收集，禁止部分就绪提交。 */
@@ -794,6 +818,7 @@ export class SceneTransformPreviewController {
 
   /** 逐成员隔离矩阵批次，既保留独立世界位姿，也支持无独立 Mesh 的模型阵列成员。 */
   public updateCompositionArrayPreview(entityId: string, direction: Vector3Data, copyCount: number, spacingMeters: number): boolean {
+    if (this.disposed) return false;
     if (copyCount === 0) { this.clearEntityArrayPreview(); return true; }
     const sources = this.resolveCompositionArraySources(entityId, copyCount);
     const geometry = this.getEntityArrayGeometry(entityId, direction);
@@ -1045,6 +1070,7 @@ export class SceneTransformPreviewController {
 
   /** 为当前选中的矩阵实例复用一个无几何 TransformNode，Gizmo 拖动仍回写该逻辑实体。 */
   public getOrCreateModelArrayGizmoProxy(entity: Entity): TransformNode {
+    if (this.disposed) throw new Error('场景变换预览已释放。');
     if (!this.modelArrayGizmoProxy || this.modelArrayGizmoProxy.node.isDisposed()) {
       this.modelArrayGizmoProxy = {
         entityId: entity.id,
@@ -1077,7 +1103,9 @@ export class SceneTransformPreviewController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeGroupTransformPreviewObserver(): void {
+    if (this.disposed || this.groupTransformPreviewObserver) return;
     this.groupTransformPreviewObserver = this.context.scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
+      if (this.disposed) return;
       this.flushGroupTranslationPreview();
       this.flushGroupRotationPreview();
     });

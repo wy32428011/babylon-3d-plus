@@ -13,6 +13,7 @@ import { getCompositionLibraryEntry } from '../composition/compositionCargoCache
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { getMeshesWorldBottomCenter } from '../runtimeNodeGeometry';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
@@ -53,6 +54,40 @@ export class SceneLocatorFetchController {
   public fetchSyncFailureReported = false;
   /** 已放货到 fetch 驱动定位线框、等待单排同步响应后再销毁的 MQTT 货箱（按排号分组）。 */
   public readonly fetchKeptCargoByRow = new Map<number, Set<string>>();
+  private readonly pendingRequests = new Set<AbortController>();
+  private operationGeneration = 0;
+  private disposed = false;
+
+  /** 停止生产新请求，并隔离旧预览的响应和 finally；批次在货物驱动停止后另行清理。 */
+  stopPreviewRequests(): void {
+    this.stopFetchSyncTimer();
+    this.operationGeneration += 1;
+    this.latestFetchRequestByRow.clear();
+    this.fetchConfigSnapshot = null;
+    this.fetchInFlightOperations = 0;
+    this.fetchSyncFailureReported = false;
+    for (const controller of this.pendingRequests) controller.abort();
+    this.pendingRequests.clear();
+  }
+
+  /** 退出预览只释放库存批次；定位线框和可重用的 Fetch 运行时留给下一次预览。 */
+  resetPreview(): void {
+    this.stopPreviewRequests();
+    this.fetchKeptCargoByRow.clear();
+    for (const [entityId, runtime] of this.locatorFetchRuntimes) {
+      runSceneRuntimeCleanup(this.context, `Fetch 批次 ${entityId}`, () => runtime.clearAllBatches());
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopPreviewRequests();
+    this.fetchKeptCargoByRow.clear();
+    for (const entityId of [...this.locatorFetchRuntimes.keys()]) {
+      runSceneRuntimeCleanup(this.context, `Fetch 运行时 ${entityId}`, () => this.disposeLocatorFetchRuntime(entityId));
+    }
+  }
 
   /** 为 fetch thinInstance 加载模型模板：走完整资产加载管线并应用单位换算。 */
   public async loadModelTemplateForFetch(target: ModelGeneratorTarget): Promise<{ meshes: Mesh[]; dispose: () => void } | null> {
@@ -244,6 +279,7 @@ export class SceneLocatorFetchController {
 
   /** 进入运行预览时执行一次全量库存同步，并按配置启动定时全量同步；无 fetch 驱动定位线框时直接返回。 */
   async handleFetchDriveEvent(fetchConfig: FetchConfig): Promise<void> {
+    if (this.disposed || this.dependencies.document.disposed) return;
     this.fetchConfigSnapshot = fetchConfig;
     const targets = this.collectFetchDriveLocators();
     if (targets.length === 0) {
@@ -261,6 +297,7 @@ export class SceneLocatorFetchController {
     targets: Array<{ entityId: string; locatorEntry: LocatorRuntimeEntry; locatorComponent: LocatorComponent }>,
     options: { quietFailure?: boolean } = {},
   ): Promise<void> {
+    if (this.disposed || this.dependencies.document.disposed) return;
     const release = this.beginFetchOperation();
     try {
       const generation = ++this.fetchRequestGeneration;
@@ -283,6 +320,7 @@ export class SceneLocatorFetchController {
 
   /** 堆垛机放货/取货完成后同步单排库存；同排多台定位线框共享一次请求。 */
   handleFetchRowSync(rowNumber: number): void {
+    if (this.disposed || this.dependencies.document.disposed) return;
     const fetchConfig = this.fetchConfigSnapshot;
     if (!fetchConfig?.url) return;
     const targets = this.collectFetchDriveLocators()
@@ -312,7 +350,10 @@ export class SceneLocatorFetchController {
 
   /** 统一发 fetch 库存请求：dataflow 接口忽略 rows 始终全量返回，按排过滤在客户端完成；失败时记日志并返回 null。 */
   public async fetchInventoryRecords(fetchConfig: FetchConfig, rows: string[], quietFailure = false): Promise<FetchContainerRecord[] | null> {
-    if (!fetchConfig.url) return null;
+    if (!fetchConfig.url || this.disposed || this.dependencies.document.disposed) return null;
+    const controller = new AbortController();
+    this.pendingRequests.add(controller);
+    const isCurrent = () => !controller.signal.aborted && !this.disposed && !this.dependencies.document.disposed;
 
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' };
@@ -322,7 +363,9 @@ export class SceneLocatorFetchController {
         method: 'POST',
         headers,
         body: JSON.stringify({ rows }),
+        signal: controller.signal,
       });
+      if (!isCurrent()) return null;
 
       if (!response.ok) {
         this.reportFetchFailure(`Fetch 请求失败：HTTP ${response.status}`, quietFailure);
@@ -330,7 +373,9 @@ export class SceneLocatorFetchController {
       }
 
       // dataflow 响应结构：data.records 为结果分组数组，货物记录在每组的 result 里
-      const payload = JSON.parse(await readUtf8ResponseText(response, 'Fetch 响应')) as {
+      const text = await readUtf8ResponseText(response, 'Fetch 响应');
+      if (!isCurrent()) return null;
+      const payload = JSON.parse(text) as {
         data?: { records?: Array<{ result?: FetchContainerRecord[] }> };
       };
       const groups = payload.data?.records;
@@ -346,20 +391,25 @@ export class SceneLocatorFetchController {
       this.fetchSyncFailureReported = false;
       return records;
     } catch (error) {
+      if (!isCurrent()) return null;
       const message = error instanceof Error ? error.message : String(error);
       this.reportFetchFailure(`Fetch 处理异常：${message}`, quietFailure);
       return null;
+    } finally {
+      this.pendingRequests.delete(controller);
     }
   }
 
   /** 标记一次 fetch 操作在途；返回的释放函数必须放在 finally 中调用，保证计数成对。 */
   public beginFetchOperation(): () => void {
+    const generation = this.operationGeneration;
     this.fetchInFlightOperations += 1;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.fetchInFlightOperations -= 1;
+      // 退出后立即重进预览时，旧请求的 finally 不得扣减新会话的在途数。
+      if (generation === this.operationGeneration) this.fetchInFlightOperations -= 1;
     };
   }
 
@@ -377,6 +427,7 @@ export class SceneLocatorFetchController {
   /** 按 syncIntervalSeconds 启动（或重启）定时全量同步；0 表示关闭定时、仅在预览开始时同步一次。 */
   public startFetchSyncTimer(fetchConfig: FetchConfig): void {
     this.stopFetchSyncTimer();
+    if (this.disposed || this.dependencies.document.disposed) return;
     this.fetchSyncFailureReported = false;
     const intervalSeconds = sanitizeFetchSyncIntervalSeconds(fetchConfig.syncIntervalSeconds);
     if (intervalSeconds <= 0) return;
@@ -506,8 +557,11 @@ export class SceneLocatorFetchController {
   public disposeLocatorFetchRuntime(entityId: string): void {
     const fetchRuntime = this.locatorFetchRuntimes.get(entityId);
     if (!fetchRuntime) return;
-    fetchRuntime.dispose();
     this.locatorFetchRuntimes.delete(entityId);
-    this.dependencies.readiness.invalidateModelStatistics();
+    try {
+      fetchRuntime.dispose();
+    } finally {
+      this.dependencies.readiness.invalidateModelStatistics();
+    }
   }
 }

@@ -16,6 +16,7 @@ import { resolveLocatorBoxIndex, resolveLocatorCellLocalBounds, resolveLocatorCe
 import { isPlainRecord } from '../runtimeValueUtils';
 import { getNodeWorldRotation } from '../runtimeNodeGeometry';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
@@ -58,6 +59,23 @@ export class SceneLocatorController {
   public readonly locatorAisleIndex = new Map<string, Map<number, LocatorRuntimeEntry[]>>();
   public readonly reportedDuplicateLocatorTargets = new Set<string>();
   public readonly reportedOverlappingLocatorRanges = new Set<string>();
+  private disposed = false;
+  private readonly disposedLocators = new WeakSet<LocatorRuntimeEntry>();
+
+  /** Fetch、暂存货物与选区 overlay 由各自所有者先清理；这里只释放定位器及其索引。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.locatorTargets.clear();
+    this.locatorDeviceIndex.clear();
+    this.locatorAisleIndex.clear();
+    this.reportedDuplicateLocatorTargets.clear();
+    this.reportedOverlappingLocatorRanges.clear();
+    for (const [entityId, locator] of [...this.locators]) {
+      runSceneRuntimeCleanup(this.context, `定位器 ${entityId}`, () => this.disposeLocator(entityId, locator));
+    }
+    this.locators.clear();
+  }
 
   /** 货箱运行问题按稳定 key 只写一次 Console。 */
   public reportCargoIssue(key: string, message: string): void {
@@ -118,6 +136,7 @@ export class SceneLocatorController {
 
   /** 重建虚拟定位线框资产编号索引与设备绑定索引，供 to_x/to_y/to_z 快速查找目标位。 */
   public rebuildLocatorTargetIndex(document: SceneDocument): void {
+    if (this.disposed) return;
     this.locatorTargets.clear();
     this.locatorDeviceIndex.clear();
     this.locatorAisleIndex.clear();
@@ -355,6 +374,7 @@ export class SceneLocatorController {
     selected: boolean,
     highlightSet: ReadonlySet<string> = this.dependencies.selection.selectedEntityIds,
   ): void {
+    if (this.disposed) return;
     const locator = entity.components.locator;
     if (!locator) return;
 
@@ -552,7 +572,7 @@ export class SceneLocatorController {
     if (locator.fetchDrive?.enabled) {
       if (!this.dependencies.fetch.locatorFetchRuntimes.has(entity.id)) {
         const fetchRuntime = new LocatorFetchRuntime(this.context.scene, entity.id, (message) => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]));
-        fetchRuntime.onStatisticsChanged = () => this.dependencies.readiness.invalidateModelStatistics();
+        fetchRuntime.onStatisticsChanged = () => { if (!this.disposed) this.dependencies.readiness.invalidateModelStatistics(); };
         this.dependencies.fetch.locatorFetchRuntimes.set(entity.id, fetchRuntime);
       }
     } else {
@@ -830,10 +850,13 @@ export class SceneLocatorController {
 
   /** 销毁列号标签网格及其独立材质纹理；labelsRoot 本身随 locator root 统一销毁。 */
   public disposeLocatorColumnLabels(entry: LocatorRuntimeEntry): void {
-    for (const label of entry.columnLabels) {
-      label.mesh.dispose(false, true);
-    }
+    const labels = entry.columnLabels;
     entry.columnLabels = [];
+    for (const [index, label] of labels.entries()) {
+      runSceneRuntimeCleanup(this.context, `定位器列号网格 ${entry.entityId}/${index}`, () => label.mesh.dispose(false, false));
+      runSceneRuntimeCleanup(this.context, `定位器列号材质 ${entry.entityId}/${index}`, () => label.material.dispose(false, false));
+      runSceneRuntimeCleanup(this.context, `定位器列号纹理 ${entry.entityId}/${index}`, () => label.texture.dispose());
+    }
   }
 
   /** 读取货架脚本写入 contentRoot metadata 的内置货格实测布局；字段缺失或非有限数字时视为未就绪。 */
@@ -897,19 +920,30 @@ export class SceneLocatorController {
 
   /** 释放虚拟定位线框的根节点、填充/边线网格和材质。 */
   public disposeLocator(entityId: string, locator: LocatorRuntimeEntry): void {
-    this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId);
-    this.dependencies.telemetry.specializedTelemetryRuntime.disposeRetainedSlotCargoForLocator(entityId);
-    this.dependencies.fetch.disposeLocatorFetchRuntime(entityId);
-    if (this.dependencies.selection.localSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('local');
-    if (this.dependencies.selection.externalSlotHighlightOverlay?.entityId === entityId) this.disposeSlotHighlightOverlay('external');
-    if (this.dependencies.selection.localSlotHighlight?.entityId === entityId) this.dependencies.selection.localSlotHighlight = null;
-    if (this.dependencies.selection.externalSlotHighlight?.entityId === entityId) this.dependencies.selection.externalSlotHighlight = null;
-    locator.fillMesh.dispose(false, false);
-    locator.edgeLines.dispose(false, false);
+    if (this.disposedLocators.has(locator)) return;
+    this.disposedLocators.add(locator);
+    if (this.locators.get(entityId) === locator) this.locators.delete(entityId);
+    // 单实体删除仍通知协作领域；最终销毁已由协调器安排这些领域先收尾。
+    if (!this.disposed) {
+      runSceneRuntimeCleanup(this.context, `定位器阵列预览 ${entityId}`, () => this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId));
+      runSceneRuntimeCleanup(this.context, `定位器暂存货物 ${entityId}`, () => this.dependencies.telemetry.specializedTelemetryRuntime.disposeRetainedSlotCargoForLocator(entityId));
+      runSceneRuntimeCleanup(this.context, `定位器 Fetch ${entityId}`, () => this.dependencies.fetch.disposeLocatorFetchRuntime(entityId));
+      if (this.dependencies.selection.localSlotHighlightOverlay?.entityId === entityId) {
+        runSceneRuntimeCleanup(this.context, `定位器本地选区 ${entityId}`, () => this.disposeSlotHighlightOverlay('local'));
+      }
+      if (this.dependencies.selection.externalSlotHighlightOverlay?.entityId === entityId) {
+        runSceneRuntimeCleanup(this.context, `定位器外部选区 ${entityId}`, () => this.disposeSlotHighlightOverlay('external'));
+      }
+      if (this.dependencies.selection.localSlotHighlight?.entityId === entityId) this.dependencies.selection.localSlotHighlight = null;
+      if (this.dependencies.selection.externalSlotHighlight?.entityId === entityId) this.dependencies.selection.externalSlotHighlight = null;
+    }
+    runSceneRuntimeCleanup(this.context, `定位器填充网格 ${entityId}`, () => locator.fillMesh.dispose(false, false));
+    runSceneRuntimeCleanup(this.context, `定位器边线 ${entityId}`, () => locator.edgeLines.dispose(false, false));
     this.disposeLocatorColumnLabels(locator);
-    locator.material.dispose();
-    locator.root.dispose(false, true);
-    this.locators.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `定位器材质 ${entityId}`, () => locator.material.dispose());
+    runSceneRuntimeCleanup(this.context, `定位器列号根节点 ${entityId}`, () => locator.columnLabelsRoot.dispose(true, false));
+    // 已逐项释放自有子节点，不递归回收可能由其它领域挂载的货物或选区。
+    runSceneRuntimeCleanup(this.context, `定位器根节点 ${entityId}`, () => locator.root.dispose(true, false));
   }
 
   /**
@@ -982,18 +1016,23 @@ export class SceneLocatorController {
   public disposeSlotHighlightOverlay(source: 'local' | 'external'): void {
     const overlay = source === 'local' ? this.dependencies.selection.localSlotHighlightOverlay : this.dependencies.selection.externalSlotHighlightOverlay;
     if (!overlay) return;
-    overlay.fillMesh.parent = null;
-    overlay.edgeFrame.parent = null;
-    overlay.fillMesh.dispose(false, false);
-    overlay.edgeFrame.dispose(false, false);
-    overlay.material.dispose();
-    overlay.edgeMaterial.dispose();
     if (source === 'local') this.dependencies.selection.localSlotHighlightOverlay = null;
     else this.dependencies.selection.externalSlotHighlightOverlay = null;
+    const label = `${source}/${overlay.entityId}`;
+    runSceneRuntimeCleanup(this.context, `单格选区填充解绑 ${label}`, () => { overlay.fillMesh.parent = null; });
+    runSceneRuntimeCleanup(this.context, `单格选区边框解绑 ${label}`, () => { overlay.edgeFrame.parent = null; });
+    runSceneRuntimeCleanup(this.context, `单格选区填充 ${label}`, () => overlay.fillMesh.dispose(false, false));
+    for (const mesh of overlay.edgeFrame.getChildMeshes()) {
+      runSceneRuntimeCleanup(this.context, `单格选区边线 ${label}/${mesh.name}`, () => mesh.dispose(false, false));
+    }
+    runSceneRuntimeCleanup(this.context, `单格选区边框 ${label}`, () => overlay.edgeFrame.dispose(false, false));
+    runSceneRuntimeCleanup(this.context, `单格选区填充材质 ${label}`, () => overlay.material.dispose());
+    runSceneRuntimeCleanup(this.context, `单格选区边框材质 ${label}`, () => overlay.edgeMaterial.dispose());
   }
 
   /** 按指定来源当前的货格坐标重建略微放大的单格填充盒与 12 边线框。 */
   public refreshSlotHighlightOverlay(source: 'local' | 'external'): void {
+    if (this.disposed) return;
     const highlight = source === 'local' ? this.dependencies.selection.localSlotHighlight : this.dependencies.selection.externalSlotHighlight;
     this.disposeSlotHighlightOverlay(source);
     if (!highlight) return;
@@ -1093,6 +1132,7 @@ export class SceneLocatorController {
 
   /** 货架脚本更新布局 metadata 后，重同步其全部绑定货格的位置与网格步距。 */
   public refreshBuiltInSlotBindings(hostEntityId: string): void {
+    if (this.disposed) return;
     const hostEntity = this.dependencies.document.syncedEntities.get(hostEntityId) ?? null;
     const hostAsset = hostEntity?.components.modelAsset;
     const hostRenderSignature = hostAsset

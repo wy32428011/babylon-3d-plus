@@ -3,6 +3,7 @@ import type { TransformComponent } from '../../../editor/model/components';
 import { EditorAutoPatrolRuntime } from '../EditorAutoPatrolRuntime';
 import { EditorManualRoamSpawnRuntime } from '../EditorManualRoamSpawnRuntime';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { ScenePoiAndEffectsController } from './ScenePoiAndEffectsController';
 import type { SceneDocumentController } from './SceneDocumentController';
 
@@ -19,6 +20,15 @@ export class ScenePatrolAndRoamController {
 
   public autoPatrolMarkerRuntime!: EditorAutoPatrolRuntime;
   public manualRoamSpawnRuntime!: EditorManualRoamSpawnRuntime;
+  private disposed = false;
+
+  /** 只释放本领域的两个标记运行时；点击事件标记仍由 effects 持有。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    runSceneRuntimeCleanup(this.context, '自动巡检标记', () => this.autoPatrolMarkerRuntime?.dispose());
+    runSceneRuntimeCleanup(this.context, '手动漫游出生点标记', () => this.manualRoamSpawnRuntime?.dispose());
+  }
 
   /** 发布 Viewer 在首次同步前永久禁用巡检原点、节点和路径辅助对象。 */
   disableEditorAutoPatrolMarkers(): void {
@@ -55,11 +65,13 @@ export class ScenePatrolAndRoamController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeAutoPatrolMarkerRuntime(): void {
+    if (this.disposed || this.autoPatrolMarkerRuntime) return;
     this.autoPatrolMarkerRuntime = new EditorAutoPatrolRuntime(this.context.scene);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeManualRoamSpawnRuntime(): void {
+    if (this.disposed || this.manualRoamSpawnRuntime) return;
     this.manualRoamSpawnRuntime = new EditorManualRoamSpawnRuntime(this.context.scene, this.context.pushLog);
   }
 

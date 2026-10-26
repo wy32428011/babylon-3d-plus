@@ -202,13 +202,14 @@ export function normalizeEntityLightingSettings(value: unknown): EntityLightingS
     ...(Array.isArray(v.inheritPolicy) ? { inheritPolicy: normalizeLightingPolicyInheritance(v.inheritPolicy)! } : {}),
   };
 }
-/** 稳定摘要用于内容一致性，不用于认证。顺序由业务数组保留，对象键排序。 */
-export function lightingContentHash(value: unknown): string {
-  let first = 0x811c9dc5, second = 0x9e3779b9;
-  const feed = (text: string) => {
-    for (let i = 0; i < text.length; i++) { first = Math.imul(first ^ text.charCodeAt(i), 0x01000193); second = Math.imul(second ^ text.charCodeAt(i), 0x85ebca6b); }
-  };
+/** 已序列化的稳定摘要文本片段；按原样并入摘要流，用于复用未变化实体的序列化结果。 */
+class LightingContentFragment {
+  readonly text: string;
+  constructor(text: string) { this.text = text; }
+}
+function walkLightingContent(value: unknown, feed: (text: string) => void): void {
   const walk = (item: unknown, inArray = false): void => {
+    if (item instanceof LightingContentFragment) { feed(item.text); return; }
     // 与场景 JSON 的持久化语义保持一致：对象省略 undefined，数组将空项写为 null。
     if (item === undefined) { feed(inArray ? 'null;' : 'undefined;'); return; }
     if (ArrayBuffer.isView(item) && !(item instanceof DataView)) {
@@ -229,6 +230,14 @@ export function lightingContentHash(value: unknown): string {
     feed(JSON.stringify(item) ?? 'null'); feed(';');
   };
   walk(value);
+}
+/** 稳定摘要用于内容一致性，不用于认证。顺序由业务数组保留，对象键排序。 */
+export function lightingContentHash(value: unknown): string {
+  let first = 0x811c9dc5, second = 0x9e3779b9;
+  const feed = (text: string) => {
+    for (let i = 0; i < text.length; i++) { first = Math.imul(first ^ text.charCodeAt(i), 0x01000193); second = Math.imul(second ^ text.charCodeAt(i), 0x85ebca6b); }
+  };
+  walkLightingContent(value, feed);
   return (first >>> 0).toString(16).padStart(8, '0') + (second >>> 0).toString(16).padStart(8, '0');
 }
 function hasPolicyInheritance(entity: Obj): boolean {
@@ -277,15 +286,24 @@ function dayNightLightingSources(scene: Obj, entities: Obj): unknown[] {
     return [{ id, effect }];
   });
 }
+/** 实体条目的序列化片段缓存；仅对不依赖其它实体的条目有效，键为不可变的实体快照对象。 */
+const entityContentFragmentCache = new WeakMap<object, { id: string; sandbox: boolean; fragment: LightingContentFragment | null }>();
+/** 与 getSceneLightingBakeSignature 结果完全一致；复用未变化实体的序列化文本，仅限实体按不可变快照更新的渲染端调用。 */
+export function getSceneLightingBakeSignatureCached(value: unknown): string {
+  return computeSceneLightingBakeSignature(value, true);
+}
 export function getSceneLightingBakeSignature(value: unknown): string {
+  return computeSceneLightingBakeSignature(value, false);
+}
+function computeSceneLightingBakeSignature(value: unknown, reuseEntityFragments: boolean): string {
   const scene = object(value), settings = object(scene.sceneSettings), entities = object(scene.entities);
   const lighting = getSceneLightingConfig(scene), bake = lighting.bake;
   const policyValue = getLightingPolicySignatureValue(lighting.policy);
   const policy = policyValue !== undefined ? normalizeSceneLightingPolicy(lighting.policy) : undefined;
   const resolve = createSceneLightingPolicyResolver(policy);
   const sandboxEnvironment = lighting.environment?.source === 'sandbox';
-  const entries = Object.keys(entities).sort().map(id => {
-    const entity = object(entities[id]), c = object(entity.components);
+  const buildEntry = (id: string, entity: Obj) => {
+    const c = object(entity.components);
     if (c.cadReference || c.poiEffect || c.chartMarker || c.dataPlatformScreen || c.manualRoamSpawn
       || (sandboxEnvironment && c.skybox)) return null;
     const lighting = normalizeEntityLightingSettings(c.lighting);
@@ -296,6 +314,19 @@ export function getSceneLightingBakeSignature(value: unknown): string {
     const components = { ...c, ...(c.skybox ? { skybox: skyboxLightingIdentity(c.skybox) } : {}),
       ...(fullyDynamic && !c.light ? { transform: undefined } : {}) };
     return { id, parentId: entity.parentId, visible: entity.visible, components };
+  };
+  const entries = Object.keys(entities).sort().map(id => {
+    const entity = object(entities[id]);
+    // 存在场景策略或继承策略时条目取决于其它实体，不能按单个实体缓存。
+    if (!reuseEntityFragments || policy || hasPolicyInheritance(entity)) return buildEntry(id, entity);
+    const hit = entityContentFragmentCache.get(entity);
+    if (hit && hit.id === id && hit.sandbox === sandboxEnvironment) return hit.fragment;
+    const entry = buildEntry(id, entity);
+    let text = '';
+    if (entry) walkLightingContent(entry, piece => { text += piece; });
+    const fragment = entry ? new LightingContentFragment(text) : null;
+    entityContentFragmentCache.set(entity, { id, sandbox: sandboxEnvironment, fragment });
+    return fragment;
   }).filter(Boolean);
   const main = lighting.main.source === 'scene' ? { source: 'scene' }
     : lighting.main.enabled ? { source: 'managed', enabled: true, color: lighting.main.color,

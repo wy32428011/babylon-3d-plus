@@ -22,6 +22,7 @@ import { ScenePatrolAndRoamController } from './scene-runtime/ScenePatrolAndRoam
 import { SceneTriangleAndReadinessController } from './scene-runtime/SceneTriangleAndReadinessController';
 import { SceneMeshPresentationController } from './scene-runtime/SceneMeshPresentationController';
 import type { SceneRuntimeContext } from './scene-runtime/SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './scene-runtime/sceneRuntimeCleanup';
 import { type SceneLightingBakeSnapshot, type LightingClassificationEntry } from '../../../electron/shared/sceneLightingBakeContract';
 import type { SceneModelStatisticsSnapshot } from '../../editor/model/sceneModelStatistics';
 import { type SceneModelEntranceSettings } from '../../editor/model/sceneModelEntrance';
@@ -49,8 +50,9 @@ import { getDetachedMaterialCloneMetrics } from './cloneDetachedModelMaterial';
 
 configureLocalBabylonDecoders();
 
-/** 公共门面：保持编辑器/Viewer 接口以及原有构造、帧回调和释放顺序。 */
+/** 各领域相互借用资源；门面协调构造与释放阶段，不维护子控制器的内部清理清单。 */
 export class SceneRuntime {
+  private readonly lifecycleContext: SceneRuntimeContext;
   private preparationClassificationGate: (() => boolean) | null = null;
   private preparationClassificationEnabled = false;
   private preparationClassificationReleased = false;
@@ -93,6 +95,7 @@ export class SceneRuntime {
       get onAlarmActivated() { return owner().onAlarmActivated; },
       set onAlarmActivated(callback) { owner().onAlarmActivated = callback; },
     };
+    this.lifecycleContext = context;
     this.document = new SceneDocumentController(context, {
       get telemetry() { return owner().telemetry; },
       get transforms() { return owner().transforms; },
@@ -329,6 +332,7 @@ export class SceneRuntime {
   setMotionStaticBatchingEnabled(enabled: boolean): void { return this.telemetry.setMotionStaticBatchingEnabled(enabled); }
 
   beginSceneSession(sessionId: string, recorder?: ProjectOpenTraceRecorder | null): void {
+    if (this.document.disposed) return;
     if (sessionId !== this.preparationClassificationSession) {
       this.preparationClassificationSession = sessionId;
       this.preparationClassificationReleased = false;
@@ -568,6 +572,14 @@ export class SceneRuntime {
     options?: SceneRuntimeSyncOptions,
   ): void { return this.document.syncModelParameters(document, entityId, hierarchySelectionIds, options); }
 
+  /** 局部同步一组实体；返回 false 表示条件不满足且未修改运行时，调用方须改用 sync()。 */
+  syncEntitiesLocally(
+    document: SceneDocument,
+    entityIds: readonly string[],
+    hierarchySelectionIds?: readonly string[],
+    options?: SceneRuntimeSyncOptions,
+  ): boolean { return this.document.syncEntitiesLocally(document, entityIds, hierarchySelectionIds, options); }
+
   syncSelection(document: SceneDocument, hierarchySelectionIds?: readonly string[]): void { return this.document.syncSelection(document, hierarchySelectionIds); }
 
   getDataPlatformScreenOverlayItems(): DataPlatformScreenOverlayItem[] { return this.effects.getDataPlatformScreenOverlayItems(); }
@@ -669,132 +681,47 @@ export class SceneRuntime {
 
 
   dispose(): void {
-    this.completeProjectOpenRuntime('cancelled', 'aborted');
-    if (this.document.disposed) return;
-    this.document.disposed = true;
-    this.outputs.generatorAssetPreloader.dispose();
-    this.readiness.modelStatisticsNotificationPending = false;
-    this.readiness.onModelStatisticsChanged = undefined;
-    this.readiness.modelStatisticsFallbackMeshes.clear();
-    this.scene.onNewMeshAddedObservable.remove(this.readiness.modelStatisticsMeshAddedObserver);
-    this.scene.onMeshRemovedObservable.remove(this.readiness.modelStatisticsMeshRemovedObserver);
-    this.effects.modelEntranceRuntime.dispose();
-    this.readiness.modelReadinessErrors.clear();
-    this.readiness.progressNotificationPending = false;
-    this.assets.modelPresentationRefreshPending = false;
-    this.locators.disposeSlotHighlightOverlay('local');
-    this.locators.disposeSlotHighlightOverlay('external');
-    this.selection.localSlotHighlight = null;
-    this.selection.externalSlotHighlight = null;
-    this.transforms.clearEntityArrayPreview();
-    this.transforms.cancelFolderGroupTransforms();
-    this.transforms.entityGroupGizmoProxy?.node.dispose(false, false);
-    this.transforms.entityGroupGizmoProxy = null;
-    this.transforms.modelArrayGizmoProxy?.node.dispose(false, false);
-    this.transforms.modelArrayGizmoProxy = null;
-    this.environment.appearanceRuntime.dispose();
-    this.environment.lightRigRuntime.dispose();
-    this.telemetry.motionStaticBatchRuntime.dispose();
-    this.environment.lightingRuntime.dispose();
-    this.environment.environmentRuntime.dispose();
-    this.environment.environmentAssetCache.dispose();
-    this.environment.environmentLoadScheduler.dispose();
-    this.assets.assetLoadScheduler.dispose();
-    if (this.telemetry.telemetryObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.telemetry.telemetryObserver);
-    }
-    if (this.transforms.groupTransformPreviewObserver) {
-      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.transforms.groupTransformPreviewObserver);
-    }
-    if (this.arrays.modelArrayVariantRenderSuppressionObserver) {
-      this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.arrays.modelArrayVariantRenderSuppressionObserver);
-    }
-    if (this.arrays.modelArrayVariantRenderRestoreObserver) {
-      this.scene.onAfterRenderObservable.remove(this.arrays.modelArrayVariantRenderRestoreObserver);
-    }
-    this.arrays.restoreSuppressedModelArrayVariantHostsAfterRender();
-    this.arrays.pendingModelArrayVariantRenderSuppressions.clear();
-    this.telemetry.endTelemetryPreview();
-    for (const [entityId, mesh] of this.presentation.meshes.entries()) {
-      this.presentation.disposeMesh(entityId, mesh);
-    }
-    for (const [entityId, locator] of this.locators.locators.entries()) {
-      this.locators.disposeLocator(entityId, locator);
-    }
-    for (const [entityId, cadReference] of this.cad.cadReferences.entries()) {
-      this.cad.disposeCadReference(entityId, cadReference);
-    }
-    for (const [entityId, trajectory] of this.presentation.conveyorTrajectories.entries()) {
-      this.presentation.disposeConveyorTrajectory(entityId, trajectory);
-    }
-    for (const [entityId, model] of this.assets.models.entries()) {
-      this.assets.disposeModel(entityId, model);
-    }
-    for (const variant of [...this.variants.modelArrayParameterVariants.values()]) {
-      this.variants.disposeModelArrayParameterVariant(variant);
-    }
-    for (const [entityId, proxy] of [...this.arrays.modelArrayTelemetryProxies.entries()]) {
-      this.arrays.disposeModelArrayTelemetryProxy(entityId, proxy);
-    }
-    for (const [entityId, modelGenerator] of this.outputs.modelGenerators.entries()) {
-      this.outputs.disposeModelGenerator(entityId, modelGenerator);
-    }
-    this.outputs.deviceSpawnerRuntime.disposeAll();
-    for (const entityId of [...this.outputs.deviceSpawnerMarkers.keys()]) {
-      this.outputs.disposeDeviceSpawnerMarker(entityId);
-    }
-    this.effects.poiEffectRuntime.dispose();
-    for (const node of this.effects.effectPoseNodes.values()) node.dispose();
-    this.effects.effectPoseNodes.clear();
-    this.telemetry.conveyorSurfaceArrowSystem.dispose();
-    this.telemetry.stackerMotionArrowSystem.dispose();
-    this.telemetry.rgvMotionArrowSystem.dispose();
-    this.telemetry.liftMotionArrowSystem.dispose();
-    this.telemetry.specializedTelemetryRuntime.dispose();
-    for (const [entityId, light] of this.presentation.lights.entries()) {
-      this.presentation.disposeLight(entityId, light);
-    }
-    this.presentation.lightMarkerRuntime.dispose();
-    this.patrol.autoPatrolMarkerRuntime.dispose();
-    this.patrol.manualRoamSpawnRuntime.dispose();
-    this.effects.clickEventBindingRuntime.dispose();
-    this.effects.alarmRuntime.dispose();
-    this.environment.shadowRuntime.dispose();
-    this.environment.skyboxRuntime.dispose();
-    this.assets.shaderWarmup.dispose();
-    this.assets.sharedModelAssetCache.dispose();
-    this.selection.modelSelectionOutlineLayer.dispose();
-    this.presentation.meshes.clear();
-    this.locators.locators.clear();
-    this.locators.locatorTargets.clear();
-    this.locators.reportedDuplicateLocatorTargets.clear();
-    this.locators.reportedOverlappingLocatorRanges.clear();
-    this.cad.cadReferences.clear();
-    this.presentation.conveyorTrajectories.clear();
-    this.assets.models.clear();
-    this.arrays.modelArrayInstanceEntities.clear();
-    this.variants.modelArrayParameterVariants.clear();
-    this.variants.modelArrayParameterVariantByEntityId.clear();
-    this.arrays.pendingModelArraySourceResyncs.clear();
-    this.arrays.pendingModelArrayVariantRenderSuppressions.clear();
-    this.arrays.suppressedModelArrayVariantRootsThisFrame.clear();
-    this.arrays.modelArrayCanonicalSignatureIds.clear();
-    this.arrays.modelArrayCanonicalSignatureSequence = 0;
-    this.arrays.modelArrayBatchByMeshUniqueId.clear();
-    this.outputs.modelGenerators.clear();
-    this.outputs.generatedOutputOwners.clear();
-    this.presentation.lights.clear();
-    this.document.entityStates.clear();
-    this.document.syncedEntities.clear();
-    this.selection.selectedEntityIds.clear();
-    this.selection.localHighlightedEntityIds.clear();
-    this.selection.externalHighlightedEntityIds.clear();
-    this.selection.clickHighlightExcludeTrackEntityIds.clear();
-    this.selection.localSlotHighlight = null;
-    this.selection.externalSlotHighlight = null;
-    this.outputs.reportedCargoIssues.clear();
-    this.selection.outlinedModelArrayBatches.clear();
-    for (const entry of this.effects.dataPlatformScreenTextures.values()) entry.texture.dispose();
-    this.effects.dataPlatformScreenTextures.clear();
+    if (!this.document.beginDisposal()) return;
+    const cleanup = (resource: string, action: () => void) => runSceneRuntimeCleanup(this.lifecycleContext, resource, action);
+    cleanup('场景打开记录', () => this.completeProjectOpenRuntime('cancelled', 'aborted'));
+
+    // 先封闭新工作和异步回写；预览与本帧抑制必须在模型仍然存活时归还。
+    cleanup('停止统计通知', () => this.readiness.stopUpdates());
+    cleanup('停止遥测帧', () => this.telemetry.stopUpdates());
+    cleanup('停止生成产物', () => this.outputs.stopUpdates());
+    cleanup('停止模型入场', () => this.effects.stopUpdates());
+    cleanup('停止模型加载', () => this.assets.stopUpdates());
+    cleanup('停止阵列更新', () => this.arrays.stopUpdates());
+    cleanup('停止 CAD 加载', () => this.cad.stopUpdates());
+    cleanup('停止环境任务', () => this.environment.stopUpdates());
+    cleanup('遥测预览复位', () => this.telemetry.endTelemetryPreview());
+    cleanup('Fetch 运行时', () => this.fetch.dispose());
+    cleanup('就绪统计', () => this.readiness.dispose());
+    cleanup('货格高亮', () => this.selection.clearSlotHighlights());
+    cleanup('变换预览', () => this.transforms.dispose());
+
+    // GI 派生资源先归还，效果与选择能力仍供业务模型释放时解绑。
+    cleanup('环境与 GI', () => this.environment.disposeEnvironment());
+    cleanup('基础网格', () => this.presentation.disposeMeshes());
+    cleanup('定位器', () => this.locators.dispose());
+    cleanup('CAD 参考图', () => this.cad.dispose());
+    cleanup('输送线轨迹', () => this.presentation.disposeTrajectories());
+    cleanup('模型实例', () => this.assets.disposeModels());
+    cleanup('参数变体', () => this.variants.dispose());
+    cleanup('阵列代理及索引', () => this.arrays.dispose());
+    cleanup('生成产物', () => this.outputs.dispose());
+    cleanup('POI 效果', () => this.effects.disposeEffects());
+    cleanup('遥测资源', () => this.telemetry.dispose());
+    cleanup('实体灯光', () => this.presentation.dispose());
+    cleanup('巡检与漫游标记', () => this.patrol.dispose());
+    cleanup('点击、告警与大屏', () => this.effects.dispose());
+
+    // 所有共享资源消费者退出后才释放缓存与选择层，文档引用最后清空。
+    cleanup('阴影与天空', () => this.environment.dispose());
+    cleanup('共享模型资产', () => this.assets.dispose());
+    cleanup('选择状态', () => this.selection.dispose());
+    cleanup('场景文档', () => this.document.dispose());
+    this.preparationClassificationGate = null;
+    this.preparationClassificationSession = null;
   }
 }
