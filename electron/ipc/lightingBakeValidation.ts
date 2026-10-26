@@ -13,10 +13,11 @@ function finite(value: unknown, label: string, min = -Infinity, max = Infinity):
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new Error(`${label}必须是范围内的有限数值。`);
   return value;
 }
-function numbers(value: unknown, label: string, size?: number): number[] {
-  if (!Array.isArray(value) || (size !== undefined && value.length !== size)) throw new Error(`${label}长度不正确。`);
-  for (const entry of value) finite(entry, label);
-  return value as number[];
+function numbers(value: unknown, label: string, size?: number): ArrayLike<number> {
+  // 二进制传输在 main 侧零拷贝为 TypedArray 视图；旧 JSON 路径仍是 number[]，两者都走同一逐项校验。
+  if (!(Array.isArray(value) || ArrayBuffer.isView(value)) || (size !== undefined && value.length !== size)) throw new Error(`${label}长度不正确。`);
+  for (const entry of value as ArrayLike<number>) finite(entry, label);
+  return value as ArrayLike<number>;
 }
 function text(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value || value.length > 4096 || value.includes('\0')) throw new Error(`${label}格式不正确。`);
@@ -59,7 +60,12 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
     const positions = numbers(mesh.positions, '顶点'), normals = numbers(mesh.normals, '法线');
     if (!positions.length || positions.length % 3 || normals.length !== positions.length) throw new Error('几何顶点或法线长度不正确。');
     const indices = numbers(mesh.indices, '索引');
-    if (!indices.length || indices.length % 3 || indices.some(index => !Number.isInteger(index) || index < 0 || index >= positions.length / 3)) throw new Error('几何索引越界或不是三角面。');
+    let indicesValid = indices.length > 0 && indices.length % 3 === 0;
+    if (indicesValid) for (let i = 0; i < indices.length; i++) {
+      const index = indices[i];
+      if (!Number.isInteger(index) || index < 0 || index >= positions.length / 3) { indicesValid = false; break; }
+    }
+    if (!indicesValid) throw new Error('几何索引越界或不是三角面。');
     numbers(mesh.worldMatrix, '世界矩阵', 16);
     if (mesh.uvs !== undefined) numbers(mesh.uvs, 'UV', positions.length / 3 * 2);
     if (mesh.uvs2 !== undefined) numbers(mesh.uvs2, 'UV2', positions.length / 3 * 2);

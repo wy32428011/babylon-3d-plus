@@ -254,7 +254,7 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
   const vertexCount = positions.length / 3;
   const groups = source.subMeshes?.length ? source.subMeshes : [{ materialIndex: 0, indexStart: 0,
     indexCount: indices?.length ?? 0, verticesStart: 0, verticesCount: vertexCount }];
-  const primitives: Array<{ index: number; indices: number[]; material: Material | null }> = [];
+  const primitives: Array<{ index: number; indices: Uint32Array; material: Material | null }> = [];
   for (let index = 0; index < groups.length; index++) {
     const group = groups[index], start = unindexed ? group.verticesStart : group.indexStart;
     const count = unindexed ? group.verticesCount : group.indexCount;
@@ -268,9 +268,11 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
       throw new Error(`对象「${mesh.name}」的 primitive:${index} 缺少完整三角面或顶点范围越界。`);
     }
     // drawArrays 的实际绘制范围是 verticesStart/count；indexCount 可为零，不能据此静默丢失表面。
-    const primitiveIndices = unindexed ? Array.from({ length: count }, (_, offset) => start + offset)
-      : Array.from(indices!).slice(start, start + count);
-    if (primitiveIndices.some(value => !Number.isInteger(value) || value < 0 || value >= vertexCount)) {
+    // 索引用 Uint32Array：不再物化 number[]，与二进制传输目标类型一致，避免大场景堆放大。
+    const primitiveIndices = new Uint32Array(count);
+    if (unindexed) for (let offset = 0; offset < count; offset++) primitiveIndices[offset] = start + offset;
+    else for (let offset = 0; offset < count; offset++) primitiveIndices[offset] = indices![start + offset];
+    if (primitiveIndices.some(value => value >= vertexCount)) {
       throw new Error(`对象「${mesh.name}」的 primitive:${index} 三角面索引超出顶点范围。`);
     }
     primitives.push({ index, indices: primitiveIndices, material });
@@ -278,21 +280,29 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
   let normals = source.getVerticesData(VertexBuffer.NormalKind);
   if (!normals) {
     const calculated: number[] = [];
-    VertexData.ComputeNormals(positions, unindexed ? primitives.flatMap(part => part.indices) : indices!, calculated);
-    normals = calculated;
+    if (unindexed) {
+      const merged = new Uint32Array(primitives.reduce((total, part) => total + part.indices.length, 0));
+      let offset = 0;
+      for (const part of primitives) { merged.set(part.indices, offset); offset += part.indices.length; }
+      VertexData.ComputeNormals(positions, merged, calculated);
+    } else {
+      VertexData.ComputeNormals(positions, indices!, calculated);
+    }
+    normals = Float32Array.from(calculated);
   }
   const uvs = source.getVerticesData(VertexBuffer.UVKind), uvs2 = source.getVerticesData(VertexBuffer.UV2Kind);
   const colors = source.useVertexColors ? source.getVerticesData(VertexBuffer.ColorKind) : null;
   const tangents = source.getVerticesData(VertexBuffer.TangentKind);
   const matrix = identity.worldMatrix ?? mesh.computeWorldMatrix(true);
   const result: LightingBakeMeshInput[] = [];
+  // 同一源网格的 primitive 共享顶点属性引用；传输编码按引用去重，只编码并上送一份。
   for (const primitive of primitives) {
     result.push({
       key: `${identity.key}/primitive:${primitive.index}`, entityId: identity.entityId, nodeKey: identity.nodeKey,
-      name: mesh.name, positions: Array.from(positions), normals: Array.from(normals), indices: primitive.indices,
-      ...(uvs ? { uvs: Array.from(uvs) } : {}), ...(uvs2 ? { uvs2: Array.from(uvs2) } : {}),
-      ...(colors ? { colors: Array.from(colors) } : {}), worldMatrix: Array.from(matrix.asArray()),
-      ...(tangents ? { tangents: Array.from(tangents) } : {}),
+      name: mesh.name, positions, normals, indices: primitive.indices,
+      ...(uvs ? { uvs } : {}), ...(uvs2 ? { uvs2 } : {}),
+      ...(colors ? { colors } : {}), worldMatrix: Array.from(matrix.asArray()),
+      ...(tangents ? { tangents } : {}),
       material: await exportLightingMaterial(primitive.material, capture, mesh), receiver: identity.receiver,
     });
   }

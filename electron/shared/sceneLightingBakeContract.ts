@@ -103,13 +103,14 @@ export type LightingBakeMeshInput = {
   entityId: string;
   nodeKey: string;
   name: string;
-  positions: number[];
-  normals: number[];
-  indices: number[];
-  uvs?: number[];
-  uvs2?: number[];
-  colors?: number[];
-  tangents?: number[];
+  // 大场景下 renderer 直接提交 TypedArray，二进制编码器批量写入；旧 JSON 路径仍可为 number[]。
+  positions: ArrayLike<number>;
+  normals: ArrayLike<number>;
+  indices: ArrayLike<number>;
+  uvs?: ArrayLike<number>;
+  uvs2?: ArrayLike<number>;
+  colors?: ArrayLike<number>;
+  tangents?: ArrayLike<number>;
   /** Babylon 列主序矩阵；顶点保持局部坐标，后台必须保留坐标系和手性。 */
   worldMatrix: number[];
   material: LightingBakeMaterialInput;

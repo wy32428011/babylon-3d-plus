@@ -64,30 +64,85 @@ function restoreTextureUrls(data: LightingBakeBinaryInput): MetadataInput {
   if (table && used.size !== table.urls.length) throw new Error('烘焙纹理字典含未使用的输入。');
   return input;
 }
-/** 数值保持 Float64 精度，索引保持 Uint32；不把大型数字数组写进 JSON。 */
+const vertexFields = fields.filter(field => field !== 'indices') as Array<Exclude<Field, 'indices'>>;
+
+/** TypedArray 整段拷贝到目标视图；number[] 保留逐元素校验写入，兼容旧 JSON 输入。 */
+function writeBinaryValues(buffer: ArrayBuffer, type: LightingBakeBinaryAttribute['type'], values: ArrayLike<number>, byteOffset: number): void {
+  const count = values.length;
+  if (type === 'uint32') {
+    const target = new Uint32Array(buffer, byteOffset, count);
+    if (values instanceof Uint32Array || values instanceof Uint16Array || values instanceof Uint8Array) { target.set(values); return; }
+    if (values instanceof Int32Array || values instanceof Int16Array || values instanceof Int8Array) {
+      if (!values.every(value => value >= 0)) throw new Error('烘焙二进制几何含无效数字或索引。');
+      target.set(values); return;
+    }
+    for (let index = 0; index < count; index++) {
+      const value = values[index];
+      if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error('烘焙二进制几何含无效数字或索引。');
+      target[index] = value;
+    }
+    return;
+  }
+  const target = new Float64Array(buffer, byteOffset, count);
+  if (values instanceof Float64Array || values instanceof Float32Array) {
+    if (!values.every(value => Number.isFinite(value))) throw new Error('烘焙二进制几何含无效数字或索引。');
+    target.set(values); return;
+  }
+  if (ArrayBuffer.isView(values) && !(values instanceof DataView)) { target.set(values as ArrayLike<number>); return; }
+  for (let index = 0; index < count; index++) {
+    const value = values[index];
+    if (!Number.isFinite(value)) throw new Error('烘焙二进制几何含无效数字或索引。');
+    target[index] = value;
+  }
+}
+
+/** 数值保持 Float64 精度，索引保持 Uint32；不把大型数字数组写进 JSON。
+ * 同一源网格派生的 primitive 共享顶点属性引用：全部记录指向同一个 ArrayBuffer，
+ * 顶点数据只编码一次，结构化克隆按引用去重，文件落地时也只写一份。 */
 export function encodeLightingBakeTransport(input: LightingBakeInput, options: { deduplicateTextureUrls?: boolean } = {}): LightingBakeBinaryInput {
   const geometry: LightingBakeBinaryMesh[] = [];
-  const meshes = input.meshes.map(mesh => {
+  const groupsByPositions = new Map<ArrayLike<number>, LightingBakeMeshInput[][]>();
+  for (const mesh of input.meshes) {
+    const candidates = groupsByPositions.get(mesh.positions) ?? [];
+    const group = candidates.find(candidate => vertexFields.every(field => candidate[0][field] === mesh[field]));
+    if (group) group.push(mesh); else candidates.push([mesh]);
+    groupsByPositions.set(mesh.positions, candidates);
+  }
+  const meshes: Array<Omit<LightingBakeMeshInput, Field>> = [];
+  for (const groups of groupsByPositions.values()) for (const group of groups) {
+    // 顶点属性按引用去重后先写入共享区，每条记录再追加自己的 indices。
+    const sharedOffsets = new Map<ArrayLike<number>, LightingBakeBinaryAttribute>();
     let size = 8;
-    const attributes: LightingBakeBinaryMesh['attributes'] = {};
-    for (const field of fields) if (mesh[field] !== undefined) {
-      size = Math.ceil(size / 8) * 8; attributes[field] = { byteOffset: size, length: mesh[field]!.length, type: field === 'indices' ? 'uint32' : 'float64' };
-      size += mesh[field]!.length * (field === 'indices' ? 4 : 8);
+    const layout = (values: ArrayLike<number>, field: Field): LightingBakeBinaryAttribute => {
+      const width = field === 'indices' ? 4 : 8;
+      size = Math.ceil(size / width) * width;
+      const attribute = { byteOffset: size, length: values.length, type: (field === 'indices' ? 'uint32' : 'float64') as LightingBakeBinaryAttribute['type'] };
+      size += values.length * width;
+      return attribute;
+    };
+    for (const mesh of group) for (const field of vertexFields) {
+      const values = mesh[field];
+      if (values !== undefined && !sharedOffsets.has(values)) sharedOffsets.set(values, layout(values, field));
     }
-    const bytes = new ArrayBuffer(size), view = new DataView(bytes); new Uint8Array(bytes).set(magic);
-    const metadata = { ...mesh };
-    for (const field of fields) {
-      const attribute = attributes[field], values = mesh[field];
-      if (attribute && values) for (let index = 0; index < values.length; index++) {
-        const value = values[index];
-        if (!Number.isFinite(value) || field === 'indices' && (!Number.isInteger(value) || value < 0 || value > 0xffffffff)) throw new Error('烘焙二进制几何含无效数字或索引。');
-        if (field === 'indices') view.setUint32(attribute.byteOffset + index * 4, value, true);
-        else view.setFloat64(attribute.byteOffset + index * 8, value, true);
-      }
-      delete metadata[field];
+    const recordAttributes = group.map(mesh => {
+      const attributes: LightingBakeBinaryMesh['attributes'] = {};
+      for (const field of vertexFields) if (mesh[field] !== undefined) attributes[field] = sharedOffsets.get(mesh[field]!);
+      if (mesh.indices !== undefined) attributes.indices = layout(mesh.indices, 'indices');
+      return attributes;
+    });
+    const bytes = new ArrayBuffer(size); new Uint8Array(bytes).set(magic);
+    for (const [values, attribute] of sharedOffsets) {
+      writeBinaryValues(bytes, attribute.type, values, attribute.byteOffset);
     }
-    geometry.push({ key: mesh.key, bytes, attributes }); return metadata;
-  });
+    group.forEach((mesh, index) => {
+      const attribute = recordAttributes[index].indices;
+      if (attribute) writeBinaryValues(bytes, attribute.type, mesh.indices, attribute.byteOffset);
+      geometry.push({ key: mesh.key, bytes, attributes: recordAttributes[index] });
+      const metadata = { ...mesh } as Omit<LightingBakeMeshInput, Field>;
+      for (const field of fields) delete (metadata as Partial<LightingBakeMeshInput>)[field];
+      meshes.push(metadata);
+    });
+  }
   // 磁盘准备也复用此encoder，只有renderer显式请求IPC优化；默认旧输出保持原样。
   const metadata = { ...input, meshes };
   return { version: 2, ...(options.deduplicateTextureUrls ? deduplicateTextureUrls(metadata) : { input: metadata }), geometry };
@@ -106,15 +161,19 @@ export function decodeLightingBakeTransport(value: unknown): LightingBakeInput {
     const geometry = byKey.get(metadata.key);
     if (!geometry) throw new Error('烘焙二进制网格映射缺失。');
     byKey.delete(metadata.key);
-    const mesh = { ...metadata } as LightingBakeMeshInput, view = new DataView(geometry.bytes), ranges: Array<[number,number]> = [];
+    const mesh = { ...metadata } as LightingBakeMeshInput, ranges: Array<[number,number]> = [];
     for (const field of fields) {
       const attribute = geometry.attributes[field];
       if (!attribute) continue;
       const width = field === 'indices' ? 4 : 8;
+      const end = attribute.byteOffset + attribute.length * width;
       if (attribute.type !== (field === 'indices' ? 'uint32' : 'float64') || !Number.isSafeInteger(attribute.byteOffset) || attribute.byteOffset < 8 || attribute.byteOffset % width || !Number.isSafeInteger(attribute.length) || attribute.length < 0
-        || attribute.byteOffset + attribute.length * width > geometry.bytes.byteLength || ranges.some(([start,end]) => attribute.byteOffset < end && attribute.byteOffset + attribute.length * width > start)) throw new Error('烘焙二进制属性偏移或长度无效。');
-      ranges.push([attribute.byteOffset, attribute.byteOffset + attribute.length * width]);
-      mesh[field] = Array.from({length:attribute.length}, (_,index) => field === 'indices' ? view.getUint32(attribute.byteOffset + index * width,true) : view.getFloat64(attribute.byteOffset + index * width,true));
+        || end > geometry.bytes.byteLength || ranges.some(([start, stop]) => attribute.byteOffset < stop && end > start && (start !== attribute.byteOffset || stop !== end))) throw new Error('烘焙二进制属性偏移或长度无效。');
+      ranges.push([attribute.byteOffset, end]);
+      // 主进程只在已校验的边界上建零拷贝视图；大场景不再物化为 number[]。
+      mesh[field] = field === 'indices'
+        ? new Uint32Array(geometry.bytes, attribute.byteOffset, attribute.length)
+        : new Float64Array(geometry.bytes, attribute.byteOffset, attribute.length);
     }
     return mesh;
   });
