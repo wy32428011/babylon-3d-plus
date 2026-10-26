@@ -705,12 +705,20 @@ export class ShuttleTelemetryDriver {
     if (cell.exitToPlatform !== true) {
       state.hcliftExitFlashOutY = null;
       state.hcliftExitStartPosition = null;
+      if (cell.deckCenter === undefined) {
+        state.hcliftEntryStartPosition = null;
+        return;
+      }
       state.hcliftEntryStartPosition ??= (state.rootPosition ?? state.rootBasePosition).clone();
-      // 尚未真正开始进梯（被 work_state 门控在原地）时仍按原门控，不抢跑
+      if (this.isShuttleTravelArrived(model, cell, travelAxis)) return;
+      // ws=2/5/6（取完/载车移动/移动完）说明提升机已载本车：直接把车刷到载货台中心
+      // （启动补位/丢帧追平，以 PLC 状态为准），不受 ws=1 门控限制、不要求已驶离站台；
+      // 其余状态仍按门控：进梯途中台面开始升降才闪入。
+      const carrying = cell.hcliftWorkState === 2 || cell.hcliftWorkState === 5 || cell.hcliftWorkState === 6;
       const entered = Vector3.Distance(state.rootPosition ?? state.rootBasePosition, state.hcliftEntryStartPosition)
         > SHUTTLE_TRAVEL_ARRIVE_TOLERANCE_METERS;
-      if (!entered || !deckLifting) return;
-      // 进梯途中台面开始升降：闪入载货台中心，随后 Y 随台面升降
+      if (!carrying && (!entered || !deckLifting)) return;
+      // 进梯途中台面开始升降，或提升机已载车：闪入/补位到载货台中心，随后 Y 随台面升降
       state.rootPosition = this.resolveShuttleTravelTargetPosition(model, cell, travelAxis);
       return;
     }

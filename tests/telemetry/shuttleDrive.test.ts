@@ -1089,7 +1089,7 @@ test('x=-2 换层中 y 上报 0：回退 to_y 解析站台层，不冻结', () =
   }
 });
 
-test('小车进出提升机由 hclift work_state 门控：1 才允许进梯，3 才允许出梯', () => {
+test('小车进出提升机由 hclift work_state 门控：1 放行进入动画，2/5/6 载车状态直接刷入，3 放行驶出', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h);
@@ -1115,19 +1115,20 @@ test('小车进出提升机由 hclift work_state 门控：1 才允许进梯，3 
     h.apply(frame, 0.1, 40);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, '必须先在站台停靠');
 
-    // 提升机不在取小车中（ws=5）：不得驶入载货台
+    // 待机（ws=0，非取小车中/非载车）：不得驶入载货台
+    setSurface(0);
     h.apply({ ...frame, x: -2 }, 0.1, 40);
-    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, 'ws≠1 时小车不得进梯');
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, 'ws=0 时小车不得进梯');
 
-    // ws=1 取小车中：允许驶入载货台
+    // ws=1 取小车中：放行进入动画
     setSurface(1);
     h.apply({ ...frame, x: -2 }, 0.1, 40);
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6, 'ws=1 时必须能进梯');
 
-    // 提升机不在卸小车中（ws=5）：不得驶出载货台
+    // ws=5 载小车移动：车已随车在动，保持在载货台（不得驶出）
     setSurface(5);
     h.apply(frame, 0.1, 40);
-    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6, 'ws≠3 时小车不得出梯');
+    assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6, 'ws=5 载车时必须留在载货台');
 
     // ws=3 卸小车中：允许驶出到站台
     setSurface(3);
@@ -1135,6 +1136,48 @@ test('小车进出提升机由 hclift work_state 门控：1 才允许进梯，3 
     assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, 'ws=3 时必须能出梯');
   } finally {
     h.dispose();
+  }
+});
+
+test('启动首帧为 ws=2/5（提升机已载车）：小车补位刷到载货台中心并随台升降', () => {
+  for (const workState of [2, 5]) {
+    const h = makeHarness();
+    try {
+      makeShuttleGeometry(h);
+      h.ref.locator = makeLocator(h.scene, {
+        columns: 1, layers: 4, startColumn: -1, rowNumber: 1, kind: 'layerChangePlatform',
+        rootPosition: new Vector3(0, 2, 11),
+        platformTrackEndWorld: new Vector3(0, 2, 10.5),
+      });
+      // 首帧提升机数据未就绪：小车先停在站台
+      const frame = { x: -1, y: 1, to_x: 0, to_y: 3, to_z: 1, to_Depth: 0, Status: 5, errorCode: 0 };
+      h.apply(frame, 0.1, 1);
+      assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 11) < 1e-6, '前置：小车须在站台');
+
+      // 首帧即「已载车」（ws=2 取完 / ws=5 载车移动）：直接刷到载货台中心，不再站台隔空跟台
+      h.state.hcliftPlatformSurfaces.set('hclift1', {
+        assetCode: '1701', aisleCode: 'A1', supportY: 2.5,
+        deckCenter: new Vector3(0, 2.5, 9.673), targetLevel: 1, arrived: workState === 2, workState,
+        updatedAtMs: Date.now(),
+      });
+      h.apply({ ...frame, x: -2 }, 0.1, 1);
+      assert.ok(Math.abs(h.model.shuttleTelemetry.rootPosition!.z - 9.673) < 1e-6,
+        `ws=${workState} 已载车时必须刷到载货台中心 z=9.673，实际 ${h.model.shuttleTelemetry.rootPosition!.z}`);
+      assert.equal(h.state.hcliftDeckOccupancies.get('hclift1')?.phase, 'loaded', '刷入后占位必须为 loaded');
+
+      // 台面移动时随台
+      h.state.hcliftPlatformSurfaces.set('hclift1', {
+        assetCode: '1701', aisleCode: 'A1', supportY: 3.0,
+        deckCenter: new Vector3(0, 3.0, 9.673), targetLevel: 1, arrived: false, workState,
+        updatedAtMs: Date.now(),
+      });
+      h.apply({ ...frame, x: -2 }, 0.1, 1);
+      const fork = h.scene.getMeshByName('huocha1')!;
+      assert.ok(Math.abs(fork.position.y - 2.95) < 1e-6,
+        `刷入后须随新台面 y=3.0 升降（叉面 2.95），实际 ${fork.position.y}`);
+    } finally {
+      h.dispose();
+    }
   }
 });
 
