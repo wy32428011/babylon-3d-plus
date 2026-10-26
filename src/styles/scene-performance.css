@@ -125,3 +125,10 @@
 .scene-performance-retained-report {
   padding: 4px 8px;
 }
+.scene-performance-adaptive-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  font-size: 11px;
+}

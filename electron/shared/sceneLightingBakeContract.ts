@@ -1,8 +1,11 @@
+import { resolveSceneSkyboxReference, skyboxLightingIdentity } from './sceneSkyboxContract.ts';
 import { GLB_STANDARD_ENVIRONMENT_ID } from './glbStandardPreview.ts';
 /** 编辑器、后台烘焙及发布共享的纯数据合同，不依赖 Electron 或 Babylon。 */
 import type { SceneLightingBakeSettings } from './sceneLightingBakeData.ts';
 export { DEFAULT_LIGHTING_BAKE_SETTINGS, normalizeSceneLightingBakeSettings, validateSceneLightingBakeSnapshot, type SceneLightingBakeSettings, type SceneLightingBakeSnapshot, type LightingBakeAsset, type LightingBakeSurface } from './sceneLightingBakeData.ts';
 import { getSceneLightingConfig } from './sceneLightingConfig.ts';
+import { isLightingLightmapRecipeCompatible } from './sceneLightingTextureCodec.ts';
+export { isLightingLightmapRecipeCompatible } from './sceneLightingTextureCodec.ts';
 import type {
   LightingMotionRole, LightingPolicyContext, LightingPolicyConflict, LightingPolicyField,
   LightingPolicyFieldSources, LightingPolicyMismatch,
@@ -288,7 +291,8 @@ export function getSceneLightingBakeSignature(value: unknown): string {
     const fullyDynamic = policy || hasPolicyInheritance(entity)
       ? possiblePolicySettings(policy, resolve, id, entity, entities).every(result => result.mobility === 'dynamic')
       : lighting.mobility === 'dynamic';
-    const components = { ...c, ...(fullyDynamic && !c.light ? { transform: undefined } : {}) };
+    const components = { ...c, ...(c.skybox ? { skybox: skyboxLightingIdentity(c.skybox) } : {}),
+      ...(fullyDynamic && !c.light ? { transform: undefined } : {}) };
     return { id, parentId: entity.parentId, visible: entity.visible, components };
   }).filter(Boolean);
   const main = lighting.main.source === 'scene' ? { source: 'scene' }
@@ -296,10 +300,14 @@ export function getSceneLightingBakeSignature(value: unknown): string {
       azimuthDegrees: lighting.main.azimuthDegrees, elevationDegrees: lighting.main.elevationDegrees, intensity: lighting.main.intensity }
       : { source: 'managed', enabled: false };
   // 天空纹理与旋转仍是输入；辐照强度只从 lighting 读取，曝光/雾和实时阴影参数不进 GI 摘要。
-  const skybox = lighting.environment?.source === 'sandbox' ? undefined : settings.skybox ? Object.fromEntries(Object.entries(object(settings.skybox)).filter(([key]) => key !== 'intensity')) : settings.skybox;
+  const skybox = lighting.environment?.source === 'sandbox' ? undefined : settings.skybox
+    ? Object.fromEntries(Object.entries(object(skyboxLightingIdentity(settings.skybox))).filter(([key]) => key !== 'intensity')) : settings.skybox;
+  const resolvedSkybox = sandboxEnvironment ? null : resolveSceneSkyboxReference(scene);
   return `lighting-v2-${lightingContentHash({
     entities: entries, environment: settings.environment, skybox,
     light: { main, fill: { intensity: lighting.fill.intensity, color: lighting.fill.color, groundColor: lighting.fill.groundColor },
+      // 旧实体天空捕获曾退化为平均辐照度；方向性原图输入必须使该旧结果过期，而非重签成有效。
+      ...(resolvedSkybox?.entityId !== null && resolvedSkybox?.visible ? { skyboxSourceCapture: 1 } : {}),
       ...(lighting.environment?.source === 'sandbox' ? { environmentLighting: { ...lighting.environment, resourceRevision: GLB_STANDARD_ENVIRONMENT_ID } } : {}),
       environmentIntensity: lighting.environmentIntensity, disabledLightIds: [...lighting.disabledLightIds].sort(), allowDayNightCycle: lighting.allowDayNightCycle,
       ...(lighting.allowDayNightCycle ? { dayNightSources: dayNightLightingSources(scene, entities) } : {}) },
@@ -347,5 +355,6 @@ export function getSceneLightingBakeError(value: unknown): string | null {
   const result = lighting.result;
   if (!result) return '混合光照尚未完成材质与间接光烘焙，请先开始烘焙。';
   if (result.signature !== getSceneLightingBakeSignature(scene)) return '静态对象、材质或光源已变化，光照烘焙结果已过期，请重新烘焙。';
+  if (!isLightingLightmapRecipeCompatible(lighting.bake.lightmapEncoding, result.assets, lighting.bake.lightmapMipLevels)) return '光照贴图编码或mip层级与当前烘焙设置不匹配，请重新烘焙。';
   return null;
 }

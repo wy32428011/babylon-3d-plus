@@ -46,6 +46,7 @@ export const createProjectAssetsSlice: EditorSlice<
   "consumeEnvironmentFocusRequest" |
   "convertLegacyEnvironmentToSceneBase" |
   "updateSkyboxConfig" |
+  "applyPreparedSkyboxEnvironment" |
   "placeSkybox" |
   "updateSelectedSkybox" |
   "setEnvironmentActiveVariant" |
@@ -341,6 +342,27 @@ export const createProjectAssetsSlice: EditorSlice<
       },
     );
   },
+  applyPreparedSkyboxEnvironment: (entityId, source, environment) => {
+    set(state => {
+      const current = entityId === null ? state.scene.sceneSettings.skybox : state.scene.entities[entityId]?.components.skybox;
+      if (!current || ['sourcePath', 'sourceUrl', 'format', 'assetRevision', 'resolution'].some(key =>
+        current[key as keyof typeof current] !== source[key as keyof typeof source])) return state;
+      if (JSON.stringify(current.environment) === JSON.stringify(environment)) return state;
+      // 派生资源不是一次业务编辑；保持历史和当前位姿，脏状态比较会忽略该缓存描述。
+      const entity = entityId === null ? null : state.scene.entities[entityId];
+      const scene = entity ? { ...state.scene, entities: { ...state.scene.entities,
+        [entity.id]: { ...entity, components: { ...entity.components, skybox: { ...entity.components.skybox!, environment } } } } }
+        : { ...state.scene, sceneSettings: { ...state.scene.sceneSettings,
+          skybox: { ...state.scene.sceneSettings.skybox!, environment } } };
+      const transaction = state.latestSceneResourceTransaction;
+      const recovery = state.latestSceneResourceRecovery;
+      // 同一文档的缓存写回须原子推进事务快照，否则首帧成功后仍无法结算；不接管已失配的旧事务。
+      return { scene,
+        ...(transaction?.after === state.scene ? { latestSceneResourceTransaction: { ...transaction, after: scene } } : {}),
+        ...(recovery?.after === state.scene ? { latestSceneResourceRecovery: { ...recovery, after: scene } } : {}),
+      };
+    });
+  },
   updateSkyboxConfig: (skybox) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改天空盒');
@@ -359,34 +381,31 @@ export const createProjectAssetsSlice: EditorSlice<
         ...result,
         hierarchySelectionIds,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
-        logs: prependLog(state.logs, nextSkybox ? '天空盒球体已更新。' : '天空盒球体已清除。'),
+        logs: prependLog(state.logs, nextSkybox ? '天空背景已更新。' : '天空背景已清除。'),
       };
     });
   },
-  placeSkybox: (skybox, placementPosition) => {
+  placeSkybox: (skybox) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '放置天空盒');
       const nextSkybox = sanitizeSceneSkybox(skybox);
       if (!nextSkybox) return state;
-      let targetEntityId: string | null = null;
       let created = false;
-      const command = updateSceneDocumentCommand('放置天空盒球体', (scene) => {
+      const command = updateSceneDocumentCommand('应用天空背景', (scene) => {
         const result = upsertSkyboxEntityInScene(scene, nextSkybox, {
-          placementPosition,
           revealEntity: true,
-          selectEntity: true,
+          selectEntity: false,
         });
-        targetEntityId = result.entityId;
         created = result.created;
         return result.scene;
       });
       const result = executeCommand(state.scene, state.history, command);
-      const hierarchySelectionIds = targetEntityId ? [targetEntityId] : state.hierarchySelectionIds;
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, state.hierarchySelectionIds);
       return {
         ...result,
         hierarchySelectionIds,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
-        logs: prependLog(state.logs, created ? '天空盒球体已创建。' : '天空盒球体已更新并选中。'),
+        logs: prependLog(state.logs, created ? '天空背景已创建。' : '天空背景已更新并选中。'),
       };
     });
   },
@@ -459,6 +478,7 @@ export const createProjectAssetsSlice: EditorSlice<
       asset.dataDrivenConfig,
       asset.builtInSlotBindingConfig,
       asset.layerChangePlatformBindingConfig,
+      asset.runtimeCapabilities,
     );
     const modelIdentity = createModelTypeIdentityFromAsset(asset);
     if (modelIdentity && entity.components.modelAsset) entity.components.modelAsset.dataPlatformModel = modelIdentity;

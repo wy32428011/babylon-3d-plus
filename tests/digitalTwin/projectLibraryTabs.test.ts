@@ -388,7 +388,8 @@ test('天空盒同步订阅委托 controller 清理迟到事件，列表成功�
   const importStart = source.indexOf('async function handleImportSkyboxFile');
   const importEnd = source.indexOf('/** 根据当前资源库选择对应的模型', importStart);
   const importHandler = source.slice(importStart, importEnd);
-  assert.ok(importHandler.includes('refreshCurrentSkyboxFromAssets([result.importedAsset])'));
+  assert.ok(importHandler.includes('refreshCurrentSkyboxFromAssets([preparedAsset])'));
+  assert.ok(importHandler.includes('prepareSkyboxEnvironment('));
   assert.doesNotMatch(source, /useEditorStore.setState/);
 });
 

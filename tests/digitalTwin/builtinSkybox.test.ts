@@ -36,11 +36,26 @@ test('安装目录读取内置资源，并拒绝同大小损坏文件和符号�
   try {
     await fs.mkdir(packagePath, { recursive: true });
     await fs.writeFile(filePath, bytes);
+    // 与 electron-builder extraResources 的安装布局一致：ENV 产物位于 builtin-skyboxes 的同级目录。
+    const environmentRoot = path.join(temporaryRoot, 'builtin-skybox-environments');
+    await fs.cp(path.resolve('public/builtin-skybox-environments'), environmentRoot, { recursive: true });
     Object.defineProperty(process, 'resourcesPath', { configurable: true, value: temporaryRoot });
     Object.defineProperty(process, 'defaultApp', { configurable: true, value: false });
     const [installed] = await listBuiltinSkyboxAssets();
     assert.equal(installed.path, filePath);
     assert.equal(installed.assetRevision, original.assetRevision);
+    assert.equal(installed.environment?.sourceSha256, original.assetRevision);
+    assert.equal(installed.environment?.format, 'env');
+    assert.equal(installed.environment?.faceSize, 512);
+    assert.ok(installed.environment?.sourcePath?.startsWith(environmentRoot));
+    const environmentFile = path.join(environmentRoot, '512.env');
+    const environmentBytes = await fs.readFile(environmentFile);
+    const corruptEnvironment = Buffer.from(environmentBytes);
+    corruptEnvironment[corruptEnvironment.length - 1] ^= 1;
+    await fs.writeFile(environmentFile, corruptEnvironment);
+    await assert.rejects(listBuiltinSkyboxAssets(), /ENV/);
+    await fs.writeFile(environmentFile, environmentBytes);
+    assert.equal((await listBuiltinSkyboxAssets())[0].environment?.sha256, installed.environment?.sha256);
     const corrupt = Buffer.from(bytes);
     corrupt[corrupt.length - 1] ^= 1;
     await fs.writeFile(filePath, corrupt);

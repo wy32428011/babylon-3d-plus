@@ -1,4 +1,4 @@
-import { normalizeEntityLightingSettings, normalizeSceneLightingBakeSettings, validateSceneLightingBakeSnapshot, getSceneLightingBakeSignature, requiresSceneLightingBake, type EntityLightingSettings } from '../../../../electron/shared/sceneLightingBakeContract';
+import { normalizeEntityLightingSettings, normalizeSceneLightingBakeSettings, validateSceneLightingBakeSnapshot, getSceneLightingBakeSignature, requiresSceneLightingBake, isLightingLightmapRecipeCompatible, type EntityLightingSettings } from '../../../../electron/shared/sceneLightingBakeContract';
 import { prepareLightingManagementDraft } from '../lightingManagementState';
 import { executeCommand } from '../../commands/CommandHistory';
 import { updateSceneDocumentCommand } from '../../commands/entityCommands';
@@ -142,7 +142,8 @@ export const createLightingManagerSlice: EditorSlice<
   completeLightingBake: (requestId, snapshot) => set(state => {
     if (state.lightingBakeRequest?.id !== requestId) return state;
     const result = validateSceneLightingBakeSnapshot(snapshot);
-    if (!result || result.signature !== getSceneLightingBakeSignature(state.scene) || isRuntimePreviewState(state)) return {
+    if (!result || result.signature !== getSceneLightingBakeSignature(state.scene)
+      || !isLightingLightmapRecipeCompatible(state.scene.sceneSettings.lighting.bake.lightmapEncoding, result.assets, state.scene.sceneSettings.lighting.bake.lightmapMipLevels) || isRuntimePreviewState(state)) return {
       lightingBakeRequest: null,
       lightingBakeStatus: { phase: 'error', message: '烘焙期间场景已变化或结果无效；保留上次结果，请重新烘焙。' },
     };
@@ -159,10 +160,12 @@ export const createLightingManagerSlice: EditorSlice<
   }),
   updateLightingBakeSettings: patch => set(state => {
     if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改光照烘焙设置');
-    const settings = normalizeSceneLightingBakeSettings({ ...state.scene.sceneSettings.lighting.bake, ...patch });
+    const settings = { ...state.scene.sceneSettings.lighting.bake, ...normalizeSceneLightingBakeSettings({ ...state.scene.sceneSettings.lighting.bake, ...patch }) };
+    if (Object.hasOwn(patch, 'lightmapMipLevels') && patch.lightmapMipLevels === undefined) delete settings.lightmapMipLevels;
     if (JSON.stringify(settings) === JSON.stringify(state.scene.sceneSettings.lighting.bake)) return state;
     const command = updateSceneDocumentCommand('修改光照烘焙设置', scene => ({
-      ...scene, sceneSettings: { ...scene.sceneSettings, lighting: { ...scene.sceneSettings.lighting, bake: settings } },
+      ...scene, sceneSettings: { ...scene.sceneSettings, lighting: { ...scene.sceneSettings.lighting,
+        version: settings.lightmapEncoding === 'rgbm-gamma' || settings.lightmapMipLevels ? 3 : scene.sceneSettings.lighting.version, bake: settings } },
     }));
     return { ...executeCommand(state.scene, state.history, command), ...(state.lightingBakeRequest ? {
       lightingBakeRequest: null, lightingBakeStatus: { phase: 'cancelled' as const, message: '烘焙设置已更改，本次任务已取消。' },

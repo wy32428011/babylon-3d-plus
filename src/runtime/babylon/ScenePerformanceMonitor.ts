@@ -111,6 +111,8 @@ export type ScenePerformanceSnapshot = {
   renderTimeMs: number | null;
   activeMeshesEvaluationMs: number | null;
   gpuFrameTimeMs: number | null;
+  /** 实际渲染表面，避免运动降分辨率或DPR变化的收益被误认为同画质提升。 */
+  renderSurface?: { width: number; height: number; hardwareScalingLevel: number } | null;
   shaderCompilationMs: number | null;
   drawCalls: number | null;
   activeMeshes: number;
@@ -159,6 +161,8 @@ type ScenePerformanceMonitorOptions = {
   /** 发布诊断可省略材质、包围盒与资源名称明细；基础 CPU/GPU 计数和几何总量仍正常采集。 */
   collectDetailedGpuWorkloads?: boolean | (() => boolean);
   captureFrameTimings?: boolean;
+  /** 编辑器仅在诊断可见/运行时启用GPU查询，普通渲染不承担查询成本。 */
+  captureGpuFrameTime?: boolean | (() => boolean);
 };
 
 /** 未支持或尚未采样不能冒充零；实际 PerfCounter 已采集的零仍为有效测量。 */
@@ -170,6 +174,14 @@ function readCounterValue(counter: { current: number; lastSecAverage: number; co
 
 function isAvailableMetric(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function readRenderSurface(engine: Engine): ScenePerformanceSnapshot['renderSurface'] {
+  try {
+    const width = engine.getRenderWidth(), height = engine.getRenderHeight(), hardwareScalingLevel = engine.getHardwareScalingLevel();
+    return [width, height, hardwareScalingLevel].every(value => Number.isFinite(value) && value > 0)
+      ? { width, height, hardwareScalingLevel } : null;
+  } catch { return null; }
 }
 
 /** 只在展示边界做有限数值归一化，保留内部原始采样精度。 */
@@ -470,6 +482,7 @@ export class ScenePerformanceMonitor {
   private pendingLongTaskCount = 0;
   private pendingLongTaskDurationMs = 0;
   private gpuFrameTimeCaptureEnabled = false;
+  private gpuCaptureStartCount = 0;
   private disposed = false;
   private frameTimings: FrameTimingWindow | null = null;
   private frameTimingObserver: Observer<Scene> | null = null;
@@ -487,12 +500,7 @@ export class ScenePerformanceMonitor {
 
     this.engineInstrumentation = new EngineInstrumentation(engine);
     this.engineInstrumentation.captureShaderCompilationTime = true;
-    try {
-      this.engineInstrumentation.captureGPUFrameTime = true;
-      this.gpuFrameTimeCaptureEnabled = this.engineInstrumentation.captureGPUFrameTime;
-    } catch (error) {
-      console.warn('Scene View GPU frame time 采集不可用，HUD 将继续显示 CPU 与场景指标。', error);
-    }
+    this.syncGpuFrameTimeCapture();
 
     try {
       this.glInfo = engine.getGlInfo();
@@ -566,8 +574,9 @@ export class ScenePerformanceMonitor {
 
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
-    const gpuFrameTimeNanoseconds = this.gpuFrameTimeCaptureEnabled
-      ? readCounterValue(this.engineInstrumentation.gpuFrameTimeCounter) : null;
+    this.syncGpuFrameTimeCapture();
+    const gpuCounter = this.gpuFrameTimeCaptureEnabled ? this.engineInstrumentation.gpuFrameTimeCounter : null;
+    const gpuFrameTimeNanoseconds = gpuCounter && gpuCounter.count > this.gpuCaptureStartCount ? readCounterValue(gpuCounter) : null;
     // installed Babylon 的公开 getter 委托到 engine._drawCalls；缺少此来源时保持不可用，不造替代 counter。
     const drawCalls = readCounterValue(this.sceneInstrumentation.drawCallsCounter);
     const details = this.options.collectDetailedGpuWorkloads;
@@ -581,6 +590,7 @@ export class ScenePerformanceMonitor {
       gpuFrameTimeMs: gpuFrameTimeNanoseconds !== null
         ? gpuFrameTimeNanoseconds * GPU_NANOSECONDS_TO_MILLISECONDS
         : null,
+      renderSurface: readRenderSurface(this.engine),
       shaderCompilationMs: readCounterValue(this.engineInstrumentation.shaderCompilationTimeCounter),
       drawCalls: drawCalls === null ? null : Math.round(drawCalls),
       activeMeshes: this.scene.getActiveMeshes().length,
@@ -604,6 +614,20 @@ export class ScenePerformanceMonitor {
     this.history.push(snapshot);
     if (this.history.length > MAX_HISTORY_SAMPLES) this.history.shift();
     return snapshot;
+  }
+
+  /** 低频同步诊断开关；重新启用后必须取得新样本，不能把停用前残留计数当成本次测量。 */
+  private syncGpuFrameTimeCapture(): void {
+    const option = this.options.captureGpuFrameTime;
+    const enabled = typeof option === 'function' ? option() : option !== false;
+    if (enabled === this.gpuFrameTimeCaptureEnabled) return;
+    try {
+      if (enabled) this.gpuCaptureStartCount = this.engineInstrumentation.gpuFrameTimeCounter?.count ?? 0;
+      this.engineInstrumentation.captureGPUFrameTime = enabled;
+      this.gpuFrameTimeCaptureEnabled = enabled && this.engineInstrumentation.captureGPUFrameTime;
+    } catch (error) {
+      console.warn('Scene View GPU frame time 采集不可用，HUD 将继续显示 CPU 与场景指标。', error);
+    }
   }
 
   /** 生成包含 renderer、最近一分钟采样和摘要的 JSON 报告。 */

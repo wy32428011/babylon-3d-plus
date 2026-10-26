@@ -37,6 +37,8 @@ import type { SceneTelemetryController } from './SceneTelemetryController';
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
 import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
 import { type ModelRuntimeEntry, readRuntimeTimestampMs } from './sceneRuntimeTypes';
+import type { SceneLoadTraceScope } from '../SceneLoadDiagnostics.ts';
+import type { ProjectOpenSpanToken, ProjectOpenSpanOutcome, ProjectOpenTraceCode } from '../../../../electron/shared/projectOpenTrace.ts';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
@@ -73,6 +75,9 @@ export class EnvironmentAndSkyboxController {
   public environmentRuntime!: SceneEnvironmentRuntime;
   /** 环境容器必须等加入场景并完成首帧渲染后，才能结算对应的统一进度单元。 */
   public readonly environmentLoadProgressUnits = new WeakMap<AssetContainer, number>();
+  private readonly environmentTraceScopes = new WeakMap<AbortSignal, SceneLoadTraceScope | null>();
+  private skyboxTrace: { token: ProjectOpenSpanToken; sourceUrl: string | null; scope: SceneLoadTraceScope | null } | null = null;
+  private skyboxOperationScope: SceneLoadTraceScope | null = null;
 
 
   /** 同步球形天空盒实体；没有实体时兼容旧 sceneSettings.skybox。 */
@@ -85,10 +90,10 @@ export class EnvironmentAndSkyboxController {
 
     const skybox = getSceneSkyboxSettings(document);
     if (!skybox) {
-      this.skyboxRuntime.sync(null);
+      this.syncSkyboxTarget(null);
       return;
     }
-    this.skyboxRuntime.sync({
+    this.syncSkyboxTarget({
       entityId: null,
       skybox,
       transform: {
@@ -106,10 +111,10 @@ export class EnvironmentAndSkyboxController {
   public syncSkyboxEntity(entity: Entity, selected: boolean): void {
     const skybox = createSceneSkyboxSettingsFromEntity(entity);
     if (!skybox) {
-      this.skyboxRuntime.sync(null);
+      this.syncSkyboxTarget(null);
       return;
     }
-    this.skyboxRuntime.sync({
+    this.syncSkyboxTarget({
       entityId: entity.id,
       skybox,
       transform: entity.components.transform,
@@ -225,7 +230,14 @@ export class EnvironmentAndSkyboxController {
     }
   }
 
+  private assertSkyboxReadyForBake(): void {
+    const state = this.skyboxRuntime.getReadiness();
+    if (state.phase === 'loading') throw new Error('天空 ENV 尚未完成准备，请等待资源就绪后再烘焙。');
+    if (state.phase === 'error') throw new Error(`天空资源未就绪：${state.message ?? '请重新准备 ENV。'}`);
+  }
+
   async preflightLightingBake(document: SceneDocument, signal?: AbortSignal): Promise<LightingBakePreflight> {
+    this.assertSkyboxReadyForBake();
     if (this.lightingBakeRunning) throw new Error('请等待当前烘焙任务结束，再检查预算。');
     if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
       || [...this.dependencies.assets.models.values()].some(model => model.externalScriptStarting || model.cancelLoad)) throw new Error('请等待全部模型与参数几何生成完成后再检查预算。');
@@ -236,11 +248,12 @@ export class EnvironmentAndSkyboxController {
     this.lightingRuntime.markDirty('bake-preflight');
     const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(crypto.randomUUID(), signal), signal);
     signal?.throwIfAborted();
-    return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input)), signal);
+    return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input, { deduplicateTextureUrls: true })), signal);
   }
 
   /** 后台任务只读取稳定快照；结果仍匹配当前场景后才应用，文档提交由编辑器事务负责。 */
   async bakeLighting(document: SceneDocument, signal?: AbortSignal, progress?: (message: string, fraction?: number, phase?: string) => void): Promise<SceneLightingBakeSnapshot> {
+    this.assertSkyboxReadyForBake();
     if (this.lightingBakeRunning) throw new Error('已有光照烘焙正在进行。');
     if (this.dependencies.effects.poiEffectRuntime.isDayNightCycleActive()) throw new Error('昼夜周期正在改变照明，请先停用昼夜组件或关闭允许昼夜周期，再烘焙间接光。');
     if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
@@ -272,7 +285,7 @@ export class EnvironmentAndSkyboxController {
       }), signal);
       const input = { ...captured.value, captureMetrics: captured.metrics };
       check();
-      const result = await awaitLightingTaskStep(api.startLightingBake(encodeLightingBakeTransport(input)), signal);
+      const result = await awaitLightingTaskStep(api.startLightingBake(encodeLightingBakeTransport(input, { deduplicateTextureUrls: true })), signal);
       check();
       progress?.('光照已生成，正在应用材质并等待画面就绪…', 0.98, 'applying');
       await this.lightingRuntime.applySnapshot(result, signal, async () => {
@@ -328,11 +341,17 @@ export class EnvironmentAndSkyboxController {
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
   ): Promise<AssetContainer> {
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
+    if (loadSignal) this.environmentTraceScopes.set(loadSignal, traceScope);
+    const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope);
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     const queuedAt = readRuntimeTimestampMs();
+    const diagnosticContext = { resource: fileName, resourceOrdinal: trace?.resourceOrdinal };
+    const queueToken = this.dependencies.readiness.loadDiagnostics.beginTraceTask('environmentQueue', diagnosticContext, traceScope);
     try {
       const container = await this.environmentLoadScheduler.run(
         () => {
+          queueToken?.end();
           this.dependencies.readiness.loadDiagnostics.record('environmentQueue', readRuntimeTimestampMs() - queuedAt);
           return this.environmentAssetCache.acquireWorkingContainer({
           cacheKey: `${rootUrl}${fileName}`,
@@ -340,8 +359,9 @@ export class EnvironmentAndSkyboxController {
           loadSource: () => this.dependencies.readiness.loadDiagnostics.measureAsync('environmentReadDecode', () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, (event) => {
             this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
             onProgress?.(event);
-          }), fileName),
+          }), diagnosticContext, traceScope),
           onClone: (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('environmentClone', ms, failed, fileName),
+          trace,
         });
         },
         loadSignal,
@@ -349,6 +369,8 @@ export class EnvironmentAndSkyboxController {
       this.environmentLoadProgressUnits.set(container, loadSequence);
       return container;
     } catch (error) {
+      queueToken?.end(error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error',
+        error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'operation-failed');
       this.dependencies.readiness.settleModelLoadProgressUnit(loadSequence);
       throw error;
     }
@@ -356,7 +378,9 @@ export class EnvironmentAndSkyboxController {
 
   /** 等待环境材质/纹理就绪，并确认环境已实际进入一帧场景渲染。 */
   public waitForEnvironmentRenderReady(loadSignal?: AbortSignal): Promise<void> {
-    return this.dependencies.readiness.loadDiagnostics.measureAsync('environmentRenderReady', () => waitForSceneRenderReady(this.context.scene, loadSignal));
+    const scope = loadSignal && this.environmentTraceScopes.has(loadSignal)
+      ? this.environmentTraceScopes.get(loadSignal)! : this.dependencies.readiness.loadDiagnostics.captureTrace();
+    return this.dependencies.readiness.loadDiagnostics.measureAsync('environmentRenderReady', () => waitForSceneRenderReady(this.context.scene, loadSignal), undefined, scope);
   }
 
   /** 成功、失败或取消都只结算一次环境加载单元。 */
@@ -383,7 +407,40 @@ export class EnvironmentAndSkyboxController {
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeSkyboxRuntime(): void {
-    this.skyboxRuntime = new SceneSkyboxRuntime(this.context.scene, this.context.pushLog, () => this.dependencies.readiness.notifyModelLoadProgressChanged());
+    this.skyboxRuntime = new SceneSkyboxRuntime(this.context.scene, this.context.pushLog, state => {
+      this.observeSkyboxTrace(state);
+      this.dependencies.readiness.notifyModelLoadProgressChanged();
+    });
+  }
+
+  private syncSkyboxTarget(target: Parameters<SceneSkyboxRuntime['sync']>[0]): void {
+    this.skyboxOperationScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
+    this.skyboxRuntime.sync(target);
+    // 同源在途复用会直接return，不产生readiness事件；本次消费者仍有真实等待边界。
+    this.observeSkyboxTrace(this.skyboxRuntime.getReadiness());
+  }
+
+  endProjectOpenSkyboxTrace(outcome: ProjectOpenSpanOutcome, code?: ProjectOpenTraceCode): void {
+    this.skyboxOperationScope = null;
+    if (outcome === 'ok') return;
+    this.skyboxTrace?.token.end(outcome, code); this.skyboxTrace = null;
+  }
+
+  private observeSkyboxTrace(state: ReturnType<SceneSkyboxRuntime['getReadiness']>): void {
+    const scope = this.skyboxOperationScope;
+    if (state.phase === 'loading') {
+      if (this.skyboxTrace && (this.skyboxTrace.sourceUrl !== state.sourceUrl || (scope !== null && this.skyboxTrace.scope !== scope))) {
+        this.skyboxTrace.token.end('stale', 'scene-stale'); this.skyboxTrace = null;
+      }
+      if (!this.skyboxTrace) {
+        const token = this.dependencies.readiness.loadDiagnostics.beginTraceTask('skyboxReady', undefined, scope);
+        if (token) this.skyboxTrace = { token, sourceUrl: state.sourceUrl, scope };
+      }
+    } else if (this.skyboxTrace) {
+      this.skyboxTrace.token.end(state.phase === 'error' ? 'error' : state.phase === 'idle' ? 'skipped' : 'ok',
+        state.phase === 'error' ? 'operation-failed' : state.phase === 'idle' ? 'not-applicable' : undefined);
+      this.skyboxTrace = null;
+    }
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
@@ -412,6 +469,8 @@ export class EnvironmentAndSkyboxController {
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeLightingRuntime(): void {
     this.lightingRuntime = new SceneLightingRuntime(this.context.scene, {
+      canDeferPreparationClassification: () => this.context.canDeferPreparationClassification?.() === true
+        && this.dependencies.readiness.loadDiagnostics.hasPendingAssetWork(),
       getSources: () => {
         const document = this.dependencies.document.shadowDocument;
         if (!document) return [];

@@ -8,6 +8,8 @@ import {
 } from './editor/home/returnToHomePage';
 import { EditorLayout } from './editor/layout/EditorLayout';
 import { useEditorStore } from './editor/store/editorStore';
+import { beginProjectOpenSceneCommit, bindProjectOpenScene, completeProjectOpenResources } from './editor/loading/projectOpenTrace';
+import type { ProjectOpenTraceContext } from '../electron/shared/projectOpenTrace';
 
 type AppView = 'home' | 'editor';
 
@@ -101,8 +103,10 @@ export default function App() {
   }
 
   /** 打开项目目录后进入编辑器，项目入口默认以空白场景开始。 */
-  function enterEditorWithProject(): void {
+  function enterEditorWithProject(openTrace?: ProjectOpenTraceContext): void {
+    if (openTrace) beginProjectOpenSceneCommit(openTrace);
     useEditorStore.getState().newScene();
+    if (openTrace) { bindProjectOpenScene(openTrace, useEditorStore.getState().sceneSessionId); completeProjectOpenResources(openTrace, 'skipped'); }
     setView('editor');
   }
 
@@ -120,9 +124,9 @@ export default function App() {
   }
 
   /** 通过最近场景路径加载场景，成功后切换到编辑器。 */
-  async function handleOpenRecentScene(filePath: string, isCurrent: () => boolean = () => true, deferEnvironmentUntilSync = false): Promise<boolean> {
+  async function handleOpenRecentScene(filePath: string, isCurrent: () => boolean = () => true, deferEnvironmentUntilSync = false, openTrace?: ProjectOpenTraceContext): Promise<boolean> {
     if (!isCurrent()) return false;
-    const loaded = await useEditorStore.getState().loadSceneFromFile(filePath, isCurrent, deferEnvironmentUntilSync);
+    const loaded = await useEditorStore.getState().loadSceneFromFile(filePath, isCurrent, deferEnvironmentUntilSync, openTrace);
     if (!isCurrent()) return false;
     if (loaded) setView('editor');
     return loaded;

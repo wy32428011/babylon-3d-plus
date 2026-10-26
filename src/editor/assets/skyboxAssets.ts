@@ -215,6 +215,7 @@ export function createSceneSkyboxFromAsset(
     if (!dataPlatformResourceId) throw new Error('天空盒资源元数据无效。');
   }
   const skybox = sanitizeSceneSkybox({
+    ...(asset.environment ? { environment: asset.environment } : {}),
     packagePath: asset.packagePath,
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,

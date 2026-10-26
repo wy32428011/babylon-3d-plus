@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { CURRENT_SCENE_FILE_VERSION } from '../../electron/shared/sceneFileVersion.ts';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
@@ -53,7 +54,7 @@ const envelope = (asset?: Record<string, unknown>) => ({ version: 5, scene: { id
 // 外层格式与光照配置按既定迁移合同升级，其余原始业务字段仍必须逐项完全相等。
 function assertOnlyLightingFormatMigrated(content: string, document: ReturnType<typeof envelope>): void {
   const recovered = JSON.parse(content);
-  assert.equal(recovered.version, 6);
+  assert.equal(recovered.version, CURRENT_SCENE_FILE_VERSION);
   assert.equal(recovered.scene.sceneSettings.lighting.version, 2);
   assert.equal(recovered.scene.sceneSettings.appearance.version, 1);
   delete recovered.scene.sceneSettings.lighting;

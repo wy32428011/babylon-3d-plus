@@ -7,6 +7,7 @@ import { precompressDeploymentFiles } from '../dist-electron/ipc/deploymentPreco
 import path from 'node:path';
 import ts from 'typescript';
 import { chromium } from 'playwright';
+import { deploymentGlbFixture } from '../tests/helpers/deploymentGlbFixture.mjs';
 
 const output = path.resolve(process.env.RESPONSE_CACHE_OUTPUT ?? 'output/playwright/published-response-cache');
 await mkdir(output, { recursive: true });
@@ -63,10 +64,19 @@ try {
  const decoded=[];
  for(const file of rawFiles) {
    const response=await cache.fetch(new URL(file.path,base).href); const bytes=await response.arrayBuffer();
-   const value=await cache.decode('json-v1',bytes,async()=>JSON.parse(new TextDecoder().decode(bytes)),
-     value=>Array.isArray(value?.positions),value=>value.positions.length*8);
+   const glb=file.path.endsWith('.glb');
+   const value=glb
+     ? await cache.decode('glb-metadata-v1',bytes,async()=>{
+       const view=new DataView(bytes);
+       if(view.getUint32(0,true)!==0x46546c67||view.getUint32(4,true)!==2||view.getUint32(8,true)!==bytes.byteLength) throw new Error('invalid GLB fixture');
+       const json=JSON.parse(new TextDecoder().decode(bytes.slice(20,20+view.getUint32(12,true))));
+       return {node:json.nodes[0].name,vertices:json.accessors[0].count,indices:json.accessors[1].count};
+     },value=>value?.vertices===3&&value.indices===6144,value=>JSON.stringify(value).length)
+     : await cache.decode('json-v1',bytes,async()=>JSON.parse(new TextDecoder().decode(bytes)),
+       value=>Array.isArray(value?.positions),value=>value.positions.length*8);
    const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
-   decoded.push({path:file.path,size:bytes.byteLength,sha256,contentType:response.headers.get('content-type'),positions:value.positions.length,first:value.positions[0]});
+   decoded.push({path:file.path,size:bytes.byteLength,sha256,contentType:response.headers.get('content-type'),
+     ...(glb?value:{positions:value.positions.length,first:value.positions[0]})});
  }
  const metrics={...cache.metrics}; cache.dispose();
  window.result={available:session.available,reason:session.reason,ready:results.every(Boolean),content,revision:config.cacheRevision,transport,decoded,metrics};
@@ -79,14 +89,16 @@ try {
     ['transport/main.js', Buffer.from('export const message="压缩传输字节";\n'.repeat(4096))],
     ['transport/main.css', Buffer.from('.fixture { color: #123456; }\n'.repeat(4096))],
     ['transport/geometry.bin', binaryGeometry],
+    ['transport/model.glb', deploymentGlbFixture('HTTP-' + version)],
     ['transport/decoder.wasm', Buffer.concat([Buffer.from([0,97,115,109,1,0,0,0]), Buffer.alloc(65536, 65)])],
     ['project/assets/transport-gi.json', Buffer.from(JSON.stringify({ positions:Array(16384).fill(0.125) }))],
+    ['project/assets/transport-model.glb', deploymentGlbFixture('HTTP-' + version)],
     ['slow.bin', Buffer.alloc(128 * 1024, 71)],
     ['oversized.bin', Buffer.from('expected response')],
     ['assets/%E6%A8%A1%E5%9E%8B%20%231%25.bin', Buffer.from('encoded path resource')],
     ['project/assets/raw.bin', Buffer.from('IDB owned, no SW write')],
   ]);
-  const manifest = { version: 1, cacheRevision: 'revision-' + version, totalBytes: 0, files: [...files].map(([name, body]) => ({ path: name, size: body.length, sha256: createHash('sha256').update(body).digest('hex'), contentType: ({'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.wasm':'application/wasm'})[path.extname(name)]??'application/octet-stream', storage: name.startsWith('project/') ? 'asset' : 'response' })) };
+  const manifest = { version: 1, cacheRevision: 'revision-' + version, totalBytes: 0, files: [...files].map(([name, body]) => ({ path: name, size: body.length, sha256: createHash('sha256').update(body).digest('hex'), contentType: ({'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.wasm':'application/wasm','.glb':'model/gltf-binary'})[path.extname(name)]??'application/octet-stream', storage: name.startsWith('project/') ? 'asset' : 'response' })) };
   manifest.totalBytes = manifest.files.reduce((sum, file) => sum + file.size, 0);
   const root=path.join(fixtureRoot,version);
   for(const [name,body] of files) { const file=path.join(root,...name.split('/').map(decodeURIComponent)); await mkdir(path.dirname(file),{recursive:true}); await writeFile(file,body); }
@@ -96,7 +108,10 @@ try {
   const precompression=await precompressDeploymentFiles(root,manifest,new AbortController().signal);
   const sidecars=new Map();
   for(const file of precompression.files) { const key=file.sourcePath.split('/').map(encodeURIComponent).join('/'); sidecars.set(key+':'+file.encoding,await readFile(path.join(root,file.path))); }
-  assert.ok(precompression.files.length>=10,'实际生成JS/CSS/WASM/GI JSON/binary传输侧车');
+  assert.ok(precompression.files.length>=14,'实际生成JS/CSS/WASM/GI JSON/binary/GLB传输侧车');
+  for(const name of ['transport/model.glb','project/assets/transport-model.glb']) {
+    for(const encoding of ['br','gzip']) assert.ok(sidecars.has(name+':'+encoding),'GLB 生成两种可选传输表示');
+  }
   packages.set(base, { files, manifest, root, sidecars, precompression, encoding:version==='101'?'gzip':'br' });
 }
 const counts = new Map();
@@ -177,9 +192,12 @@ try {
     const warm=name==='warm'||name==='warm-br'||name==='old-release';
     for(const file of [...result.transport,...result.decoded]) { const expected=packages.get(base).manifest.files.find(row=>row.path===file.path); assert.equal(file.size,expected.size); assert.equal(file.sha256,expected.sha256); assert.equal(file.contentType,expected.contentType); }
     assert.equal(result.decoded[0].positions,16384); assert.equal(result.decoded[0].first,0.125);
+    const model=result.decoded.find(file=>file.path.endsWith('.glb'));
+    assert.equal(model.node,'HTTP-'+version); assert.equal(model.vertices,3); assert.equal(model.indices,6144);
+    assert.equal(model.contentType,'model/gltf-binary');
     assert.equal(result.metrics.storageFailures,0);
-    if(warm) { assert.equal(result.metrics.downloads,0); assert.equal(result.metrics.decodes,0); assert.equal(result.metrics.resourceHits,1); assert.equal(result.metrics.decodeHits,1); }
-    else { assert.equal(result.metrics.downloads,1); assert.equal(result.metrics.decodes,1); assert.equal(result.metrics.decodeHits,0); }
+    if(warm) { assert.equal(result.metrics.downloads,0); assert.equal(result.metrics.decodes,0); assert.equal(result.metrics.resourceHits,2); assert.equal(result.metrics.decodeHits,2); }
+    else { assert.equal(result.metrics.downloads,2); assert.equal(result.metrics.decodes,2); assert.equal(result.metrics.decodeHits,0); }
     if (warm) {
       for (const file of packages.get(base).manifest.files.filter(file => file.storage === 'response')) {
         assert.equal(counts.get(base + file.path) ?? 0, before[base + file.path] ?? 0, name + ': no repeated static bytes: ' + file.path);
@@ -188,7 +206,7 @@ try {
     }
     const wire=transfers.slice(firstTransfer);
     if(warm) assert.equal(wire.length,0,'冷热缓存命中后无重复传输侧车/原文');
-    else { assert.equal(wire.length,5); assert.ok(wire.every(row=>row.encoding===packages.get(base).encoding&&row.bytes<row.decodedBytes)); }
+    else { assert.equal(wire.length,7); assert.ok(wire.every(row=>row.encoding===packages.get(base).encoding&&row.bytes<row.decodedBytes)); }
     samples.push({ name, ...result, transfer:{encoding:packages.get(base).encoding,requests:wire.length,encodedBytes:wire.reduce((n,row)=>n+row.bytes,0),decodedBytes:wire.reduce((n,row)=>n+row.decodedBytes,0)} });
   }
   const base = '/digital-twin/releases/7/101/';

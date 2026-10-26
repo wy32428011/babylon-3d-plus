@@ -22,7 +22,7 @@ hooks.deregister();
 const url = (file: string) => 'editor-asset://local/' + encodeURIComponent(file);
 
 test('打开或保存的光照预处理拒绝未知场景版本，不能将其改写为当前版本', async () => {
-  for (const version of [7, '6', null]) {
+  for (const version of [8, '6', null]) {
     const content = JSON.stringify({ version, scene: { entities: {}, sceneSettings: {} } });
     for (const prepare of [prepareLightingSceneContent, prepareLightingSceneSave]) {
       await assert.rejects(prepare(content, path.join(os.tmpdir(), 'unsupported.scene.json')), /场景.*版本|场景.*格式/);

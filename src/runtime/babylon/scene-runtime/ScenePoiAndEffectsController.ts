@@ -23,13 +23,14 @@ import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
 import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
 import type { SceneWorldBoundsController } from './SceneWorldBoundsController';
 import { type DataPlatformScreenOverlayItem } from './sceneRuntimeTypes';
+import { awaitLightingTaskStep } from '../lightingBakeTask';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
   readonly telemetry: Pick<SceneTelemetryController, 'telemetryPreviewActive'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'generatedOutputOwners'>;
   readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes'>;
-  readonly environment: Pick<EnvironmentAndSkyboxController, 'environmentRuntime'>;
+  readonly environment: Pick<EnvironmentAndSkyboxController, 'environmentRuntime' | 'lightingRuntime'>;
   readonly document: Pick<SceneDocumentController, 'syncedEntities' | 'isEntityVisible'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'meshes'>;
@@ -93,6 +94,14 @@ export class ScenePoiAndEffectsController {
   /** 收集就绪的环境和业务模型；阵列按来源批次处理，不拆实例、不包含编辑标记。 */
   async prepareModelEntrance(settings: SceneModelEntranceSettings, signal?: AbortSignal): Promise<void> {
     const config = normalizeSceneModelEntranceSettings(settings);
+    // 只对显式入口等待真实GI提交；否则会克隆隐藏源而让可见代理跳过动画。
+    if (config.enabled) {
+      const ready = this.dependencies.environment.lightingRuntime.whenReady();
+      if (signal) await awaitLightingTaskStep(ready, signal); else await ready;
+      signal?.throwIfAborted();
+    }
+    const visibleMeshes = (id: string, meshes: readonly AbstractMesh[]) => config.enabled
+      ? this.dependencies.environment.lightingRuntime.getSelectionMeshes(id, meshes) : [...meshes];
     const targets: Array<{ id: string; node: TransformNode | AbstractMesh; meshes: AbstractMesh[] }> = [];
     const selected = new Set(config.targetEntityIds);
     const environment = this.dependencies.environment.environmentRuntime.getBuildingEffectTarget();
@@ -101,7 +110,7 @@ export class ScenePoiAndEffectsController {
       && (config.scope === 'all' || selected.has(ENVIRONMENT_EFFECT_TARGET_ID)));
     if (environment && this.modelEntranceIncludesEnvironment) {
       targets.push({ id: ENVIRONMENT_EFFECT_TARGET_ID, node: environment,
-        meshes: environment.getChildMeshes(false).filter(mesh => !mesh.isDisposed() && mesh.getTotalVertices() > 0) });
+        meshes: visibleMeshes(ENVIRONMENT_EFFECT_TARGET_ID, environment.getChildMeshes(false)).filter(mesh => !mesh.isDisposed() && mesh.getTotalVertices() > 0) });
     }
     for (const [id, entity] of this.dependencies.document.syncedEntities) {
       if (entity.components.modelArrayInstance || !this.dependencies.document.isEntityVisible(id)
@@ -114,7 +123,7 @@ export class ScenePoiAndEffectsController {
       if (model) for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) {
         if (variant.sourceEntityId === id) meshes.push(...variant.model.meshes, ...(variant.model.modelArrayBatch?.meshes ?? []));
       }
-      targets.push({ id, node, meshes: [...new Set(meshes)].filter(candidate => !candidate.isDisposed() && candidate.getTotalVertices() > 0) });
+      targets.push({ id, node, meshes: [...new Set(visibleMeshes(id, meshes))].filter(candidate => !candidate.isDisposed() && candidate.getTotalVertices() > 0) });
     }
     if (config.enabled && !targets.length) throw new Error('没有可播放入场的就绪模型，请检查作用范围和模型可见性。');
     await this.dependencies.readiness.loadDiagnostics.measureAsync('entrancePrepare', () => this.modelEntranceRuntime.prepare(config, targets, signal));

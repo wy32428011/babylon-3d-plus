@@ -47,11 +47,13 @@ test('领域执行保留独立 Node 命令、去重 runner 目标，手动 GPU �
 test('原始 301 候选逐文件保留，不退役；手动项均有条件和源码证据', () => {
   const registry = JSON.parse(readFileSync(new URL('../scripts/test-entry-classification.json', import.meta.url), 'utf8'));
   assert.equal(registry.reviewedBaseline.originalUnconfirmed, 301);
-  assert.equal(registry.entries.length, 301);
-  assert.equal(new Set(registry.entries.map(entry => entry.file)).size, 301);
+  // 登记表只增不减：原始 301 候选是下限，后续新增的候选须同样逐文件登记。
+  const total = registry.entries.length;
+  assert.ok(total >= registry.reviewedBaseline.originalUnconfirmed);
+  assert.equal(new Set(registry.entries.map(entry => entry.file)).size, total);
   assert.ok(registry.entries.every(entry => entry.command && entry.prerequisites.length && entry.evidence.length));
   assert.ok(registry.entries.filter(entry => entry.disposition !== 'node-contract').every(entry => entry.domain === null));
   const audit = auditClassification(registry, registry.entries.map(entry => ({ file: entry.file, support: false, entries: new Set() })), file => readFileSync(new URL('../' + file, import.meta.url), 'utf8'));
-  assert.equal(audit.reviewed, 301);
+  assert.equal(audit.reviewed, total);
   assert.equal(audit.unresolved, 0);
 });

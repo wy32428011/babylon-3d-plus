@@ -25,6 +25,17 @@ function sample(at: number, fps = 60): EditorPerformanceSourceSnapshot {
   };
 }
 
+test('性能报告保存实际buffer和缩放等级并隔离原快照，不把降分辨率隐藏为同画质收益', () => {
+  let now = 0;
+  const session = createEditorPerformanceRunSession(telemetry(), () => now);
+  now = 3000;
+  const source = { ...sample(now), renderSurface: { width: 1280, height: 720, hardwareScalingLevel: 1.5 } };
+  session.record(source, telemetry(101));
+  source.renderSurface.width = 1;
+  const report = JSON.parse(session.createReport());
+  assert.deepEqual(report.samples[0].renderSurface, { width: 1280, height: 720, hardwareScalingLevel: 1.5 });
+});
+
 test('性能运行复制逐帧报告，停止后与秒级历史一起冻结', () => {
   const window = new FrameTimingWindow();
   let now = 0;

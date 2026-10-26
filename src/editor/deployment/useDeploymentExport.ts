@@ -1,3 +1,4 @@
+import { prepareSceneSkyboxEnvironments } from '../assets/skyboxPreparationService.ts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializeScene } from '../project/SceneSerializer';
 import { getSceneShadowBakeError } from '../model/sceneShadowBake';
@@ -127,6 +128,7 @@ export function useDeploymentExport(): DeploymentExportController {
   const mountedRef = useRef(true);
   const activeRef = useRef(false);
   const cancelRequestedRef = useRef(false);
+  const skyboxPreparationRef = useRef<AbortController | null>(null);
   const attemptIdRef = useRef(0);
   const terminalLogStatusRef = useRef<DeploymentExportStatus | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
@@ -219,6 +221,7 @@ export function useDeploymentExport(): DeploymentExportController {
 
     return () => {
       mountedRef.current = false;
+      skyboxPreparationRef.current?.abort();
       unsubscribe();
     };
   }, [updateState]);
@@ -270,7 +273,17 @@ export function useDeploymentExport(): DeploymentExportController {
         throw new Error('当前环境未提供部署导出能力，请使用 Electron 桌面编辑器。');
       }
 
-      const sceneContent = serializeScene(sceneSnapshot);
+      const preparation = new AbortController();
+      skyboxPreparationRef.current = preparation;
+      const session = useEditorStore.getState().sceneSessionId;
+      const preparedScene = await prepareSceneSkyboxEnvironments(sceneSnapshot, preparation.signal, stage => {
+        if (!mountedRef.current || useEditorStore.getState().sceneSessionId !== session || cancelRequestedRef.current) preparation.abort();
+        updateState(current => ({ ...current, progress: current.progress ? { ...current.progress, message: `正在准备天空 ENV：${stage}…` } : null }));
+      }, session);
+      skyboxPreparationRef.current = null;
+      if (preparation.signal.aborted || cancelRequestedRef.current) throw new DOMException('导出准备已取消。', 'AbortError');
+      if (useEditorStore.getState().sceneSessionId !== session) throw new Error('场景已切换，旧导出准备已停止。');
+      const sceneContent = serializeScene(preparedScene);
       const ipcResult = await exportWebProject({
         requestId,
         suggestedName: snapshot.projectName,
@@ -289,6 +302,8 @@ export function useDeploymentExport(): DeploymentExportController {
       if (!result) throw new Error('部署导出未返回有效结果路径。');
       finishSuccess(attemptId, result);
     } catch (error) {
+      skyboxPreparationRef.current?.abort();
+      skyboxPreparationRef.current = null;
       if (cancelRequestedRef.current || isCanceledError(error)) {
         finishCanceled(attemptId);
         return;
@@ -307,6 +322,10 @@ export function useDeploymentExport(): DeploymentExportController {
       progress: current.progress ? { ...current.progress, message: '正在取消并清理临时文件…' } : current.progress,
     }));
 
+    if (skyboxPreparationRef.current) {
+      skyboxPreparationRef.current.abort();
+      return;
+    }
     try {
       const cancelWebProjectExport = window.editorApi?.cancelWebProjectExport;
       if (!cancelWebProjectExport) throw new Error('当前环境未提供部署导出取消能力。');

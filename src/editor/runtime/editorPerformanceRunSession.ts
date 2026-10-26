@@ -10,7 +10,7 @@ const WARMUP_WINDOW_MS = 2_000;
 
 export type EditorPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
   'sampledAt' | 'fps' | 'frameTimeMs' | 'renderTimeMs' | 'activeMeshesEvaluationMs'
-  | 'gpuFrameTimeMs' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
+  | 'gpuFrameTimeMs' | 'renderSurface' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
   | 'totalMeshes' | 'totalVertices' | 'thinInstances' | 'activeThinInstances'
   | 'estimatedActiveVertexInvocations' | 'estimatedActiveTriangleInvocations'
   | 'longTaskCount' | 'longTaskDurationMs'>;
@@ -52,6 +52,10 @@ function nullableMetric(value: number | null): number | null {
 
 /** 报告只选取数值指标，避免携带设备、资源名称和业务配置。 */
 function selectSample(snapshot: EditorPerformanceSourceSnapshot, sampledAt: number): EditorPerformanceSourceSnapshot {
+  const surface = snapshot.renderSurface;
+  const renderSurface = surface && [surface.width, surface.height, surface.hardwareScalingLevel]
+    .every(value => Number.isFinite(value) && value > 0)
+    ? { width: surface.width, height: surface.height, hardwareScalingLevel: surface.hardwareScalingLevel } : null;
   return {
     sampledAt: new Date(sampledAt).toISOString(),
     fps: finiteMetric(snapshot.fps),
@@ -59,6 +63,7 @@ function selectSample(snapshot: EditorPerformanceSourceSnapshot, sampledAt: numb
     renderTimeMs: nullableMetric(snapshot.renderTimeMs),
     activeMeshesEvaluationMs: nullableMetric(snapshot.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(snapshot.gpuFrameTimeMs),
+    ...(surface !== undefined ? { renderSurface } : {}),
     shaderCompilationMs: nullableMetric(snapshot.shaderCompilationMs),
     drawCalls: nullableMetric(snapshot.drawCalls),
     activeMeshes: finiteMetric(snapshot.activeMeshes),

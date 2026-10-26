@@ -25,6 +25,7 @@ import { type RuntimePreviewReadiness } from '../../model/mqttConfigUtils';
 import type { EditorRuntimeMode } from '../../model/editorRuntimeMode';
 import { type CadReferenceLoadStatus } from '../../cad/cadReferenceLoadStatus';
 import type { StateCreator } from 'zustand';
+import type { ProjectOpenTraceContext } from '../../../../electron/shared/projectOpenTrace';
 
 export type EditorLog = {
   id: string;
@@ -352,7 +353,8 @@ export type EditorState = {
   consumeEnvironmentFocusRequest: (requestId: string) => void;
   convertLegacyEnvironmentToSceneBase: () => void;
   updateSkyboxConfig: (skybox: SceneSkyboxSettings | null) => void;
-  placeSkybox: (skybox: SceneSkyboxSettings, placementPosition?: Vector3Data) => void;
+  applyPreparedSkyboxEnvironment: (entityId: string | null, source: SceneSkyboxSettings, environment: import('../../../../electron/shared/sceneSkyboxContract').SkyboxEnvironmentResource) => void;
+  placeSkybox: (skybox: SceneSkyboxSettings) => void;
   updateSelectedSkybox: (patch: Partial<Pick<SkyboxComponent, 'intensity' | 'resolution'>>) => void;
   setEnvironmentActiveVariant: (sourceUrl: string) => void;
   requestCameraPoseSave: () => void;
@@ -474,7 +476,7 @@ export type EditorState = {
   markScenePersisted: (content?: string) => void;
   saveScene: () => Promise<boolean>;
   loadScene: () => Promise<boolean>;
-  loadSceneFromFile: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean) => Promise<boolean>;
+  loadSceneFromFile: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean, openTrace?: ProjectOpenTraceContext) => Promise<boolean>;
   loadSceneFromContent: (content: string, sourceName: string) => boolean;
   pushLog: (message: string) => void;
 };

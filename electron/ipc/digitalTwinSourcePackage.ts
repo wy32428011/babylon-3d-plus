@@ -1,3 +1,5 @@
+import { verifySkyboxEnvironmentFile } from './skyboxEnvironmentResources.ts';
+import { isAuthorizedAssetFile, decodeAssetUrl, encodeAssetUrl } from './assetRegistry.ts';
 import { collectSceneSkyboxReferences, visitSceneResourceValues, mapSceneResourceValues, sceneResourceFieldKind } from '../shared/sceneResourceTraversal.js';
 import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { ZipArchive } from 'archiver';
@@ -22,6 +24,8 @@ import { getSceneLightingBakeError, getSceneLightingBakeSignature } from '../sha
 import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
 import { captureSceneLightingBakeRelocation, stripLightingPolicyIdentityLocationHints } from '../shared/sceneLightingBakeRelocation.js';
 import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
+import { collectLightingMipArchiveStorePaths, applyLightingMipArchiveStore } from './lightingMipArchiveStore.js';
+import { readModelResourceDependencies } from './modelResourceDependencies.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
@@ -221,6 +225,11 @@ export async function buildDigitalTwinSourcePackage(
         warnedOrphanedSkyboxIds,
         options.signal,
         options.skyboxCacheDependencies,
+        projectRoot,
+        file => isAuthorizedAssetFile(file) || isPathInsideOrEqual(projectRoot, file)
+          || isPathInsideOrEqual(sharedResourcesRoot, file)
+          || Boolean(skyboxCacheContext.dataPlatformSkyboxRoot && isPathInsideOrEqual(skyboxCacheContext.dataPlatformSkyboxRoot, file))
+          || Boolean(legacyWorkspaceRoot && isPathInsideOrEqual(path.join(legacyWorkspaceRoot, 'Assets'), file)),
       );
     }
 
@@ -260,11 +269,26 @@ export async function buildDigitalTwinSourcePackage(
         expectedSha256: asset.sha256, label: '光照烘焙固定产物 ' + asset.asset.id }];
     }
     await validateResourceBundleSourcePaths(candidates, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
+    // 库根loose主文件的URI也属于同一离线闭包；只加入明确文件，保留相对布局与逐文件SHA。
+    const dependencyBundles: ResourceBundle[] = [];
+    for (const bundle of candidates) {
+      if (!/^Assets\/Models\//i.test(bundle.destinationRelativePath) || !/\.(?:glb|gltf)$/i.test(bundle.sourcePath)) continue;
+      if (!(await fs.lstat(bundle.sourcePath)).isFile()) continue;
+      const dependencyRoot = path.dirname(bundle.sourcePath), destinationRoot = path.posix.dirname(bundle.destinationRelativePath);
+      for (const dependency of await readModelResourceDependencies(bundle.sourcePath, dependencyRoot, options.signal)) {
+        if (candidateBySource.has(createPathKey(dependency)) || candidates.some(owner => isPathInsideOrEqual(owner.sourcePath, dependency) && owner.sourcePath !== dependency)) continue;
+        const extra = { sourcePath: dependency, destinationRelativePath: path.posix.join(destinationRoot, path.relative(dependencyRoot, dependency).replaceAll('\\', '/')) };
+        dependencyBundles.push(extra); candidateBySource.set(createPathKey(dependency), extra);
+      }
+    }
+    await validateResourceBundleSourcePaths(dependencyBundles, projectRoot, sharedResourcesRoot, options.signal, legacyWorkspaceRoot);
+    candidates.push(...dependencyBundles);
     const resourcePlan = await createSourceResourcePlan(candidates, projectRoot, options.signal);
     const bundles = resourcePlan.bundles;
     for (const scene of scenes) {
       resourcePlan.validateModelReferences(scene.parsed, scene.relativePath);
-      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan, new WeakSet(collectEffectModelReferences(scene.parsed)));
+      const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan,
+        new WeakSet(collectEffectModelReferences(scene.parsed)), stableSkyboxObjects);
       const restoreLighting = restoreRelocatedLighting.get(scene);
       if (isPlainObject(portableScene) && restoreLighting) {
         // 仅逆向本清单实际重写的资源位置，并还原本轮新增的内容快照注释后验证等价性。
@@ -347,7 +371,9 @@ export async function buildDigitalTwinSourcePackage(
       { encoding: 'utf8', flag: 'wx' },
     );
     options.onProgress?.('正在压缩源工程 ZIP…', estimatedFiles, estimatedFiles);
-    await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
+    const storedLightmaps = await collectLightingMipArchiveStorePaths(stagingRoot,
+      scenes.map(scene => ({ relativePath: scene.relativePath, content: scene.portableContent })), options.signal);
+    await archiveDirectoryContents(stagingRoot, archivePath, options.signal, storedLightmaps);
     const stat = await fs.stat(archivePath);
     if (!stat.isFile() || stat.size <= 0) {
       throw new Error('源工程 ZIP 大小无效。');
@@ -531,12 +557,15 @@ async function prepareSourceSceneSkyboxes(
   warnedOrphanedSkyboxIds: Set<string>,
   signal: AbortSignal,
   dependencyOverrides: Partial<DeploymentSkyboxCacheDependencies> | undefined,
+  projectRoot: string,
+  isAuthorizedSource: (file: string) => boolean,
 ): Promise<void> {
   const scene = isPlainObject(sceneFile.scene) ? sceneFile.scene : null;
   if (!scene) return;
   const skyboxes = collectSceneSkyboxReferences(scene);
 
   for (const skybox of skyboxes) {
+    if (skybox.sourceAvailable === false) throw new Error('SOURCE 必须包含天空原图，不能把仅 ENV 的运行包作为源工程发布。');
     const resolved = await resolveDeploymentSkyboxReference(
       skybox,
       cacheContext,
@@ -544,6 +573,32 @@ async function prepareSourceSceneSkyboxes(
       signal,
       dependencyOverrides,
     );
+    if (skybox.environment) {
+      const original = typeof skybox.sourcePath === 'string' && skybox.sourcePath
+        ? skybox.sourcePath : decodeAssetUrl(String(skybox.sourceUrl));
+      const sourcePath = resolved?.sourcePath ?? (path.isAbsolute(original) ? original : path.resolve(projectRoot, original));
+      const verified = await verifySkyboxEnvironmentFile({ ...skybox, sourcePath }, signal, isAuthorizedSource);
+      const environment = { ...verified.resource, sourcePath: verified.sourcePath, sourceUrl: encodeAssetUrl(verified.sourcePath) };
+      delete environment.packagePath;
+      skybox.environment = environment;
+      stableSkyboxObjects.add(environment);
+      const registerFile = async (file: string, destination: string, sha256: string) => {
+        const stat = await fs.lstat(file);
+        stableSkyboxBundles.set(`explicit:${createPathKey(file)}`, {
+          sourcePath: file, destinationRelativePath: destination,
+          copyFile: { sourcePath: file, relativePath: path.basename(file), size: stat.size, mtimeMs: stat.mtimeMs,
+            destinationRelativePath: destination, kind: 'texture', expectedSize: stat.size, expectedSha256: sha256,
+            integrityLabel: '天空源/ENV 固定版本资源' },
+        });
+      };
+      await registerFile(verified.sourcePath, `Assets/Skyboxes/Runtime-${environment.sha256.slice(0, 16)}/${environment.sha256}.env`, environment.sha256);
+      if (!resolved) {
+        await registerFile(sourcePath, `Assets/Skyboxes/Source-${environment.sourceSha256.slice(0, 16)}/${path.basename(sourcePath)}`, environment.sourceSha256);
+        skybox.sourcePath = sourcePath;
+        skybox.sourceUrl = encodeAssetUrl(sourcePath);
+        stableSkyboxObjects.add(skybox);
+      }
+    }
     if (!resolved) continue;
     rewriteSourceSkyboxReference(skybox, resolved);
     stableSkyboxObjects.add(skybox);
@@ -846,6 +901,7 @@ function rewriteSceneToPortableAssets(
   platformImageBundleMap: ReadonlyMap<string, PlatformImageBundle> = new Map(),
   resourcePlan?: SourceResourcePlan,
   effectMetadata = new WeakSet<object>(),
+  skyboxMetadata = new WeakSet<object>(),
 ): unknown {
   return mapSceneResourceValues(value, {
     string: (value, key) => {
@@ -875,7 +931,7 @@ function rewriteSceneToPortableAssets(
     },
     array: (items, field, mapChild) => sceneResourceFieldKind(field) === 'path-array'
       ? items.map(item => mapChild(item, field))
-      : items.map(item => rewriteSceneToPortableAssets(item, field, platformImageBundleMap, resourcePlan)),
+      : items.map(item => rewriteSceneToPortableAssets(item, field, platformImageBundleMap, resourcePlan, effectMetadata, skyboxMetadata)),
     object: (value, _field, mapChild) => {
       if (effectMetadata.has(value)) {
         const model = { ...value };
@@ -890,6 +946,9 @@ function rewriteSceneToPortableAssets(
         mapChild(childValue, childKey),
       ]));
       const model = typeof value.sourcePath === 'string' ? resourcePlan?.reference(value.sourcePath) : null;
+      if (skyboxMetadata.has(value) && value.format !== 'env' && model?.kind === 'file') {
+        rewritten.packagePath = path.posix.dirname(model.destination);
+      }
       if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
         rewritten.sourceSnapshot = { contentSha256: model.bundle.contentSha256 };
       }
@@ -1040,7 +1099,8 @@ async function copySafeResource(
   return;
 }
 
-async function archiveDirectoryContents(stagingRoot: string, archivePath: string, signal: AbortSignal): Promise<void> {
+async function archiveDirectoryContents(stagingRoot: string, archivePath: string, signal: AbortSignal,
+  storedLightmaps: ReadonlySet<string> = new Set()): Promise<void> {
   throwIfAborted(signal);
   await new Promise<void>((resolve, reject) => {
     const output = createWriteStream(archivePath, { flags: 'wx' });
@@ -1064,7 +1124,8 @@ async function archiveDirectoryContents(stagingRoot: string, archivePath: string
     archive.once('error', settle);
     archive.once('warning', settle);
     archive.pipe(output);
-    archive.directory(stagingRoot, false);
+    if (storedLightmaps.size) archive.directory(stagingRoot, false, entry => applyLightingMipArchiveStore(entry, storedLightmaps));
+    else archive.directory(stagingRoot, false);
     void archive.finalize().catch(settle);
   });
   throwIfAborted(signal);

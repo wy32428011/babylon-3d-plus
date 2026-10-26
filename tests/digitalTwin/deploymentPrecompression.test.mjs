@@ -11,6 +11,7 @@ import { ZipArchive } from 'archiver';
 import unzipper from 'unzipper';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import { binaryFixture, geometryFixture } from '../lightingBake/lightingGeometryBinaryFixture.ts';
+import { deploymentGlbFixture } from '../helpers/deploymentGlbFixture.mjs';
 
 const hooks = registerHooks({ resolve(specifier, context, next) {
   if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL?.includes('/electron/')) {
@@ -51,6 +52,57 @@ test('静态JS/CSS/JSON/WASM生成更小br/gzip，原文/完整清单SHA与revis
   for (const file of result.files) { const original = await fs.readFile(path.join(f.root, file.sourcePath)), encoded = await fs.readFile(path.join(f.root, file.path)); assert.ok(encoded.length < original.length); assert.deepEqual(file.encoding === 'br' ? brotliDecompressSync(encoded) : gunzipSync(encoded), original); assert.equal(file.size, encoded.length); }
   assert.ok(result.files.every(file => !/runtime-config|release-cache-manifest|published-cache-worker|README/.test(file.path)));
   assert.equal(f.manifest.cacheRevision, 'fixture-r1'); await checkOriginals(f);
+});
+
+test('GLB只在至少节省10%时生成无损侧车，解压后字节与原SHA一致，已压缩GLB不生成侧车', async t => {
+  // 可压缩输入为有效几何；随机字节仅模拟已压缩载荷，运输层不负责 GLB 语义校验。
+  const compressible = deploymentGlbFixture('unit-GLB');
+  const seed = createHash('sha256').update('glb-seed').digest();
+  const mostlyRandom = Buffer.concat([...Array.from({ length: 8192 }, (_, i) => createHash('sha256').update(seed).update(String(i)).digest()), Buffer.alloc(12000, 0)]);
+  const f = await fixture(t, { 'project/assets/环境.glb': compressible, 'project/assets/设备.glb': mostlyRandom });
+  const result = await precompressDeploymentFiles(f.root, f.manifest, new AbortController().signal);
+  assert.deepEqual(result.files.map(x => x.sourcePath).sort(), ['project/assets/环境.glb', 'project/assets/环境.glb']);
+  for (const file of result.files) {
+    const encoded = await fs.readFile(path.join(f.root, file.path));
+    const restored = file.encoding === 'br' ? brotliDecompressSync(encoded) : gunzipSync(encoded);
+    assert.ok(encoded.length < compressible.length * 0.9);
+    assert.equal(sha(restored), sha(compressible));
+  }
+  assert.equal(result.skipped.filter(x => x.path.startsWith('project/assets/设备.glb') && x.reason === 'not-smaller').length, 2,
+    '收益不足 10% 的 GLB 侧车应跳过');
+  assert.ok(f.manifest.files.every(file => !/\.(?:br|gz)$/.test(file.path)));
+  assert.equal(f.manifest.files.find(file => decodeURIComponent(file.path).endsWith('环境.glb')).contentType, 'model/gltf-binary');
+  const zipPath = path.join(f.root, 'transport.zip');
+  // 使用真实 ZIP 核对运输层；此检查不替代需要 Electron 的完整 DIST 打包入口。
+  await new Promise((resolve, reject) => {
+    const output = createWriteStream(zipPath), archive = new ZipArchive({ zlib: { level: 9 } });
+    output.once('close', resolve); output.once('error', reject); archive.once('error', reject); archive.pipe(output);
+    for (const name of ['project/assets/环境.glb', 'project/assets/环境.glb.br', 'project/assets/环境.glb.gz', 'project/assets/设备.glb', 'release-cache-manifest.json']) {
+      archive.file(path.join(f.root, name), { name });
+    }
+    void archive.finalize().catch(reject);
+  });
+  const archive = await unzipper.Open.file(zipPath);
+  const archived = new Map(await Promise.all(archive.files.map(async file => [file.path, await file.buffer()])));
+  assert.deepEqual(archived.get('project/assets/环境.glb'), compressible);
+  assert.deepEqual(brotliDecompressSync(archived.get('project/assets/环境.glb.br')), compressible);
+  assert.deepEqual(gunzipSync(archived.get('project/assets/环境.glb.gz')), compressible);
+  assert.deepEqual(archived.get('release-cache-manifest.json'), f.manifestBytes);
+  for (const entry of f.manifest.files) {
+    const bytes = archived.get(decodeURIComponent(entry.path));
+    assert.equal(bytes.length, entry.size); assert.equal(sha(bytes), entry.sha256);
+  }
+  const { NullEngine, Scene, ImportMeshAsync, VertexBuffer } = await import('@babylonjs/core');
+  await import('@babylonjs/loaders/glTF/index.js');
+  const engine = new NullEngine(), scene = new Scene(engine);
+  try {
+    const restored = brotliDecompressSync(archived.get('project/assets/环境.glb.br'));
+    const loaded = await ImportMeshAsync(new Uint8Array(restored), scene, { pluginExtension: '.glb' });
+    const mesh = loaded.meshes.find(mesh => mesh.name === 'unit-GLB');
+    assert.ok(mesh); assert.equal(mesh.getTotalVertices(), 3); assert.equal(mesh.getTotalIndices(), 6144);
+    assert.deepEqual(Array.from(mesh.getVerticesData(VertexBuffer.PositionKind)), [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  } finally { scene.dispose(); engine.dispose(); }
+  await checkOriginals(f);
 });
 
 test('B7有效binary几何生成无损侧车，原始SHA/清单保持且预算不足时只跳过侧车', async t => {

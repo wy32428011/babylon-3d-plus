@@ -18,6 +18,9 @@ import type { SceneModelEntranceSettings } from '../../editor/model/sceneModelEn
 import { cloneEnvironmentMaterial } from './cloneEnvironmentMaterial';
 import { withNewMaterialDirtyGuard } from './withNewMaterialDirtyGuard';
 import { isTargetModelEffectSuspended, registerTargetModelEffectSuspension, suspendTargetModelEffects } from './effects/TargetModelEffects';
+import { copyBakedLightingMaterialPlugin, getBakedLightingOwnedTextures } from './BakedLightingMaterialPlugin';
+import { registerLightingMaterialOverride, type LightingMaterialOverrideLease } from './lightingMaterialOverrides';
+import { withLightingEntranceAttributeUpdate } from './lightingEntranceGeometryUpdates';
 
 type Target = { id: string; node: TransformNode | AbstractMesh; meshes?: readonly AbstractMesh[] };
 type Binding = {
@@ -26,6 +29,7 @@ type Binding = {
   instanceBuffer: boolean; thinBuffer: Float32Array | null;
   releases: Array<() => void>; unsubscribe: Array<() => void>;
   minimum: Vector3; maximum: Vector3; wireframes: Map<Material, boolean>;
+  materialOverrides: Map<Material, LightingMaterialOverrideLease>;
 };
 export type ModelEntranceSnapshot = {
   status: 'idle' | 'preparing' | 'prepared' | 'playing' | 'completed' | 'cancelled'; elapsedSeconds: number;
@@ -175,7 +179,7 @@ export class ModelEntranceRuntime {
         const mesh = node instanceof InstancedMesh ? node.sourceMesh : node;
         let binding = bySource.get(mesh);
         if (!binding) {
-          binding = { mesh, original: mesh.material, replacement: null, materials: [], textures: new Set(), plugins: [], targets: new Map(), instanceBuffer: false, thinBuffer: null, releases: [], unsubscribe: [], minimum: Vector3.Zero(), maximum: Vector3.One(), wireframes: new Map() };
+          binding = { mesh, original: mesh.material, replacement: null, materials: [], textures: new Set(), plugins: [], targets: new Map(), instanceBuffer: false, thinBuffer: null, releases: [], unsubscribe: [], minimum: Vector3.Zero(), maximum: Vector3.One(), wireframes: new Map(), materialOverrides: new Map() };
           bySource.set(mesh, binding);
         }
         if (!binding.targets.has(node)) binding.targets.set(node, index);
@@ -244,7 +248,9 @@ export class ModelEntranceRuntime {
       if (original instanceof MultiMaterial) {
         const multi = new MultiMaterial(`${original.name}_entrance`, this.scene); binding.materials.push(multi);
         copies.set(original, multi);
-        multi.subMaterials = original.subMaterials.map(material => this.cloneMaterial(material, binding, copies)); return multi;
+        multi.subMaterials = original.subMaterials.map(material => this.cloneMaterial(material, binding, copies));
+        binding.materialOverrides.set(multi, registerLightingMaterialOverride(multi, original, 'entrance', { targets: new Set([binding.mesh, ...binding.targets.keys()]) }));
+        return multi;
       }
       const material = original ? cloneEnvironmentMaterial(original, `${original.name}_entrance`) : new StandardMaterial('entrance_default', this.scene);
       if (!material) throw new Error(`无法克隆入场材质: ${original?.name ?? 'default'}`);
@@ -256,16 +262,22 @@ export class ModelEntranceRuntime {
       if (['fade', 'stagger', 'assembly', 'hologram'].includes(this.settings!.effect)) {
         material.transparencyMode = original?.needAlphaTesting() ? Material.MATERIAL_ALPHATESTANDBLEND : Material.MATERIAL_ALPHABLEND;
       }
-      binding.plugins.push(new EntrancePlugin(material, binding, this.settings!)); return material;
+      copyBakedLightingMaterialPlugin(original, material);
+      binding.plugins.push(new EntrancePlugin(material, binding, this.settings!));
+      binding.materialOverrides.set(material, registerLightingMaterialOverride(material, original, 'entrance', {
+        ignoreTextures: getBakedLightingOwnedTextures(original), ownedWireframe: this.settings!.effect === 'hologram',
+        targets: new Set([binding.mesh, ...binding.targets.keys()]),
+      }));
+      return material;
     });
   }
   private installInstances(binding: Binding): void {
     const mesh = binding.mesh;
     if (mesh.hasThinInstances) {
       binding.thinBuffer = new Float32Array(mesh.thinInstanceCount * 4);
-      mesh.thinInstanceSetBuffer(ATTRIBUTE, binding.thinBuffer, 4, false);
+      withLightingEntranceAttributeUpdate(mesh.geometry, () => mesh.thinInstanceSetBuffer(ATTRIBUTE, binding.thinBuffer, 4, false));
     } else if (mesh.instances.length) {
-      mesh.registerInstancedBuffer(ATTRIBUTE, 4); binding.instanceBuffer = true;
+      withLightingEntranceAttributeUpdate(mesh.geometry, () => mesh.registerInstancedBuffer(ATTRIBUTE, 4)); binding.instanceBuffer = true;
       mesh.instancedBuffers[ATTRIBUTE] = new Vector4(1, 0, 0, 0);
       for (const instance of mesh.instances) instance.instancedBuffers[ATTRIBUTE] = new Vector4(1, 0, 0, 0);
     }
@@ -300,7 +312,7 @@ export class ModelEntranceRuntime {
         const isolated = !binding.instanceBuffer ||
           ((!binding.mesh.isEnabled() || !binding.mesh.isVisible || binding.targets.has(binding.mesh)) &&
             binding.mesh.instances.every(instance => !instance.isEnabled() || !instance.isVisible || binding.targets.has(instance)));
-        for (const [material, wireframe] of binding.wireframes) material.wireframe = (isolated && this.progress < .5) || wireframe;
+        for (const [material, wireframe] of binding.wireframes) binding.materialOverrides.get(material)!.setOwnedScalar('wireframe', (isolated && this.progress < .5) || wireframe);
       }
       if (binding.instanceBuffer) {
         binding.mesh.instancedBuffers[ATTRIBUTE].x = progress;
@@ -313,7 +325,7 @@ export class ModelEntranceRuntime {
       }
       if (binding.thinBuffer) {
         for (let i = 0; i < binding.thinBuffer.length; i += 4) binding.thinBuffer[i] = progress;
-        binding.mesh.thinInstanceBufferUpdated(ATTRIBUTE);
+        withLightingEntranceAttributeUpdate(binding.mesh.geometry, () => binding.mesh.thinInstanceBufferUpdated(ATTRIBUTE));
       }
     }
     this.updateParticles(local);
@@ -368,9 +380,14 @@ export class ModelEntranceRuntime {
     this.particleMesh.updateVerticesData('entranceParticleVisibility', this.particleVisibility, false, false);
   }
   private releaseBinding(binding: Binding): void {
+    const errors: unknown[] = [];
     for (const unsubscribe of binding.unsubscribe) unsubscribe();
     if (!binding.mesh.isDisposed() && binding.mesh.material === binding.replacement) binding.mesh.material = binding.original;
-    if (binding.thinBuffer && !binding.mesh.isDisposed()) binding.mesh.thinInstanceSetBuffer(ATTRIBUTE, null, 4);
+    for (const lease of [...binding.materialOverrides.values()].reverse()) {
+      try { lease.release(); } catch (error) { errors.push(error); }
+    }
+    binding.materialOverrides.clear();
+    if (binding.thinBuffer && !binding.mesh.isDisposed()) withLightingEntranceAttributeUpdate(binding.mesh.geometry, () => binding.mesh.thinInstanceSetBuffer(ATTRIBUTE, null, 4));
     if (binding.instanceBuffer) {
       delete binding.mesh.instancedBuffers[ATTRIBUTE];
       for (const instance of binding.mesh.instances) delete instance.instancedBuffers[ATTRIBUTE];
@@ -386,12 +403,15 @@ export class ModelEntranceRuntime {
     for (const material of binding.materials.reverse()) material.dispose(false, false);
     for (const texture of binding.textures) texture.dispose();
     for (const release of binding.releases) release();
+    if (errors.length) throw new AggregateError(errors, '入口材质业务值恢复失败，显示覆盖已释放。');
   }
   private release(): void {
-    for (const binding of this.bindings) this.releaseBinding(binding);
+    const errors: unknown[] = [];
+    for (const binding of this.bindings) { try { this.releaseBinding(binding); } catch (error) { errors.push(error); } }
     this.bindings = []; this.particleMesh?.dispose(); this.particleMaterial?.dispose(false, false);
     this.particleMesh = null; this.particleMaterial = null; this.particles = [];
     this.particlePositions = new Float32Array(0);
     this.particleVisibility = new Float32Array(0);
+    if (errors.length) throw new AggregateError(errors, '入口材质释放失败，全部会话租约已收束。');
   }
 }

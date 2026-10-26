@@ -10,11 +10,12 @@ const modules = await createP4SsrTestModules(['/src/runtime/babylon/ScenePerform
 after(() => modules.close());
 const { ScenePerformanceMonitor, summarizeScenePerformance } = await modules.ssrLoadModule('/src/runtime/babylon/ScenePerformanceMonitor.ts');
 
-function fixture(context) {
+function fixture(context, options = {}) {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const monitor = new ScenePerformanceMonitor(engine, scene, {
     getRuntimeMetrics: () => ({}), getEditThinInstancePlanMetrics: () => ({}), collectDetailedGpuWorkloads: false,
+    ...options,
   });
   context.after(() => { monitor.dispose(); scene.dispose(); engine.dispose(); });
   return { engine, scene, monitor };
@@ -79,14 +80,29 @@ test('摘要忽略未采样的CPU/draw而保留合法0，不把缺失样本混�
 });
 
 test('真实已采集PerfCounter的GPU合法零保留，关闭采集不能把残留counter当测量', context => {
-  const { monitor } = fixture(context);
+  let enabled = true;
+  const { monitor } = fixture(context, { captureGpuFrameTime: () => enabled });
   const counter = monitor.engineInstrumentation.shaderCompilationTimeCounter;
   counter.fetchNewFrame(); counter.addCount(0, true);
   // 仅验证counter数值合同；NullEngine本身不提供GPU测量，不能据此宣称真实GPU为0ms。
   Object.defineProperty(monitor.engineInstrumentation, 'gpuFrameTimeCounter', { value: counter });
   assert.equal(monitor.sample().gpuFrameTimeMs, 0);
-  monitor.gpuFrameTimeCaptureEnabled = false;
+  enabled = false;
   assert.equal(monitor.sample().gpuFrameTimeMs, null);
+  enabled = true;
+  assert.equal(monitor.sample().gpuFrameTimeMs, null, '重新启用不能复用前一代计数');
+  counter.fetchNewFrame(); counter.addCount(1_500_000, true);
+  assert.equal(monitor.sample().gpuFrameTimeMs, 1.5);
+});
+
+test('关闭诊断时不启用GPU查询，低频开关只在状态转换调用SDK', context => {
+  const { monitor } = fixture(context, { captureGpuFrameTime: false });
+  assert.equal(monitor.gpuFrameTimeCaptureEnabled, false);
+  const counter = monitor.engineInstrumentation.shaderCompilationTimeCounter;
+  counter.fetchNewFrame(); counter.addCount(123, true);
+  Object.defineProperty(monitor.engineInstrumentation, 'gpuFrameTimeCounter', { value: counter });
+  assert.equal(monitor.sample().gpuFrameTimeMs, null);
+  assert.equal(monitor.engineInstrumentation.captureGPUFrameTime, false);
 });
 
 test('真实afterRender观察器按显式墙钟窗计量，停止后保留报告及旧interval口径', context => {

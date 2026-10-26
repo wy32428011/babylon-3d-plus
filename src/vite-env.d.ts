@@ -124,6 +124,7 @@ type DataPlatformProjectEntry = {
 
 type OpenDataPlatformProjectRequest = {
   projectId: string;
+  trace?: import('../electron/shared/projectOpenTrace').ProjectOpenTraceContext;
 };
 
 type DataPlatformBindingSummary = {
@@ -149,6 +150,8 @@ type DataPlatformProjectOpenResult = {
   envModelSyncStarted: boolean;
   skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
+  trace?: import('../electron/shared/projectOpenTrace').ProjectOpenTraceSnapshot;
+  traceIpc?: import('../electron/types').ProjectOpenIpcTiming;
 };
 
 type DataPlatformDeepLink = {
@@ -370,6 +373,7 @@ type AssetEntry = {
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
   fileSizeBytes?: number;
+  sourceModelDensity?: import('../electron/shared/modelDensityTypes').SourceModelDensity;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
@@ -646,6 +650,7 @@ interface Window {
     resetDataPlatformWorkspace: () => Promise<DataPlatformConfig>;
     listDataPlatformProjects: (request?: DataPlatformProjectListRequest) => Promise<DataPlatformProjectListResult>;
     openDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectOpenResult>;
+    getProjectOpenTrace: (request: import('../electron/types').GetProjectOpenTraceRequest) => Promise<import('../electron/shared/projectOpenTrace').ProjectOpenTraceSnapshot | null>;
     closeDataPlatformProject: () => Promise<void>;
     cancelDataPlatformProjectLoading?: () => Promise<boolean>;
     getDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectEntry>;
@@ -679,6 +684,9 @@ interface Window {
     importManualRoamAvatar: () => Promise<ImportManualRoamAvatarResult>;
     importEnvironmentModelFile: () => Promise<ImportEnvironmentModelFileResult>;
     importSkyboxFile: () => Promise<ImportSkyboxFileResult>;
+    prepareSkyboxEnvironment: (source: import('../electron/shared/sceneSkyboxContract').SkyboxPreparationSource) => Promise<import('../electron/shared/sceneSkyboxContract').SkyboxPreparationTicket>;
+    commitSkyboxEnvironment: (request: { token: string; bytes: Uint8Array }) => Promise<import('../electron/shared/sceneSkyboxContract').SkyboxEnvironmentResource>;
+    cancelSkyboxEnvironment: (token: string) => Promise<boolean>;
     listModelPackageVariants: (request: ListModelPackageVariantsRequest) => Promise<ModelPackageVariant[]>;
     getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest) => Promise<DigitalTwinPublishContext>;
     prepareDigitalTwinPublishSceneSnapshots: (request: import('../electron/types').DigitalTwinPublishScenePreparationRequest) => Promise<import('../electron/types').DigitalTwinPublishScenePreparationResult>;

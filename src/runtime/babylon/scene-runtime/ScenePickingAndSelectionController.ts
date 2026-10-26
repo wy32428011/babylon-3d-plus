@@ -6,7 +6,7 @@ import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 
 import { collectFolderRuntimeEntityIds } from '../../../editor/model/entityHierarchy';
 import type { Vector3Data } from '../../../editor/model/math';
-import { isPointInsideSkyboxSphere, type SceneDocument } from '../../../editor/model/SceneDocument';
+import type { SceneDocument } from '../../../editor/model/SceneDocument';
 import { type AutoPatrolMarkerPick } from '../EditorAutoPatrolRuntime';
 import { intersectWorldRayWithModelDisplayBounds } from '../modelPickBounds';
 import { prepareInstancedMeshesForSelectionOutline } from '../instancedSelectionBuffers';
@@ -64,18 +64,9 @@ export class ScenePickingAndSelectionController {
   public maxSelectionSyncDurationMs = 0;
   public lastSelectionChangedEntityCount = 0;
 
-  /** 天空盒包围当前相机时不参与背景拾取；相机位于球外时恢复球面点击选择。 */
+  /** 无限远背景始终不是场景可选对象。 */
   public isEntityPickableFromActiveCamera(entityId: string): boolean {
-    const entity = this.dependencies.document.syncedEntities.get(entityId);
-    if (!entity?.components.skybox) return true;
-    const camera = this.context.scene.cameraToUseForPointers ?? this.context.scene.activeCamera;
-    if (!camera) return false;
-    const position = camera.globalPosition;
-    return !isPointInsideSkyboxSphere(entity.components.transform, {
-      x: position.x,
-      y: position.y,
-      z: position.z,
-    });
+    return !this.dependencies.document.syncedEntities.get(entityId)?.components.skybox;
   }
 
   /** 优先拾取巡检节点编号；路线原点返回 waypointId=null。 */

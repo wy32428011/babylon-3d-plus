@@ -9,9 +9,11 @@ import { recoverLocalSceneResourceTransaction } from './localSceneRecoveryServic
 import { planSceneModelUpdates, matchSceneModelUpdates, getSceneEnvironmentUpdateReference, findCurrentSceneModelReplacement, type SceneModelCatalogEntry } from '../shared/sceneModelUpdatePlan.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream, promises as fs } from 'node:fs';
+import { constants as fsConstants, createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as waitForRenameRetry } from 'node:timers/promises';
 import { getHeapStatistics } from 'node:v8';
+import type { ProjectOpenTraceRecorder, ProjectOpenPhase, ProjectOpenSpanToken, ProjectOpenSpanOutcome } from '../shared/projectOpenTrace.ts';
 import type {
   DataPlatformEnvironmentSyncProgress,
   DataPlatformImageSyncProgress,
@@ -122,6 +124,26 @@ const MAX_PROJECT_SCENE_FILES = 1_000;
 const MAX_CONCURRENT_SCENE_MODEL_RESOURCES = 4;
 const PROJECT_TEXT_HEAP_EXPANSION_FACTOR = 16n;
 const MIN_FREE_HEAP_RESERVE_BYTES = 128n * 1024n * 1024n;
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1_200, 1_600] as const;
+
+/** 诊断异常不能替换实际文件/事务的返回值、取消和错误。 */
+function observeProjectTrace<T>(trace: ProjectOpenTraceRecorder | undefined, operation: (recorder: ProjectOpenTraceRecorder) => T): T | undefined {
+  if (!trace) return undefined;
+  try { return operation(trace); } catch { try { trace.noteDiagnosticFailure(); } catch { /* 仅诊断降级。 */ } return undefined; }
+}
+function endProjectTracePhase(trace: ProjectOpenTraceRecorder | undefined, token: ProjectOpenSpanToken | undefined, outcome: ProjectOpenSpanOutcome): void {
+  observeProjectTrace(trace, () => token?.end(outcome, outcome === 'ok' ? undefined : outcome === 'cancelled' ? 'aborted' : 'operation-failed'));
+}
+function measureProjectTracePhase<T>(trace: ProjectOpenTraceRecorder | undefined, phase: ProjectOpenPhase, signal: AbortSignal, task: () => Promise<T>): Promise<T> {
+  if (!trace) return task();
+  const token = observeProjectTrace(trace, recorder => recorder.beginPhase(phase));
+  let pending: Promise<T>;
+  try { pending = task(); } catch (error) { endProjectTracePhase(trace, token, signal.aborted ? 'cancelled' : 'error'); throw error; }
+  return pending.then(value => { endProjectTracePhase(trace, token, 'ok'); return value; }, error => {
+    endProjectTracePhase(trace, token, signal.aborted ? 'cancelled' : 'error'); throw error;
+  });
+}
+const WINDOWS_RENAME_RETRY_ERROR_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 
 let dataPlatformProjectServiceShuttingDown = false;
 let sceneResourceContextGeneration = 0;
@@ -271,6 +293,8 @@ export async function openDataPlatformProject(
   baseUrl: string,
   workspaceRoot: string,
   webBaseUrl: string = baseUrl,
+  trace?: ProjectOpenTraceRecorder,
+  resolvePhase?: ProjectOpenSpanToken,
 ): Promise<DataPlatformProjectOpenResult> {
   if (dataPlatformProjectServiceShuttingDown) {
     throw new Error('应用正在退出，无法打开数据中台项目。');
@@ -279,6 +303,7 @@ export async function openDataPlatformProject(
   sceneResourceContextGeneration += 1;
   openingProjectCount += 1;
   const controller = new AbortController();
+  const resolving = resolvePhase ?? observeProjectTrace(trace, recorder => recorder.beginPhase('projectResolve'));
   openTaskControllers.add(controller);
   const task = (async () => {
     const localTask = localSceneResourceTask;
@@ -287,12 +312,15 @@ export async function openDataPlatformProject(
       await localTask.promise.catch(() => undefined);
     }
     controller.signal.throwIfAborted();
-    return openDataPlatformProjectInternal(project, baseUrl, workspaceRoot, webBaseUrl, controller.signal);
+    return openDataPlatformProjectInternal(project, baseUrl, workspaceRoot, webBaseUrl, controller.signal, trace, resolving);
   })();
   openTasks.add(task);
 
   try {
     return await task;
+  } catch (error) {
+    endProjectTracePhase(trace, resolving, controller.signal.aborted ? 'cancelled' : 'error');
+    throw error;
   } finally {
     openingProjectCount -= 1;
     openTaskControllers.delete(controller);
@@ -870,7 +898,13 @@ export async function listSyncedImagesForWorkspace(workspaceRoot: string): Promi
   const binding = getCurrentDataPlatformBinding();
   if (!binding) {
     await ensureWritableEditorRoot(workspaceRoot).catch(() => undefined);
-    return listSyncedImages(workspaceRoot);
+    // 混合迁移期间两处都可能有独有资源；同一逻辑引用优先共享缓存，不能因部分迁移漏掉旧图。
+    const [shared, legacy] = await Promise.all([
+      listSyncedImages(resolveDataPlatformSharedResourcesRoot(workspaceRoot)), listSyncedImages(workspaceRoot),
+    ]);
+    const images = new Map(shared.map(image => [image.reference, image]));
+    for (const image of legacy) if (!images.has(image.reference)) images.set(image.reference, image);
+    return [...images.values()];
   }
   const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
   return listSyncedImages(sharedResourcesRoot);
@@ -938,6 +972,8 @@ async function openDataPlatformProjectInternal(
   workspaceRoot: string,
   webBaseUrl: string,
   signal: AbortSignal,
+  trace?: ProjectOpenTraceRecorder,
+  resolvePhase?: ProjectOpenSpanToken,
 ): Promise<DataPlatformProjectOpenResult> {
   // 先校验用户配置的工作区本身，避免子目录创建失败时只暴露晦涩的 ENOTDIR。
   await ensureWritableEditorRoot(workspaceRoot);
@@ -960,14 +996,18 @@ async function openDataPlatformProjectInternal(
   if (remoteVersionId && !project.latestEditorProjectPackageUrl?.trim()) {
     throw new Error('数据中台项目已有工程版本，但未返回有效工程包地址，已保留原本地场景，请重新获取项目后重试。');
   }
+  endProjectTracePhase(trace, resolvePhase, 'ok');
   const preserveLocalChanges = async (stagedRoot: string): Promise<void> => {
     if (await hasDifferentLocalProjectContent(projectRoot, stagedRoot, signal)) {
       conflictCopyPath = await createLocalConflictCopy(workspaceRoot, projectRoot, project.id, existingBinding?.latestVersionId ?? null);
       warning = `已按数据中台工程恢复；原本地内容与远端不同，已保留副本：${conflictCopyPath}`;
     }
   };
+  let materializePhase: ProjectOpenSpanToken | undefined;
+  try {
   // 工作目录是可编辑副本。发布失败也会先写入本地文件，绑定版本号不能作为内容一致的依据。
   if (project.latestEditorProjectPackageUrl) {
+    const packageUrl = project.latestEditorProjectPackageUrl;
     const openRoot = path.join(projectRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
     const archivePath = path.join(openRoot, 'project-package.zip');
     const extractRoot = path.join(openRoot, 'extracted');
@@ -977,18 +1017,23 @@ async function openDataPlatformProjectInternal(
     let preserveOpenRoot = false;
     try {
       await fs.mkdir(openRoot, { recursive: true });
-      await downloadRemoteFile({
+      await measureProjectTracePhase(trace, 'sourceDownload', signal, () => downloadRemoteFile({
         baseUrl,
-        remoteUrl: project.latestEditorProjectPackageUrl,
+        remoteUrl: packageUrl,
         destinationPath: archivePath,
         signal,
         timeoutMs: PROJECT_DOWNLOAD_TIMEOUT_MS,
         context: `下载项目“${project.projectName}”工程包`,
+      }));
+      const detection = await measureProjectTracePhase(trace, 'sourceExtractValidate', signal, async () => {
+        await extractZipSecurely(archivePath, extractRoot, signal);
+        const detected = await detectCurrentProjectPackage(extractRoot);
+        if (detected.kind !== 'current') throw new Error(`数据中台工程包无法打开：${detected.reason}。未回退到本地工程。`);
+        return detected;
       });
-      await extractZipSecurely(archivePath, extractRoot, signal);
-      const detection = await detectCurrentProjectPackage(extractRoot);
 
       if (detection.kind === 'current') {
+        materializePhase = observeProjectTrace(trace, recorder => recorder.beginPhase('projectMaterialize'));
         const materialized = await materializeCurrentProjectPackage({
           editorRoot: projectRoot,
           packageRoot: detection.packageRoot,
@@ -1002,8 +1047,6 @@ async function openDataPlatformProjectInternal(
         source = 'package';
         sceneFilePath = materialized.sceneFilePath;
         warning = [warning, materialized.warning].filter(Boolean).join('；') || null;
-      } else {
-        throw new Error(`数据中台工程包无法打开：${detection.reason}。未回退到本地工程。`);
       }
     } catch (error) {
       preserveOpenRoot = error instanceof DataPlatformRollbackError;
@@ -1012,6 +1055,10 @@ async function openDataPlatformProjectInternal(
       if (!preserveOpenRoot) await fs.rm(openRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   } else {
+    for (const phase of ['sourceDownload', 'sourceExtractValidate'] as const) observeProjectTrace(trace, recorder => {
+      recorder.beginPhase(phase).end('skipped', 'no-source-package');
+    });
+    materializePhase = observeProjectTrace(trace, recorder => recorder.beginPhase('projectMaterialize'));
     const openRoot = path.join(projectRoot, '.babylon-editor', `data-platform-open-${randomUUID()}`);
     const emptyPackageRoot = path.join(openRoot, 'empty');
     let preserveOpenRoot = false;
@@ -1075,6 +1122,7 @@ async function openDataPlatformProjectInternal(
     sharedResourcesRoot,
     createDataPlatformSkyboxSyncContextKey(baseUrl, project.id, projectRoot),
   );
+  endProjectTracePhase(trace, materializePhase, 'ok');
   return {
     projectRoot,
     sceneFilePath,
@@ -1086,6 +1134,10 @@ async function openDataPlatformProjectInternal(
     skyboxSyncStarted,
     binding,
   };
+  } catch (error) {
+    endProjectTracePhase(trace, materializePhase, signal.aborted ? 'cancelled' : 'error');
+    throw error;
+  }
 }
 /** 恢复远端前保留不同的本地内容，不尝试自动合并。 */
 async function createLocalConflictCopy(
@@ -1338,7 +1390,7 @@ async function materializeCurrentProjectPackage(options: {
     await fs.writeFile(stagedScenePath, rewrittenSceneContent, 'utf-8');
     sceneTargets.set(path.resolve(sceneSourcePath), targetScenePath);
   }
-  await fs.rename(sourceAssetsRoot, stagedAssetsRoot);
+  await renameProjectPathWithWindowsRetry(sourceAssetsRoot, stagedAssetsRoot, options.signal, { copyFallback: true });
   promotionItems.push(createPromotionItem('directory', targetAssetsRoot, stagedAssetsRoot, backupAssetsRoot));
   promotionItems.push(createPromotionItem('directory', targetScenesRoot, stagedScenesRoot, backupScenesRoot));
   const entrySceneTargetPath = options.entrySceneSourcePath ? sceneTargets.get(path.resolve(options.entrySceneSourcePath)) : null;
@@ -1348,7 +1400,7 @@ async function materializeCurrentProjectPackage(options: {
   options.signal.throwIfAborted();
 
   try {
-    for (const item of promotionItems) await promoteItem(item);
+    for (const item of promotionItems) await promoteItem(item, options.signal);
 
     const rebuilt = await scanCurrentModelLibrary(options.editorRoot);
     const stagedIndexPath = path.join(stagedRoot, '.babylon-editor', 'asset-index.json');
@@ -1364,7 +1416,7 @@ async function materializeCurrentProjectPackage(options: {
     await fs.writeFile(stagedIndexPath, indexContent, 'utf-8');
     const indexItem = createPromotionItem('file', indexTargetPath, stagedIndexPath, indexBackupPath);
     promotionItems.push(indexItem);
-    await promoteItem(indexItem);
+    await promoteItem(indexItem, options.signal);
 
     return {
       sceneFilePath: entrySceneTargetPath ?? null,
@@ -1505,14 +1557,69 @@ function createPromotionItem(
   return { type, target, staged, backup, previousMoved: false, stagedMoved: false };
 }
 
-async function promoteItem(item: PromotionItem): Promise<void> {
+/**
+ * Windows 扫描器、索引器或文件监听（如开发服务器的 chokidar）可能占用刚解压的目录；只重试占用错误，保持移动和事务回滚语义。
+ * copyFallback 仅用于“源在本次事务暂存区、目标尚不存在”的移动：重试耗尽后改为复制到目标再尽力删除源。
+ * 重命名要求目录内没有任何打开的句柄，而复制只需读权限，因此持续占用时仍能完成；源会随暂存目录统一清理。
+ */
+async function renameProjectPathWithWindowsRetry(
+  source: string,
+  target: string,
+  signal?: AbortSignal,
+  options: { copyFallback?: boolean } = {},
+): Promise<void> {
+  for (let retry = 0; ; retry += 1) {
+    signal?.throwIfAborted();
+    try {
+      await fs.rename(source, target);
+      return;
+    } catch (error) {
+      const retryable = process.platform === 'win32' && isNodeError(error) && WINDOWS_RENAME_RETRY_ERROR_CODES.has(error.code ?? '');
+      if (!retryable) throw error;
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[retry];
+      if (delay === undefined) {
+        if (options.copyFallback) { await copyProjectPathInsteadOfRename(source, target, error, signal); return; }
+        throw error;
+      }
+      await waitForRenameRetry(delay, undefined, { signal });
+    }
+  }
+}
+
+/** 目标必须不存在；复制失败会删除不完整的目标并抛出原始重命名错误，源保持不动。 */
+async function copyProjectPathInsteadOfRename(source: string, target: string, renameError: unknown, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  if (await pathExists(target)) throw renameError;
+  const sourceStat = await fs.lstat(source);
+  let copyError: unknown = null;
+  try {
+    if (sourceStat.isDirectory()) {
+      await fs.cp(source, target, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true, verbatimSymlinks: true });
+    } else {
+      await fs.copyFile(source, target, fsConstants.COPYFILE_EXCL);
+    }
+  } catch (error) {
+    copyError = error;
+  }
+  if (copyError !== null) {
+    await fs.rm(target, { recursive: true, force: true }).catch(() => undefined);
+    // cause 保留最初的重命名错误（真正的根因），复制失败原因写入消息。
+    throw new Error(`移动“${source}”失败，且复制替代也未完成：${copyError instanceof Error ? copyError.message : String(copyError)}`,
+      { cause: renameError });
+  }
+  // 源位于本次暂存区，删除失败（仍被占用）不影响结果，暂存目录结束时会再次清理。
+  await fs.rm(source, { recursive: true, force: true }).catch(() => undefined);
+}
+
+async function promoteItem(item: PromotionItem, signal: AbortSignal): Promise<void> {
   await fs.mkdir(path.dirname(item.target), { recursive: true });
   if (await pathExists(item.target)) {
     await fs.mkdir(path.dirname(item.backup), { recursive: true });
-    await fs.rename(item.target, item.backup);
+    await renameProjectPathWithWindowsRetry(item.target, item.backup, signal);
     item.previousMoved = true;
   }
-  await fs.rename(item.staged, item.target);
+  // 原目标已移入备份，目标不存在，暂存内容可以安全地以复制替代移动；原有用户目录的备份移动仍只用重命名。
+  await renameProjectPathWithWindowsRetry(item.staged, item.target, signal, { copyFallback: true });
   item.stagedMoved = true;
 }
 
@@ -1525,7 +1632,8 @@ async function rollbackPromotionItems(items: PromotionItem[]): Promise<string[]>
       }
       if (item.previousMoved && await pathExists(item.backup)) {
         await fs.mkdir(path.dirname(item.target), { recursive: true });
-        await fs.rename(item.backup, item.target);
+        // 回滚必须排空，不能沿用已经取消的打开任务 signal。
+        await renameProjectPathWithWindowsRetry(item.backup, item.target, undefined, { copyFallback: true });
       }
     } catch (error) {
       errors.push(error instanceof Error ? error.message : String(error));

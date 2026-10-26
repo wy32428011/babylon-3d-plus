@@ -1,3 +1,4 @@
+import { normalizeSkyboxEnvironmentResource } from '../shared/sceneSkyboxContract.ts';
 import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -141,6 +142,11 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
     restoredKeys.add(key);
   }
   const compare = (before: unknown, after: unknown, location: string): void => {
+    if (location.endsWith('.components.skybox.environment') || location.endsWith('.sceneSettings.skybox.environment')) {
+      // 产物可以随已验证的源升级重建；主发布流程仍逐文件核对源 SHA、recipe 和 ENV SHA。
+      normalizeSkyboxEnvironmentResource(after);
+      return;
+    }
     if (before === null || typeof before !== 'object') {
       if (before !== after) throw new Error(`发布准备改变了实例参数或绑定：${location}`);
       return;

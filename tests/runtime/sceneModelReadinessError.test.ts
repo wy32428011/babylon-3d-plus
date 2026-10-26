@@ -30,7 +30,7 @@ after(() => { scene.dispose(); engine.dispose(); });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
 function runtimeFixture() {
-  const runtime = new SceneRuntime(scene);
+  const runtime = new SceneRuntime(scene, () => {});
   Object.assign(runtime, { scene });
   Object.assign(runtime.assets, { models: new Map(), modelLoadSequence: 0, applyModelInteractivity: () => {}, restoreModelArrayHostMeshes: () => {}, refreshModelEntityMeshes: () => {}, normalizeModelContentOrigin: () => {}, disposeModel: (id: string, model: any) => { runtime.assets.models.delete(id); model.root.dispose(); } });
   Object.assign(runtime.readiness, { modelReadinessErrors: new Map(), loadDiagnostics: new SceneLoadDiagnostics(), scheduleModelPresentationRefresh: () => {} });
@@ -42,7 +42,6 @@ function runtimeFixture() {
   Object.assign(runtime.parameters, { applyModelUnitScale: () => {}, syncModelScriptMetadata: () => {}, applyModelParameters: () => {} });
   Object.assign(runtime.telemetry, { updateModelExternalScriptRuntimeContext: () => {} });
   Object.assign(runtime.arrays, { endModelArrayHostRenderSuppression: () => {} });
-  Object.assign(runtime.document.context, { pushLog: () => {} });
   return runtime;
 }
 function asset(revision = 'one') {

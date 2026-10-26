@@ -69,6 +69,9 @@ import {
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 import { readRegisteredSyncedImage } from './syncedImageRead.js';
 import { DigitalTwinUploadClient } from './digitalTwinUploadClient.js';
+import { ProjectOpenTraceStore } from './projectOpenTraceStore.ts';
+import { readProjectOpenTraceContext, type ProjectOpenTraceRecorder, type ProjectOpenSpanOutcome,
+  type ProjectOpenTraceSnapshot, type ProjectOpenSpanRef, type ProjectOpenTraceContext } from '../shared/projectOpenTrace.ts';
 
 const DATA_PLATFORM_CONFIG_FILE = 'data-platform-config.json';
 const PROJECT_QUERY_PATH = 'api/v1/projects/query';
@@ -79,6 +82,29 @@ const PROJECT_REQUEST_TIMEOUT_MS = 10_000;
 let registered = false;
 let projectClosing = false;
 const projectSessionTasks = new Set<Promise<unknown>>();
+const projectOpenTraces = new ProjectOpenTraceStore();
+
+function projectTraceClock(): number | null {
+  try { const value = performance.now(); return Number.isFinite(value) && value >= 0 ? value : null; } catch { return null; }
+}
+function readRequestedProjectTrace(value: unknown) {
+  try { if (!value || typeof value !== 'object') return null;
+    const field = Object.getOwnPropertyDescriptor(value, 'trace'); return readProjectOpenTraceContext(field && 'value' in field ? field.value : undefined);
+  } catch { return null; }
+}
+function observeProjectOpenTrace<T>(trace: ProjectOpenTraceRecorder | undefined, operation: (recorder: ProjectOpenTraceRecorder) => T): T | undefined {
+  if (!trace) return undefined;
+  try { return operation(trace); } catch { try { trace.noteDiagnosticFailure(); } catch { /* 不改变业务结果。 */ } return undefined; }
+}
+function projectTraceParent(trace: ProjectOpenTraceRecorder | undefined, context: ProjectOpenTraceContext | null | undefined = trace?.context): ProjectOpenSpanRef | undefined {
+  const id = context?.parentSpanId;
+  return id ? { openId: trace!.context.openId, clockDomain: id.startsWith('main:') ? 'main' : 'renderer', spanId: id } : undefined;
+}
+function projectTraceFailure(error: unknown): ProjectOpenSpanOutcome {
+  if (projectClosing) return 'cancelled';
+  try { if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') return 'cancelled'; } catch { /* 原错误继续传播。 */ }
+  return 'error';
+}
 
 export function isDataPlatformProjectClosing(): boolean {
   return projectClosing;
@@ -222,7 +248,15 @@ export function registerDataPlatformIpc(): void {
   );
   registerProjectSessionHandler(
     'data-platform:openProject',
-    async (_event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> => {
+    async (event, request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectOpenResult> => {
+      const receivedMs = projectTraceClock();
+      const requestedTrace = readRequestedProjectTrace(request);
+      const trace = (requestedTrace ? projectOpenTraces.start(event?.sender?.id ?? 0, requestedTrace) : null) ?? undefined;
+      const bridge = observeProjectOpenTrace(trace, recorder => recorder.beginIpcBridge('openProject', receivedMs, { parent: projectTraceParent(trace) }));
+      const resolving = observeProjectOpenTrace(trace, recorder => recorder.beginPhase('projectResolve', { parent: bridge?.ref ?? recorder.rootRef }));
+      let outcome: ProjectOpenSpanOutcome = 'error', response: DataPlatformProjectOpenResult | undefined;
+      let controller: AbortController | undefined, revision: number | undefined;
+      try {
       assertSceneSwitchAllowed();
       const openRequest = validateOpenProjectRequest(request);
       const project = trustedProjectsById.get(openRequest.projectId);
@@ -237,22 +271,42 @@ export function registerDataPlatformIpc(): void {
         throw new Error('数据中台地址已变化，请刷新项目列表后再打开。');
       }
       if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
-      const revision = projectConfigRevision;
-      const controller = new AbortController();
+      revision = projectConfigRevision;
+      controller = new AbortController();
       projectMetadataControllers.add(controller);
-      try {
         const currentProject = await requestCurrentDataPlatformProject(config.baseUrl, project.id, controller.signal);
         await assertProjectOpenConfigUnchanged(config, revision);
         controller.signal.throwIfAborted();
         assertSceneSwitchAllowed();
-        const result = await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
+        const result = trace
+          ? await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl, trace, resolving)
+          : await openDataPlatformProject(currentProject, config.baseUrl, config.workspaceRoot, config.webBaseUrl || config.baseUrl);
         assertSceneSwitchAllowed();
-        return result;
+        const snapshot = observeProjectOpenTrace(trace, recorder => recorder.snapshot());
+        response = snapshot ? { ...result, trace: snapshot } : result; outcome = 'ok';
+        return response;
+      } catch (error) {
+        outcome = controller?.signal.aborted ? 'cancelled' : revision !== undefined && revision !== projectConfigRevision ? 'stale' : projectTraceFailure(error);
+        observeProjectOpenTrace(trace, () => resolving?.end(outcome, outcome === 'cancelled' ? 'aborted' : outcome === 'stale' ? 'scene-stale' : 'operation-failed'));
+        throw error;
       } finally {
-        projectMetadataControllers.delete(controller);
+        if (controller) projectMetadataControllers.delete(controller);
+        const localStatus = observeProjectOpenTrace(trace, recorder => recorder.getStatus());
+        if (localStatus === 'cancelled' || localStatus === 'stale') outcome = localStatus;
+        const returnedMs = trace ? projectTraceClock() : null;
+        observeProjectOpenTrace(trace, () => bridge?.end(outcome, outcome === 'ok' ? undefined : outcome === 'cancelled' ? 'aborted' : 'operation-failed', returnedMs));
+        if (response && trace) response.traceIpc = { openId: trace.context.openId, operation: 'openProject', receivedMs, returnedMs, outcome };
+        if (outcome !== 'ok') observeProjectOpenTrace(trace, recorder => recorder.finish(outcome === 'cancelled' ? 'cancelled' : outcome === 'stale' ? 'stale' : 'failed'));
       }
     },
   );
+
+  /** 只读已接收的同sender诊断；不查询网络、不启动collector，也不改变项目授权。 */
+  ipcMain.handle('data-platform:getProjectOpenTrace', (event, request: { openId?: unknown }): ProjectOpenTraceSnapshot | null => {
+    try { const context = readProjectOpenTraceContext({ version: 1, openId: request?.openId });
+      return context ? projectOpenTraces.read(event?.sender?.id ?? 0, context.openId) : null;
+    } catch { return null; }
+  });
 
   registerProjectSessionHandler('data-platform:syncModels', async (): Promise<boolean> => {
     const config = await readDataPlatformConfig();
@@ -260,13 +314,30 @@ export function registerDataPlatformIpc(): void {
     return syncDataPlatformModelsForWorkspace(config.baseUrl, config.workspaceRoot);
   });
 
-  registerProjectSessionHandler('data-platform:prepareLocalSceneResources', async (_event, request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => {
+  registerProjectSessionHandler('data-platform:prepareLocalSceneResources', async (event, request: LocalSceneResourceSyncRequest): Promise<LocalSceneResourceSyncResult> => {
+    const receivedMs = projectTraceClock(), context = readRequestedProjectTrace(request);
+    const trace = (context ? projectOpenTraces.forOwner(event?.sender?.id ?? 0, context.openId) : null) ?? undefined;
+    const bridge = observeProjectOpenTrace(trace, recorder => recorder.beginIpcBridge('sceneResources', receivedMs, { parent: projectTraceParent(trace, context) }));
+    let outcome: ProjectOpenSpanOutcome = 'error', response: LocalSceneResourceSyncResult | undefined;
+    try {
     const config = await readDataPlatformConfig();
     if (request?.mode === 'data-platform-latest' || request?.mode === 'scene-latest' || request?.mode === 'local-latest' || request?.mode === 'local-recovery') {
-      return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+      response = await prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+    } else {
+      response = !config.baseUrl ? { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] }
+        : await prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
     }
-    if (!config.baseUrl) return { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] };
-    return prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
+    const snapshot = observeProjectOpenTrace(trace, recorder => recorder.snapshot());
+    if (snapshot) response = { ...response, trace: snapshot };
+    outcome = 'ok'; return response;
+    } catch (error) { outcome = projectTraceFailure(error); throw error; }
+    finally {
+      const localStatus = observeProjectOpenTrace(trace, recorder => recorder.getStatus());
+      if (localStatus === 'cancelled' || localStatus === 'stale') outcome = localStatus;
+      const returnedMs = trace ? projectTraceClock() : null;
+      observeProjectOpenTrace(trace, () => bridge?.end(outcome, outcome === 'ok' ? undefined : outcome === 'cancelled' ? 'aborted' : 'operation-failed', returnedMs));
+      if (response && trace) response.traceIpc = { openId: trace.context.openId, operation: 'sceneResources', receivedMs, returnedMs, outcome };
+    }
   });
 
   registerProjectSessionHandler('data-platform:cancelSceneModelSync', async (_event, request: { requestId: string }): Promise<boolean> => {
@@ -292,10 +363,11 @@ export function registerDataPlatformIpc(): void {
   registerProjectSessionHandler('data-platform:retryEnvironmentSync', async (): Promise<boolean> => {
     return retryLatestDataPlatformEnvironmentSync();
   });
-  ipcMain.handle('data-platform:closeProject', async (): Promise<void> => {
+  ipcMain.handle('data-platform:closeProject', async (event): Promise<void> => {
     if (isDigitalTwinPublishActive()) throw new Error('数字孪生发布正在进行，完成或取消发布后才能返回首页。');
     if (projectClosing) throw new Error('正在关闭当前项目，请稍后重试。');
     projectClosing = true;
+    try { projectOpenTraces.closeOwner(event?.sender?.id ?? 0); } catch { /* 诊断不得阻止实际关闭。 */ }
     cancelCompositionSync();
     try {
       resetScenePublishScope();
@@ -313,9 +385,10 @@ export function registerDataPlatformIpc(): void {
     }
   });
 
-  ipcMain.handle('data-platform:cancelProjectLoading', (): boolean => {
+  ipcMain.handle('data-platform:cancelProjectLoading', (event): boolean => {
     const metadataPending = projectMetadataControllers.size > 0;
     for (const controller of projectMetadataControllers) controller.abort();
+    try { projectOpenTraces.closeOwner(event?.sender?.id ?? 0); } catch { /* 诊断不得阻止实际取消。 */ }
     return cancelDataPlatformProjectLoading() || metadataPending;
   });
 
@@ -358,7 +431,7 @@ export function registerDataPlatformIpc(): void {
     'data-platform:listSyncedImages',
     async (): Promise<SyncedImageAssetEntry[]> => {
       const config = await readDataPlatformConfig();
-      if (!config.baseUrl) return [];
+      // 本地索引读取不依赖远端配置，离线打开也必须先恢复已缓存图片。
       return listSyncedImagesForWorkspace(config.workspaceRoot);
     },
   );
@@ -846,6 +919,7 @@ function validateOpenProjectRequest(value: unknown): OpenDataPlatformProjectRequ
 
   return {
     projectId: normalizeRequiredIdentifier(value.projectId, '打开数据中台项目请求中的 projectId'),
+    ...(readRequestedProjectTrace(value) ? { trace: readRequestedProjectTrace(value)! } : {}),
   };
 }
 

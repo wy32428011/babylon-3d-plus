@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -102,6 +103,11 @@ const harnessPlugin: Plugin = {
   resolveId(source, importer) {
     const normalizedImporter = importer?.replace(/\\/g, '/') ?? '';
 
+    // 本文件验证天空盒/工程切换；发布并发门禁独立注入，避免加载整条发布打包模块图。
+    if (source === './digitalTwinPublishIpc.js' && normalizedImporter.includes('/electron/ipc/')) {
+      return '\0task4-publish-state';
+    }
+
     if (normalizedImporter.includes('/electron/ipc/dataPlatformProjectService.ts')) {
       if (source === './assetRegistry.js') return '\0task4-asset-registry';
       if (source === './projectAssetStore.js') return '\0task4-project-store';
@@ -128,12 +134,16 @@ const harnessPlugin: Plugin = {
   },
   load(id) {
     const stateLookup = `globalThis[${JSON.stringify(HARNESS_STATE_KEY)}]`;
+    if (id === '\0task4-publish-state') {
+      return 'export function isDigitalTwinPublishActive() { return false; }';
+    }
     if (id === '\0task4-asset-registry') {
       return `export const encodeAssetUrl = (filePath) => 'editor-asset://local/' + encodeURIComponent(filePath);`;
     }
     if (id === '\0task4-project-store') {
       return `
         import path from 'node:path';
+        import { promises as fs } from 'node:fs';
         const getState = () => ${stateLookup};
         export async function activateProjectRoot(projectRoot) {
           getState().events.push('activateProject:' + projectRoot);
@@ -144,6 +154,10 @@ const harnessPlugin: Plugin = {
           getState().events.push('ensureDirectories:' + normalizedRoot);
           const gate = getState().directoryPrepareGates.get(normalizedRoot);
           if (gate) await gate;
+          // 与真实 ensureProjectDirectories 一致创建空骨架，供物化事务实际移动。
+          for (const directory of ['.babylon-editor', 'Assets/Models', 'Assets/Environments', 'Assets/Skyboxes', 'Assets/Images']) {
+            await fs.mkdir(path.join(normalizedRoot, directory), { recursive: true });
+          }
         }
         export const getProjectAssetIndexPath = (root) => path.join(root, '.babylon-editor', 'asset-index.json');
         export const getProjectModelsRoot = (root) => path.join(root, 'Assets', 'Models');
@@ -345,7 +359,7 @@ before(async () => {
     appType: 'custom',
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    server: { middlewareMode: true, hmr: false, watch: null },
     optimizeDeps: { noDiscovery: true },
     resolve: {
       alias: {
@@ -437,7 +451,8 @@ test('设置共享天空盒根后仍只列出当前项目本地天空盒，不�
     getSharedProjectSkyboxRoot(): string | null;
     listProjectAssets(): Promise<{
       projectRoot: string | null;
-      skyboxes: Array<{ path: string; packagePath: string }>;
+      skyboxes: Array<{ path: string; packagePath: string; source: string; id: string }>;
+      localSkyboxes: Array<{ path: string; packagePath: string }>;
     }>;
   };
 
@@ -463,8 +478,10 @@ test('设置共享天空盒根后仍只列出当前项目本地天空盒，不�
   const result = await store.listProjectAssets();
 
   assert.equal(store.getSharedProjectSkyboxRoot(), path.normalize(sharedRoot));
-  assert.deepEqual(result.skyboxes.map((asset) => path.basename(asset.path)), ['local.hdr']);
-  assert.equal(result.skyboxes[0]?.packagePath, path.resolve(localPackageRoot));
+  // 产品在本地/中台列表前加入已校验的内置天空盒；本地专用列表仍只有当前工程资产。
+  assert.deepEqual(result.skyboxes.filter(asset => asset.source === 'builtin').map(asset => asset.id), ['builtin-skybox:partly-cloudy-light']);
+  assert.deepEqual(result.skyboxes.filter(asset => asset.source !== 'builtin').map((asset) => path.basename(asset.path)), ['local.hdr']);
+  assert.deepEqual(result.localSkyboxes.map((asset) => asset.packagePath), [path.resolve(localPackageRoot)]);
   assert.equal(result.skyboxes.some((asset) => asset.packagePath.includes('DataPlatform-42')), false);
 
   store.setSharedProjectSkyboxRoot(null);
@@ -537,9 +554,10 @@ test('导入本地天空盒后复用共享合并逻辑并返回 active/orphaned 
     const result = await store.importSkyboxFileIntoProject(sourceFilePath);
 
     assert.equal(result.importedAsset.source, 'project');
-    assert.deepEqual(result.skyboxes.map((asset) => asset.source), ['project', 'data-platform']);
-    assert.deepEqual(result.skyboxes.map((asset) => asset.displayName), ['same-name', 'same-name']);
-    assert.equal(result.skyboxes[0].path, result.importedAsset.path);
+    assert.deepEqual(result.skyboxes.map((asset) => asset.source), ['builtin', 'project', 'data-platform']);
+    const projectAndRemote = result.skyboxes.filter(asset => asset.source !== 'builtin');
+    assert.deepEqual(projectAndRemote.map((asset) => asset.displayName), ['same-name', 'same-name']);
+    assert.equal(projectAndRemote[0].path, result.importedAsset.path);
     assert.deepEqual(result.orphanedSkyboxes.map((asset) => asset.id), ['data-platform-skybox:43']);
     assert.equal(result.orphanedSkyboxes[0].availability, 'orphaned');
     assert.equal(registry.isAuthorizedAssetFile(result.importedAsset.path), true);
@@ -741,7 +759,11 @@ test('天空盒 prepare 在项目切换与 dispose 竞态中失效并被等待�
   assert.equal(openResult.modelSyncStarted, true);
   assert.equal(openResult.skyboxSyncStarted, true);
   assert.equal(state.networkCalls, 0);
-  assert.ok(state.events.indexOf(`writeBinding:${path.resolve(workspaceRoot, 'Projects', '42')}`) < state.events.indexOf(`setSkybox:${sharedRoot}`));
+  const expectedProjectRoot = path.resolve(workspaceRoot, 'Platforms', createHash('sha256').update(baseUrl).digest('hex'), 'Projects', '42');
+  assert.equal(openResult.projectRoot, expectedProjectRoot);
+  const writeBindingIndex = state.events.indexOf(`writeBinding:${expectedProjectRoot}`);
+  assert.ok(writeBindingIndex >= 0);
+  assert.ok(writeBindingIndex < state.events.indexOf(`setSkybox:${sharedRoot}`));
   assert.ok(state.events.indexOf(`setSkybox:${sharedRoot}`) < state.events.indexOf(`startSkybox:${sharedRoot}`));
   assert.match(state.skyboxStarts.at(-1)?.contextKey ?? '', /^[a-f0-9]{64}$/);
 

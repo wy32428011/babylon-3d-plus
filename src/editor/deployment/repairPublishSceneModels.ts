@@ -15,7 +15,7 @@ function createRecoveredModel(asset: ProjectModelAssetEntry) {
     normalizeModelParameterConfig(asset.parameterConfig) ?? undefined,
     asset.scriptAssets, asset.parameterScriptMetadata, asset.animationScriptMetadata,
     asset.defaultAssetCode, asset.assetRevision, asset.dataDrivenConfig, asset.builtInSlotBindingConfig,
-    asset.layerChangePlatformBindingConfig,
+    asset.layerChangePlatformBindingConfig, asset.runtimeCapabilities,
   );
   const model = entity.components.modelAsset!;
   const [kind, resourceId, modelPath] = publishModelMatchKey(asset.sourceUrl).split(':');

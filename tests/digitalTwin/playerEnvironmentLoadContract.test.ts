@@ -38,7 +38,7 @@ test('发布 Viewer 并行加载环境模型，但首次加载进度仍等待环
 
 test('环境模型首帧完成后才替换旧环境、发布 ready 并结算进度，失败保留旧环境', { timeout: 10_000 }, async () => {
   assert.match(runtimeSource, /waitForRenderReady: \(signal\) => this\.waitForEnvironmentRenderReady\(signal\)/);
-  assert.match(runtimeSource, /return this\.dependencies\.readiness\.loadDiagnostics\.measureAsync\('environmentRenderReady', \(\) => waitForSceneRenderReady\(this\.context\.scene, loadSignal\)\)/);
+  assert.match(runtimeSource, /return this\.dependencies\.readiness\.loadDiagnostics\.measureAsync\('environmentRenderReady', \(\) => waitForSceneRenderReady\(this\.context\.scene, loadSignal\),\s*undefined,\s*scope\)/);
   const loadAndSwap = evaluateSourceExpression(environmentRuntimeSource,
     node => ts.isMethodDeclaration(node) && node.name.getText() === 'loadAndSwap', {
       splitAssetUrl: (url: string) => ({ rootUrl: '', fileName: url }),

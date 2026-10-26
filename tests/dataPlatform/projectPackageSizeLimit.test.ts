@@ -127,11 +127,18 @@ test('工程包场景完成读取和重写后才移动 Assets 目录', async () 
     'utf-8',
   );
   const rewriteIndex = serviceSource.indexOf('rewriteSceneForEditorRoot(sceneSourcePath, options.editorRoot)');
-  const moveAssetsIndex = serviceSource.indexOf('await fs.rename(sourceAssetsRoot, stagedAssetsRoot)');
+  const moveAssetsIndex = serviceSource.indexOf('await renameProjectPathWithWindowsRetry(sourceAssetsRoot, stagedAssetsRoot, options.signal, { copyFallback: true })');
 
   assert.notEqual(rewriteIndex, -1, '应先生成编辑器场景内容');
   assert.notEqual(moveAssetsIndex, -1, '应通过同盘移动物化 Assets');
   assert.ok(rewriteIndex < moveAssetsIndex, '场景读取不得发生在 Assets 被移走之后');
+  // 正常路径仍是同盘 rename；只有占用重试耗尽后才复制，且目标必须不存在。
+  assert.match(serviceSource, /async function renameProjectPathWithWindowsRetry[\s\S]*?await fs\.rename\(source, target\)[\s\S]*?if \(delay === undefined\) \{\s*if \(options\.copyFallback\)/,
+    '复制只能作为占用重试耗尽后的回退');
+  assert.match(serviceSource, /async function copyProjectPathInsteadOfRename[\s\S]*?if \(await pathExists\(target\)\) throw renameError;/,
+    '复制回退不得覆盖已存在的目标');
+  assert.doesNotMatch(serviceSource, /renameProjectPathWithWindowsRetry\(item\.target, item\.backup, signal, \{ copyFallback/,
+    '原有用户目录移入备份只能用 rename，不得复制后删除');
 });
 
 test('工程包容量错误不会被误判为不兼容包并降级为空项目', async () => {

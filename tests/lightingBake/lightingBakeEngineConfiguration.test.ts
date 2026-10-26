@@ -18,6 +18,15 @@ async function setup(t: TestContext) {
 }
 const ready = (candidate: string): LightingBakeEngineStatus => ({ available: true, path: candidate, version: '4.5.3', devices: [{ id: 'cpu', name: 'CPU', backend: 'CPU', type: 'CPU' }] });
 
+function isolateDiscoveryEnvironment(t: TestContext, directory: string): void {
+  const keys = ['ProgramFiles', 'LOCALAPPDATA', 'BABYLON_BLENDER_PATH'] as const;
+  const original = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  t.after(async () => { for (const key of keys) { if (original[key] === undefined) delete process.env[key]; else process.env[key] = original[key]; } });
+  process.env.ProgramFiles = path.join(directory, 'system');
+  process.env.LOCALAPPDATA = path.join(directory, 'local');
+  delete process.env.BABYLON_BLENDER_PATH;
+}
+
 test('无工程的本机配置查询显示有效来源，不创建配置文件', async t => {
   const fixture = await setup(t), installed = path.join(fixture.directory, 'installed', 'blender.exe');
   const service = createLightingBakeEngineConfigurationService({ userDataDirectory: fixture.directory, getEnvironmentPath: () => undefined, installationCandidates: async () => [installed], detectEnginePath: async candidate => ready(candidate) });
@@ -139,6 +148,77 @@ test('默认发现读取环境变量，并按数字版本降序发现受控临�
   assert.equal((await service.getConfiguration()).source, 'environment'); delete process.env.BABYLON_BLENDER_PATH;
   assert.equal((await service.getConfiguration()).source, 'installation');
   if (process.platform === 'win32') assert.equal(probes[1], path.join(base, 'Blender 4.10', 'blender.exe'));
+});
+
+test('Windows每用户安装发现支持实际便携目录，拒绝无关目录/文件/链接并保留版本失败回退', { skip: process.platform !== 'win32' }, async t => {
+  const fixture = await setup(t); isolateDiscoveryEnvironment(t, fixture.directory);
+  const base = path.join(process.env.LOCALAPPDATA!, 'Programs', 'Blender Foundation');
+  for (const name of ['Blender 99.0', 'blender-5.2.2-windows-x64', 'Blender 4.10', 'Blender 4.9', 'unrelated', 'blender-77.0-linux-x64']) {
+    const directory = path.join(base, name); await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'blender.exe'), 'test-only executable placeholder');
+  }
+  await fs.writeFile(path.join(base, 'Blender 98.0'), 'not a directory');
+  await fs.symlink(path.join(base, 'Blender 99.0'), path.join(base, 'Blender 100.0'), 'junction');
+  const probes: string[] = [];
+  const service = createLightingBakeEngineConfigurationService({ userDataDirectory: fixture.directory,
+    detectEnginePath: async candidate => detectLightingBakeEnginePath(candidate, {
+      probeVersion: async file => { probes.push(file); return path.basename(path.dirname(file)) === 'Blender 99.0'
+        ? { available: false, message: 'fixture unsupported build' } : { ...ready(file), version: '5.2.2' }; },
+      discoverDevices: async () => ready(fixture.candidate).devices!,
+    }) });
+  const result = await service.getConfiguration();
+  assert.equal(result.source, 'installation');
+  assert.equal(result.engine.path, path.join(base, 'blender-5.2.2-windows-x64', 'blender.exe'));
+  assert.deepEqual(probes, [path.join(base, 'Blender 99.0', 'blender.exe'), path.join(base, 'blender-5.2.2-windows-x64', 'blender.exe')]);
+  await assert.rejects(fs.stat(fixture.configPath), { code: 'ENOENT' });
+});
+
+test('Windows自动发现保留系统安装顺序，失败后再读每用户路径且显式配置/环境仍优先', { skip: process.platform !== 'win32' }, async t => {
+  const fixture = await setup(t); isolateDiscoveryEnvironment(t, fixture.directory);
+  const system = path.join(process.env.ProgramFiles!, 'Blender Foundation', 'Blender 4.10', 'blender.exe');
+  const local = path.join(process.env.LOCALAPPDATA!, 'Programs', 'Blender Foundation', 'blender-5.2.2-windows-x64', 'blender.exe');
+  for (const file of [system, local]) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, 'test-only executable placeholder'); }
+  let systemAvailable = true; const probes: string[] = [];
+  const originalConfig = JSON.stringify({ blenderPath: fixture.candidate, keep: { enabled: true } });
+  const service = createLightingBakeEngineConfigurationService({ userDataDirectory: fixture.directory,
+    detectEnginePath: async candidate => { probes.push(candidate); return candidate === system && !systemAvailable
+      ? { available: false, message: 'fixture unavailable system installation' } : ready(candidate); } });
+  assert.equal((await service.getConfiguration()).engine.path, system);
+  systemAvailable = false; probes.length = 0;
+  assert.equal((await service.getConfiguration()).engine.path, local);
+  assert.deepEqual(probes, [system, local]);
+  await fs.writeFile(fixture.configPath, originalConfig); probes.length = 0;
+  assert.equal((await service.getConfiguration()).source, 'configuration'); assert.deepEqual(probes, [fixture.candidate]);
+  process.env.BABYLON_BLENDER_PATH = path.join(fixture.directory, 'environment', 'blender.exe'); probes.length = 0;
+  assert.equal((await service.getConfiguration()).source, 'environment'); assert.deepEqual(probes, [process.env.BABYLON_BLENDER_PATH]);
+  assert.equal(await fs.readFile(fixture.configPath, 'utf8'), originalConfig);
+});
+
+test('Windows发现缺失安装或相对LocalAppData时保持不可用，不猜测工作目录中的可执行文件', { skip: process.platform !== 'win32' }, async t => {
+  const fixture = await setup(t); isolateDiscoveryEnvironment(t, fixture.directory);
+  process.env.LOCALAPPDATA = 'relative-user-path';
+  let probes = 0;
+  const service = createLightingBakeEngineConfigurationService({ userDataDirectory: fixture.directory,
+    detectEnginePath: async candidate => { probes++; return ready(candidate); } });
+  const result = await service.getConfiguration();
+  assert.equal(result.source, null); assert.equal(result.engine.available, false); assert.equal(probes, 0);
+  await assert.rejects(fs.stat(fixture.configPath), { code: 'ENOENT' });
+});
+
+test('Windows保留既有ProgramFiles junction安装发现，最终仍验证真实blender文件', { skip: process.platform !== 'win32' }, async t => {
+  const fixture = await setup(t); isolateDiscoveryEnvironment(t, fixture.directory);
+  const real = path.join(fixture.directory, 'system-real-install'), base = path.join(process.env.ProgramFiles!, 'Blender Foundation');
+  await fs.mkdir(real, { recursive: true }); await fs.mkdir(base, { recursive: true });
+  await fs.writeFile(path.join(real, 'blender.exe'), 'test-only executable placeholder');
+  const junction = path.join(base, 'Blender 4.10'); await fs.symlink(real, junction, 'junction');
+  const probes: string[] = [];
+  const service = createLightingBakeEngineConfigurationService({ userDataDirectory: fixture.directory,
+    detectEnginePath: async candidate => detectLightingBakeEnginePath(candidate, {
+      probeVersion: async file => { probes.push(file); return ready(file); }, discoverDevices: async () => ready(fixture.candidate).devices!,
+    }) });
+  const result = await service.getConfiguration();
+  assert.equal(result.source, 'installation'); assert.equal(result.engine.path, path.join(junction, 'blender.exe'));
+  assert.deepEqual(probes, [path.join(junction, 'blender.exe')]);
 });
 
 test('版本子进程超时只终止本次探针；启动异常和版本过低明确失败', async () => {

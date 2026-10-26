@@ -1,5 +1,6 @@
 export type LightingChangeKind = 'pose' | 'bindings' | 'classification' | 'structure' | 'unknown';
 export type LightingInvalidationEntry = 'query' | 'frame' | 'sync' | 'capture' | 'snapshot' | 'preview' | 'focus';
+// noConsumer：当前没有任何分类消费者，帧内不收集；coalesced：合并窗口内延后收集。
 const kinds = () => ({ pose: 0, bindings: 0, classification: 0, structure: 0, unknown: 0 });
 const entries = () => ({ query: 0, frame: 0, sync: 0, capture: 0, snapshot: 0, preview: 0, focus: 0 });
 const counters = () => ({
@@ -7,7 +8,7 @@ const counters = () => ({
   collections: { count: 0, totalMs: 0, maxMs: 0, byEntry: entries() },
   bindings: { refreshes: 0, forcedRebuilds: 0, byEntry: entries() },
   meshLifecycle: { requests: 0, coalescedMarks: 0, fullRequests: 0 },
-  skipped: { pose: 0, cleanClassification: 0, cleanBindings: 0, pendingActivation: 0, derived: 0, disposed: 0 },
+  skipped: { pose: 0, cleanClassification: 0, cleanBindings: 0, pendingActivation: 0, derived: 0, disposed: 0, noConsumer: 0, coalesced: 0, preparing: 0 },
   decisions: { skipped: 0, fallbacks: 0, byReason: Object.create(null) as Record<string, { skipped: number; fallbacks: number }>, overflowReasons: 0 },
   fallbacks: { unknown: 0 }, reentrant: { classification: 0, bindings: 0 },
 });

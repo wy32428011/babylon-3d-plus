@@ -1,3 +1,6 @@
+import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
+import { collectSceneSkyboxReferences } from '../../../electron/shared/sceneResourceTraversal.ts';
+import { normalizeSkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../../../electron/shared/sceneFileVersion.js';
 import { normalizeSceneModelEntranceSettings } from '../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig } from '../model/sceneOpeningAnimation';
@@ -28,16 +31,13 @@ import {
   createModelAssetCode,
   normalizeDataPlatformResourceId,
   readOwnDataProperty,
-  normalizeSkyboxSphereScale,
   normalizeStackerSimulationScenario,
   sanitizeFetchConfig,
   sanitizeMqttConfig,
   sanitizeSceneSettings,
   sanitizeSceneSkybox,
-  sanitizeSceneViewDistance,
   isSceneCameraOrientation,
   SCENE_SENSITIVITY_DEFAULT,
-  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   type MqttConfig,
   type SceneCameraOrientation,
   type SceneCameraProjection,
@@ -108,18 +108,50 @@ const DEFAULT_SCENE_FILE_UNITS: SceneFileUnits = { length: SCENE_LENGTH_UNIT };
 
 type PlainObject = Record<string, unknown>;
 
-export function serializeScene(scene: SceneDocument): string {
+export function serializeScene(scene: SceneDocument, options: { includePreparedSkybox?: boolean } = {}): string {
+  // 在光照迁移/合批签名可能遍历对象前拒绝访问器，不能先读 getter 再声称安全规范化。
+  for (const skybox of collectSceneSkyboxReferences(scene)) {
+    normalizeOptionalDataPlatformResourceId(skybox);
+    normalizeSkyboxRuntimeFields(skybox);
+  }
   const canonical = migrateSceneLightingDocument(scene) as SceneDocument;
-  const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(canonical));
+  const snapshot = createSerializableSceneSnapshot(createPersistedModelThinInstanceScene(canonical), options.includePreparedSkybox !== false);
   return JSON.stringify({ version: CURRENT_SCENE_FILE_VERSION, units: { length: SCENE_LENGTH_UNIT }, scene: snapshot }, null, 2);
 }
 
+let comparisonInput: string | null = null;
+let comparisonContent = '';
+
+/** 派生缓存回填不是业务编辑；保存基线仅在内容变化时解析一次，避免每次查询重复迁移整场景。 */
+export function hasSceneDocumentChanges(scene: SceneDocument, persistedContent: string): boolean {
+  if (persistedContent !== comparisonInput) {
+    comparisonInput = persistedContent;
+    comparisonContent = persistedContent;
+    try {
+      const file = JSON.parse(persistedContent);
+      let changed = false;
+      for (const skybox of collectSceneSkyboxReferences(file.scene)) {
+        if (Object.hasOwn(skybox, 'environment')) { delete skybox.environment; changed = true; }
+      }
+      if (changed) comparisonContent = JSON.stringify(file, null, 2);
+    } catch { /* 无有效保存基线时保持原字符串，当前文档仍应显示为未保存。 */ }
+  }
+  return serializeScene(scene, { includePreparedSkybox: false }) !== comparisonContent;
+}
+
+function preparedSkyboxSnapshot<T extends object | null>(value: T, includePrepared: boolean): T {
+  if (!value || includePrepared) return value;
+  const copy = { ...value };
+  delete (copy as Record<string, unknown>).environment;
+  return copy;
+}
+
 /** 保存前只替换天空盒嵌套对象，保留其它场景引用并确保不修改输入。 */
-function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
+function createSerializableSceneSnapshot(scene: SceneDocument, includePrepared: boolean): SceneDocument {
   const entities = Object.fromEntries(
     Object.entries(scene.entities).map(([entityId, entity]) => [
       entityId,
-      createSerializableEntitySnapshot(entity),
+      createSerializableEntitySnapshot(entity, includePrepared),
     ]),
   );
   const sceneSettings = scene.sceneSettings as SceneSettings | undefined;
@@ -129,7 +161,7 @@ function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
     entities,
     sceneSettings: {
       ...sceneSettings,
-      skybox: normalizeSceneSkyboxSettings(sceneSettings.skybox),
+      skybox: preparedSkyboxSnapshot(normalizeSceneSkyboxSettings(sceneSettings.skybox), includePrepared),
       openingAnimation: normalizeSceneOpeningConfig(sceneSettings.openingAnimation),
       modelEntrance: normalizeSceneModelEntranceSettings(sceneSettings.modelEntrance),
     },
@@ -137,13 +169,13 @@ function createSerializableSceneSnapshot(scene: SceneDocument): SceneDocument {
 }
 
 /** 可编辑资源组件使用加载入口同一套严格规范化，避免保存无法重新打开的配置。 */
-function createSerializableEntitySnapshot(entity: Entity): Entity {
+function createSerializableEntitySnapshot(entity: Entity, includePrepared: boolean): Entity {
   if (!entity.components.skybox && !entity.components.chartMarker) return entity;
   return {
     ...entity,
     components: {
       ...entity.components,
-      ...(entity.components.skybox ? { skybox: normalizeSkyboxComponent(entity.components.skybox) } : {}),
+      ...(entity.components.skybox ? { skybox: preparedSkyboxSnapshot(normalizeSkyboxComponent(entity.components.skybox), includePrepared) } : {}),
       ...(entity.components.chartMarker ? { chartMarker: normalizeChartMarker(entity.components.chartMarker) } : {}),
     },
   };
@@ -267,20 +299,7 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
   };
 }
 
-/** 天空盒存在时把持久化相机距离提升到 12 km，避免 10 km 球体被远裁剪面截断。 */
-function enforceSkyboxMinimumViewDistance(sceneSettings: SceneSettings): SceneSettings {
-  const viewDistance = sanitizeSceneViewDistance(
-    sceneSettings.camera.viewDistance,
-    SCENE_SKYBOX_VIEW_DISTANCE_MIN,
-  );
-  if (viewDistance === sceneSettings.camera.viewDistance) return sceneSettings;
-  return {
-    ...sceneSettings,
-    camera: { ...sceneSettings.camera, viewDistance },
-  };
-}
-
-/** 把旧 sceneSettings.skybox 自动迁移为可进入 Hierarchy 的球形天空盒实体。 */
+/** 旧扁平天空配置迁移为隐藏的场景唯一配置实体，不再改变相机距离。 */
 function migrateLegacySkyboxSettingsToEntity(
   entityIds: string[],
   entities: Record<string, Entity>,
@@ -293,9 +312,7 @@ function migrateLegacySkyboxSettingsToEntity(
     return {
       entityIds,
       entities,
-      sceneSettings: skyboxEntityIds.length === 1
-        ? enforceSkyboxMinimumViewDistance(nextSceneSettings)
-        : nextSceneSettings,
+      sceneSettings: nextSceneSettings,
     };
   }
 
@@ -308,7 +325,7 @@ function migrateLegacySkyboxSettingsToEntity(
   return {
     entityIds: [...entityIds, skyboxEntity.id],
     entities: { ...entities, [skyboxEntity.id]: skyboxEntity },
-    sceneSettings: enforceSkyboxMinimumViewDistance({ ...sceneSettings, skybox: null }),
+    sceneSettings: { ...sceneSettings, skybox: null },
   };
 }
 
@@ -370,12 +387,24 @@ function normalizeSceneSettings(value: unknown): SceneSettings {
   });
 }
 
+function normalizeSkyboxRuntimeFields(skybox: PlainObject): Pick<NonNullable<EntityComponents['skybox']>, 'environment' | 'sourceAvailable'> {
+  const environment = readOwnDataProperty(skybox, 'environment');
+  const sourceAvailable = readOwnDataProperty(skybox, 'sourceAvailable');
+  if (environment.kind === 'accessor' || sourceAvailable.kind === 'accessor') throwUnsupportedSceneFileError();
+  if (sourceAvailable.kind === 'data' && sourceAvailable.value !== undefined && sourceAvailable.value !== false) throwUnsupportedSceneFileError();
+  return {
+    ...(environment.kind === 'data' && environment.value !== undefined ? { environment: normalizeSkyboxEnvironmentResource(environment.value) } : {}),
+    ...(sourceAvailable.kind === 'data' && sourceAvailable.value === false ? { sourceAvailable: false as const } : {}),
+  };
+}
+
 function normalizeSceneSkyboxSettings(value: unknown): SceneSkyboxSettings | null {
   if (value === null || value === undefined) return null;
 
   const skybox = assertPlainObject(value);
+  const runtimeFields = normalizeSkyboxRuntimeFields(skybox);
   const sourceUrl = assertString(skybox.sourceUrl);
-  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) {
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX) && runtimeFields.sourceAvailable !== false) {
     throwUnsupportedSceneFileError();
   }
 
@@ -386,6 +415,7 @@ function normalizeSceneSkyboxSettings(value: unknown): SceneSkyboxSettings | nul
 
   const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
+    ...runtimeFields,
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
@@ -593,10 +623,6 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
 
   if ('skybox' in components && components.skybox !== undefined) {
     normalized.skybox = normalizeSkyboxComponent(components.skybox);
-    normalized.transform = {
-      ...normalized.transform,
-      scale: normalizeSkyboxSphereScale(normalized.transform.scale),
-    };
   }
 
   if ('locator' in components && components.locator !== undefined) {
@@ -851,13 +877,15 @@ function validateModelArrayInstanceReferences(entityIds: string[], entities: Rec
 /** 严格恢复球形天空盒实体资源，Transform 单独负责位置、旋转和缩放。 */
 function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents['skybox']> {
   const skybox = assertPlainObject(value);
+  const runtimeFields = normalizeSkyboxRuntimeFields(skybox);
   const sourceUrl = assertString(skybox.sourceUrl);
-  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) throwUnsupportedSceneFileError();
+  if (!sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX) && runtimeFields.sourceAvailable !== false) throwUnsupportedSceneFileError();
   const format = skybox.format;
   if (format !== 'hdr' && format !== 'exr') throwUnsupportedSceneFileError();
 
   const dataPlatformResourceId = normalizeOptionalDataPlatformResourceId(skybox);
   const normalized = sanitizeSceneSkybox({
+    ...runtimeFields,
     packagePath: assertString(skybox.packagePath),
     sourcePath: assertString(skybox.sourcePath),
     sourceUrl,
@@ -870,6 +898,8 @@ function normalizeSkyboxComponent(value: unknown): NonNullable<EntityComponents[
   });
   if (!normalized) throwUnsupportedSceneFileError();
   return {
+    ...(normalized.environment ? { environment: normalized.environment } : {}),
+    ...(normalized.sourceAvailable === false ? { sourceAvailable: false as const } : {}),
     packagePath: normalized.packagePath,
     sourcePath: normalized.sourcePath,
     sourceUrl: normalized.sourceUrl,
@@ -1170,6 +1200,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets.length ? { scriptAssets } : {}),
     ...(parameterScriptMetadata.length ? { parameterScriptMetadata } : {}),
+    ...modelRuntimeCapabilitiesField(modelAsset.runtimeCapabilities),
     ...(animationScriptMetadata.length ? { animationScriptMetadata } : {}),
     ...(parameterConfig ? { parameterConfig, parameterValues } : {}),
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),

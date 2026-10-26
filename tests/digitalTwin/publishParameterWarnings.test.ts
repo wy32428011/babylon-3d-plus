@@ -18,7 +18,7 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
   state.commitLatestSceneResources = (_id: string, _before: unknown, after: unknown, issues: string[]) => {
     state.scene = after; commits.push(issues); return true;
   };
-  (globalThis as any).__publishWarningsTest = { state, resources, logs };
+  (globalThis as any).__publishWarningsTest = { state, resources, logs, skyboxPreparedScenes: [] as any[] };
   (globalThis as any).window = { editorApi: { prepareLocalSceneResources: async () => resources, cancelSceneModelSync: async () => true },
     document: { createElement: () => ({ remove() {} }) }, setInterval, clearInterval };
   const stubs: Record<string, string> = {
@@ -27,6 +27,8 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
     '../assets/environmentAssets': 'export const loadEnvironmentFromAsset=async()=>null;',
     '../loading/environmentPreparationProgress': 'export const environmentPreparationStore={clearError(){},getSnapshot:()=>({sceneSessionId:"session",error:null})};',
     '../loading/scenePreparationProgress': 'export const beginSceneModelAssetRefresh=()=>{}; export const reportSceneModelSyncProgress=()=>{}; export const settleSceneModelAssetRefresh=()=>{}; export const countExpectedSceneBatchedEntities=()=>0; export const getScenePreparationSnapshot=()=>({sceneSessionId:"session",completed:true,runtime:{stable:true,forcedSettled:false}});',
+    // 本用例只验证参数 warning 路由；ENV 编译依赖真实 GPU，由独立 WebGL/Electron 用例覆盖，这里仅记录准备阶段收到的场景。
+    '../assets/skyboxPreparationService.ts': 'export const prepareSceneSkyboxEnvironments=async scene=>{globalThis.__publishWarningsTest.skyboxPreparedScenes.push(scene);return scene;};',
     '../model/sceneShadowBake': 'export const getSceneShadowBakeError=()=>null;',
     '../project/SceneSerializer': 'export const deserializeScene=s=>JSON.parse(s).scene; export const serializeScene=scene=>JSON.stringify({version:5,scene});',
     '../../runtime/babylon/sceneRenderReadiness': 'export const waitForSceneRenderReady=async()=>{};',
@@ -64,6 +66,8 @@ test('入口和额外场景参数warnings只写日志并继续准备，真实资
     assert.equal(Object.hasOwn(preparedSkybox, 'dataPlatformResourceId'), false);
     assert.equal((globalThis as any).__publishWarningsTest.renderedScene.entities.sky.components.skybox.sourcePath, 'current.hdr',
       '其他SOURCE场景必须在渲染与烘焙前替换本地天空盒');
+    const preparedScenes = (globalThis as any).__publishWarningsTest.skyboxPreparedScenes;
+    assert.equal(preparedScenes.at(-1).entities.sky.components.skybox.sourcePath, 'current.hdr', '渲染与烘焙前必须先对替换后的天空盒准备 ENV');
     assert.equal(skyboxScene.entities.sky.components.skybox.sourcePath, 'old.hdr');
     resources.issues = [{ resourceKind: 'model', resourceId: '42', message: '真实模型文件下载失败' }];
     await assert.rejects(module.synchronizePublishScene('session', () => {}, state.pushLog), /真实模型文件下载失败/);

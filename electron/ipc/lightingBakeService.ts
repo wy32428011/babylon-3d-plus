@@ -13,6 +13,9 @@ import { encodeLightingBakeTransport, type LightingBakeBinaryMesh } from '../sha
 import type { LightingBakeDevice, LightingBakeDeviceSelection } from '../shared/sceneLightingBakeDevices.ts';
 import { createLightingBakeTask } from './lightingBakeTaskHistory.ts';
 import { createLightingBakeEngineConfigurationService, validateLightingBakeEnginePath } from './lightingBakeEngineConfiguration.ts';
+import { getRequestedLightingLightmapEncoding, getRequestedLightingLightmapMipLevels, getLightingLightmapBaseEncoding,
+  getLightingLightmapTextureBytes, LIGHTING_LIGHTMAP_MIP_RECIPE, LIGHTING_LIGHTMAP_MIP_WORKING_BYTES_LIMIT } from '../shared/sceneLightingTextureCodec.ts';
+import { isLightingLightmapMipEncoding, validateLightingLightmapMipAsset } from '../shared/sceneLightingLightmapMips.ts';
 
 const SOURCE_TEXTURE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga', '.hdr', '.exr']);
 const engineDeviceCache = new Map<string, Promise<LightingBakeDevice[]>>();
@@ -164,6 +167,7 @@ async function prepareInput(options: LightingBakeServiceOptions, directory: stri
   }) }, geometry: options.binaryGeometry } : encodeLightingBakeTransport(options.input);
   // 几何单独保存，JSON 只包含版本化元数据；不再复制全量 number[] 树或整包字符串。
   const request = structuredClone(encoded.input) as unknown as LightingBakeInput & { environment: { textureFile?: string } };
+  if (getRequestedLightingLightmapMipLevels(request.settings.lightmapMipLevels)) Object.assign(request.settings, { lightmapMipWorkingBytesLimit: LIGHTING_LIGHTMAP_MIP_WORKING_BYTES_LIMIT });
   const geometry = options.binaryGeometry ?? encoded.geometry;
   for (const [index, item] of geometry.entries()) {
     assertActive(options);
@@ -237,7 +241,7 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
     let errorMessage = '', gpuFallback = false, previousProgress = 0, settled = false, terminationError: Error | null = null;
     const child = spawn(options.enginePath, ['--background', '--factory-startup', '--disable-autoexec',
       '--python-exit-code', '1', '--python', script, '--', '--input', path.join(directory, 'input.json')],
-    { cwd: directory, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' } });
+    { cwd: directory, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1' } });
     if (child.pid) options.onEngineSpawn?.(child.pid);
     let forceTimer: ReturnType<typeof setTimeout> | undefined;
     const terminate = (reason: Error) => {
@@ -296,7 +300,7 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
 
 type EngineResult = {
   version: number; signature: string; engineVersion: string;
-  atlases: Array<{ file: string; width: number; height: number; rgbmRange: number }>;
+  atlases: Array<{ file: string; width: number; height: number; rgbmRange: number; encoding?: string; levelCount?: number; textureBytes?: number; mipRecipe?: string }>;
   meshes: Array<{ key: string; entityId: string; nodeKey: string; geometryFile: string; geometryVersion?: 1 | 2; encoding?: LightingBakeAsset['encoding']; atlasIndex: number }>;
   probesFile: string; statistics: SceneLightingBakeSnapshot['statistics'];
 };
@@ -306,7 +310,10 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
   if (result.version !== 1 || result.signature !== options.input.signature || !Array.isArray(result.atlases)
     || !Array.isArray(result.meshes) || typeof result.engineVersion !== 'string' || !result.engineVersion || !result.statistics) throw new Error('烘焙结果与场景输入不匹配。');
   const sourceMeshes = matchLightingBakeSurfaceSources(options.input.meshes, result.meshes);
-  const textureBytes = result.atlases.length * options.input.settings.atlasSize ** 2 * 4;
+  const requestedEncoding = getRequestedLightingLightmapEncoding(options.input.settings.lightmapEncoding);
+  const requestedLevels = getRequestedLightingLightmapMipLevels(options.input.settings.lightmapMipLevels);
+  const bytesPerAtlas = requestedLevels ? getLightingLightmapTextureBytes(options.input.settings.atlasSize, options.input.settings.atlasSize, requestedLevels) : options.input.settings.atlasSize ** 2 * 4;
+  const textureBytes = result.atlases.length * bytesPerAtlas;
   if (textureBytes > options.input.settings.maxTextureMiB * 1048576) throw new Error('光照图集超过当前纹理预算，候选结果未提交。');
   // 正式资产与候选目录也使用短随机名称，避免烘焙完成后保存产物再次触发 Windows 长路径限制。
   const folderName = randomBytes(12).toString('hex');
@@ -314,30 +321,44 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
   await fs.mkdir(pending);
   const assets: LightingBakeAsset[] = [];
   let validatedProbeCount = 0;
-  const copyOutput = async (name: string, kind: LightingBakeAsset['kind'], id: string, rgbmRange?: number, expectedGeometryVersion?: 1 | 2, encoding?: LightingBakeAsset['encoding']) => {
-    if (encoding !== undefined && (kind !== 'geometry' || encoding !== 'json' && encoding !== 'binary-v1')) throw new Error('几何结果清单编码不正确。');
-    const expectedExtension = kind === 'lightmap' ? '.png' : kind === 'geometry' && encoding === 'binary-v1' ? '.bin' : '.json';
+  const copyOutput = async (name: string, kind: LightingBakeAsset['kind'], id: string, rgbmRange?: number, expectedGeometryVersion?: 1 | 2, encoding?: LightingBakeAsset['encoding'],
+    mip?: Pick<LightingBakeAsset, 'width' | 'height' | 'levelCount' | 'textureBytes' | 'mipRecipe'>) => {
+    if (encoding !== undefined && !(kind === 'geometry' && (encoding === 'json' || encoding === 'binary-v1')
+      || kind === 'lightmap' && (encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(encoding)))) throw new Error('烘焙结果清单编码不正确。');
+    const expectedExtension = kind === 'lightmap' ? isLightingLightmapMipEncoding(encoding) ? '.bin' : '.png' : kind === 'geometry' && encoding === 'binary-v1' ? '.bin' : '.json';
     if (path.extname(name).toLowerCase() !== expectedExtension) throw new Error('烘焙产物扩展名与清单编码不一致。');
     const source = safeLightingBakeChildPath(staging, name);
     const info = await fs.lstat(source);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('烘焙产物不是有效文件。');
     const bytes = await fs.readFile(source, { signal: options.signal });
     let geometryVersion: 1 | 2 | undefined;
-    if (kind === 'lightmap') validateLightingPng(bytes, options.input.settings.atlasSize ** 2, { width: options.input.settings.atlasSize, height: options.input.settings.atlasSize });
+    if (kind === 'lightmap') {
+      if (isLightingLightmapMipEncoding(encoding)) {
+        if (mip?.mipRecipe !== LIGHTING_LIGHTMAP_MIP_RECIPE) throw new Error('光照mip生产recipe不受支持。');
+        validateLightingLightmapMipAsset({ kind, encoding, url: name, byteLength: bytes.length, rgbmRange, ...mip }, bytes, Math.min(bytesPerAtlas, 0xffffffff));
+      } else validateLightingPng(bytes, options.input.settings.atlasSize ** 2, { width: options.input.settings.atlasSize, height: options.input.settings.atlasSize });
+    }
     else {
       if (kind === 'geometry') {
+        if (encoding !== undefined && encoding !== 'json' && encoding !== 'binary-v1') throw new Error('几何结果清单编码不正确。');
         geometryVersion = decodeLightingGeometryResource(bytes, encoding).version;
         if (expectedGeometryVersion !== undefined && expectedGeometryVersion !== geometryVersion) throw new Error('几何文件与结果清单版本不一致。');
       } else validatedProbeCount = validateLightingProbes(JSON.parse(bytes.toString('utf8'))).probes.length;
     }
     await fs.writeFile(safeLightingBakeChildPath(pending, name), bytes, { flag: 'wx', signal: options.signal });
     assets.push({ id, kind, url: options.encodeAssetUrl(path.join(destination, name)), byteLength: bytes.length,
-      sha256: createHash('sha256').update(bytes).digest('hex'), ...(geometryVersion !== undefined ? { geometryVersion } : {}), ...(encoding !== undefined ? { encoding } : {}), ...(rgbmRange !== undefined ? { rgbmRange } : {}) });
+      sha256: createHash('sha256').update(bytes).digest('hex'), ...(geometryVersion !== undefined ? { geometryVersion } : {}), ...(encoding !== undefined ? { encoding } : {}), ...(rgbmRange !== undefined ? { rgbmRange } : {}), ...(mip ?? {}) });
   };
   try {
     for (const [index, atlas] of result.atlases.entries()) {
       if (!(atlas.rgbmRange > 0) || !Number.isFinite(atlas.rgbmRange) || atlas.width !== options.input.settings.atlasSize || atlas.height !== atlas.width) throw new Error('光照贴图元数据不正确。');
-      await copyOutput(atlas.file, 'lightmap', `lightmap-${index}`, atlas.rgbmRange);
+      const mip = isLightingLightmapMipEncoding(atlas.encoding);
+      const actualEncoding = mip ? getLightingLightmapBaseEncoding(atlas.encoding) : getRequestedLightingLightmapEncoding(atlas.encoding);
+      if (actualEncoding !== requestedEncoding || actualEncoding === 'rgbm-gamma' && atlas.rgbmRange < 1) throw new Error('光照贴图结果编码与请求不匹配。');
+      if (Boolean(requestedLevels) !== mip || mip && (atlas.levelCount !== requestedLevels + 1 || atlas.textureBytes !== bytesPerAtlas || atlas.mipRecipe !== LIGHTING_LIGHTMAP_MIP_RECIPE)) throw new Error('光照mip层级、recipe或全部RGBA预算与请求不匹配。');
+      await copyOutput(atlas.file, 'lightmap', `lightmap-${index}`, atlas.rgbmRange, undefined,
+        mip ? atlas.encoding as LightingBakeAsset['encoding'] : actualEncoding === 'rgbm-gamma' ? 'rgbm-gamma' : undefined,
+        mip ? { width: atlas.width, height: atlas.height, levelCount: atlas.levelCount, textureBytes: atlas.textureBytes, mipRecipe: atlas.mipRecipe } : undefined);
     }
     const surfaces: SceneLightingBakeSnapshot['surfaces'] = [];
     const seen = new Set<string>();
@@ -393,6 +414,8 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
   try {
     tracked.onProgress({ jobId: options.input.jobId, phase: 'preparing', progress: 0, message: '正在准备材质、纹理和静态几何' });
     await fs.copyFile(fileURLToPath(new URL('../lighting-bake/cycles_bake.py', import.meta.url)), script);
+    await fs.copyFile(fileURLToPath(new URL('../lighting-bake/rgbm_gamma_codec.py', import.meta.url)), path.join(staging, 'rgbm_gamma_codec.py'));
+    if (getRequestedLightingLightmapMipLevels(options.input.settings.lightmapMipLevels)) await fs.copyFile(fileURLToPath(new URL('../lighting-bake/lightmap_mips.py', import.meta.url)), path.join(staging, 'lightmap_mips.py'));
     await prepareInput(tracked, staging); await task.flush();
     let inputBytes = 0;
     for (const name of await fs.readdir(staging)) if (name === 'input.json' || name.startsWith('geometry-input-') || name.startsWith('source-texture-')) inputBytes += (await fs.stat(path.join(staging, name))).size;

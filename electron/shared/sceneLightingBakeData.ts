@@ -1,10 +1,17 @@
 import { normalizeLightingProbeVolumes, type LightingProbeVolume } from './sceneLightingProbeVolumes.ts';
+import { normalizeLightingLightmapEncoding, normalizeLightingLightmapMipLevels, getLightingLightmapTextureBytes,
+  LIGHTING_LIGHTMAP_MIP_RECIPE, type LightingLightmapBaseEncoding, type LightingLightmapAssetEncoding, type LightingLightmapMipLevels } from './sceneLightingTextureCodec.ts';
+import { isLightingLightmapMipEncoding } from './sceneLightingLightmapMips.ts';
 
 /** 光照配置与烘焙合同共用的基础数据；不反向依赖配置、编辑器或运行时。 */
 export type SceneLightingBakeSettings = {
   enabled: boolean;
   /** 缺省使用稳定 CPU 路径；执行设备不改变物理输入签名。 */
   device?: 'cpu' | 'auto' | 'gpu';
+  /** 缺省保留旧线性 PNG；显式 gamma 需要场景光照配置 v3 与新产物。 */
+  lightmapEncoding?: LightingLightmapBaseEncoding;
+  /** 缺省仍为旧单级PNG；显式1..4为额外LOD，必须使用v3严格容器。 */
+  lightmapMipLevels?: LightingLightmapMipLevels;
   /** 启用区域为空时沿用全场包围盒，旧场景无需迁移。 */
   probeVolumes?: LightingProbeVolume[];
   quality: 'preview' | 'standard' | 'high';
@@ -25,13 +32,16 @@ export type LightingBakeAsset = {
   kind: 'geometry' | 'lightmap' | 'probes';
   /** 缺省为旧产物；显式版本必须与几何文件一致。 */
   geometryVersion?: 1 | 2;
-  /** 仅几何资源使用；旧省略继续读取 JSON。 */
-  encoding?: LightingGeometryEncoding;
+  /** 几何省略为 JSON；lightmap 省略为旧线性 RGBM PNG。 */
+  encoding?: LightingGeometryEncoding | LightingLightmapAssetEncoding;
   url: string;
   byteLength: number;
   sha256?: string;
   /** RGBM 贴图在线性空间解码；alpha 不是材质透明度。 */
   rgbmRange?: number;
+  /** 仅mip容器使用；旧资产不补这些键。textureBytes是全部RGBA级而非文件压缩长度。 */
+  width?: number; height?: number; levelCount?: number; textureBytes?: number;
+  mipRecipe?: string;
 };
 export type LightingBakeSurface = {
   key: string;
@@ -61,6 +71,8 @@ export function normalizeSceneLightingBakeSettings(value: unknown): SceneLightin
   return {
     enabled: typeof v.enabled === 'boolean' ? v.enabled : d.enabled,
     ...(['cpu', 'auto', 'gpu'].includes(String(v.device)) ? { device: v.device as 'cpu' | 'auto' | 'gpu' } : {}),
+    ...(v.lightmapEncoding === undefined ? {} : { lightmapEncoding: normalizeLightingLightmapEncoding(v.lightmapEncoding) }),
+    ...(v.lightmapMipLevels === undefined ? {} : { lightmapMipLevels: normalizeLightingLightmapMipLevels(v.lightmapMipLevels) }),
     ...(v.probeVolumes === undefined ? {} : { probeVolumes: normalizeLightingProbeVolumes(v.probeVolumes) }),
     quality: v.quality === 'preview' || v.quality === 'high' ? v.quality : 'standard',
     atlasSize: v.atlasSize === 1024 || v.atlasSize === 4096 ? v.atlasSize : 2048,
@@ -85,12 +97,22 @@ export function validateSceneLightingBakeSnapshot(value: unknown): SceneLighting
       || typeof a.url !== 'string' || !a.url || /^(?:javascript|data|blob):/i.test(a.url)
       || typeof a.byteLength !== 'number' || !Number.isSafeInteger(a.byteLength) || a.byteLength < 0) return null;
     if (a.geometryVersion !== undefined && (a.kind !== 'geometry' || (a.geometryVersion !== 1 && a.geometryVersion !== 2))) return null;
-    if (a.encoding !== undefined && (a.kind !== 'geometry' || (a.encoding !== 'json' && a.encoding !== 'binary-v1'))) return null;
+    if (a.encoding !== undefined && !(a.kind === 'geometry' && (a.encoding === 'json' || a.encoding === 'binary-v1')
+      || a.kind === 'lightmap' && (a.encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(a.encoding)))) return null;
     if (a.rgbmRange !== undefined && (typeof a.rgbmRange !== 'number' || !Number.isFinite(a.rgbmRange) || a.rgbmRange <= 0)) return null;
+    if (a.kind === 'lightmap' && a.encoding === 'rgbm-gamma' && (typeof a.rgbmRange !== 'number' || a.rgbmRange < 1)) return null;
+    if (isLightingLightmapMipEncoding(a.encoding)) {
+      if (a.kind !== 'lightmap' || a.mipRecipe !== LIGHTING_LIGHTMAP_MIP_RECIPE || typeof a.rgbmRange !== 'number' || a.rgbmRange < 1 || ![a.width, a.height, a.levelCount, a.textureBytes].every(Number.isSafeInteger)
+        || (a.width as number) < 2 || (a.height as number) < 2 || (a.width as number) > 8192 || (a.height as number) > 8192
+        || ((a.width as number) & ((a.width as number) - 1)) || ((a.height as number) & ((a.height as number) - 1))
+        || (a.levelCount as number) < 2 || (a.levelCount as number) > 5 || (a.levelCount as number) > Math.floor(Math.log2(Math.max(a.width as number, a.height as number))) + 1
+        || a.textureBytes !== getLightingLightmapTextureBytes(a.width as number, a.height as number, (a.levelCount as number) - 1)) return null;
+    }
     const asset: LightingBakeAsset = {
       id: a.id, kind: a.kind as LightingBakeAsset['kind'], url: a.url, byteLength: a.byteLength,
       ...(a.geometryVersion === 1 || a.geometryVersion === 2 ? { geometryVersion: a.geometryVersion } : {}),
-      ...(a.encoding === 'json' || a.encoding === 'binary-v1' ? { encoding: a.encoding } : {}),
+      ...(a.encoding === 'json' || a.encoding === 'binary-v1' || a.encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(a.encoding) ? { encoding: a.encoding } : {}),
+      ...(isLightingLightmapMipEncoding(a.encoding) ? { width: a.width as number, height: a.height as number, levelCount: a.levelCount as number, textureBytes: a.textureBytes as number, mipRecipe: LIGHTING_LIGHTMAP_MIP_RECIPE } : {}),
       ...(typeof a.sha256 === 'string' ? { sha256: a.sha256 } : {}),
       ...(typeof a.rgbmRange === 'number' ? { rgbmRange: a.rgbmRange } : {}),
     };

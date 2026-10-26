@@ -6,6 +6,7 @@ import path from 'node:path';
 import { app } from 'electron';
 import unzipper from 'unzipper';
 import { brotliDecompressSync, gunzipSync, gzipSync } from 'node:zlib';
+import { deploymentGlbFixture } from '../helpers/deploymentGlbFixture.mjs';
 
 const root = await mkdtemp(path.join(tmpdir(), 'zending-release-cache-package-'));
 await mkdir(path.join(root, 'user-data'));
@@ -29,6 +30,7 @@ async function run() {
     'assets/main.js.gz': gzipSync('console.log("fixture viewer");\n'.repeat(2048)),
     'assets/main.css': 'body{margin:0}\n'.repeat(2048),
     'fixtures/GI几何.json': JSON.stringify({ positions: Array(4096).fill(0.125) }),
+    'fixtures/环境模型 #1.glb': deploymentGlbFixture('ZIP-GLB'),
     'decoders/draco.wasm': Buffer.concat([Buffer.from([0, 97, 115, 109]), Buffer.alloc(65536, 1)]),
     'icons/工厂 #1.svg': '<svg xmlns="http://www.w3.org/2000/svg"/>',
     'published-cache-worker.js': 'self.addEventListener("fetch",()=>{});',
@@ -60,7 +62,22 @@ async function run() {
   assert.deepEqual(manifest.files.map((entry) => decodeURIComponent(entry.path)).sort(),
     [...entries.keys()].filter((entry) => !excluded.has(entry) && (!/\.(?:br|gz)$/.test(entry) || Object.hasOwn(templateFiles, entry))).sort());
   const sidecars = [...entries.keys()].filter(entry => /\.(?:br|gz)$/.test(entry) && !Object.hasOwn(templateFiles, entry));
-  assert.ok(sidecars.length >= 8, 'JS/CSS/JSON/WASM均提供有效传输侧车');
+  assert.ok(sidecars.length >= 10, 'JS/CSS/JSON/WASM/GLB均提供有效传输侧车');
+  const glbPath = 'fixtures/环境模型 #1.glb';
+  assert.deepEqual(entries.get(glbPath), templateFiles[glbPath]);
+  const glbEntry = manifest.files.find(entry => decodeURIComponent(entry.path) === glbPath);
+  assert.equal(glbEntry.contentType, 'model/gltf-binary');
+  for (const extension of ['br', 'gz']) assert.ok(entries.has(glbPath + '.' + extension));
+  // 用真实 Babylon glTF loader 核对几何，避免仅有 glTF magic 的运输伪夹具掩盖格式错误。
+  const { NullEngine, Scene, ImportMeshAsync, VertexBuffer } = await import('@babylonjs/core');
+  await import('@babylonjs/loaders/glTF/index.js');
+  const engine = new NullEngine(), scene = new Scene(engine);
+  try {
+    const loaded = await ImportMeshAsync(new Uint8Array(entries.get(glbPath)), scene, { pluginExtension: '.glb' });
+    const mesh = loaded.meshes.find(mesh => mesh.name === 'ZIP-GLB');
+    assert.ok(mesh); assert.equal(mesh.getTotalVertices(), 3); assert.equal(mesh.getTotalIndices(), 6144);
+    assert.deepEqual(Array.from(mesh.getVerticesData(VertexBuffer.PositionKind)), [0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  } finally { scene.dispose(); engine.dispose(); }
   for (const sidecar of sidecars) { const bytes = entries.get(sidecar), original = entries.get(sidecar.replace(/\.(?:br|gz)$/, '')); assert.ok(original, sidecar); assert.ok(bytes.length < original.length); assert.deepEqual(sidecar.endsWith('.br') ? brotliDecompressSync(bytes) : gunzipSync(bytes), original); }
   for (const control of ['runtime-config.json', 'release-cache-manifest.json', 'published-cache-worker.js']) assert.ok(!sidecars.some(file => file === control + '.br' || file === control + '.gz'));
   let totalBytes = 0;
@@ -108,7 +125,7 @@ async function run() {
   }
   console.log(JSON.stringify({ status: 'PASS', files: first.fileCount, archiveEntries:entries.archiveEntryCount, cachedFiles: manifest.files.length, sidecars:sidecars.length, zip:{withSidecars:first.fileSize,original:second.fileSize,tightenedBudget:packageBudget,fallback:budgeted.fileSize}, precompression:first.precompression,
     checks: ['zip-complete-file-hashes', 'runtime-revision-consistent', 'control-files-excluded',
-      'legacy-asset-manifest', 'new-publication-revision', 'precompression-byte-roundtrip', 'zip-budget-original-fallback', 'existing-sidecar-preserved', 'cancel-cleanup', 'mid-compression-cancel-cleanup', 'zip-fallback-cancel-cleanup'] }));
+      'legacy-asset-manifest', 'new-publication-revision', 'precompression-byte-roundtrip', 'glb-mime-and-babylon-geometry', 'zip-budget-original-fallback', 'existing-sidecar-preserved', 'cancel-cleanup', 'mid-compression-cancel-cleanup', 'zip-fallback-cancel-cleanup'] }));
 }
 
 async function finish(code) {

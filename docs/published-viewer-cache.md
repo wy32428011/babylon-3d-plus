@@ -6,6 +6,10 @@
 
 首帧完成时，控制台的 `[Viewer loading] 场景首帧诊断` 包含运行时 `loading` 快照：`stages` 分别记录模型队列、容器整体加载、同步容器克隆、脚本整体初始化、入场准备和首帧验证；`resources.stages` 进一步记录发布缓存读取、网络请求/响应体、SHA-256 校验和缓存写入。`slowestAssets` 最多保留 12 项文件名与关联实体，不保留资源 URL 或本地路径。并行阶段的累计时间不能相加作为总加载时间，脚本与容器整体等待也不能直接当作纯 CPU 解码时间。
 
+`stages.scriptConstructor` 与 `stages.scriptOnStart` 进一步区分脚本构造和 onStart 的同步调用耗时、尝试次数及失败数；onStart 包括一次可选方法分派及其 getter/错误处理，不等待脚本返回的 Promise。参数 setter、读取、编译与调度等待仍包含在原整体初始化指标中，不能将嵌套指标相加。Editor 的“性能监控 → 复制诊断”与 Viewer 首帧诊断均可读取这些字段。
+
+`loading.scriptInitialization.topResources` 按完整资源引用在内存汇总，输出累计同步耗时最高的 20 个资源，包含各阶段 count/failedCount/totalMs/maxMs；同名不同来源不会合并，输出仅保留文件名与不含路径的运行期 resourceId。最多追踪 512 个资源，超过后 `droppedTimingRecords` 计数并将 `rankingComplete` 设为 false，不能把不完整排名当成全部资源的准确 Top20。统计范围为 runtime 生命周期累计，并非每次打开的独立 trace，也不代表真实中台端到端打开收益。
+
 入场准备采用 8 ms 软批次预算，让出主线程后继续；单个材质克隆不可抢占。新材质的同步复制临时抑制重复的全场景标脏，恢复原状态后才挂载到网格，真实渲染验证仍保留。该路径依赖 Babylon 9.12 的内部开关恢复方法，升级 Babylon 时须运行 `tests/runtime/materialCloneDirtyGuard.test.ts` 及材质、入场、首帧回归。已部署 Viewer 需要重新发布数字孪生才能获得这些改进。
 
 数字孪生 DIST 包按发布版本建立完整静态缓存。中台大屏“跟随当前发布”在每次打开/刷新时查询在线状态，选择本次响应的 release 地址；同版本刷新、关闭后重开、仅重新发布大屏布局均复用缓存。数字孪生重新发布产生新的 release 地址与 `cacheRevision`，首次访问新版本建立新缓存。已经打开的页面继续使用原版本。
@@ -48,7 +52,7 @@
 
 Draco、Meshopt 的 CPU 几何数组和 KTX2 mipmap 转码数据继续复用原有缓存；键包含发布标识、部署地址、引擎/算法版本、压缩字节 SHA-256 和参数，KTX2 还包含 GPU 能力。HDR/EXR 沿用天空盒独立缓存。解码结果是可回收加速数据，不承诺永久保留。
 
-普通图片解码、glTF 场景解析、脚本执行、GPU 上传、着色器准备和天空盒预过滤仍会发生。刷新需要重建 Babylon/WebGL 实例，本功能承诺同版复用静态文件，不承诺完全没有初始化耗时或实时网络请求。
+普通图片解码、glTF 场景解析、脚本执行、GPU 上传、着色器准备和天空 ENV 的 GPU 上传仍会发生（天空盒不再有 HDR/EXR 解码与预过滤）。刷新需要重建 Babylon/WebGL 实例，本功能承诺同版复用静态文件，不承诺完全没有初始化耗时或实时网络请求。
 
 没有完整缓存清单的发布包继续使用原有缓存路径。没有 `cacheRevision` 的旧配置在资源清单拥有完整 SHA-256 与大小时使用清单指纹缓存资产；场景与清单继续联网，非法旧清单降级正常加载。
 
@@ -56,7 +60,9 @@ IndexedDB 保留 10 秒打开超时、30 秒无请求进展超时、只读数据
 
 ## DIST 预压缩与静态服务
 
-数字孪生 DIST 打包在原始文件和 `release-cache-manifest.json` 完整写入后，为清单中的 JS/MJS、CSS、JSON（包含场景与 GI 几何）及 WASM 生成可选的 `.br`、`.gz` 传输侧车。原始文件逐字保留；原清单的 SHA-256、大小、`totalBytes`、存储归属及本次 `cacheRevision` 不受侧车影响，侧车本身不加入缓存清单。浏览器按原 URL 请求，HTTP 解压后的原始字节继续由现有缓存校验；无需更换资源 URL 或缓存键。
+数字孪生 DIST 打包在原始文件和 `release-cache-manifest.json` 完整写入后，为清单中的 JS/MJS、CSS、JSON（包含场景与 GI 几何）、WASM、BIN 及 GLB 生成可选的 `.br`、`.gz` 传输侧车。原始文件逐字保留；原清单的 SHA-256、大小、`totalBytes`、存储归属及本次 `cacheRevision` 不受侧车影响，侧车本身不加入缓存清单。浏览器按原 URL 请求，HTTP 解压后的原始字节继续由现有缓存校验；无需更换资源 URL 或缓存键。
+
+GLB 只保留体积小于原文件 90% 的表示（节省必须超过 10%），避免已压缩的 Draco/KTX2 载荷只带来少量收益却额外占用 ZIP/解压预算。GLB 的 URL 与 `model/gltf-binary` MIME 不变，不修改模型几何、精度、节点或层级；未生成侧车时沿用原文件。此项仍依赖静态服务的编码协商，不能将本地压缩字节收益直接解释为线上打开耗时下降。
 
 控制入口 `runtime-config.json`、`release-cache-manifest.json` 和 `published-cache-worker.js` 不生成侧车。比原文件大的压缩结果、已存在同名路径以及最终侧车名称超过文件系统组件长度的表示均跳过，既有文件不覆盖；预压缩失败或取消会排空所有在途流并清理本次产物，打包不会输出半成品。
 
@@ -104,3 +110,5 @@ node scripts/smoke-published-cache-storage.mjs
 响应缓存专项另外覆盖实际打包 helper 生成的 Brotli/gzip 侧车、解压后 SHA/大小、原始资源与 JSON 解码缓存冷热命中、传输字节，以及 Range、Worker 冷启动、存活 helper 重建会话、配额故障与跨会话取消。存储专项覆盖页面租约、旧版清理与大于 512 MiB 的合成文件分块保存。这些结果证明本地实现，不代表实际业务场景、线上反向代理、HTTPS 证书或已安装编辑器已经升级。
 
 B7 的原精度 `.bin` 几何也生成可选 `.br`/`.gz`；服务器仍以原 `.bin` URL 和 `application/octet-stream` 返回，HTTP 解压后的字节必须匹配原清单。侧车不进入 `release-cache-manifest.json`，原文件仍是无预压缩支持时的回退。
+
+Viewer 的 `viewer` 配置可显式设置 `opaqueCanvas: true`（不透明上下文）及 `adaptiveResolution: true`（相机运动时临时降低分辨率，静止500ms后恢复基础等级）。两项缺省均关闭；宿主DPR通过既有显示桥接协调，不覆盖临时运动等级。启用自适应分辨率会改变运动中的像素密度，性能对照须同时记录实际buffer与hardwareScalingLevel。配置仍执行严格字段/布尔值校验。

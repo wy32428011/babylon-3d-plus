@@ -17,6 +17,7 @@ const EDITOR_HELPER_FLAGS = [
   'editorGroundGrid',
   'editorOverlay',
   'editorSkyboxSphere',
+  'runtimeSkybox',
   'editorShadowCatcher',
   'editorAutoPatrolMarker',
   'editorManualRoamSpawn',

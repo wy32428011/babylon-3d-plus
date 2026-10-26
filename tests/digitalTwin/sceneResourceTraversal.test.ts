@@ -64,7 +64,7 @@ test('严格发布收集全部资源位置，保持先报警后生成器的校�
   assert.equal(refs.environments[0].environment, scene.sceneSettings.environment);
   assert.equal(refs.environments[0].variants[1], scene.sceneSettings.environment.variants[1]);
   assert.equal(refs.clickEventBindings[0].deviceType, scene.entities.first.components.clickEventBinding.deviceSlots[0].deviceType);
-  assert.deepEqual(refs.entityResources.map(({ value, kind }) => [value.sourcePath, kind]), [['entity-sky', 'skybox'], ['cad', 'other'], ['image', 'other']]);
+  assert.deepEqual(refs.entityResources.map(({ value, kind }) => [value.sourcePath, kind]), [['entity-sky', 'skybox'], ['cad', 'other'], ['image', 'other'], ['settings-sky', 'skybox']]);
 });
 
 test('宽容恢复保留先生成器后报警的顺序，跳过无效旧节点且保持原对象引用', () => {

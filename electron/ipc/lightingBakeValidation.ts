@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { normalizeLightingLightmapEncoding, normalizeLightingLightmapMipLevels } from '../shared/sceneLightingTextureCodec.ts';
 import { normalizeLightingProbeVolumes } from '../shared/sceneLightingProbeVolumes.ts';
 import { decodeLightingBakeTransport } from '../shared/sceneLightingBakeBinary.ts';
 import type { LightingBakeInput, LightingBakeMeshInput } from '../shared/sceneLightingBakeContract.js';
@@ -39,6 +40,8 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
   }
   text(input.signature, '场景签名'); text(input.sceneName, '场景名称');
   const settings = object(input.settings, '烘焙设置');
+  normalizeLightingLightmapEncoding(settings.lightmapEncoding);
+  normalizeLightingLightmapMipLevels(settings.lightmapMipLevels);
   const probeVolumes = normalizeLightingProbeVolumes(settings.probeVolumes);
   if (settings.device !== undefined && !['cpu','auto','gpu'].includes(settings.device as string)) throw new Error('烘焙设备选择无效。');
   finite(settings.atlasSize, '图集大小', 64, 8192);

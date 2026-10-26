@@ -1,5 +1,8 @@
 export type { LightingBakeInput, LightingBakeProgress, LightingBakeEngineStatus, SceneLightingBakeSnapshot } from './shared/sceneLightingBakeContract.js';
 import type { OpeningPackageBinding } from './shared/openingPackage.js';
+import type { SourceModelDensity } from './shared/modelDensityTypes.js';
+import type { ProjectOpenTraceContext, ProjectOpenTraceSnapshot, ProjectOpenIpcOperation, ProjectOpenSpanOutcome } from './shared/projectOpenTrace.js';
+export type { ProjectOpenTraceContext, ProjectOpenTraceSnapshot } from './shared/projectOpenTrace.js';
 
 export type OpeningPackageListResult = { projectRoot: string | null; packages: OpeningPackageBinding[]; warnings: string[] };
 export type OpeningPackageImportResult = OpeningPackageListResult & { canceled: boolean; package: OpeningPackageBinding | null };
@@ -129,7 +132,12 @@ export type DataPlatformProjectEntry = {
 
 export type OpenDataPlatformProjectRequest = {
   projectId: string;
+  trace?: ProjectOpenTraceContext;
 };
+export type GetProjectOpenTraceRequest = { openId: string };
+/** 每次handler独立收/返边界，后续getter采样时刻不能代替此包络。 */
+export type ProjectOpenIpcTiming = { openId: string; operation: ProjectOpenIpcOperation; receivedMs: number | null;
+  returnedMs: number | null; outcome: ProjectOpenSpanOutcome };
 
 export type DataPlatformBindingSummary = {
   baseUrl: string;
@@ -154,6 +162,8 @@ export type DataPlatformProjectOpenResult = {
   envModelSyncStarted: boolean;
   skyboxSyncStarted: boolean;
   binding: DataPlatformBindingSummary;
+  trace?: ProjectOpenTraceSnapshot;
+  traceIpc?: ProjectOpenIpcTiming;
 };
 
 export type DataPlatformDeepLink = {
@@ -289,6 +299,7 @@ export type DataPlatformModelSyncProgress = {
 };
 
 export type LocalSceneResourceSyncRequest = {
+  trace?: ProjectOpenTraceContext;
   mode?: 'data-platform-latest' | 'scene-latest' | 'local-latest' | 'local-recovery';
   /** 同步调用的取消标识，只能取消同一请求。 */
   requestId?: string;
@@ -301,6 +312,8 @@ export type LocalSceneResourceSyncRequest = {
 };
 
 export type LocalSceneResourceSyncResult = {
+  trace?: ProjectOpenTraceSnapshot;
+  traceIpc?: ProjectOpenIpcTiming;
   libraryErrors?: string[];
   /** 可继续应用新版模型的参数或绑定提示，不参与资源失败门控。 */
   warnings?: string[];
@@ -450,6 +463,7 @@ export type AssetEntry = {
   metadataPath?: string;
   scriptPaths?: string[];
   scriptAssets?: ModelScriptAsset[];
+  runtimeCapabilities?: import('./shared/modelRuntimeCapabilities.js').ModelRuntimeCapabilities;
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
   defaultAssetCode?: string;
@@ -457,6 +471,7 @@ export type AssetEntry = {
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
   fileSizeBytes?: number;
+  sourceModelDensity?: SourceModelDensity;
   parameterConfig?: unknown;
   dataDrivenConfig?: unknown;
   builtInSlotBindingConfig?: unknown;
@@ -479,6 +494,7 @@ export type ProjectModelAssetEntry = AssetEntry & {
 
 /** 项目天空盒资源独立于模型资产索引，直接扫描 Assets/Skyboxes 得到。 */
 export type ProjectSkyboxAssetEntry = {
+  environment?: import('./shared/sceneSkyboxContract.js').SkyboxEnvironmentResource;
   id: string;
   name: string;
   displayName: string;

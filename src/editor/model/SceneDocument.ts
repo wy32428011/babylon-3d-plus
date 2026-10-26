@@ -1,3 +1,5 @@
+import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
+import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource, type SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from './sceneModelEntrance';
 import { normalizeSceneOpeningConfig, type SceneOpeningConfig } from './sceneOpeningAnimation';
 import { DEFAULT_SPOT_ANGLE, DEFAULT_SPOT_EXPONENT, DEFAULT_AREA_LIGHT_SIZE } from './lightSettings';
@@ -89,16 +91,6 @@ export const SCENE_SKYBOX_INTENSITY_MAX = 5;
 export const SCENE_SKYBOX_INTENSITY_DEFAULT = 1;
 export const SCENE_SKYBOX_RESOLUTIONS = [256, 512, 1024] as const;
 export const SCENE_SKYBOX_RESOLUTION_DEFAULT = 512;
-export const SCENE_SKYBOX_VIEW_DISTANCE_MIN = 12000;
-export const SKYBOX_FOCUS_VIEW_DISTANCE_METERS = SCENE_VIEW_DISTANCE_MAX;
-export const SKYBOX_SPHERE_DIAMETER_METERS = 10000;
-export const SKYBOX_SPHERE_SEGMENTS = 48;
-/** 保守取一个经纬网格角步长，确保相机位于 Babylon 天空盒所有三角面内侧。 */
-export const SKYBOX_SPHERE_INNER_RADIUS_RATIO = Math.cos(
-  Math.PI / (SKYBOX_SPHERE_SEGMENTS + 2),
-);
-export const SKYBOX_SPHERE_SCALE_MIN = 0.1;
-export const SKYBOX_SPHERE_SCALE_MAX = 1;
 export const SCENE_ENVIRONMENT_OPACITY_MIN = 0;
 export const SCENE_ENVIRONMENT_OPACITY_MAX = 1;
 export const SCENE_ENVIRONMENT_OPACITY_DEFAULT = 1;
@@ -189,6 +181,8 @@ export type SceneSkyboxFormat = SkyboxFormat;
 export type SceneSkyboxResolution = SkyboxResolution;
 
 export type SceneSkyboxSettings = {
+  environment?: SkyboxEnvironmentResource;
+  sourceAvailable?: false;
   packagePath: string;
   sourcePath: string;
   sourceUrl: string;
@@ -648,18 +642,22 @@ export function readOwnDataProperty(value: object, propertyKey: PropertyKey): Ow
 export function sanitizeSceneSkybox(
   skybox: SceneSkyboxSettings | null | undefined,
 ): SceneSkyboxSettings | null {
-  if (!skybox) return null;
+  if (!skybox || typeof skybox.packagePath !== 'string' || typeof skybox.sourcePath !== 'string' || typeof skybox.sourceUrl !== 'string') return null;
 
   const packagePath = skybox.packagePath.trim();
   const sourcePath = skybox.sourcePath.trim();
   const sourceUrl = skybox.sourceUrl.trim();
   const format = skybox.format;
-  if (!packagePath || !sourcePath || !sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)) return null;
-  if (
-    (format !== 'hdr' && format !== 'exr')
-    || readSkyboxPathFormat(sourcePath) !== format
-    || readSkyboxPathFormat(sourceUrl) !== format
-  ) return null;
+  const environmentField = readOwnDataProperty(skybox, 'environment');
+  if (environmentField.kind === 'accessor') return null;
+  let environment = environmentField.kind === 'data' && environmentField.value !== undefined
+    ? normalizeSkyboxEnvironmentResource(environmentField.value) : undefined;
+  const runtimeOnly = skybox.sourceAvailable === false;
+  if (format !== 'hdr' && format !== 'exr') return null;
+  if (runtimeOnly) {
+    if (packagePath || sourcePath || sourceUrl || !environment) return null;
+  } else if (!packagePath || !sourcePath || !sourceUrl.startsWith(AUTHORIZED_LOCAL_ASSET_URL_PREFIX)
+    || readSkyboxPathFormat(sourcePath) !== format || readSkyboxPathFormat(sourceUrl) !== format) return null;
 
   const assetRevision = skybox.assetRevision?.trim();
   const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
@@ -670,8 +668,14 @@ export function sanitizeSceneSkybox(
   const resolution = SCENE_SKYBOX_RESOLUTIONS.includes(skybox.resolution)
     ? skybox.resolution
     : SCENE_SKYBOX_RESOLUTION_DEFAULT;
+  if (environment && !skyboxEnvironmentMatchesSource({ resolution, assetRevision }, environment)) {
+    if (runtimeOnly) return null;
+    environment = undefined;
+  }
 
   return {
+    ...(environment ? { environment } : {}),
+    ...(runtimeOnly ? { sourceAvailable: false as const } : {}),
     packagePath,
     sourcePath,
     sourceUrl,
@@ -694,53 +698,13 @@ export function sanitizeSceneSkybox(
   };
 }
 
-/** 将任意旧三轴缩放迁移为安全等比倍率；取最大绝对值避免缩小既有覆盖范围。 */
-export function getSkyboxSphereScaleMultiplier(scale: Vector3Data): number {
-  const finiteAbsoluteValues = [scale.x, scale.y, scale.z]
-    .filter((value) => Number.isFinite(value))
-    .map((value) => Math.abs(value));
-  const maximum = finiteAbsoluteValues.length > 0 ? Math.max(...finiteAbsoluteValues) : 1;
-  return clampFiniteNumber(maximum, SKYBOX_SPHERE_SCALE_MIN, SKYBOX_SPHERE_SCALE_MAX, 1);
-}
-
-/** 把天空盒缩放统一为 X/Y/Z 相同的安全倍率。 */
-export function normalizeSkyboxSphereScale(scale: Vector3Data): Vector3Data {
-  const multiplier = getSkyboxSphereScaleMultiplier(scale);
-  return vector3(multiplier, multiplier, multiplier);
-}
-
-/** 根据当前等比缩放返回天空盒球体的实际直径。 */
-export function getSkyboxSphereDiameterMeters(scale: Vector3Data): number {
-  return SKYBOX_SPHERE_DIAMETER_METERS * getSkyboxSphereScaleMultiplier(scale);
-}
-
-/** 判断指定世界点是否位于球形天空盒内部，供 Scene 背景拾取避让使用。 */
-export function isPointInsideSkyboxSphere(
-  transform: Pick<Entity['components']['transform'], 'position' | 'scale'>,
-  point: Vector3Data,
-): boolean {
-  const values = [
-    transform.position.x,
-    transform.position.y,
-    transform.position.z,
-    point.x,
-    point.y,
-    point.z,
-  ];
-  if (values.some((value) => !Number.isFinite(value))) return false;
-
-  const radius = getSkyboxSphereDiameterMeters(transform.scale) / 2;
-  const deltaX = point.x - transform.position.x;
-  const deltaY = point.y - transform.position.y;
-  const deltaZ = point.z - transform.position.z;
-  return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ < radius * radius;
-}
-
-/** 从场景级兼容设置提取球形天空盒实体组件。 */
+/** 从场景级兼容设置提取唯一天空配置，原始资源与运行产物分别保留。 */
 export function createSkyboxComponent(skybox: SceneSkyboxSettings): SkyboxComponent {
   const normalized = sanitizeSceneSkybox(skybox);
   if (!normalized) throw new Error('天空盒资源配置无效。');
   return {
+    ...(normalized.environment ? { environment: normalized.environment } : {}),
+    ...(normalized.sourceAvailable === false ? { sourceAvailable: false as const } : {}),
     packagePath: normalized.packagePath,
     sourcePath: normalized.sourcePath,
     sourceUrl: normalized.sourceUrl,
@@ -760,7 +724,7 @@ function normalizeSkyboxRotationRadians(rotationY: number): number {
   return Number(wrapped.toFixed(6));
 }
 
-/** 读取场景中第一个球形天空盒实体；正常编辑流程只会维护一个。 */
+/** 读取场景中第一个天空背景实体；正常编辑流程只会维护一个。 */
 export function getSceneSkyboxEntity(
   scene: Pick<SceneDocument, 'entityIds' | 'entities'>,
 ): Entity | null {
@@ -771,12 +735,14 @@ export function getSceneSkyboxEntity(
   return null;
 }
 
-/** 从单个球形天空盒实体恢复兼容设置，供资源重关联、Inspector 与运行时共享。 */
+/** 从单个天空背景实体恢复兼容设置，供资源重关联、Inspector 与运行时共享。 */
 export function createSceneSkyboxSettingsFromEntity(entity: Entity): SceneSkyboxSettings | null {
   const skybox = entity.components.skybox;
   if (!skybox) return null;
   const resourceIdField = readOwnDataProperty(skybox, 'dataPlatformResourceId');
   return sanitizeSceneSkybox({
+    ...(skybox.environment ? { environment: skybox.environment } : {}),
+    ...(skybox.sourceAvailable === false ? { sourceAvailable: false as const } : {}),
     packagePath: skybox.packagePath,
     sourcePath: skybox.sourcePath,
     sourceUrl: skybox.sourceUrl,
@@ -1188,7 +1154,7 @@ export function createMeshEntity(meshKind: MeshKind, position: Vector3Data = vec
   };
 }
 
-/** 创建可选择、可移动和可缩放的球形天空盒实体。 */
+/** 创建可选择、可移动和可缩放的天空背景实体。 */
 export function createSkyboxEntity(
   skybox: SceneSkyboxSettings,
   position: Vector3Data = vector3(0, 0, 0),
@@ -1468,6 +1434,7 @@ export function createModelEntity(
   dataDrivenConfig?: unknown,
   builtInSlotBindingConfig?: unknown,
   layerChangePlatformBindingConfig?: unknown,
+  runtimeCapabilities?: unknown,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
@@ -1501,6 +1468,7 @@ export function createModelEntity(
         unitScaleToMeters: unitInfo.unitScaleToMeters,
         ...(scriptAssets?.length ? { scriptAssets } : {}),
         ...(parameterScriptMetadata?.length ? { parameterScriptMetadata } : {}),
+        ...modelRuntimeCapabilitiesField(runtimeCapabilities),
         ...(animationScriptMetadata?.length ? { animationScriptMetadata } : {}),
         ...(parameterConfig
           ? {

@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import { type BabylonViewport } from '../../../runtime/babylon/createEngine';
 import { type SceneRuntime } from '../../../runtime/babylon/SceneRuntime';
 import { type SceneFocusPerformanceMetrics } from '../../../runtime/babylon/ScenePerformanceMonitor';
-import { SKYBOX_FOCUS_VIEW_DISTANCE_METERS, SCENE_VIEW_DISTANCE_MAX, type SceneDocument } from '../../model/SceneDocument';
+import { SCENE_VIEW_DISTANCE_MAX, type SceneDocument } from '../../model/SceneDocument';
 import { type ManualRoamRuntime } from '../../../runtime/roam/ManualRoamRuntime';
 import type { RefObject } from 'react';
 type EditorState = ReturnType<typeof useEditorStore.getState>;
@@ -35,25 +35,18 @@ export function useSceneFocusTransition({
     if (bounds) {
       manualRoamRef.current?.setEnabled(false);
       const currentScene = sceneDocumentRef.current;
-      const containsSkybox = sceneFocusRequest.entityIds.some((entityId) => (
-        Boolean(currentScene?.entities[entityId]?.components.skybox)
-      ));
       const containsCad = sceneFocusRequest.entityIds.some(entityId => Boolean(currentScene?.entities[entityId]?.components.cadReference));
       // CAD 参考层按完整实例范围取景，不能套用普通模型 3m 聚焦上限。
       viewport.setViewDistance(
-        containsSkybox
-          ? SKYBOX_FOCUS_VIEW_DISTANCE_METERS
-          : containsCad
-            ? Math.min(SCENE_VIEW_DISTANCE_MAX, Math.max(currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX, Math.ceil(bounds.radiusMeters * 4)))
-            : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
+        containsCad
+          ? Math.min(SCENE_VIEW_DISTANCE_MAX, Math.max(currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX, Math.ceil(bounds.radiusMeters * 4)))
+          : currentScene?.sceneSettings.camera.viewDistance ?? SCENE_VIEW_DISTANCE_MAX,
       );
       viewport.focusOnBounds(
         bounds,
-        containsSkybox
-          ? { animate: false, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-          : containsCad
-            ? { ...sceneFocusRequest.transition, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
-            : sceneFocusRequest.transition,
+        containsCad
+          ? { ...sceneFocusRequest.transition, maxRadiusMeters: Number.POSITIVE_INFINITY, useModelFocusAngle: false }
+          : sceneFocusRequest.transition,
       );
       sceneFocusPerformanceRef.current = {
         ...bounds,

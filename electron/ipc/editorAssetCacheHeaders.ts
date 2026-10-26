@@ -21,6 +21,7 @@ const CACHEABLE_EDITOR_ASSET_EXTENSIONS = new Set([
   '.ktx2',
   '.hdr',
   '.exr',
+  '.env',
 ]);
 
 export type EditorAssetProtocolResponse = {

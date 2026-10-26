@@ -1,3 +1,4 @@
+import type { SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { EffectConfiguration } from './effectConfiguration';
 import type { CompositionResourceReference } from '../../../electron/shared/compositionTypes';
 import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTwinEffect';
@@ -39,8 +40,11 @@ export type DataPlatformScreenComponent = {
 export type SkyboxFormat = 'hdr' | 'exr';
 export type SkyboxResolution = 256 | 512 | 1024;
 
-/** 球形天空盒实体保存 HDR/EXR 资源及环境光参数，位置、旋转和尺寸统一使用实体 Transform。 */
+/** 天空背景配置：保留 HDR/EXR 原图与旧位姿数据，运行时只使用独立 ENV 和水平旋转。 */
 export type SkyboxComponent = {
+  environment?: SkyboxEnvironmentResource;
+  /** DIST 仅保留源身份；为 false 时三个源地址为空，不可用于重新烘焙。 */
+  sourceAvailable?: false;
   packagePath: string;
   sourcePath: string;
   sourceUrl: string;
@@ -140,6 +144,8 @@ export type ModelAssetTemplate = {
   sourceUrl: string;
   sourceSnapshot?: ModelSourceSnapshot;
   assetRevision?: string;
+  /** 仅实际模型源声明且配置校验通过时允许只读共享，旧包继续完整隔离。 */
+  runtimeCapabilities?: import('../../../electron/shared/modelRuntimeCapabilities.ts').ModelRuntimeCapabilities;
   lengthUnit: ModelSourceLengthUnit;
   unitScaleToMeters: number;
   scriptAssets?: ModelScriptAsset[];

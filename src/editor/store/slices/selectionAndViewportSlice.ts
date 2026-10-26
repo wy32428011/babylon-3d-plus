@@ -6,7 +6,7 @@ import { createId } from '../../../shared/ids';
 import { resolveLightTransformTool } from '../../model/lightEditor';
 import { STANDARD_CAMERA_VIEW_LABELS } from '../../model/cameraOrientation';
 import { isHierarchyGroupTransformSelection, resolveHierarchyGroupTransformSelection } from '../../model/entityHierarchy';
-import { getSceneSkyboxSettings, sanitizeSceneSensitivityValue, sanitizeSceneViewDistance, SCENE_SKYBOX_VIEW_DISTANCE_MIN } from '../../model/SceneDocument';
+import { sanitizeSceneSensitivityValue, sanitizeSceneViewDistance } from '../../model/SceneDocument';
 import { containsManualRoamSpawnEntity } from '../../model/manualRoamSpawn';
 import { DEFAULT_SNAP_SETTINGS, getSelectedEntity, areSelectedModelMeasurementsEqual, areSelectedGroupSpatialInfosEqual, resolveSelectionTransformMode, sanitizeHierarchySelection, resolveSceneFocusEntityIds, getActiveHierarchySelectionIds } from './selectionOperations';
 import { isRuntimePreviewState, guardRuntimePreviewMutation, prependLog } from './editorMutationGuard';
@@ -208,10 +208,7 @@ export const createSelectionAndViewportSlice: EditorSlice<
   setCameraViewDistance: (viewDistance) => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改相机距离');
-      const minimum = getSceneSkyboxSettings(state.scene)
-        ? SCENE_SKYBOX_VIEW_DISTANCE_MIN
-        : undefined;
-      const nextViewDistance = sanitizeSceneViewDistance(viewDistance, minimum);
+      const nextViewDistance = sanitizeSceneViewDistance(viewDistance);
       if (state.scene.sceneSettings.camera.viewDistance === nextViewDistance) return state;
 
       return {

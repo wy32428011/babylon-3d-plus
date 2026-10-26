@@ -12,7 +12,8 @@ const entryAudit = auditEntries(scripts, JSON.parse(read('scripts/test-entry-man
 const classification = JSON.parse(read('scripts/test-entry-classification.json'));
 const classifications = new Map(classification.entries.map(entry => [entry.file, entry]));
 const walk = dir => readdirSync(path.join(root, dir), { withFileTypes: true })
-  .flatMap(entry => entry.isDirectory() ? walk(`${dir}/${entry.name}`) : [`${dir}/${entry.name}`]);
+  // Python解释器缓存不是测试来源，不能因执行顺序使清单新增二进制候选。
+  .flatMap(entry => entry.isDirectory() ? entry.name === '__pycache__' ? [] : walk(`${dir}/${entry.name}`) : [`${dir}/${entry.name}`]);
 const files = [...walk('tests'), ...walk('scripts')].sort();
 const sources = new Map(files.filter(file => /\.[cm]?[jt]sx?$/.test(file)).map(file => [file, read(file)]));
 const candidate = file => file !== 'scripts/generate-test-inventory.mjs' &&

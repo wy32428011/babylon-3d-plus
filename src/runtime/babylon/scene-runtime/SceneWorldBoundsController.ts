@@ -243,8 +243,7 @@ export class SceneWorldBoundsController {
     const primitiveMesh = this.dependencies.presentation.meshes.get(entityId);
     if (primitiveMesh) return getMeshWorldBounds(primitiveMesh);
 
-    const skyboxMesh = this.dependencies.environment.skyboxRuntime.getMesh(entityId);
-    if (skyboxMesh) return getMeshWorldBounds(skyboxMesh);
+    if (this.dependencies.environment.skyboxRuntime.hasEntity(entityId)) return null;
 
     const locator = this.dependencies.locators.locators.get(entityId);
     if (locator) {

@@ -92,7 +92,6 @@ export class SceneTransformPreviewController {
 
     return (
       this.dependencies.presentation.meshes.get(entityId) ??
-      this.dependencies.environment.skyboxRuntime.getMesh(entityId) ??
       this.dependencies.locators.locators.get(entityId)?.root ??
       this.dependencies.cad.cadReferences.get(entityId)?.root ??
       this.dependencies.assets.models.get(entityId)?.root ??
@@ -410,7 +409,6 @@ export class SceneTransformPreviewController {
 
     const node = (
       this.dependencies.presentation.meshes.get(entityId)
-      ?? this.dependencies.environment.skyboxRuntime.getMesh(entityId)
       ?? this.dependencies.locators.locators.get(entityId)?.root
       ?? this.dependencies.cad.cadReferences.get(entityId)?.root
       ?? this.dependencies.assets.models.get(entityId)?.root
@@ -464,7 +462,6 @@ export class SceneTransformPreviewController {
 
     const node = (
       this.dependencies.presentation.meshes.get(entityId)
-      ?? this.dependencies.environment.skyboxRuntime.getMesh(entityId)
       ?? this.dependencies.locators.locators.get(entityId)?.root
       ?? this.dependencies.cad.cadReferences.get(entityId)?.root
       ?? this.dependencies.assets.models.get(entityId)?.root

@@ -2,7 +2,7 @@ import { DEFAULT_EDITOR_GRID_SETTINGS, EDITOR_GRID_CELL_SIZES, type EditorGridCe
 import type { CadReferenceComponent, LightComponent, LocatorComponent, LocatorFetchDriveConfig, MeshRendererComponent, ModelAssetComponent, TransformComponent } from '../../model/components';
 import type { Entity } from '../../model/Entity';
 import { ENTITY_NAME_MAX_LENGTH } from '../../model/modelArray';
-import { MODEL_ASSET_CODE_MAX_LENGTH, normalizeSkyboxSphereScale, type SceneEnvironmentSettings, type SceneDocument } from '../../model/SceneDocument';
+import { MODEL_ASSET_CODE_MAX_LENGTH, type SceneEnvironmentSettings, type SceneDocument } from '../../model/SceneDocument';
 import type { Vector3Data } from '../../model/math';
 import { cloneModelParameterValues, findModelParameterDefinition, sanitizeModelParameterValue, type ModelParameterValue, type ModelParameterValues } from '../../model/modelParameters';
 import type { EditorState } from './editorStoreTypes';
@@ -28,8 +28,9 @@ export function cloneTransform(transform: TransformComponent): TransformComponen
 
 /** 对实体 Transform 应用组件级不变量；特殊编辑标记不允许产生无效缩放或倾斜。 */
 export function normalizeTransformForEntity(entity: Entity, transform: TransformComponent): TransformComponent {
+  // 天空不参与通用/群组位姿编辑；水平朝向由天空配置命令单独更新，旧位姿数据原样保留。
+  if (entity.components.skybox) return cloneTransform(entity.components.transform);
   const normalized = cloneTransform(transform);
-  if (entity.components.skybox) normalized.scale = normalizeSkyboxSphereScale(normalized.scale);
   if (entity.components.autoPatrol) normalized.scale = { x: 1, y: 1, z: 1 };
   if (entity.components.manualRoamSpawn) {
     normalized.rotation = { x: 0, y: normalized.rotation.y, z: 0 };

@@ -203,7 +203,9 @@ export class HybridShadowCache {
   private faceRestored = false;
   private readonly faceObserver: Observer<number>;
   private readonly bindObserver: Observer<RenderTargetTexture>;
+  private readonly lossObserver: Observer<AbstractEngine>;
   private readonly restoreObserver: Observer<AbstractEngine>;
+  private contextLost = false;
   private faceIndex = 0;
   private revision = 0;
   private enabled = true;
@@ -229,8 +231,14 @@ export class HybridShadowCache {
     this.bindObserver = this.shadowMap.onBeforeBindObservable.add(() => {
       this.state.refreshForFrame(this.scene.getFrameId());
     });
+    this.lossObserver = this.engine.onContextLostObservable.add(() => {
+      this.contextLost = true;
+      // 浏览器已释放该世代native资源；只遗忘引用，不能等restore后向新context删除旧句柄。
+      this.faces.clear();
+    });
     this.restoreObserver = this.engine.onContextRestoredObservable.add(() => {
       this.releaseFaces();
+      this.contextLost = false;
       this.invalidate();
     });
   }
@@ -253,6 +261,7 @@ export class HybridShadowCache {
     if (this.shadowMap.customRenderFunction === this.renderCallback) this.shadowMap.customRenderFunction = this.originalRender;
     this.shadowMap.onBeforeRenderObservable.remove(this.faceObserver);
     this.shadowMap.onBeforeBindObservable.remove(this.bindObserver);
+    this.engine.onContextLostObservable.remove(this.lossObserver);
     this.engine.onContextRestoredObservable.remove(this.restoreObserver);
     this.releaseFaces();
     for (const group of this.groups.values()) for (const list of [...group.statics, ...group.dynamics]) list.dispose();
@@ -449,7 +458,8 @@ export class HybridShadowCache {
   }
 
   private releaseFaces(): void {
-    if (this.gl) for (const face of this.faces.values()) {
+    // lost事件可能尚未派发；dispose/disable也不能对已失效句柄调用GLdelete。
+    if (this.gl && !this.contextLost && !this.gl.isContextLost?.()) for (const face of this.faces.values()) {
       this.gl.deleteFramebuffer(face.framebuffer);
       this.gl.deleteRenderbuffer(face.color);
       this.gl.deleteRenderbuffer(face.depth);

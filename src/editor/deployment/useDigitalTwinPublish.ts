@@ -1,3 +1,4 @@
+import { prepareSceneSkyboxEnvironments } from '../assets/skyboxPreparationService.ts';
 import { synchronizePublishScene, waitForPublishRuntime, preparePublishLightingBake } from './preparePublishScene';
 import { commitPublishRecovery, publishWithResourceRetry } from './publishOrchestration';
 import { beginSceneModelAssetRefresh, settleSceneModelAssetRefresh } from '../loading/scenePreparationProgress';
@@ -101,6 +102,8 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
   }, [pushLog]);
 
   const canceledRequestIdRef = useRef<string | null>(null);
+  const skyboxPreparationRef = useRef<AbortController | null>(null);
+  useEffect(() => () => skyboxPreparationRef.current?.abort(), []);
 
   const start = useCallback(async (options: StartDigitalTwinPublishOptions): Promise<DigitalTwinPublishResult | null> => {
     if (!window.editorApi?.publishDigitalTwin) return null;
@@ -135,6 +138,8 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     }));
 
     let releasePublishOperation: (() => void) | undefined;
+    const skyboxPreparation = new AbortController();
+    skyboxPreparationRef.current = skyboxPreparation;
     try {
       releasePublishOperation = acquireSceneModelPublishOperation(prepared.sceneSessionId);
       const assertCurrent = () => {
@@ -194,8 +199,12 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
           await waitForPublishRuntime(prepared.sceneSessionId, assertCurrent);
           await preparePublishLightingBake(assertCurrent);
           assertCurrent();
-          const entryContent = serializeScene(useEditorStore.getState().scene);
           const entryScene = useEditorStore.getState().scene;
+          const preparedEntryScene = await prepareSceneSkyboxEnvironments(entryScene, skyboxPreparation.signal,
+            () => { try { assertCurrent(); } catch (error) { skyboxPreparation.abort(error); } }, prepared.sceneSessionId);
+          assertCurrent();
+          if (useEditorStore.getState().scene !== entryScene) throw new Error('天空准备期间场景已修改，请重新发布。');
+          const entryContent = serializeScene(preparedEntryScene);
           const assertEntryCurrent = () => {
             assertCurrent();
             if (useEditorStore.getState().scene !== entryScene) throw new Error('准备其他场景期间当前场景已修改，请重新发布以包含最新内容。');
@@ -209,7 +218,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
                   projectId: options.projectId, sceneContent: serializeScene(scene) });
                 assertEntryCurrent();
                 return repairPublishSceneSkyboxes(scene, recovery).scene;
-              });
+              }, skyboxPreparation.signal);
             preparedScenes.push({ sceneId: item.sceneId, sceneContent: content });
           }
           assertCurrent();
@@ -285,6 +294,8 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
       pushLog(canceled ? '数字孪生发布已取消。' : '数字孪生发布失败：' + message);
       return null;
     } finally {
+      skyboxPreparation.abort();
+      if (skyboxPreparationRef.current === skyboxPreparation) skyboxPreparationRef.current = null;
       releasePublishOperation?.();
       if (activeRequestIdRef.current === requestId) {
         activeRequestIdRef.current = null;
@@ -297,6 +308,7 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
     const requestId = activeRequestIdRef.current;
     if (!requestId || !window.editorApi?.cancelDigitalTwinPublish) return;
     canceledRequestIdRef.current = requestId;
+    skyboxPreparationRef.current?.abort();
     await window.editorApi.cancelDigitalTwinPublish({ requestId }).catch(() => false);
   }, []);
 

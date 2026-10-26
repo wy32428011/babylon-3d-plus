@@ -20,6 +20,23 @@ type ExternalModelScriptInstance = {
 /** 外置模型脚本运行模式，编辑态只响应参数，运行态可读取遥测快照。 */
 export type ExternalModelScriptRuntimeMode = 'edit' | 'runtime';
 
+export type ExternalModelScriptInitializationTiming = {
+  stage: 'scriptConstructor' | 'scriptOnStart';
+  scriptAsset: ModelScriptAsset;
+  className: string;
+  /** 同步调用区间；onStart 为一次可选分派，包含 getter/错误处理，不等待返回的 Promise。 */
+  durationMs: number;
+  failed: boolean;
+};
+type InitializationContext = { scriptAsset: ModelScriptAsset; className: string };
+type ExternalModelScriptRuntimeOptions = {
+  /** 仅来源容器认证后注入；摘要必须在执行脚本模块之前核对。 */
+  expectedScriptHashes?: Readonly<Record<string, string>>;
+  onInitializationTiming?: (timing: ExternalModelScriptInitializationTiming) => void;
+  /** 同步真实边界观察；返回的结束回调不等待脚本 Promise，也不改变旧计时回调。 */
+  onInitializationStageStart?: (stage: ExternalModelScriptInitializationTiming['stage'], context: InitializationContext) => ((failed: boolean) => void) | undefined;
+};
+
 /** 注入到外置模型脚本实例的只读遥测快照，避免脚本直接依赖 MQTT store。 */
 export type ExternalModelScriptTelemetrySnapshot = {
   deviceType: string;
@@ -54,7 +71,7 @@ const scriptTextRequests = new Map<string, Promise<string>>();
 const compiledScriptRequests = new Map<string, Promise<CompiledExternalModelScript>>();
 const scriptLoadDiagnostics = { readRequests: 0, sharedReads: 0, compileRequests: 0, sharedCompiles: 0,
   precompiledHits: 0, compilerFallbacks: 0, compiledCacheHits: 0, compileElapsedMs: 0, initializationCount: 0, initializationQueueMs: 0,
-  initializationMs: 0, maxInitializationMs: 0, cancelledInitializations: 0 };
+  initializationMs: 0, maxInitializationMs: 0, cancelledInitializations: 0, diagnosticFailures: 0 };
 let typescriptModulePromise: Promise<typeof TypeScriptModule> | null = null;
 
 /** 只读 renderer 会话计数；编译耗时包含首次等待 TypeScript 模块的时间。 */
@@ -79,6 +96,7 @@ export class ExternalModelScriptRuntime {
   constructor(
     private readonly node: TransformNode,
     private readonly modelAsset: ModelAssetComponent,
+    private readonly options: ExternalModelScriptRuntimeOptions = {},
   ) {
     this.assetCode = modelAsset.assetCode;
   }
@@ -161,7 +179,9 @@ export class ExternalModelScriptRuntime {
   /** 启动单个 TypeScript 模型脚本中声明的运行组件。 */
   private async startScriptAsset(scriptAsset: ModelScriptAsset): Promise<void> {
     try {
-      const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision);
+      const expected = this.options.expectedScriptHashes;
+      if (expected && !Object.hasOwn(expected, scriptAsset.name)) throw new Error(`只读模型声明缺少脚本：${scriptAsset.name}`);
+      const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision, expected?.[scriptAsset.name]);
       if (this.disposed) return;
       this.initializationError ??= compiledScript.initializationError ?? null;
       if (compiledScript.dataDriven !== undefined) {
@@ -178,10 +198,21 @@ export class ExternalModelScriptRuntime {
             const ScriptClass = compiledScript.classes[className];
             if (!ScriptClass) continue;
 
-            const instance = new ScriptClass(this.node);
+            const timingContext = { scriptAsset, className };
+            const finishTrace = this.beginInitializationStage('scriptConstructor', timingContext);
+            const constructorStartedAt = this.options.onInitializationTiming ? performance.now() : null;
+            let instance: ExternalModelScriptInstance, failed = true;
+            try {
+              instance = new ScriptClass(this.node);
+              failed = false;
+            } finally {
+              const endedAt = constructorStartedAt === null ? undefined : performance.now();
+              finishTrace?.(failed);
+              this.reportInitializationTiming('scriptConstructor', timingContext, constructorStartedAt, failed, endedAt);
+            }
             this.assignParameterValues(instance);
             this.instances.push(instance);
-            this.callLifecycle(instance, 'onStart');
+            this.callLifecycle(instance, 'onStart', timingContext);
           }
         } finally {
           const elapsed = performance.now() - startedAt;
@@ -235,10 +266,14 @@ export class ExternalModelScriptRuntime {
     const definition = this.findParameterDefinition(key);
     if (definition?.type !== 'texture' || typeof value !== 'string') return value;
 
-    return resolveModelTextureAssetUrl(value, {
+    const resolved = resolveModelTextureAssetUrl(value, {
       sourceUrl: this.modelAsset.sourceUrl,
       assetRevision: this.modelAsset.assetRevision,
-    }) ?? value;
+    });
+    if (!resolved && value.trim().startsWith('editor-image://')) {
+      throw new Error(`贴图参数「${key}」的图片未登记，请恢复本地图片库或同步该资源。`);
+    }
+    return resolved ?? value;
   }
 
   /** 按参数 key 查找模型包声明，用于区分普通字符串和贴图逻辑引用。 */
@@ -247,14 +282,41 @@ export class ExternalModelScriptRuntime {
   }
 
   /** 调用脚本生命周期，避免单个脚本异常中断编辑器运行时。 */
-  private callLifecycle(instance: ExternalModelScriptInstance, methodName: 'onStart' | 'onUpdate' | 'onStop'): void {
+  private callLifecycle(instance: ExternalModelScriptInstance, methodName: 'onStart' | 'onUpdate' | 'onStop', context?: InitializationContext): void {
+    const finishTrace = context ? this.beginInitializationStage('scriptOnStart', context) : undefined;
+    const startedAt = context && this.options.onInitializationTiming ? performance.now() : null;
+    let failed = true;
     try {
       instance[methodName]?.();
+      failed = false;
     } catch (error) {
       if (!this.disposed && methodName !== 'onStop') {
         this.initializationError ??= `脚本 ${methodName} 失败：${error instanceof Error ? error.message : String(error)}`;
       }
       console.warn(`模型脚本生命周期执行失败：${methodName}`, error);
+    } finally {
+      const endedAt = startedAt === null ? undefined : performance.now();
+      finishTrace?.(failed);
+      if (context) this.reportInitializationTiming('scriptOnStart', context, startedAt, failed, endedAt);
+    }
+  }
+
+  private beginInitializationStage(stage: ExternalModelScriptInitializationTiming['stage'], context: InitializationContext): ((failed: boolean) => void) | undefined {
+    try {
+      const finish = this.options.onInitializationStageStart?.(stage, context);
+      return finish ? failed => { try { finish(failed); } catch { scriptLoadDiagnostics.diagnosticFailures += 1; } } : undefined;
+    } catch { scriptLoadDiagnostics.diagnosticFailures += 1; return undefined; }
+  }
+
+  /** 诊断只观察完成后的数值，不能重复执行脚本；诊断失败也不能覆盖原业务异常。 */
+  private reportInitializationTiming(stage: ExternalModelScriptInitializationTiming['stage'], context: InitializationContext,
+    startedAt: number | null, failed: boolean, endedAt?: number): void {
+    if (startedAt === null) return;
+    try {
+      this.options.onInitializationTiming?.({ stage, ...context, durationMs: (endedAt ?? performance.now()) - startedAt, failed });
+    } catch (error) {
+      scriptLoadDiagnostics.diagnosticFailures += 1;
+      console.warn('模型脚本初始化诊断失败', error);
     }
   }
 }
@@ -263,6 +325,7 @@ export class ExternalModelScriptRuntime {
 async function loadCompiledExternalModelScript(
   scriptAsset: ModelScriptAsset,
   assetRevision: string | undefined,
+  expectedSourceHash?: string,
 ): Promise<CompiledExternalModelScript> {
   const sourceText = await fetchScriptText(scriptAsset, assetRevision);
   let hashRequest = sourceHashRequests.get(sourceText);
@@ -272,6 +335,9 @@ async function loadCompiledExternalModelScript(
     if (sourceHashRequests.size > 128) sourceHashRequests.delete(sourceHashRequests.keys().next().value!);
   }
   const sourceHash = await hashRequest;
+  if (expectedSourceHash !== undefined && sourceHash !== expectedSourceHash) {
+    throw new Error(`只读模型脚本内容已改变，请重新导入模型：${scriptAsset.name}`);
+  }
   const cacheKey = `${scriptAsset.sourceUrl}:${sourceHash}`;
   const cachedScript = compiledScriptCache.get(cacheKey);
   if (cachedScript) {

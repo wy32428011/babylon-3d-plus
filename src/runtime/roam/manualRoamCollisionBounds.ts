@@ -529,6 +529,7 @@ function shouldResolveThinInstanceMesh(
     || metadata?.editorAutoPatrolMarker
     || metadata?.editorShadowCatcher
     || metadata?.editorSkyboxSphere
+    || metadata?.runtimeSkybox
   ) return false;
   const name = mesh.name.toLowerCase();
   return !name.includes('skybox')

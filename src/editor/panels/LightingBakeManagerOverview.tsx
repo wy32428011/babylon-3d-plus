@@ -47,7 +47,8 @@ export type LightingBakeManagerOverviewProps = {
 export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewProps) {
   const { lighting, disabled, onLightingChange } = props;
   const { bake, shadows } = lighting;
-  const onBakeChange = (patch: Partial<SceneLightingBakeSettings>) => onLightingChange({ ...lighting, bake: { ...bake, ...patch } });
+  const onBakeChange = (patch: Partial<SceneLightingBakeSettings>) => onLightingChange({ ...lighting,
+    version: patch.lightmapEncoding === 'rgbm-gamma' || patch.lightmapMipLevels ? 3 : lighting.version, bake: { ...bake, ...patch } });
   const onShadowChange = (patch: Partial<SceneLightingConfig['shadows']>) => onLightingChange({ ...lighting, shadows: { ...shadows, ...patch } });
   return <div className="lighting-manager-overview">
     <div className="lighting-manager-overview-settings">
@@ -85,6 +86,18 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
           onChange={event => onBakeChange({ quality: event.target.value as SceneLightingBakeSettings['quality'] })}>
           <option value="preview">快速预览</option><option value="standard">标准</option><option value="high">高质量</option>
         </select></label>
+        <LightingManagerToggle label="暗部精度（Gamma RGBM）" description="可选新编码，需要重新烘焙；启用后保存为光照配置 v3，旧版本编辑器无法打开"
+          checked={bake.lightmapEncoding === 'rgbm-gamma'} disabled={disabled}
+          onChange={enabled => onBakeChange({ lightmapEncoding: enabled ? 'rgbm-gamma' : 'rgbm' })} />
+        <label className="lighting-manager-field"><span>远距离抗闪烁（有限Mip）</span><select aria-label="光照贴图Mip层级" value={bake.lightmapMipLevels ?? 0} disabled={disabled}
+          onChange={event => {
+            const levels = Number(event.target.value), next = { ...bake };
+            if (levels === 0) delete next.lightmapMipLevels; else next.lightmapMipLevels = levels as SceneLightingBakeSettings['lightmapMipLevels'];
+            onLightingChange({ ...lighting, version: levels ? 3 : lighting.version, bake: next });
+          }}>
+          <option value={0}>关闭（原单级贴图）</option>{[1, 2, 3, 4].map(level => <option key={level} value={level}>额外 {level} 级 LOD</option>)}
+        </select></label>
+        <p className="lighting-manager-note">显式启用需光照配置 v3 并重新烘焙；增加纹理内存。UV 间隔不足时会明确拒绝，保留旧结果。</p>
         <label className="lighting-manager-field"><span>计算设备</span><select aria-label="烘焙计算设备" value={bake.device ?? 'cpu'} disabled={disabled}
           onChange={event => onBakeChange({ device: event.target.value as SceneLightingBakeSettings['device'] })}>
           <option value="cpu">CPU</option><option value="auto">自动选择可用设备（新场景默认）</option><option value="gpu">GPU（需要可用设备）</option>

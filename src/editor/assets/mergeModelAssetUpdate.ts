@@ -5,7 +5,7 @@ import { isAllowedTextureReference } from '../model/textureReferences';
 
 const RESOURCE_FIELDS = [
   'sourcePath', 'sourceUrl', 'sourceSnapshot', 'assetRevision', 'lengthUnit', 'unitScaleToMeters',
-  'scriptAssets', 'parameterScriptMetadata', 'animationScriptMetadata', 'parameterConfig',
+  'scriptAssets', 'runtimeCapabilities', 'parameterScriptMetadata', 'animationScriptMetadata', 'parameterConfig',
   'parameterValues', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig', 'dataPlatformModel',
 ] as const;
 

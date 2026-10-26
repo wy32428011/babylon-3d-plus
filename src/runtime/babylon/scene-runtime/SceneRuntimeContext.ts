@@ -10,6 +10,8 @@ export type SceneRuntimeContext = {
   onModelStatisticsChanged?: (snapshot: SceneModelStatisticsSnapshot) => void;
   onAlarmActivated?: (event: AlarmActivation) => void;
   readonly scene: Scene;
+  /** 仅宿主确实遮挡初始场景且尚未进入首帧验证时返回true。 */
+  readonly canDeferPreparationClassification?: () => boolean;
   readonly pushLog: (message: string) => void;
   readonly onModelMeasurementChanged: (entityId: string) => void;
   readonly notifyEnvironmentSnapshot: (snapshot: EnvironmentRuntimeSnapshot) => void;

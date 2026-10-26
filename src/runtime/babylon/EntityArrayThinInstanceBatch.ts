@@ -8,6 +8,7 @@ import { ENTITY_ARRAY_MATRIX_INSTANCE_LIMIT, ENTITY_ARRAY_MATRIX_DETERMINANT_EPS
 import { groupRepeatedStaticGeometryCandidates, mergeStaticCandidatesByMaterial } from './thinInstanceStaticGeometry';
 import { resolveBatchSourceMesh, getSourceMatrixCount, captureCandidateSourceWorldMatrices, captureSourceWorldMatrices, captureMatrixOrientations, getMatrixOrientation, createMatrixBatch, applyBatchOrientation, isCommittedBatchStateUnchanged, commitMatrixBuffer, applyBatchInteractionState, syncBatchEffectiveInteractionState, resolveFormalBatchMaxInstancesPerPartition, createSpatialMatrixPartitions, createEntityInstanceRanges, acquireIndependentFloatBuffer, acquireIndependentEntityIndexBuffer, acquireFloatBuffer, acquireDetachedFloatBuffer, acquireDetachedEntityIndexBuffer, resetInactiveBatchBuffers, applyNegativeOrientationCarrierToBuffer, acquireEntityIndexBuffer, createEntityRangeStarts, appendEntityInstanceRange, writeSelectionRange, isFiniteMatrixData, isRigidTransformMatrix, createTransformMatrix, isFiniteVector3, isFiniteTransform, isFiniteMatrix, disposeBatches } from './thinInstanceMatrixBuilder';
 import { isTransformedBoxInFrustum, isFiniteVector3Data, cloneBoundingInfo, calculateTransformedExtentToRef } from './thinInstanceFrustum';
+import { copyMatrixRows, sparseMatrixUploadsEnabled } from './thinInstanceSparseUpdates';
 export type { EntityArrayThinInstanceBatchOptions, EntityArrayThinInstanceTransform, EntityArrayLightingInstance } from './thinInstanceBatchTypes';
 
 
@@ -850,7 +851,13 @@ export class EntityArrayThinInstanceBatch {
       completeSourceEntityIndexBuffer,
       instanceCount,
     );
-    renderMatrixBuffer.set(completeSourceMatrixBuffer);
+    // 只有当前完整可见布局与新实体顺序相同，才能保留 GPU 布局并只上传变化行。
+    const stableLayout = sparseMatrixUploadsEnabled(batch.mesh.getScene())
+      && batch.matrixBuffer === renderMatrixBuffer && batch.mesh.thinInstanceCount === instanceCount
+      && batch.visibleSourceIndexCount === instanceCount && batch.entityIndexBuffer?.length === instanceCount
+      && completeSourceEntityIndexBuffer.every((value, index) => batch.entityIndexBuffer![index] === value
+        && batch.visibleSourceIndexBuffer?.[index] === index);
+    const uploadRanges = copyMatrixRows(renderMatrixBuffer, completeSourceMatrixBuffer, instanceCount, stableLayout);
     renderEntityIndexBuffer.set(completeSourceEntityIndexBuffer);
     batch.entityIndexBuffer = renderEntityIndexBuffer;
     const ranges = createEntityInstanceRanges(renderEntityIndexBuffer, entityCount, instanceCount);
@@ -860,7 +867,7 @@ export class EntityArrayThinInstanceBatch {
     for (let index = 0; index < instanceCount; index += 1) visibleSourceIndexes[index] = index;
     batch.visibleSourceIndexBuffer = visibleSourceIndexes;
     batch.visibleSourceIndexCount = instanceCount;
-    commitMatrixBuffer(batch, renderMatrixBuffer, instanceCount, true);
+    commitMatrixBuffer(batch, renderMatrixBuffer, instanceCount, true, uploadRanges);
     const bounds = batch.mesh.getBoundingInfo().boundingBox;
     batch.fullBoundingInfo = new BoundingInfo(bounds.minimumWorld.clone(), bounds.maximumWorld.clone());
     batch.lastFrustumContainment = -1;
@@ -985,14 +992,11 @@ export class EntityArrayThinInstanceBatch {
       sourceMatrixBuffer,
       sourceMatrixBuffer.length,
     );
-    for (let visibleIndex = 0; visibleIndex < visibleCount; visibleIndex += 1) {
-      const sourceIndex = scratchIndexes[visibleIndex];
-      const sourceOffset = sourceIndex * 16;
-      renderMatrixBuffer.set(sourceMatrixBuffer.subarray(sourceOffset, sourceOffset + 16), visibleIndex * 16);
-    }
+    const uploadRanges = copyMatrixRows(renderMatrixBuffer, sourceMatrixBuffer, visibleCount,
+      sameVisibleLayout && renderMatrixBuffer === batch.matrixBuffer && sparseMatrixUploadsEnabled(batch.mesh.getScene()), scratchIndexes);
     if (sameVisibleLayout) {
       // 纯矩阵位移不改变可见顺序时复用实体索引和范围缓冲，拖动帧只上传矩阵。
-      commitMatrixBuffer(batch, renderMatrixBuffer, visibleCount, false);
+      commitMatrixBuffer(batch, renderMatrixBuffer, visibleCount, false, uploadRanges);
       return false;
     }
 

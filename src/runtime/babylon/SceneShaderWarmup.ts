@@ -299,6 +299,28 @@ function nativeLibrary(): boolean {
       }),
   );
 }
+const nativeForceBlockDirty = Scene.prototype._forceBlockMaterialDirtyMechanism;
+const nativeDirtyAccessor = Object.getOwnPropertyDescriptor(Scene.prototype, 'blockMaterialDirtyMechanism');
+
+/** 复用原生API边界检查；仅供作者显式选择的同步、未绑定材质克隆，不用于批量修改场景材质。 */
+export function canBatchDetachedMaterialInitialization(material: Material, scene: Scene): boolean {
+  const prototype = Object.getPrototypeOf(material);
+  if (!nativeLibrary() || !sceneApi(scene) || !nativeReady.has(prototype)
+    || !sdkApi(material, prototype, ['pluginManager']) || !builtinPluginFacts(material)) return false;
+  if (Object.values(Object.getOwnPropertyDescriptors(material)).some(descriptor => !('value' in descriptor))) return false;
+  if (Object.hasOwn(scene, 'blockMaterialDirtyMechanism') || Object.hasOwn(scene, '_forceBlockMaterialDirtyMechanism')
+    || Scene.prototype._forceBlockMaterialDirtyMechanism !== nativeForceBlockDirty) return false;
+  const accessor = Object.getOwnPropertyDescriptor(Scene.prototype, 'blockMaterialDirtyMechanism');
+  if (accessor?.get !== nativeDirtyAccessor?.get || accessor?.set !== nativeDirtyAccessor?.set) return false;
+  for (const observable of [scene.onNewMaterialAddedObservable, scene.onNewTextureAddedObservable]) {
+    if (!safeObservable(observable) || observable.hasObservers()) return false;
+  }
+  // Raw/Dynamic/自定义纹理可能在克隆时同步调用外部代码，保留原行为；普通glTF Texture走原生克隆。
+  return material.getActiveTextures().every(texture => Object.getPrototypeOf(texture) === Texture.prototype
+    && sdkApi(texture, Texture.prototype)
+    && Object.values(Object.getOwnPropertyDescriptors(texture)).every(descriptor => 'value' in descriptor));
+}
+
 const abortReason = (signal: AbortSignal) =>
   signal.reason ?? new DOMException('着色器准备已取消。', 'AbortError');
 function bounded(value: number | undefined, fallback: number, maximum: number): number {

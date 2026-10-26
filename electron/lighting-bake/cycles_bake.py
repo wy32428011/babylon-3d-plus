@@ -336,6 +336,35 @@ def apply_vertex_colors(obj: Any, source: dict) -> None:
         links.new(vertex.outputs["Alpha"], nodes.get("LightingAlphaVertex").inputs[1])
 
 
+def can_skip_nonreceiver_lightmap_uv(data: dict) -> bool:
+    """仅研究候选：非receiver且材质仅依赖完整显式SourceUV时，LightmapUV不被消费。"""
+    if type(data) is not dict or data.get("receiver", True) is not False:
+        return False
+    positions = data.get("positions")
+    if type(positions) not in (list, tuple, array) or not positions or len(positions) % 3:
+        return False
+    material = data.get("material")
+    allowed = {"baseColor", "alpha", "alphaMode", "alphaCutoff", "useTextureAlpha", "useVertexAlpha", "meshVisibility",
+               "metallic", "roughness", "emissive", "doubleSided", "invertNormalMapX", "invertNormalMapY", "textures"}
+    if type(material) is not dict or set(material) - allowed:
+        return False
+    textures = material.get("textures", {})
+    if type(textures) is not dict:
+        return False
+    for kind, entry in textures.items():
+        if kind not in {"baseColor", "emissive", "metallicRoughness", "normal", "occlusion"} or type(entry) is not dict:
+            return False
+        coordinates = entry.get("coordinatesIndex")
+        if type(coordinates) is not int or coordinates not in (0, 1):
+            return False
+        values = data.get("uvs2" if coordinates else "uvs")
+        if type(values) not in (list, tuple, array) or len(values) != len(positions) // 3 * 2:
+            return False
+        if not all(type(value) in (int, float) and math.isfinite(value) for value in values):
+            return False
+    return True
+
+
 def make_mesh(data: dict, root: Path, index: int) -> Any:
     positions = data["positions"]
     vertices = [vector(positions[i:i + 3]) for i in range(0, len(positions), 3)]
@@ -380,8 +409,9 @@ def make_mesh(data: dict, root: Path, index: int) -> Any:
     mesh.update()
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
-    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02, area_weight=1.0,
-                             correct_aspect=False, scale_to_bounds=False)
+    if not can_skip_nonreceiver_lightmap_uv(data):
+        bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.02, area_weight=1.0,
+                                 correct_aspect=False, scale_to_bounds=False)
     bpy.ops.object.mode_set(mode="OBJECT")
     for vertex, original in zip(mesh.vertices, vertices):
         vertex.co = original
@@ -451,7 +481,7 @@ def split_triangles(triangles: list[tuple[tuple[float, ...], ...]], axis: int,
     return halves
 
 
-def partition_receiver(source: dict, size: int, density: float, maximum_area: float | None = None) -> list[dict]:
+def partition_receiver(source: dict, size: int, density: float, maximum_area: float | None = None, gutter: int = 4) -> list[dict]:
     """把超页接收面按世界空间裁成完整二叉叶集，不改原实体、材质或采样密度。"""
     base_key, separator, parent_path = source["key"].rpartition("/tile:")
     if not separator or not parent_path or not set(parent_path) <= {"0", "1"}:
@@ -472,7 +502,7 @@ def partition_receiver(source: dict, size: int, density: float, maximum_area: fl
                  for start in range(0, len(source["indices"]), 3)]
     original_area = sum(triangle_area(face) for face in triangles)
     # Blender 顶点存储为单精度；预留微小数值余量，防止恰好满页在转换后超出一像素。
-    capacity = ((size - 8) / density) ** 2 * (1 - 1e-6)
+    capacity = ((size - 2 * gutter) / density) ** 2 * (1 - 1e-6)
     if maximum_area is not None:
         capacity = min(capacity, maximum_area)
     if original_area <= capacity:
@@ -550,6 +580,7 @@ def partition_receiver(source: dict, size: int, density: float, maximum_area: fl
 
 def partition_receivers(meshes: list[dict], settings: dict) -> list[dict]:
     size, density = settings["atlasSize"], settings["texelsPerMeter"]
+    gutter = lightmap_gutter(settings)
     budget = settings["maxTextureMiB"] * 1024 * 1024
     receiver_area = 0.0
     for source in meshes:
@@ -566,7 +597,7 @@ def partition_receivers(meshes: list[dict], settings: dict) -> list[dict]:
     result = []
     for source in meshes:
         if source.get("receiver", True):
-            parts = partition_receiver(source, size, density)
+            parts = partition_receiver(source, size, density, gutter=gutter)
             result.extend(parts)
         else:
             result.append(source)
@@ -605,7 +636,16 @@ def lightmap_face_world_per_uv(obj: Any, face: Any) -> float:
     return math.sqrt(largest_eigenvalue)
 
 
-def lightmap_metrics(obj: Any, density: float) -> tuple[int, int, float, float, float]:
+def lightmap_gutter(settings: dict) -> int:
+    """仅新Mip布局预留所有有限LOD的采样足印；旧PNG仍固定4像素。"""
+    levels = settings.get("lightmapMipLevels", 0)
+    if isinstance(levels, bool) or not isinstance(levels, int) or levels not in (0, 1, 2, 3, 4):
+        raise ValueError("不支持的有限mip层级。")
+    # cert逐级延展严格小于1+1.5*2^level；再留1texel量化余量，覆盖任意图块格相位。
+    return 4 if levels == 0 else math.ceil(1.5 * (1 << levels)) + 2
+
+
+def lightmap_metrics(obj: Any, density: float, gutter: int = 4) -> tuple[int, int, float, float, float]:
     """按 UV→世界 Jacobian 最大奇异值保证任意方向的实际采样密度。"""
     uv = obj.data.uv_layers["LightmapUV"]
     minimum_u = min(entry.uv.x for entry in uv.data)
@@ -614,8 +654,8 @@ def lightmap_metrics(obj: Any, density: float) -> tuple[int, int, float, float, 
     maximum_v = max(entry.uv.y for entry in uv.data)
     world_per_uv = max((lightmap_face_world_per_uv(obj, face) for face in obj.data.polygons), default=0)
     scale = world_per_uv * density * (1 + 1e-4)
-    return (max(16, math.ceil((maximum_u - minimum_u) * scale) + 8),
-            max(16, math.ceil((maximum_v - minimum_v) * scale) + 8), scale, minimum_u, minimum_v)
+    return (max(16, math.ceil((maximum_u - minimum_u) * scale) + 2 * gutter),
+            max(16, math.ceil((maximum_v - minimum_v) * scale) + 2 * gutter), scale, minimum_u, minimum_v)
 
 
 def repair_lightmap_uvs(obj: Any, density: float) -> int:
@@ -676,20 +716,21 @@ def repair_lightmap_uvs(obj: Any, density: float) -> int:
 def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list[dict], list[Any]]:
     """对展开后仍超页的长条/多岛网格继续切分，直到真实密度能装入单页。"""
     size, density = settings["atlasSize"], settings["texelsPerMeter"]
+    gutter = lightmap_gutter(settings)
     pending = list(reversed(partition_receivers(meshes, settings)))
     sources, objects = [], []
     while pending:
         source = pending.pop()
         obj = make_mesh(source, root, len(objects))
         try:
-            width, height, _, _, _ = lightmap_metrics(obj, density) if source.get("receiver", True) else (0, 0, 0, 0, 0)
+            width, height, _, _, _ = lightmap_metrics(obj, density, gutter) if source.get("receiver", True) else (0, 0, 0, 0, 0)
         except LightmapUvError:
             repair_lightmap_uvs(obj, density)
             # 修复后仍执行相同严格校验；失败时不能跳面或降低目标密度。
-            width, height, _, _, _ = lightmap_metrics(obj, density)
+            width, height, _, _, _ = lightmap_metrics(obj, density, gutter)
         if source.get("receiver", True) and max(width, height) > size:
-            maximum_area = world_area(obj) * ((size - 8) / (max(width, height) - 8)) ** 2 * 0.9
-            parts = partition_receiver(source, size, density, maximum_area)
+            maximum_area = world_area(obj) * ((size - 2 * gutter) / (max(width, height) - 2 * gutter)) ** 2 * 0.9
+            parts = partition_receiver(source, size, density, maximum_area, gutter)
             if len(parts) < 2:
                 raise ValueError(f"{source['name']} 无法保持目标采样密度并完成空间切分。")
             mesh, materials = obj.data, list(obj.data.materials)
@@ -705,8 +746,8 @@ def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list
     return sources, objects
 
 
-def pack_atlases(objects: list[Any], size: int, density: float, budget: int) -> list[list[Any]]:
-    metrics = {obj.name: lightmap_metrics(obj, density) for obj in objects}
+def pack_atlases(objects: list[Any], size: int, density: float, budget: int, gutter: int = 4) -> list[list[Any]]:
+    metrics = {obj.name: lightmap_metrics(obj, density, gutter) for obj in objects}
     ordered = sorted(objects, key=lambda obj: metrics[obj.name][1], reverse=True)
     pages: list[list[Any]] = []
     placements = []
@@ -735,8 +776,8 @@ def pack_atlases(objects: list[Any], size: int, density: float, budget: int) -> 
                          f"当前预算 {budget / 1048576:.2f} MiB；没有丢弃对象或自动降低贴图密度。")
     for obj, x, y, scale, minimum_u, minimum_v, atlas in placements:
         for entry in obj.data.uv_layers["LightmapUV"].data:
-            entry.uv = ((x + 4 + (entry.uv.x - minimum_u) * scale) / size,
-                        (y + 4 + (entry.uv.y - minimum_v) * scale) / size)
+            entry.uv = ((x + gutter + (entry.uv.x - minimum_u) * scale) / size,
+                        (y + gutter + (entry.uv.y - minimum_v) * scale) / size)
         obj["atlas"] = atlas
     return pages
 
@@ -926,6 +967,81 @@ def sample_probe_irradiance(pixels: np.ndarray, size: int, count: int) -> np.nda
     return samples.mean(axis=1, dtype=np.float64).reshape(count, 18)
 
 
+def can_skip_zero_direct_pass(scene: Any, lights: list[Any]) -> bool:
+    """只在实际静态节点图可证明无环境/自发光贡献时省去第二遍；未知材质继续原路径。"""
+    def constant(socket: Any) -> Any:
+        if socket is None or socket.is_linked:
+            return None
+        value = socket.default_value
+        if isinstance(value, (int, float)):
+            return float(value) if math.isfinite(value) else None
+        return tuple(value) if all(math.isfinite(component) for component in value) else None
+
+    def static_tree(owner: Any) -> Any:
+        if owner is None or not owner.use_nodes or owner.animation_data is not None:
+            return None
+        tree = owner.node_tree
+        return tree if tree is not None and tree.animation_data is None else None
+
+    try:
+        if scene.render.engine != "CYCLES":
+            return False
+        if scene.world is not None:
+            tree = static_tree(scene.world)
+            if tree is None or any(node.bl_idname not in {"ShaderNodeBackground", "ShaderNodeOutputWorld"} or node.mute
+                                   for node in tree.nodes):
+                return False
+            outputs = [node for node in tree.nodes if node.bl_idname == "ShaderNodeOutputWorld"]
+            if (len(outputs) != 1 or not outputs[0].is_active_output or outputs[0].target not in {"ALL", "CYCLES"}
+                    or outputs[0].inputs["Volume"].is_linked):
+                return False
+            surface = outputs[0].inputs["Surface"]
+            if len(surface.links) != 1 or surface.links[0].from_node.bl_idname != "ShaderNodeBackground":
+                return False
+            background = surface.links[0].from_node
+            if constant(background.inputs.get("Strength")) != 0 or constant(background.inputs.get("Color")) is None:
+                return False
+        # 只接受受控导出器已使用的非发光节点；组、脚本、体积与独立Emission均保持两遍。
+        allowed = {"ShaderNodeBsdfPrincipled", "ShaderNodeOutputMaterial", "ShaderNodeBsdfTransparent", "ShaderNodeMixShader",
+                   "ShaderNodeNewGeometry", "ShaderNodeMath", "ShaderNodeMixRGB", "ShaderNodeTexImage", "ShaderNodeUVMap",
+                   "ShaderNodeMapping", "ShaderNodeVectorMath", "ShaderNodeSeparateXYZ", "ShaderNodeCombineXYZ",
+                   "ShaderNodeSeparateColor", "ShaderNodeCombineColor", "ShaderNodeNormalMap", "ShaderNodeVertexColor"}
+        for obj in scene.objects:
+            if obj.hide_render:
+                continue
+            if obj.instance_type != "NONE":
+                return False
+            if obj.type == "LIGHT":
+                if obj not in lights:
+                    return False
+                continue
+            if obj.type in {"CAMERA", "EMPTY", "ARMATURE"}:
+                continue
+            if obj.type != "MESH" or obj.modifiers or not obj.material_slots:
+                return False
+            for slot in obj.material_slots:
+                tree = static_tree(slot.material)
+                if tree is None or any(node.bl_idname not in allowed or node.mute for node in tree.nodes):
+                    return False
+                outputs = [node for node in tree.nodes if node.bl_idname == "ShaderNodeOutputMaterial"]
+                if (len(outputs) != 1 or not outputs[0].is_active_output or outputs[0].target not in {"ALL", "CYCLES"}
+                        or outputs[0].inputs["Volume"].is_linked or not outputs[0].inputs["Surface"].is_linked):
+                    return False
+                shaders = [node for node in tree.nodes if node.bl_idname == "ShaderNodeBsdfPrincipled"]
+                if not shaders:
+                    return False
+                for shader in shaders:
+                    color = constant(shader.inputs.get("Emission Color"))
+                    strength = constant(shader.inputs.get("Emission Strength"))
+                    if (not isinstance(color, tuple) or len(color) < 3 or not isinstance(strength, float)
+                            or (strength != 0 and any(value != 0 for value in color[:3]))):
+                        return False
+        return True
+    except (AttributeError, KeyError, TypeError, ValueError, ReferenceError):
+        # 未知节点接口或失效数据块不能把推断变成错误成功，回到完整两遍让原烘焙路径处理。
+        return False
+
+
 def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str) -> np.ndarray:
     scene = bpy.context.scene
     image = bpy.data.images.new(name, width=size, height=size, alpha=True, float_buffer=True)
@@ -942,6 +1058,14 @@ def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str)
         bake_diffuse()
         pixels = np.empty(size * size * 4, dtype=np.float32)
         image.pixels.foreach_get(pixels)
+        if can_skip_zero_direct_pass(scene, lights):
+            # 等价于加零后原合并的钳制/alpha规则；不分配第二份图像，也保留原函数最终pass设置。
+            rgba = pixels.reshape(-1, 4)
+            np.fmax(rgba[:, :3], 0, out=rgba[:, :3])
+            rgba[:, 3] = 1
+            scene.render.bake.use_pass_direct = True
+            scene.render.bake.use_pass_indirect = False
+            return pixels
         for light in lights:
             light.hide_render = True
         scene.render.bake.use_pass_direct = True
@@ -957,8 +1081,25 @@ def bake_irradiance(objects: list[Any], lights: list[Any], size: int, name: str)
         bpy.data.images.remove(image)
 
 
-def save_rgbm(pixels: np.ndarray, size: int, destination: Path) -> float:
-    dynamic_range, encoded = encode_rgbm_pixels(pixels)
+def save_rgbm(pixels: np.ndarray, size: int, destination: Path, encoding: str = "rgbm") -> float:
+    if encoding == "rgbm-gamma":
+        # 仅新编码加载独立 helper；使用明确的同目录路径，不依赖 Blender 的 sys.path。
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lighting_rgbm_gamma_codec", Path(__file__).with_name("rgbm_gamma_codec.py"))
+        codec = importlib.util.module_from_spec(spec)
+        # Blender 的嵌入解释器可能忽略 PYTHON* 环境；平面任务目录不能产生 __pycache__。
+        # 只覆盖本次受控 helper 导入，并恢复解释器状态，不放宽任务目录归属校验。
+        previous_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(codec)
+        finally:
+            sys.dont_write_bytecode = previous_bytecode
+        dynamic_range, encoded = codec.encode_rgbm_gamma_pixels(pixels)
+    elif encoding == "rgbm":
+        dynamic_range, encoded = encode_rgbm_pixels(pixels)
+    else:
+        raise ValueError("不支持的光照贴图编码。")
     image = bpy.data.images.new(destination.stem, width=size, height=size, alpha=True)
     image.colorspace_settings.name = "Non-Color"
     image.alpha_mode = "CHANNEL_PACKED"
@@ -968,6 +1109,55 @@ def save_rgbm(pixels: np.ndarray, size: int, destination: Path) -> float:
     image.save()
     bpy.data.images.remove(image)
     return dynamic_range
+
+
+LIGHTMAP_MIP_RECIPE = "BLMIP001-chart-padding-v1-guard1-box-linear-v1-rgba8-f32-half-v1-packing-v2"
+_LIGHTMAP_MIP_MODULE = None
+
+
+def lightmap_mip_module():
+    """仅显式mip生产使用；Blender忽略环境变量，必须同步隔离字节码写入。"""
+    global _LIGHTMAP_MIP_MODULE
+    if _LIGHTMAP_MIP_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lighting_lightmap_mips", Path(__file__).with_name("lightmap_mips.py"))
+        module = importlib.util.module_from_spec(spec)
+        previous_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_bytecode
+        _LIGHTMAP_MIP_MODULE = module
+    return _LIGHTMAP_MIP_MODULE
+
+
+def lightmap_mip_meshes(page: list[Any], sources: list[dict]) -> list[dict]:
+    """认证使用真实原拓扑与最终float32逐角点LightmapUV，不从导出焊接结果猜chart。"""
+    result = []
+    for obj in page:
+        mesh = obj.data
+        layer = mesh.uv_layers.get("LightmapUV")
+        if layer is None:
+            raise ValueError("有限mip缺少最终LightmapUV。")
+        indices = np.empty((len(mesh.polygons), 3), dtype=np.uint32)
+        uvs = np.empty((len(mesh.polygons), 3, 2), dtype=np.float32)
+        for face in mesh.polygons:
+            if len(face.loop_indices) != 3:
+                raise ValueError("有限mip只接受已存在的真实三角拓扑；未自动改面或重排UV。")
+            for corner, loop_index in enumerate(face.loop_indices):
+                indices[face.index, corner] = mesh.loops[loop_index].vertex_index
+                uvs[face.index, corner] = layer.data[loop_index].uv
+        result.append({"key": sources[obj["input_index"]]["key"], "triangles": indices, "bakeUvs": uvs})
+    return result
+
+
+def lightmap_mip_certificate_summary(certificate: dict) -> dict:
+    return {key: value for key, value in certificate.items() if key != "charts"} | {
+        "chartCount": len(certificate["charts"]),
+        "charts": [{"id": int(chart["id"]), "meshKey": chart["meshKey"], "triangleCount": int(chart["triangleCount"]),
+                    "bounds": [float(value) for value in chart["bounds"]], "rectangle": [int(value) for value in chart["rectangle"]],
+                    "seedCount": int(chart["seedCount"])} for chart in certificate["charts"]]}
 
 
 def collect_export_geometry(obj: Any, source: dict) -> dict:
@@ -1437,27 +1627,60 @@ def main() -> None:
     scene.cycles.max_bounces = 8
     scene.cycles.diffuse_bounces = 4
     settings = data["settings"]
+    lightmap_encoding = settings.get("lightmapEncoding", "rgbm")
+    if lightmap_encoding not in ("rgbm", "rgbm-gamma"):
+        raise ValueError("不支持的光照贴图编码。")
+    lightmap_mip_levels = settings.get("lightmapMipLevels", 0)
+    if isinstance(lightmap_mip_levels, bool) or not isinstance(lightmap_mip_levels, int) or lightmap_mip_levels not in (0, 1, 2, 3, 4):
+        raise ValueError("不支持的有限mip层级。")
     input_bounds = source_probe_bounds(data["meshes"])
     data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
     lights = setup_lights(data, root)
     size = settings["atlasSize"]
     receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
-    pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024)
+    pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024, lightmap_gutter(settings))
+    texture_bytes = len(pages) * size * size * 4
+    mip_module = None
+    mip_working_limit = None
+    if lightmap_mip_levels:
+        mip_module = lightmap_mip_module()
+        mip_working_limit = settings.get("lightmapMipWorkingBytesLimit")
+        if isinstance(mip_working_limit, bool) or not isinstance(mip_working_limit, int) or mip_working_limit <= 0 or mip_working_limit > 2 * 1024 ** 3:
+            raise ValueError("有限mip缺少明确且不超过2GiB的临时工作数组预算。")
+        per_atlas = sum(max(1, size >> level) ** 2 * 4 for level in range(lightmap_mip_levels + 1))
+        texture_bytes = len(pages) * per_atlas
+        if texture_bytes > settings["maxTextureMiB"] * 1024 * 1024:
+            raise ValueError("有限mip全部RGBA级超出GPU纹理预算，未降低层级/尺寸。")
+        certificates = []
+        for page in pages:
+            chart_meshes = lightmap_mip_meshes(page, data["meshes"])
+            certificate, owner = mip_module.certify_lightmap_mip_charts(chart_meshes, size, size, lightmap_mip_levels, max_working_bytes=mip_working_limit)
+            certificates.append(lightmap_mip_certificate_summary(certificate))
+            del owner, certificate, chart_meshes
+        write_json(root / "lightmap-mip-certificates.json", {"version": 1, "recipe": LIGHTMAP_MIP_RECIPE, "maxWorkingBytes": mip_working_limit,
+                   "workingScope": "per atlas receiver triangles after UV/packing; not process RSS", "atlases": certificates})
     # 先做全部可判定检查，避免全部图集完成后才发现探针超限。
     # UV 展开曾临时改动局部顶点；在提前预检前统一刷新恢复后的物理几何。
     bpy.context.view_layer.update()
     positions = probe_positions(objects, settings["probeSpacing"], settings.get("probeVolumes"), input_bounds)
     write_json(root / "preflight.json", {"version": 1, "atlasCount": len(pages),
-                                       "probeCount": len(positions), "textureBytes": len(pages) * size * size * 4,
+                                       "probeCount": len(positions), "textureBytes": texture_bytes,
                                        "sourceBounds": input_bounds})
     progress("preflight", 1, 1, f"预检通过：{len(pages)} 张图集，{len(positions)} 个探针")
     atlas_results = []
     for index, page in enumerate(pages):
         progress("baking", index, len(pages), "正在烘焙间接光与环境漫反射")
         pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
-        name = f"lightmap-{index}.png"
-        dynamic_range = save_rgbm(pixels, size, root / name)
-        atlas_results.append({"file": name, "width": size, "height": size, "encoding": "rgbm", "rgbmRange": dynamic_range})
+        if lightmap_mip_levels:
+            payload = mip_module.prepare_lightmap_mips(pixels, size, size, lightmap_mip_meshes(page, data["meshes"]), lightmap_mip_levels,
+                lightmap_encoding, max_working_bytes=mip_working_limit, max_texture_bytes=per_atlas)
+            name = f"lightmap-{index}.bin"
+            (root / name).write_bytes(payload["data"])
+            atlas_results.append({"file": name, **{key: payload[key] for key in ("width", "height", "encoding", "rgbmRange", "levelCount", "textureBytes")}, "mipRecipe": LIGHTMAP_MIP_RECIPE})
+        else:
+            name = f"lightmap-{index}.png"
+            dynamic_range = save_rgbm(pixels, size, root / name, lightmap_encoding)
+            atlas_results.append({"file": name, "width": size, "height": size, "encoding": lightmap_encoding, "rgbmRange": dynamic_range})
     mesh_results = []
     for obj in receivers:
         index = obj["input_index"]
@@ -1471,7 +1694,7 @@ def main() -> None:
                                     "statistics": {"meshCount": len(objects), "triangleCount": sum(len(entry["indices"]) // 3 for entry in data["meshes"]),
                                                    "atlasCount": len(pages), "probeCount": count,
                                                    "durationMs": round((time.monotonic() - started) * 1000),
-                                                   "textureBytes": len(pages) * size * size * 4}})
+                                                   "textureBytes": texture_bytes}})
     progress("completed", 1, 1, "光照资源生成完成，正在校验")
 
 

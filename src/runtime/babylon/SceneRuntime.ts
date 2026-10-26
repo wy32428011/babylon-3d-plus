@@ -1,5 +1,6 @@
 import './babylonSideEffects.js';
 import './babylonGltfLoader.js';
+import { setSparseMatrixUploadsEnabled } from './thinInstanceSparseUpdates';
 import type { Engine } from '@babylonjs/core/Engines/engine.js';
 import { getGpuCapabilityProfile as readGpuCapabilityProfile } from './gpuCapabilityProfile';
 import { SceneDocumentController } from './scene-runtime/SceneDocumentController';
@@ -43,10 +44,17 @@ import type { PublishedAssetCache } from '../assets/publishedAssetCache';
 import type { DataPlatformScreenOverlayItem, LocatorRuntimeEntry, SceneRuntimeSyncOptions, SceneRuntimeModelLoadProgress, SceneRuntimePerformanceMetrics } from './scene-runtime/sceneRuntimeTypes';
 export type { DataPlatformScreenOverlayItem, ModelRuntimeEntry, GeneratedOutputOwnerRuntimeEntry, ModelGeneratorRuntimeEntry, LocatorRuntimeEntry, SceneRuntimeModelArrayIdentityMode, SceneRuntimeSyncOptions, SceneRuntimeModelLoadProgress, SceneRuntimePerformanceMetrics } from './scene-runtime/sceneRuntimeTypes';
 
+import type { ProjectOpenTraceRecorder, ProjectOpenSpanOutcome, ProjectOpenTraceCode } from '../../../electron/shared/projectOpenTrace.ts';
+import { getDetachedMaterialCloneMetrics } from './cloneDetachedModelMaterial';
+
 configureLocalBabylonDecoders();
 
 /** 公共门面：保持编辑器/Viewer 接口以及原有构造、帧回调和释放顺序。 */
 export class SceneRuntime {
+  private preparationClassificationGate: (() => boolean) | null = null;
+  private preparationClassificationEnabled = false;
+  private preparationClassificationReleased = false;
+  private preparationClassificationSession: string | null = null;
   private readonly document: SceneDocumentController;
   private readonly assets: ModelAssetRuntimeController;
   private readonly parameters: ModelParameterBindingController;
@@ -77,6 +85,8 @@ export class SceneRuntime {
     const owner = () => this;
     const context: SceneRuntimeContext = { scene, pushLog, onModelMeasurementChanged, onModelLoadProgress, getResourceLoadDiagnostics,
       callbackReceiver: owner(),
+      canDeferPreparationClassification: () => this.preparationClassificationEnabled
+        && !this.preparationClassificationReleased && this.preparationClassificationGate?.() === true,
       notifyEnvironmentSnapshot: snapshot => onEnvironmentSnapshot(snapshot),
       get onModelStatisticsChanged() { return owner().onModelStatisticsChanged; },
       set onModelStatisticsChanged(callback) { owner().onModelStatisticsChanged = callback; },
@@ -318,7 +328,26 @@ export class SceneRuntime {
 
   setMotionStaticBatchingEnabled(enabled: boolean): void { return this.telemetry.setMotionStaticBatchingEnabled(enabled); }
 
-  beginSceneSession(sessionId: string): void { return this.telemetry.beginSceneSession(sessionId); }
+  beginSceneSession(sessionId: string, recorder?: ProjectOpenTraceRecorder | null): void {
+    if (sessionId !== this.preparationClassificationSession) {
+      this.preparationClassificationSession = sessionId;
+      this.preparationClassificationReleased = false;
+    }
+    if (this.readiness.loadDiagnostics.captureTrace()?.recorder !== recorder) this.environment.endProjectOpenSkyboxTrace('stale', 'scene-stale');
+    this.readiness.loadDiagnostics.beginProjectOpenTrace(recorder, sessionId);
+    this.telemetry.beginSceneSession(sessionId);
+  }
+
+  markProjectOpenAssetsSettled(): void { this.readiness.loadDiagnostics.markProjectOpenAssetsSettled(); }
+
+  getProjectOpenModelAcquisitionFailures(sceneSessionId: string): number | null {
+    return this.readiness.loadDiagnostics.getProjectOpenModelAcquisitionFailures(sceneSessionId);
+  }
+
+  completeProjectOpenRuntime(outcome: ProjectOpenSpanOutcome = 'ok', code?: ProjectOpenTraceCode): void {
+    this.environment.endProjectOpenSkyboxTrace(outcome, code);
+    this.readiness.loadDiagnostics.completeProjectOpenRuntime(outcome, code);
+  }
 
   getMotionStaticBatchDiagnostics() { return this.telemetry.getMotionStaticBatchDiagnostics(); }
 
@@ -344,7 +373,17 @@ export class SceneRuntime {
 
   getModelEntranceSnapshot() { return this.effects.getModelEntranceSnapshot(); }
 
-  waitForInitialRenderReady(signal?: AbortSignal): Promise<void> { return this.readiness.waitForInitialRenderReady(signal); }
+  async waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(signal.reason ?? new DOMException('首帧准备已取消。', 'AbortError'));
+    this.preparationClassificationReleased = true;
+    this.environment.lightingRuntime?.finishPreparationClassification();
+    return this.readiness.waitForInitialRenderReady(signal);
+  }
+
+  setPreparationClassificationGate(gate: () => boolean): void { this.preparationClassificationGate = gate; }
+  setPreparationClassificationEnabled(enabled: boolean): void { this.preparationClassificationEnabled = enabled; }
+  getPreparationClassificationMetrics() { return { enabled: this.preparationClassificationEnabled,
+    released: this.preparationClassificationReleased, deferredFrames: this.environment.lightingRuntime?.getPreparationDeferredFrames() ?? 0 }; }
 
   beginTelemetryPreview(): void { return this.telemetry.beginTelemetryPreview(); }
 
@@ -542,8 +581,19 @@ export class SceneRuntime {
 
   getShaderWarmupMetrics() { return this.assets.shaderWarmup.getMetrics(); }
 
+  getDetachedMaterialCloneMetrics() { return getDetachedMaterialCloneMetrics(this.scene); }
+
   /** 准备阶段shader预热内部A/B入口；不写入场景或修改任何画质默认值。 */
   setPreparationShaderWarmupEnabled(enabled: boolean): void { this.assets.shaderWarmup.setEnabled(enabled); }
+
+  /** 只影响本 Scene 的有界矩阵上传实验；不写场景文件，缺省关闭。 */
+  setSparseMatrixUploadsEnabled(enabled: boolean): void { setSparseMatrixUploadsEnabled(this.scene, enabled); }
+
+  setSkyboxEnvironmentResolver(resolver: import('./SceneSkyboxRuntime').SkyboxEnvironmentResolver,
+    onPrepared?: import('./SceneSkyboxRuntime').SkyboxEnvironmentPrepared,
+    onReadiness?: (state: import('./SceneSkyboxRuntime').SkyboxReadiness) => void): void {
+    this.environment.skyboxRuntime.setEnvironmentResolver(resolver, onPrepared, onReadiness);
+  }
 
   syncSkybox(document: SceneDocument): void { return this.environment.syncSkybox(document); }
 
@@ -614,6 +664,7 @@ export class SceneRuntime {
 
 
   dispose(): void {
+    this.completeProjectOpenRuntime('cancelled', 'aborted');
     if (this.document.disposed) return;
     this.document.disposed = true;
     this.outputs.generatorAssetPreloader.dispose();

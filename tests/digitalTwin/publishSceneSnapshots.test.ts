@@ -194,7 +194,7 @@ test('version 6 通过真实快照与准备结果入口，保留业务字段及�
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-for (const version of [7, '6']) test(`发布快照与准备结果拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async () => {
+for (const version of [8, '7']) test(`发布快照与准备结果拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'publish-scenes-invalid-version-'));
   assert.equal(path.dirname(root), path.resolve(tmpdir()));
   const signal = new AbortController().signal, valid = content('有效五版场景');

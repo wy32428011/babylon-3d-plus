@@ -24,6 +24,9 @@ export function LightingBakeManagerAppearance({ appearance, disabled, onChange, 
     <LightingManagerToggle label="柔和泛光" checked={appearance.bloomEnabled} disabled={disabled} onChange={bloomEnabled => patch({ bloomEnabled })} />
     <LightingManagerNumberField label="泛光强度" value={appearance.bloomWeight} min={0} max={1} step={0.05} disabled={disabled || !appearance.bloomEnabled}
       onChange={bloomWeight => patch({ bloomWeight })} />
+    <LightingManagerToggle label="泛光抗锯齿（MSAA）" checked={appearance.bloomMsaaEnabled === true} disabled={disabled || !appearance.bloomEnabled}
+      onChange={bloomMsaaEnabled => patch({ bloomMsaaEnabled })} />
+    <p className="lighting-manager-note">改善柔和泛光画面的边缘锯齿，会增加 GPU 开销；仅在柔和泛光开启时生效。</p>
     <LightingManagerToggle label="距离雾" checked={appearance.fogEnabled} disabled={disabled} onChange={fogEnabled => patch({ fogEnabled })} />
     <LightingManagerColorField label="雾颜色" value={appearance.fogColor} disabled={disabled || !appearance.fogEnabled} onChange={fogColor => patch({ fogColor })} />
     <LightingManagerNumberField label="起雾距离" value={appearance.fogStart} min={0} max={Math.min(100000, appearance.fogEnd - 1)} unit="米"

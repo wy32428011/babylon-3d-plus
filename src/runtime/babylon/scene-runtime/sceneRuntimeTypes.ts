@@ -77,6 +77,7 @@ export type EditorMeshMetadata = {
 
 export type ModelRuntimeAssetHandle = {
   kind: 'owned-container' | 'shared-instance';
+  runtimeCapabilities?: import('../../../../electron/shared/modelRuntimeCapabilities.ts').ModelRuntimeCapabilities;
   animationGroups: AnimationGroup[];
   dispose: () => void;
 };
@@ -434,6 +435,7 @@ export type SceneRuntimePerformanceMetrics = {
     pendingModelCount: number;
     failedModelAcquisitions: number;
     modelCache: ReturnType<SharedModelAssetCache['getMetrics']>;
+    matrixUploads: ReturnType<typeof import('../thinInstanceSparseUpdates').getMatrixUploadMetrics>;
     cargoPreload: ReturnType<ModelGeneratorAssetPreloader['getMetrics']>;
     environmentCache: ReturnType<EnvironmentAssetContainerCache['getMetrics']>;
     entrance: ReturnType<ModelEntranceRuntime['getSnapshot']>;

@@ -73,7 +73,7 @@ async function inspectFiles(directory: string, forCleanup = false): Promise<{ by
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
     const stat = await fs.lstat(path.join(directory, entry.name));
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('任务目录含非普通文件，无法证明清理归属。');
-    if (forCleanup && !/^(?:task\.json(?:\.tmp)?|cycles(?:-cpu)?\.log|cycles_bake\.py|input\.json|result\.json|preflight\.json|probes\.json|(?:geometry|lightmap)-\d+\.(?:json|png)|source-texture-\d+\.[A-Za-z0-9]+|geometry-(?:input-)?\d+\.bin)$/.test(entry.name)) throw new Error('任务目录含未知文件，无法证明清理归属。');
+    if (forCleanup && !/^(?:task\.json(?:\.tmp)?|cycles(?:-cpu)?\.log|(?:cycles_bake|rgbm_gamma_codec|lightmap_mips)\.py|input\.json|result\.json|preflight\.json|probes\.json|probe-batches\.json|lightmap-mip-certificates\.json|(?:geometry|lightmap)-\d+\.(?:json|png|bin)|source-texture-\d+\.[A-Za-z0-9]+|geometry-(?:input-)?\d+\.bin)$/.test(entry.name)) throw new Error('任务目录含未知文件，无法证明清理归属。');
     bytes += stat.size; if (entry.name === 'cycles.log') logAvailable = true;
   }
   return { bytes, logAvailable };

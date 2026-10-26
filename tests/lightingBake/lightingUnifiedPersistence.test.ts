@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { CURRENT_SCENE_FILE_VERSION } from '../../electron/shared/sceneFileVersion.ts';
 import { createHash } from 'node:crypto';
 import { existsSync, promises as fs } from 'node:fs';
 import { createRequire, registerHooks } from 'node:module';
@@ -91,7 +92,7 @@ test('旧文件SOURCE与DIST只输出统一配置并保留旧GI过期标记，�
   const packaged = await buildDigitalTwinSourcePackage(sourceOptions);
   const archive = await unzipper.Open.file(packaged.filePath);
   const portable = JSON.parse((await archive.files.find((file: any) => file.path === 'Scenes/main.scene.json').buffer()).toString());
-  assert.equal(portable.version, 6, '统一配置需要新文件版本，避免旧编辑器静默忽略照明');
+  assert.equal(portable.version, CURRENT_SCENE_FILE_VERSION, '统一配置需要新文件版本，避免旧编辑器静默忽略照明');
   assertCanonical(portable.scene, scene); assert.equal(portable.extension, 'envelope');
   assert.equal(portable.scene.sceneSettings.lighting.result.signature, 'lighting-v1-0123456789abcdef');
   assert.notEqual(portable.scene.sceneSettings.lighting.result.signature, getSceneLightingBakeSignature(portable.scene));
@@ -102,7 +103,7 @@ test('旧文件SOURCE与DIST只输出统一配置并保留旧GI过期标记，�
   }
   const prepared = await prepareDeploymentExport(original, 'unified-legacy', [], signal, () => {});
   const deployed = JSON.parse(prepared.sceneContent);
-  assert.equal(deployed.version, 6);
+  assert.equal(deployed.version, CURRENT_SCENE_FILE_VERSION);
   assertCanonical(deployed.scene, scene, false); assert.equal(deployed.extension, 'envelope');
   // DIST 既有契约把连接设置放到 runtime-config，场景文档中只保留禁用占位配置。
   assert.equal(deployed.scene.mqttConfig.enabled, false); assert.equal(deployed.scene.mqttConfig.address, '');
@@ -117,14 +118,14 @@ test('旧文件SOURCE与DIST只输出统一配置并保留旧GI过期标记，�
     const member = decodeURIComponent(new URL(asset.url).pathname.slice(1));
     assert.equal(sha(await fs.readFile(path.join(output, member))), asset.sha256);
   }
-  const canonicalInput = JSON.stringify({ version: 6, scene: migrateSceneLightingDocument(scene) });
+  const canonicalInput = JSON.stringify({ version: CURRENT_SCENE_FILE_VERSION, scene: migrateSceneLightingDocument(scene) });
   const nextScenePath = path.join(projectRoot, 'Scenes', 'new-format.scene.json');
   await fs.writeFile(nextScenePath, canonicalInput);
   const nextPackage = await buildDigitalTwinSourcePackage({ ...sourceOptions, entrySceneFilePath: nextScenePath, outputRoot: path.join(root, 'source-v6') });
   const nextArchive = await unzipper.Open.file(nextPackage.filePath);
-  assert.equal(JSON.parse((await nextArchive.files.find((file: any) => file.path === 'Scenes/new-format.scene.json').buffer()).toString()).version, 6);
+  assert.equal(JSON.parse((await nextArchive.files.find((file: any) => file.path === 'Scenes/new-format.scene.json').buffer()).toString()).version, CURRENT_SCENE_FILE_VERSION);
   const nextDeployment = await prepareDeploymentExport(canonicalInput, 'unified-v6', [], signal, () => {});
-  assert.equal(JSON.parse(nextDeployment.sceneContent).version, 6);
+  assert.equal(JSON.parse(nextDeployment.sceneContent).version, CURRENT_SCENE_FILE_VERSION);
   assert.equal(sha(await fs.readFile(scenePath)), sha(original));
   assert.equal(JSON.stringify({ version: 5, extension: 'envelope', scene }), original);
 });
@@ -133,16 +134,16 @@ test('没有资源改址时本地、事务、组合和SOURCE打开入口仍迁�
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lighting-unified-recovery-')); t.after(() => cleanup(root));
   const scene = legacyScene(), envelope = { version: 5, scene }, content = JSON.stringify(envelope), signal = new AbortController().signal;
   const local = await recoverLocalSceneResourcePaths({ sceneContent: content, workspaceRoot: root });
-  assert.equal(JSON.parse(local.sceneContent).version, 6);
+  assert.equal(JSON.parse(local.sceneContent).version, CURRENT_SCENE_FILE_VERSION);
   assertCanonical(JSON.parse(local.sceneContent).scene, scene); assert.equal(local.restoredReferenceCount, 0);
   const transaction = await recoverLocalSceneResourceTransaction({ request: { sceneContent: content }, baseUrl: '', workspaceRoot: root,
     projectRoot: null, signal, isOriginalPathAllowed: () => false });
-  assert.equal(JSON.parse(transaction.recoveredSceneContent).version, 6);
+  assert.equal(JSON.parse(transaction.recoveredSceneContent).version, CURRENT_SCENE_FILE_VERSION);
   assertCanonical(JSON.parse(transaction.recoveredSceneContent).scene, scene); assert.deepEqual(transaction.issues, []);
   const composition = await recoverSceneCompositions(scene, path.join(root, 'shared'), null, '', signal);
   assertCanonical(composition.scene, scene); assert.deepEqual(composition.issues, []);
   const relocated = relocateDataPlatformScene(envelope, root) as any;
-  assert.equal(relocated.version, 6);
+  assert.equal(relocated.version, CURRENT_SCENE_FILE_VERSION);
   assertCanonical(relocated.scene, scene);
   assert.equal(JSON.stringify(envelope), content);
 });
@@ -180,7 +181,7 @@ test('发布剔除纯CAD只保留原有效v2结果，旧v1和已有过期结果�
     statistics: { meshCount: 1, triangleCount: 12, atlasCount: 1, probeCount: 1, textureBytes: 1, durationMs: 1 }, extension: { keep: 'result' } };
   const original = JSON.stringify(scene), published = { version: 5, scene };
   assert.equal(stripCadReferencesFromSceneFile(published), 1);
-  assert.equal(published.version, 6);
+  assert.equal(published.version, CURRENT_SCENE_FILE_VERSION);
   assert.equal(published.scene.sceneSettings.lighting.result.signature, getSceneLightingBakeSignature(published.scene));
   assert.deepEqual(published.scene.sceneSettings.lighting.result.extension, { keep: 'result' });
   assert.equal(JSON.stringify(scene), original, '发布副本不得改写调用方保留的本地场景');

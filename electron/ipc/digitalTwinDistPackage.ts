@@ -19,6 +19,7 @@ import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } fro
 import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } from './deploymentSkyboxCache.js';
 import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 import { assertViewerCoreIntegrity, assertViewerTemplateSupportsScene, selectRuntimeTemplateFiles } from './viewerTemplateCapabilities.js';
+import { collectLightingMipArchiveStorePaths, applyLightingMipArchiveStore } from './lightingMipArchiveStore.js';
 
 const COPY_CONCURRENCY = 4;
 const MAX_DIST_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -120,6 +121,8 @@ export async function buildDigitalTwinDistPackage(
     const cacheManifest = await createDeploymentReleaseCacheManifest(stagingRoot, cacheRevision, options.signal);
     await fs.writeFile(resolveDeploymentDestination(stagingRoot, RELEASE_CACHE_MANIFEST_PATH),
       `${JSON.stringify(cacheManifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', signal: options.signal });
+    const storedLightmaps = await collectLightingMipArchiveStorePaths(stagingRoot,
+      [{ relativePath: 'project/scene.json', content: prepared.sceneContent }], options.signal);
     let precompression: DeploymentPrecompressionResult | undefined;
     if (options.precompress !== false) {
       options.onProgress?.('正在生成可选传输压缩文件…', 84);
@@ -130,7 +133,7 @@ export async function buildDigitalTwinDistPackage(
       prepared.warnings.push(...precompression.diagnostics);
     }
     options.onProgress?.('正在压缩 dist ZIP…', 86);
-    await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
+    await archiveDirectoryContents(stagingRoot, archivePath, options.signal, storedLightmaps);
     let stat = await fs.stat(archivePath);
     let zipBudgetFallback = false;
     if (stat.size > maxPackageBytes && precompression?.files.length) {
@@ -142,7 +145,7 @@ export async function buildDigitalTwinDistPackage(
       await fs.rm(archivePath);
       throwIfDeploymentExportAborted(options.signal);
       options.onProgress?.('传输压缩文件触及 ZIP 上限，正在回退原包…', 90);
-      await archiveDirectoryContents(stagingRoot, archivePath, options.signal);
+      await archiveDirectoryContents(stagingRoot, archivePath, options.signal, storedLightmaps);
       stat = await fs.stat(archivePath);
       zipBudgetFallback = true;
       precompression.budget.finalBytes = precompression.budget.originalBytes;
@@ -238,7 +241,8 @@ async function writeGeneratedFiles(
   return runtimeConfig.cacheRevision;
 }
 
-async function archiveDirectoryContents(stagingRoot: string, archivePath: string, signal: AbortSignal): Promise<void> {
+async function archiveDirectoryContents(stagingRoot: string, archivePath: string, signal: AbortSignal,
+  storedLightmaps: ReadonlySet<string> = new Set()): Promise<void> {
   throwIfDeploymentExportAborted(signal);
   await new Promise<void>((resolve, reject) => {
     const output = createWriteStream(archivePath, { flags: 'wx' });
@@ -262,7 +266,8 @@ async function archiveDirectoryContents(stagingRoot: string, archivePath: string
     archive.once('error', settle);
     archive.once('warning', settle);
     archive.pipe(output);
-    archive.directory(stagingRoot, false);
+    if (storedLightmaps.size) archive.directory(stagingRoot, false, entry => applyLightingMipArchiveStore(entry, storedLightmaps));
+    else archive.directory(stagingRoot, false);
     void archive.finalize().catch(settle);
   });
   throwIfDeploymentExportAborted(signal);

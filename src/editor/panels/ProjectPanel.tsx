@@ -1,3 +1,4 @@
+import { prepareSkyboxEnvironment } from '../assets/skyboxPreparationService.ts';
 import { DATA_PLATFORM_MODEL_SYNC_PHASE_LABELS, DATA_PLATFORM_ENVIRONMENT_SYNC_PHASE_LABELS, DATA_PLATFORM_IMAGE_SYNC_PHASE_LABELS, DATA_PLATFORM_CHART_SYNC_PHASE_LABELS, DATA_PLATFORM_SKYBOX_SYNC_PHASE_LABELS } from './project-library/projectLibrarySyncContracts';
 import { type DataPlatformModelSyncProgress, type DataPlatformEnvironmentSyncProgress, type DataPlatformImageSyncProgress, type DataPlatformChartSyncProgress, getDataPlatformModelSyncApi, getDataPlatformEnvironmentSyncApi, getDataPlatformImageSyncApi, getDataPlatformChartSyncApi, getDataPlatformSkyboxSyncApi } from './project-library/projectLibrarySyncContracts';
 import { SkyboxLibraryTab } from './project-library/SkyboxLibraryTab';
@@ -9,6 +10,9 @@ import { COMPOSITION_SELECTION_DRAG } from '../composition/composition';
 import { CompositionLibrary } from '../composition/CompositionLibrary';
 import { applyAvailableSceneModelUpdates } from '../assets/applySceneModelUpdates';
 import { runSceneModelSyncTransaction, getSceneModelPublishSession, subscribeSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
+import { getSceneProjectOpenContext, beginProjectOpenRequest, completeProjectOpenResources,
+  type ProjectOpenRequestToken } from '../loading/projectOpenTrace';
+import type { ProjectOpenSpanOutcome } from '../../../electron/shared/projectOpenTrace';
 import { deserializeScene, serializeScene } from '../project/SceneSerializer';
 import { useCallback, useEffectEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react';
 
@@ -805,6 +809,10 @@ export function ProjectPanel(props: ProjectPanelProps) {
     const runId = `local-scene-${sceneSessionId}-${localResourceRetry}`;
     const refreshId = crypto.randomUUID();
     const isCurrent = () => active && useEditorStore.getState().sceneSessionId === sceneSessionId;
+    const openTrace = getSceneProjectOpenContext(sceneSessionId);
+    let traceRequest: ProjectOpenRequestToken | undefined;
+    let traceOutcome: ProjectOpenSpanOutcome = 'ok';
+    let traceRequestStarted = false;
     if (sceneResourcePolicy === 'local-refresh') useEditorStore.getState().beginLocalSceneResourceRecovery(sceneSessionId);
     reportSceneModelSyncProgress(sceneSessionId, {
       runId, phase: 'querying', completed: 0, total: 0, error: null,
@@ -822,9 +830,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
         // 历史引用缺少身份交给主进程恢复或报告局部问题，渲染端不提前阻断整场景。
         const resourceId = sceneResourcePolicy === 'data-platform-refresh'
           ? environment?.dataPlatformResourceId : getRequiredEnvironmentResourceIds(beforeScene)?.[0];
+        traceRequest = openTrace ? beginProjectOpenRequest(openTrace, 'sceneResources') : undefined;
+        traceRequestStarted = !!traceRequest;
         const result = await window.editorApi.prepareLocalSceneResources({
           mode: sceneResourcePolicy === 'data-platform-refresh' ? 'data-platform-latest' : 'local-latest',
           requestId: runId,
+          ...(traceRequest ? { trace: traceRequest.context } : {}),
           sceneContent: serializeScene(beforeScene),
           ...(sceneResourcePolicy === 'local-refresh' ? {
             sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined,
@@ -832,6 +843,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
           } : {}),
           environment: environment ? { resourceId, displayName: environment.displayNameSnapshot || environment.displayName } : undefined,
         });
+        traceRequest?.finish('ok', result);
+        if (result.issues?.length || result.libraryErrors?.length) traceOutcome = 'error';
         if (!isCurrent()) return;
         if (sceneResourcePolicy === 'local-refresh' && typeof result.recoveredSceneContent === 'string') {
           if (useEditorStore.getState().scene !== beforeScene) {
@@ -892,14 +905,19 @@ export function ProjectPanel(props: ProjectPanelProps) {
           if (sceneResourcePolicy === 'local-refresh') {
             // 模型先统一到中台版本，再恢复图片、天空盒及其他本地依赖，避免被缺失旧模型挡住。
             try {
+              traceRequest = openTrace ? beginProjectOpenRequest(openTrace, 'sceneResources') : undefined;
+              traceRequestStarted ||= !!traceRequest;
               const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', requestId: runId,
+                ...(traceRequest ? { trace: traceRequest.context } : {}),
                 sceneContent: serializeScene(finalScene), sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined });
+              traceRequest?.finish('ok', recovered);
               if (!isCurrent()) return;
               issues.push(...(recovered.issues ?? []).map(describeIssue));
               warnings.push(...(recovered.warnings ?? []));
               if (typeof recovered.recoveredSceneContent !== 'string') throw new Error('本地资源恢复未返回有效场景内容。');
               finalScene = deserializeScene(recovered.recoveredSceneContent);
             } catch (error) {
+              traceOutcome = isCurrent() ? 'error' : 'stale'; traceRequest?.finish(traceOutcome);
               if (!isCurrent()) return;
               const message = error instanceof Error ? error.message : String(error);
               // 取消和切换不能借局部恢复兜底提交；其它恢复失败保留第一阶段已校验的模型更新。
@@ -914,13 +932,15 @@ export function ProjectPanel(props: ProjectPanelProps) {
           }
           for (const warning of new Set(warnings)) pushLog(warning);
           allowScenePreparationEditing(sceneSessionId, false);
-          if (issues.length) environmentPreparationStore.fail(sceneSessionId, issues.join('\n'));
+          if (issues.length) { traceOutcome = 'error'; environmentPreparationStore.fail(sceneSessionId, issues.join('\n')); }
           else environmentPreparationStore.clearError(sceneSessionId);
           settleSceneModelAssetRefresh(sceneSessionId, issues.join('\n') || null, refreshId);
           // 局部更新失败仍等待保留的快照与成功组完成渲染，不能提前结束加载。
           return;
         }
       } catch (error) {
+        traceOutcome = isCurrent() ? 'error' : 'stale';
+        traceRequest?.finish(traceOutcome);
         if (!isCurrent()) return;
         const message = error instanceof Error ? error.message : String(error);
         pushLog(`本地场景资源准备失败：${message}`);
@@ -941,6 +961,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
           // 查询失败时仍通过当前快照的实际渲染结果结束加载。
         }
       } finally {
+        if (openTrace && (isCurrent() || traceRequestStarted || useEditorStore.getState().sceneSessionId !== sceneSessionId)) {
+          completeProjectOpenResources(openTrace, isCurrent() ? traceOutcome : 'stale');
+        }
         if (isCurrent()) {
           localResourcePreparingRef.current = false;
           setIsPreparingSceneResources(false);
@@ -1622,6 +1645,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
 
     setImportingLibraryKey(libraryKind);
+    let sourceImported = false;
+    const preparation = new AbortController();
+    const preparationSession = useEditorStore.getState().sceneSessionId;
     setLibraryStatus(libraryKind, { message: '正在导入 HDR/EXR 天空盒...', kind: 'info' });
     try {
       const result = await window.editorApi.importSkyboxFile();
@@ -1634,15 +1660,23 @@ export function ProjectPanel(props: ProjectPanelProps) {
       setSkyboxAssets(result.skyboxes ?? []);
       setOrphanedSkyboxAssets(result.orphanedSkyboxes ?? []);
       setProjectRoot(result.projectRoot);
-      const refreshedCurrentSkybox = refreshCurrentSkyboxFromAssets([result.importedAsset]);
+      sourceImported = true;
+      const environment = await prepareSkyboxEnvironment(createSceneSkyboxFromAsset(result.importedAsset, currentSkybox), preparation.signal, stage => {
+        if (useEditorStore.getState().sceneSessionId !== preparationSession) preparation.abort();
+        setLibraryStatus(libraryKind, { message: `原图已导入，正在准备 ENV：${stage}…`, kind: 'info' });
+      }, preparationSession);
+      if (useEditorStore.getState().sceneSessionId !== preparationSession) throw new Error('场景已切换，旧天空准备未应用。');
+      const preparedAsset = { ...result.importedAsset, environment };
+      setSkyboxAssets((result.skyboxes ?? []).map(asset => asset.id === preparedAsset.id ? preparedAsset : asset));
+      const refreshedCurrentSkybox = refreshCurrentSkyboxFromAssets([preparedAsset]);
       const projectSuffix = result.projectRoot ? `，已写入项目：${result.projectRoot}` : '';
       const refreshSuffix = refreshedCurrentSkybox ? '，已刷新当前场景天空盒' : '';
-      const message = `天空盒已导入：${result.importedAsset.displayName}（${result.importedAsset.format.toUpperCase()}）${projectSuffix}${refreshSuffix}。`;
+      const message = `天空原图已导入且 ENV 已准备：${result.importedAsset.displayName}（${result.importedAsset.format.toUpperCase()}）${projectSuffix}${refreshSuffix}。`;
       setLibraryStatus(libraryKind, { message, kind: 'info' });
       pushLog(message);
     } catch (error) {
       const message = formatSkyboxSyncError(error);
-      const statusMessage = `导入天空盒失败：${message}`;
+      const statusMessage = `${sourceImported ? '原图已导入，但 ENV 准备失败' : '导入天空盒失败'}：${message}`;
       setLibraryStatus(libraryKind, { message: statusMessage, kind: 'error' });
       pushLog(statusMessage);
     } finally {
@@ -1694,12 +1728,12 @@ export function ProjectPanel(props: ProjectPanelProps) {
     }
   }
 
-  /** 从资源库创建或更新唯一球形天空盒实体，并保留当前显示参数。 */
+  /** 从资源库创建或更新唯一无限远天空背景实体，并保留当前显示参数。 */
   function handleSkyboxAssetApply(asset: ProjectSkyboxAssetEntry): void {
     if (props.readOnly) return;
     try {
       placeSkybox(createSceneSkyboxFromAsset(asset, currentSkybox));
-      pushLog(`球形天空盒已放置并选中：${asset.displayName}`);
+      pushLog(`已选择天空背景，正在验证 ENV 资源：${asset.displayName}`);
     } catch (error) {
       const message = formatSkyboxSyncError(error);
       pushLog(`天空盒配置无效，未更新场景：${message}`);
@@ -2143,7 +2177,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
                     ? `拖拽到模型 texture 属性：${item.name}`
                     : isImportedAsset
                       ? item.asset.kind === 'skybox'
-                        ? `点击放置球形天空盒或拖拽到 Scene：${item.name}（${item.asset.format.toUpperCase()}）`
+                        ? `点击放置无限远天空背景或拖拽到 Scene：${item.name}（${item.asset.format.toUpperCase()}）`
                         : isEnvironmentLibrary
                           ? `点击应用或拖拽到环境属性：${item.name}，${getModelUnitTitle(item.asset)}`
                           : `点击导入或拖拽到 Scene：${item.name}，${getModelUnitTitle(item.asset)}`

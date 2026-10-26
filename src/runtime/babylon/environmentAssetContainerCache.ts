@@ -6,18 +6,23 @@ import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { Scene, Node } from '@babylonjs/core';
+import { beginSceneAssetTrace, type SceneAssetTrace } from './SceneLoadDiagnostics.ts';
+import type { AssetCloneTiming } from './SharedModelAssetCache.ts';
+import type { ProjectOpenSpanRef } from '../../../electron/shared/projectOpenTrace.ts';
 
 export type AcquireEnvironmentWorkingContainerOptions = {
   cacheKey: string;
   scene: Scene;
   loadSource: () => Promise<AssetContainer>;
-  onClone?: (durationMs: number, failed: boolean) => void;
+  onClone?: (durationMs: number, failed: boolean, timing?: AssetCloneTiming) => void;
+  trace?: SceneAssetTrace;
 };
 
 type CachedEnvironmentSource = {
   promise: Promise<AssetContainer>;
   container: AssetContainer | null;
   disposed: boolean;
+  sourceRef: ProjectOpenSpanRef | null;
 };
 
 /**
@@ -45,7 +50,12 @@ export class EnvironmentAssetContainerCache {
     options: AcquireEnvironmentWorkingContainerOptions,
   ): Promise<AssetContainer> {
     if (this.disposed) throw new Error('环境资源缓存已释放，无法加载环境模型。');
-    const source = await this.acquireSource(options);
+    const entry = this.acquireSource(options);
+    const waitToken = beginSceneAssetTrace(options.trace, 'templateWait', entry.sourceRef ? { links: [entry.sourceRef] } : undefined);
+    let source: AssetContainer;
+    try { source = await entry.promise; waitToken?.end(); }
+    catch (error) { waitToken?.end('error', 'operation-failed'); throw error; }
+    const cloneToken = beginSceneAssetTrace(options.trace, 'environmentClone');
     const startedAt = performance.now();
     let failed = true;
     try {
@@ -55,7 +65,9 @@ export class EnvironmentAssetContainerCache {
       failed = false;
       return working;
     } finally {
-      try { options.onClone?.(performance.now() - startedAt, failed); }
+      const endedAtMs = performance.now();
+      cloneToken?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined);
+      try { options.onClone?.(endedAtMs - startedAt, failed, { startedAtMs: startedAt, endedAtMs }); }
       catch (error) { console.warn('[Scene load] 环境克隆计时观察器失败。', error); }
     }
   }
@@ -73,14 +85,15 @@ export class EnvironmentAssetContainerCache {
 
   private acquireSource(
     options: AcquireEnvironmentWorkingContainerOptions,
-  ): Promise<AssetContainer> {
+  ): CachedEnvironmentSource {
     const cached = this.entries.get(options.cacheKey);
     if (cached) {
       this.hits += 1;
-      return cached.promise;
+      return cached;
     }
 
     this.misses += 1;
+    const sourceToken = beginSceneAssetTrace(options.trace, 'modelAcquire');
     const entry: CachedEnvironmentSource = {
       promise: Promise.resolve().then(async () => {
         try {
@@ -90,17 +103,20 @@ export class EnvironmentAssetContainerCache {
             throw new Error('环境源容器在解析完成前已失效。');
           }
           entry.container = container;
+          sourceToken?.end();
           return container;
         } catch (error) {
+          sourceToken?.end('error', 'operation-failed');
           if (this.entries.get(options.cacheKey) === entry) this.entries.delete(options.cacheKey);
           throw error;
         }
       }),
       container: null,
       disposed: false,
+      sourceRef: sourceToken?.ref ?? null,
     };
     this.entries.set(options.cacheKey, entry);
-    return entry.promise;
+    return entry;
   }
 }
 

@@ -46,6 +46,8 @@ import {
   type CameraViewTransitionOptions,
 } from './ArcRotateCameraViewController';
 import { createBackgroundFrameRequester } from './backgroundFrameRequester';
+import { AdaptiveResolutionController } from './AdaptiveResolutionController';
+import type { Observer } from '@babylonjs/core/Misc/observable.js';
 
 export { EDITOR_GRID_CELL_SIZES, DEFAULT_EDITOR_GRID_SETTINGS } from './EditorGroundGrid';
 export { applySavedCameraPose } from './ArcRotateCameraViewController';
@@ -77,6 +79,10 @@ export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRunti
 export type BabylonViewportOptions = {
   showGrid?: boolean;
   allowCameraControl?: boolean;
+  /** 显式不透明画布选项；缺省仍保留原透明上下文，供 Viewer 单独验收后选择。 */
+  opaqueCanvas?: boolean;
+  /** 显式运动降分辨率，静止后恢复；缺省关闭，不改变脚本或MQTT节拍。 */
+  adaptiveResolution?: boolean;
   /** 设为 true 时要求真实硬件 WebGL，并拒绝 SwiftShader、WARP 等软件 renderer 回退。 */
   requireHardwareAcceleration?: boolean;
   /** 可选日志回调，用于向上层控制台输出 GPU renderer 诊断信息。 */
@@ -117,6 +123,10 @@ export type BabylonViewport = {
   setCameraOrientation: (orientation: CameraOrientation, options?: CameraViewTransitionOptions) => void;
   setCameraProjection: (projection: CameraProjection) => void;
   setGridSettings: (settings: EditorGridSettings) => void;
+  setAdaptiveResolution: (enabled: boolean) => void;
+  /** 宿主/DPR更新基础像素比，不覆盖本控制器临时运动等级。 */
+  setBaseHardwareScalingLevel: (level: number) => void;
+  getAdaptiveResolutionState: () => ReturnType<AdaptiveResolutionController['getSnapshot']> | null;
   dispose: () => void;
 };
 
@@ -401,7 +411,7 @@ export function createBabylonViewport(
   let engine: Engine;
   try {
     const candidate = new Engine(canvas, true, {
-      alpha: true,
+      alpha: options.opaqueCanvas !== true,
       preserveDrawingBuffer: false,
       stencil: true,
       powerPreference: 'high-performance',
@@ -496,6 +506,35 @@ export function createBabylonViewport(
     () => cameraControlsEnabled,
   );
   let disposed = false;
+  let adaptiveResolution: AdaptiveResolutionController | null = null;
+  let observedCamera: Camera | null = null;
+  let cameraMotionObserver: Observer<Camera> | null = null;
+  let cameraMoved = false;
+  const clearAdaptiveCamera = (): void => {
+    if (cameraMotionObserver) observedCamera?.onViewMatrixChangedObservable.remove(cameraMotionObserver);
+    observedCamera = null; cameraMotionObserver = null; cameraMoved = false;
+  };
+  const setAdaptiveResolution = (enabled: boolean): void => {
+    if (disposed) return;
+    if (!enabled) { adaptiveResolution?.dispose(); adaptiveResolution = null; clearAdaptiveCamera(); return; }
+    if (!adaptiveResolution) {
+      adaptiveResolution = new AdaptiveResolutionController(engine, {
+        onError: error => options.onLog?.(`运动分辨率控制已暂停：${getErrorMessage(error)}`),
+      });
+    }
+  };
+  const setBaseHardwareScalingLevel = (level: number): void => {
+    if (!Number.isFinite(level) || level <= 0) throw new RangeError('基础渲染缩放等级无效。');
+    const state = adaptiveResolution?.getSnapshot();
+    if (state && Math.abs(state.baselineLevel - level) <= .001) return;
+    const reenable = adaptiveResolution !== null;
+    if (reenable) setAdaptiveResolution(false);
+    // 保留Viewer原DPR桥接的1e-3容差，关闭自适应时也不引入无意义的resize。
+    if (Math.abs(engine.getHardwareScalingLevel() - level) > .001) engine.setHardwareScalingLevel(level);
+    // 明确的宿主基础配置变更开启新周期；同步观察者抢占时不重新接管。
+    if (reenable && engine.getHardwareScalingLevel() === level) setAdaptiveResolution(true);
+  };
+  setAdaptiveResolution(options.adaptiveResolution === true);
   let contextLost = false;
   let renderFailed = false;
 
@@ -524,6 +563,11 @@ export function createBabylonViewport(
     }
 
     registerKtx2WorkerEngine(engine);
+    if (adaptiveResolution) {
+      adaptiveResolution.onContextRestored();
+      adaptiveResolution.update({ enabled: false, moving: false, now: performance.now() });
+      cameraMoved = false;
+    }
     contextLost = false;
     renderFailed = false;
     onRuntimeStatus?.({
@@ -538,6 +582,16 @@ export function createBabylonViewport(
     if (!preparationFrameBudget.shouldRender(options.isScenePreparing?.() === true, performance.now())) return;
 
     try {
+      if (adaptiveResolution) {
+        const activeCamera = scene.activeCamera;
+        if (activeCamera !== observedCamera) {
+          clearAdaptiveCamera(); observedCamera = activeCamera; cameraMoved = true;
+          cameraMotionObserver = activeCamera?.onViewMatrixChangedObservable.add(() => { cameraMoved = true; }) ?? null;
+        }
+        // 只观察相机自然更新事件，不额外计算视图/世界矩阵；首个运动帧后开始降采样。
+        adaptiveResolution.update({ enabled: true, moving: cameraMoved, now: performance.now() });
+        cameraMoved = false;
+      }
       scene.render();
       if (renderFailed) {
         renderFailed = false;
@@ -604,7 +658,11 @@ export function createBabylonViewport(
       cameraViewController.setCameraProjection(projection);
     },
     setGridSettings: editorGround.setSettings,
+    setAdaptiveResolution,
+    setBaseHardwareScalingLevel,
+    getAdaptiveResolutionState: () => adaptiveResolution?.getSnapshot() ?? null,
     dispose: () => {
+      adaptiveResolution?.dispose(); adaptiveResolution = null; clearAdaptiveCamera();
       disposed = true;
       flyControls.dispose();
       scene.onBeforeRenderObservable.remove(cameraPanScaleObserver);

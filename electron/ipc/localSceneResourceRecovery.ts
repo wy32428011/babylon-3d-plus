@@ -8,6 +8,7 @@ import { collectSceneResourceReferences, collectLightingPolicyResourceModels, co
 import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
 import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
 import { validateSceneLightingBakeSnapshot } from '../shared/sceneLightingBakeContract.js';
+import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 import { encodeAssetUrl } from './assetRegistry.js';
 import { createDataPlatformModelRuntimeRevision, readDataPlatformModelIndex, type DataPlatformModelIndex } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
@@ -31,7 +32,7 @@ export type LocalSceneResourceRecoveryResult = {
   sceneContent: string; resolvedFiles: string[]; restoredReferenceCount: number;
   issues: LocalSceneResourceIssue[]; missing: MissingLocalSceneResource[];
 };
-type ResourceOwner = { value: JsonObject; kind: LocalSceneResourceKind; resourceId?: string; revision?: string; rootPath?: string };
+type ResourceOwner = { value: JsonObject; kind: LocalSceneResourceKind; resourceId?: string; revision?: string; rootPath?: string; rebuildable: boolean };
 type Reference = {
   owner: ResourceOwner; parent: JsonObject | unknown[]; key: string | number; jsonPath: string;
   value: string; sourcePath: string; suffix: string; url: boolean; directory: boolean; required: boolean; relative: boolean;
@@ -84,6 +85,8 @@ export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneR
   for (const group of queue) {
     const result = resolutions.get(group)!; const first = group[0];
     if (!result.file) {
+      // 缺失派生 ENV 可由已恢复原图重建；此处不冒充就绪，后续天空准备仍受首帧门控。
+      if (first.owner.rebuildable) continue;
       const reason = result.error ?? '原资源不存在，当前工作区中没有可验证的对应文件。';
       issues.push({ resourceKind: first.owner.kind, resourceId: first.owner.resourceId, sourcePath: first.sourcePath, message: reason });
       missing.push({ resourceKind: first.owner.kind, resourceId: first.owner.resourceId, sourcePath: first.sourcePath,
@@ -115,14 +118,15 @@ function collectReferences(document: JsonObject, sceneFilePath?: string): Refere
   visitSceneResourceValues(document, (value, location) => {
     if (value && typeof value === 'object') paths.set(value, location.path);
   });
-  const add = (value: JsonObject, kind: LocalSceneResourceKind) => {
+  const add = (value: JsonObject, kind: LocalSceneResourceKind, rebuildable = false) => {
     if (owners.has(value)) return; owners.add(value);
     const source = [value.sourcePath, value.sourceUrl, value.packagePath, value.activeVariantUrl, value.url].find(item => typeof item === 'string') as string | undefined;
     const identity = object(value.dataPlatformModel);
     const inferred = source ? inferResourceIdentity(decodeLocalReference(source)?.file ?? source) : undefined;
     const owner: ResourceOwner = { value, kind: identity?.kind === 'combo' ? 'combo' : inferred?.kind ?? kind,
       resourceId: stringValue(identity?.resourceId) ?? stringValue(value.dataPlatformResourceId) ?? inferred?.resourceId,
-      revision: stringValue(value.assetRevision) ?? stringValue(value.dataPlatformRevision), rootPath: stringValue(value.packagePath) };
+      revision: value.format === 'env' ? stringValue(value.sha256) : stringValue(value.assetRevision) ?? stringValue(value.dataPlatformRevision),
+      rootPath: stringValue(value.packagePath), rebuildable };
     const addField = (parent: JsonObject | unknown[], key: string | number, directory: boolean, required: boolean) => {
       const value = (parent as JsonObject)[key]; if (typeof value !== 'string') return;
       const decoded = decodeLocalReference(value); if (!decoded) return;
@@ -150,7 +154,7 @@ function collectReferences(document: JsonObject, sceneFilePath?: string): Refere
   for (const { asset } of collected.models) add(asset, 'model');
   for (const { deviceType } of collected.clickEventBindings) add(deviceType, 'model');
   for (const { environment } of collected.environments) add(environment, 'environment');
-  for (const { value, kind } of collected.entityResources) add(value, kind);
+  for (const { value, kind, rebuildable } of collected.entityResources) add(value, kind, rebuildable);
   return result;
 }
 
@@ -225,8 +229,16 @@ class ResourceResolver {
     const normalized = reference.sourcePath.replace(/\\/g, '/');
     if (containsAsciiControlCharacters(normalized) || normalized.split('/').some(part => part === '..' || part === '.')) throw new Error('资源路径包含不安全的路径穿越或控制字符。');
     const bakeAsset = reference.owner.value;
-    if (['geometry', 'lightmap', 'probes'].includes(String(bakeAsset.kind)) && typeof bakeAsset.url === 'string'
-      && (!/(?:^|\/)Assets\/LightingBakes\/[^/]+\/.+/i.test(normalized) || path.extname(normalized).toLowerCase() !== (bakeAsset.kind === 'lightmap' ? '.png' : '.json'))) throw new Error('光照烘焙产物路径或类型无效。');
+    if (['geometry', 'lightmap', 'probes'].includes(String(bakeAsset.kind)) && typeof bakeAsset.url === 'string') {
+      // 扩展名必须与已知kind/codec成对匹配；不能把新产物恢复放宽成任意bin读取。
+      const mip = bakeAsset.kind === 'lightmap' && isLightingLightmapMipEncoding(bakeAsset.encoding);
+      const encodingValid = bakeAsset.kind === 'lightmap'
+        ? bakeAsset.encoding === undefined || bakeAsset.encoding === 'rgbm-gamma' || mip
+        : bakeAsset.kind === 'geometry' ? bakeAsset.encoding === undefined || bakeAsset.encoding === 'json' || bakeAsset.encoding === 'binary-v1'
+          : bakeAsset.encoding === undefined;
+      const extension = bakeAsset.kind === 'lightmap' ? mip ? '.bin' : '.png' : bakeAsset.kind === 'geometry' && bakeAsset.encoding === 'binary-v1' ? '.bin' : '.json';
+      if (!encodingValid || !/(?:^|\/)Assets\/LightingBakes\/[^/]+\/.+/i.test(normalized) || path.extname(normalized).toLowerCase() !== extension) throw new Error('光照烘焙产物路径或类型无效。');
+    }
     const inferred = inferResourceIdentity(normalized);
     if (inferred && reference.owner.resourceId && (inferred.resourceId !== reference.owner.resourceId || inferred.kind !== reference.owner.kind)) throw new Error('资源身份与文件路径中的类型或 ID 不一致。');
     const identity = object(reference.owner.value.dataPlatformModel);

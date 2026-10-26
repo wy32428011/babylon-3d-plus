@@ -1,3 +1,5 @@
+import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
+import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { ModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import type { ModelScriptAsset, PoiEffectKind } from '../model/components';
@@ -6,6 +8,7 @@ import { findSyncedImageAssetByReference } from '../../assets/syncedImageAssets'
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig, type BuiltInSlotBindingConfig, type LayerChangePlatformBindingConfig } from '../model/builtInSlotBinding';
 import { isPoiEffectKind } from '../model/poiEffect';
+import type { SourceModelDensity } from '../../../electron/shared/modelDensityTypes';
 
 export type ModelSourceLengthUnit = 'meter' | 'centimeter' | 'millimeter';
 export type SkyboxAssetFormat = 'hdr' | 'exr';
@@ -24,6 +27,7 @@ export type AssetEntry = {
   metadataPath?: string;
   scriptPaths?: string[];
   scriptAssets?: ModelScriptAsset[];
+  runtimeCapabilities?: import('../../../electron/shared/modelRuntimeCapabilities.ts').ModelRuntimeCapabilities;
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
   defaultAssetCode?: string;
@@ -31,6 +35,7 @@ export type AssetEntry = {
   lengthUnit?: ModelSourceLengthUnit;
   unitScaleToMeters?: number;
   fileSizeBytes?: number;
+  sourceModelDensity?: SourceModelDensity;
   parameterConfig?: ModelParameterConfig;
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
@@ -52,6 +57,7 @@ export type ProjectModelAssetEntry = AssetEntry & {
 };
 
 export type ProjectSkyboxAssetEntry = {
+  environment?: import('../../../electron/shared/sceneSkyboxContract.ts').SkyboxEnvironmentResource;
   id: string;
   name: string;
   displayName: string;
@@ -227,6 +233,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (thumbnailUrl) asset.thumbnailUrl = thumbnailUrl;
     if (scriptPaths) asset.scriptPaths = scriptPaths;
     if (scriptAssets) asset.scriptAssets = scriptAssets;
+    Object.assign(asset, modelRuntimeCapabilitiesField(payload.runtimeCapabilities));
     if (Array.isArray(payload.parameterScriptMetadata)) asset.parameterScriptMetadata = payload.parameterScriptMetadata;
     if (Array.isArray(payload.animationScriptMetadata)) asset.animationScriptMetadata = payload.animationScriptMetadata;
     if (defaultAssetCode) asset.defaultAssetCode = defaultAssetCode;
@@ -320,6 +327,13 @@ export function decodeSkyboxAssetDragPayload(rawPayload: string): ProjectSkyboxA
       availability: 'active',
     };
 
+    const environmentValue = readOwnDataField(payload, 'environment');
+    if (environmentValue !== undefined) {
+      const environment = normalizeSkyboxEnvironmentResource(environmentValue);
+      if (!environment.sourceUrl.startsWith('editor-asset://local/')
+        || !skyboxEnvironmentMatchesSource({ resolution: environment.faceSize, assetRevision }, environment)) return null;
+      asset.environment = environment;
+    }
     const hasDataPlatformMetadata = ['dataPlatformResourceId', 'dataPlatformRevision', 'fileSha256']
       .some((key) => hasOwnDataField(payload, key));
     if (source === 'project' || source === 'builtin') {

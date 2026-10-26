@@ -69,8 +69,8 @@ export default defineConfig(({ mode }) => {
     cacheDir: process.env.VITE_CACHE_DIR || 'node_modules/.vite',
     plugins: [react(), editorLocalAssetDevServerPlugin(devAssetRoots), ...buildAnalysisPlugins('editor')],
     optimizeDeps: {
-      // 历史验收与打包目录中也有 HTML，只从实际编辑器入口扫描依赖。
-      entries: ['index.html'],
+      // 只扫描产品入口；提前收集懒加载转换器，避免首次导入天空时预构建触发整页重载。
+      entries: ['index.html', 'src/editor/assets/skyboxEnvironmentCompiler.ts', 'src/runtime/babylon/skyboxDecodedData.worker.ts'],
     },
     server: {
       host: '127.0.0.1',
@@ -78,9 +78,15 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       watch: {
         // 生成目录无需热更新，避免为历史缓存和安装包建立大量文件监听。
-        ignored: ['output', 'release', 'dist-electron', 'dist-viewer-template'].map(
-          (directory) => `${path.resolve(workspaceRoot, directory).replaceAll('\\', '/')}/**`,
-        ),
+        // 数据中台工作区（Platforms）、共享资源库和任何 .babylon-editor 暂存目录由编辑器主进程读写；
+        // Windows 下 chokidar 对每个目录持有 fs.watch 句柄，被监听目录无法重命名（EPERM），
+        // 会导致中台工程物化、模型同步等原子替换失败，因此必须排除。
+        ignored: [
+          ...['output', 'release', 'dist-electron', 'dist-viewer-template', 'Platforms', 'SharedResources'].map(
+            (directory) => `${path.resolve(workspaceRoot, directory).replaceAll('\\', '/')}/**`,
+          ),
+          '**/.babylon-editor/**',
+        ],
       },
       fs: {
         allow: devAssetRoots,

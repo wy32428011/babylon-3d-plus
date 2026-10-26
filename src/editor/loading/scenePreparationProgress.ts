@@ -1,4 +1,5 @@
 import type { Entity } from '../model/Entity';
+import { getSceneProjectOpenContext, retireSceneProjectOpenTrace } from './projectOpenTrace.ts';
 
 export type ScenePreparationPhase =
   | 'starting'
@@ -42,6 +43,7 @@ export type ScenePreparationRuntimeProgress = {
 
 export type ScenePreparationState = {
   sceneSessionId: string;
+  openId?: string;
   phase: ScenePreparationPhase;
   percent: number;
   label: string;
@@ -137,6 +139,7 @@ export function hasScenePreparationRuntimeTimedOut(startedAtMs: number, nowMs: n
 export function createScenePreparationState(sceneSessionId: string): ScenePreparationState {
   return {
     sceneSessionId,
+    ...(getSceneProjectOpenContext(sceneSessionId)?.openId ? { openId: getSceneProjectOpenContext(sceneSessionId)!.openId } : {}),
     phase: 'starting',
     percent: 2,
     label: '正在准备场景',
@@ -437,7 +440,8 @@ export function getScenePreparationTimings() {
     const phase = currentScenePreparationState.phase;
     phases[phase] = (phases[phase] ?? 0) + now - preparationPhaseStartedAt;
   }
-  return { completed: currentScenePreparationState.completed, settled: preparationEndedAt !== null, totalMs: now - preparationStartedAt, phases,
+  return { sceneSessionId: currentScenePreparationState.sceneSessionId, openId: currentScenePreparationState.openId ?? null,
+    completed: currentScenePreparationState.completed, settled: preparationEndedAt !== null, totalMs: now - preparationStartedAt, phases,
     runtimeStable: currentScenePreparationState.runtime.stable,
     forcedSettled: currentScenePreparationState.runtime.forcedSettled };
 }
@@ -464,6 +468,7 @@ function publishScenePreparationState(nextState: ScenePreparationState): void {
 /** 切换场景时建立新代次；相同会话重复挂载不会清空已有进度。 */
 export function beginScenePreparation(sceneSessionId: string): void {
   if (currentScenePreparationState.sceneSessionId === sceneSessionId) return;
+  retireSceneProjectOpenTrace(currentScenePreparationState.sceneSessionId);
   publishScenePreparationState(createScenePreparationState(sceneSessionId));
 }
 

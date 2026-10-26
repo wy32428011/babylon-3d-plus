@@ -1,3 +1,4 @@
+import { modelRuntimeCapabilitiesField } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../../assets/mergeModelAssetUpdate';
 import type { AssetEntry } from '../../assets/AssetDatabase';
 import { createImportedAssetIndexes, findImportedAssetForModelAsset } from '../../assets/modelAssetRelink';
@@ -24,6 +25,7 @@ export function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(asset.scriptAssets?.length ? { scriptAssets: cloneJsonValue(asset.scriptAssets) } : {}),
     ...(asset.parameterScriptMetadata?.length ? { parameterScriptMetadata: cloneJsonValue(asset.parameterScriptMetadata) } : {}),
+    ...modelRuntimeCapabilitiesField(asset.runtimeCapabilities),
     ...(asset.animationScriptMetadata?.length ? { animationScriptMetadata: cloneJsonValue(asset.animationScriptMetadata) } : {}),
     ...(asset.dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(asset.dataDrivenConfig) } : {}),
     ...(asset.builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(asset.builtInSlotBindingConfig) } : {}),
@@ -53,6 +55,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     left.lengthUnit === right.lengthUnit &&
     left.unitScaleToMeters === right.unitScaleToMeters &&
     areJsonValuesEqual(left.scriptAssets, right.scriptAssets) &&
+    areJsonValuesEqual(left.runtimeCapabilities, right.runtimeCapabilities) &&
     areJsonValuesEqual(left.parameterScriptMetadata, right.parameterScriptMetadata) &&
     areJsonValuesEqual(left.animationScriptMetadata, right.animationScriptMetadata) &&
     areJsonValuesEqual(left.dataDrivenConfig, right.dataDrivenConfig) &&

@@ -114,10 +114,6 @@ import {
   type PlayerPerformanceSample,
 } from './playerPerformanceDiagnostics';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
-import {
-  createPublishedSkyboxCameraBoundsControllerForDocument,
-  type PublishedSkyboxCameraBoundsController,
-} from './publishedSkyboxCameraBounds';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -366,7 +362,6 @@ export function PlayerApp() {
     let autoPatrolPlayback: AutoPatrolPlaybackController | null = null;
     let autoPatrolIntegration: AutoPatrolRuntimeIntegration | null = null;
     let manualRoam: ManualRoamRuntime | null = null;
-    let skyboxCameraBounds: PublishedSkyboxCameraBoundsController | null = null;
     let interactionController: DigitalTwinInteractionController | null = null;
     let openingBridge: GeographicOpeningBridge | null = null;
     let sceneOpeningSettings = resolvePackageOpeningSettings(undefined);
@@ -666,6 +661,8 @@ export function PlayerApp() {
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
+          opaqueCanvas: parsedConfig.viewer.opaqueCanvas,
+          adaptiveResolution: parsedConfig.viewer.adaptiveResolution,
           requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
           keepRenderingInBackground: true,
           initialSensitivity: sceneDocument.sceneSettings.sensitivity,
@@ -679,11 +676,6 @@ export function PlayerApp() {
           animate: false,
           lockStandardOrientation: false,
         });
-        skyboxCameraBounds = createPublishedSkyboxCameraBoundsControllerForDocument(
-          viewport.scene,
-          viewport.camera,
-          sceneDocument,
-        );
         resize();
 
         runtime = new SceneRuntime(
@@ -1157,8 +1149,6 @@ export function PlayerApp() {
         canvasResizeObserver = null;
         if (resize) window.removeEventListener('resize', resize);
         window.removeEventListener('message', handleHostDisplayMessage);
-        skyboxCameraBounds?.dispose();
-        skyboxCameraBounds = null;
         performanceSessionRef.current?.dispose();
         performanceSessionRef.current = null;
         runtime?.setTelemetryPerformanceTimingEnabled(false);
@@ -1210,8 +1200,6 @@ export function PlayerApp() {
       setViewportScreen(null);
       runtimeRef.current = null;
       viewportRef.current = null;
-      skyboxCameraBounds?.dispose();
-      skyboxCameraBounds = null;
       performanceSessionRef.current?.dispose();
       performanceSessionRef.current = null;
       runtime?.setTelemetryPerformanceTimingEnabled(false);

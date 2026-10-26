@@ -22,7 +22,7 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function fixture(precompiled?: unknown) {
+function fixture(precompiled?: unknown, options: { now?: () => number; scheduler?: ModelInitializationScheduler; warn?: (...args: unknown[]) => void; resolveTexture?: (reference: string) => string | null } = {}) {
   const compilerGate = deferred<typeof ts>();
   const requests: Array<{ url: string; resolve(value: unknown): void; settled: boolean }> = [];
   let compiles = 0;
@@ -33,9 +33,12 @@ function fixture(precompiled?: unknown) {
     return ts.transpileModule(...args);
   } };
   const api = runInNewContext(executable, {
-    Map, Set, Error, performance, console, fetchPrecompiledModelScript: async () => precompiled, digestModelScriptText, normalizePrecompiledModelScript, prepareModelScriptCompilation,
+    Map, Set, Error, performance: options.now ? { now: options.now } : performance,
+    console: options.warn ? { ...console, warn: options.warn } : console,
+    fetchPrecompiledModelScript: async () => precompiled, digestModelScriptText, normalizePrecompiledModelScript, prepareModelScriptCompilation,
     resolveBabylonScriptRuntimeNamespace: async () => ({}), resolveRuntimeAssetUrl: (url: string) => url,
-    modelInitializationScheduler: new ModelInitializationScheduler(),
+    resolveModelTextureAssetUrl: options.resolveTexture ?? (() => null),
+    modelInitializationScheduler: options.scheduler ?? new ModelInitializationScheduler(),
     readUtf8ResponseText: (response: any) => response.text(), loadTypeScriptCompiler: () => compilerGate.promise,
     fetch: (url: string) => new Promise(resolve => requests.push({ url, resolve, settled: false })), fetchRuntimeAsset: (url: string) => new Promise(resolve => requests.push({ url, resolve, settled: false })),
   });
@@ -208,6 +211,190 @@ test('过期或损坏 sidecar 回退原 TS，scene inline code 从不进入执�
     assert.equal(node.script.started, true);
     assert.equal(f.compiles(), 1);
     assert.equal(f.diagnostics().precompiledHits, 0);
+    runtime.dispose();
+  }
+});
+
+type InitializationTiming = {
+  stage: 'scriptConstructor' | 'scriptOnStart'; scriptAsset: typeof asset; className: string; durationMs: number; failed: boolean;
+};
+
+test('同步初始化分段排除读取等待、调度排队和参数 setter 耗时，保留原执行顺序', async () => {
+  let clock = 0;
+  const queued = deferred<void>(), queueGate = deferred<void>();
+  const scheduler = new ModelInitializationScheduler(6, () => clock, async () => {
+    queued.resolve(); await queueGate.promise;
+  }, { deferFirstSlice: true });
+  const f = fixture(undefined, { now: () => clock, scheduler });
+  const timings: InitializationTiming[] = [];
+  const node = { events: [] as string[], advance: (ms: number) => { clock += ms; } };
+  const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'TIMED', scriptAssets: [asset] }, {
+    onInitializationTiming: (timing: InitializationTiming) => timings.push(timing),
+  });
+  runtime.updateParameterValues({ width: 42 });
+  const pending = runtime.start();
+  try {
+    clock = 50;
+    f.respond(`export default class FixtureRuntime {
+      constructor(node) { this.node=node; node.events.push('constructor'); node.advance(5); }
+      set width(value) { this.node.events.push('width:'+value); this.node.advance(12); }
+      set assetCode(value) { this.node.events.push('asset:'+value); this.node.advance(17); }
+      onStart() { this.node.events.push('onStart'); this.node.advance(7); }
+    }`);
+    f.releaseCompiler(); await queued.promise;
+    clock = 250; queueGate.resolve(); await pending;
+    assert.deepEqual(node.events, ['constructor', 'width:42', 'asset:TIMED', 'onStart']);
+    assert.deepEqual(timings.map(timing => [timing.stage, timing.durationMs, timing.failed, timing.className]),
+      [['scriptConstructor', 5, false, 'default'], ['scriptOnStart', 7, false, 'default']]);
+    assert.ok(timings.every(timing => timing.scriptAsset === asset));
+    assert.equal(f.diagnostics().initializationQueueMs, 200);
+    assert.equal(f.diagnostics().initializationMs, 41, '原同步总段继续包含参数 setter，不能由两个子段相加替代');
+    assert.equal(runtime.getInitializationError(), null);
+  } finally { queueGate.resolve(); await pending; runtime.dispose(); }
+});
+
+test('onStart getter 仅取一次并保持实例 receiver，计时包括同步 dispatch 的 getter', async () => {
+  let clock = 0;
+  const f = fixture(undefined, { now: () => clock });
+  const timings: InitializationTiming[] = [];
+  const node = { getters: 0, calls: 0, receiver: false, advance: (ms: number) => { clock += ms; } };
+  const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'RECEIVER', scriptAssets: [asset] }, {
+    onInitializationTiming: (timing: InitializationTiming) => timings.push(timing),
+  });
+  const pending = runtime.start();
+  f.respond(`export default class FixtureRuntime {
+    constructor(node) { this.node=node; node.script=this; }
+    get onStart() { this.node.getters++; this.node.advance(2); return function() {
+      this.node.calls++; this.node.receiver=this===this.node.script; this.node.advance(7);
+    }; }
+  }`);
+  f.releaseCompiler();
+  try {
+    await pending;
+    assert.equal(node.getters, 1); assert.equal(node.calls, 1); assert.equal(node.receiver, true);
+    assert.deepEqual(timings.map(timing => [timing.stage, timing.durationMs, timing.failed]),
+      [['scriptConstructor', 0, false], ['scriptOnStart', 9, false]]);
+    assert.equal(runtime.getInitializationError(), null);
+  } finally { runtime.dispose(); }
+});
+
+test('constructor 与 onStart 原始失败分别计时，只有已入列实例在 dispose 时执行 onStop', async () => {
+  for (const phase of ['constructor', 'onStart'] as const) {
+    let clock = 0;
+    const warnings: unknown[][] = [];
+    const f = fixture(undefined, { now: () => clock, warn: (...args) => warnings.push(args) });
+    const timings: InitializationTiming[] = [];
+    const node = { events: [] as string[], phase, advance: (ms: number) => { clock += ms; } };
+    const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'FAIL', scriptAssets: [asset] }, {
+      onInitializationTiming: (timing: InitializationTiming) => timings.push(timing),
+    });
+    const pending = runtime.start();
+    f.respond(`export default class FixtureRuntime {
+      constructor(node) { this.node=node; node.events.push('constructor'); node.advance(3);
+        if(node.phase==='constructor') throw new Error('original-constructor-error'); }
+      onStart() { this.node.events.push('onStart'); this.node.advance(4); throw new Error('original-onStart-error'); }
+      onStop() { this.node.events.push('onStop'); }
+    }`);
+    f.releaseCompiler();
+    await pending;
+    assert.match(runtime.getInitializationError(), new RegExp('original-' + phase + '-error'));
+    assert.equal(warnings.length, 1, '原异常仍通过既有容错路径记录一次');
+    assert.deepEqual(timings.map(timing => [timing.stage, timing.durationMs, timing.failed]), phase === 'constructor'
+      ? [['scriptConstructor', 3, true]]
+      : [['scriptConstructor', 3, false], ['scriptOnStart', 4, true]]);
+    runtime.dispose(); runtime.dispose();
+    assert.deepEqual(node.events, phase === 'constructor' ? ['constructor'] : ['constructor', 'onStart', 'onStop']);
+  }
+});
+
+test('坏诊断 sink 不破坏启动、实例释放或 constructor/onStart 原始错误', async () => {
+  for (const phase of ['success', 'constructor', 'onStart'] as const) {
+    const warnings: unknown[][] = [];
+    const f = fixture(undefined, { warn: (...args) => warnings.push(args) });
+    const node = { events: [] as string[], phase };
+    const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'BAD-SINK', scriptAssets: [asset] }, {
+      onInitializationTiming() { throw new Error('diagnostic-sink-error'); },
+    });
+    const pending = runtime.start();
+    f.respond(`export default class FixtureRuntime {
+      constructor(node) { this.node=node; node.events.push('constructor');
+        if(node.phase==='constructor') throw new Error('original-constructor-error'); }
+      onStart() { this.node.events.push('onStart'); if(this.node.phase==='onStart') throw new Error('original-onStart-error'); }
+      onStop() { this.node.events.push('onStop'); }
+    }`);
+    f.releaseCompiler(); await pending;
+    if (phase !== 'success') assert.match(runtime.getInitializationError(), new RegExp('original-' + phase + '-error'));
+    else assert.equal(runtime.getInitializationError(), null);
+    const failures = phase === 'constructor' ? 1 : 2;
+    assert.equal(f.diagnostics().diagnosticFailures, failures);
+    assert.equal(warnings.filter(args => String(args[1]).includes('diagnostic-sink-error')).length, failures);
+    runtime.dispose();
+    assert.deepEqual(node.events, phase === 'constructor' ? ['constructor'] : ['constructor', 'onStart', 'onStop']);
+  }
+});
+
+test('onStart 返回未完成 Promise 时不等待或扩大同步段，后续异步工作不重复记账', async () => {
+  let clock = 0;
+  const gate = deferred<void>();
+  const f = fixture(undefined, { now: () => clock });
+  const timings: InitializationTiming[] = [];
+  const node = { events: [] as string[], gate: gate.promise, advance: (ms: number) => { clock += ms; } };
+  const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'ASYNC', scriptAssets: [asset] }, {
+    onInitializationTiming: (timing: InitializationTiming) => timings.push(timing),
+  });
+  const pending = runtime.start();
+  f.respond(`export default class FixtureRuntime {
+    constructor(node) { this.node=node; }
+    async onStart() { this.node.events.push('before-await'); this.node.advance(7); await this.node.gate;
+      this.node.events.push('after-await'); this.node.advance(100); }
+  }`);
+  f.releaseCompiler();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([pending.then(() => 'settled'), new Promise(resolve => {
+      timer = setTimeout(() => resolve('waiting-onStart'), 1000);
+    })]);
+    assert.equal(outcome, 'settled', '原 start 合同不等待脚本返回的 Promise');
+    assert.deepEqual(node.events, ['before-await']);
+    assert.deepEqual(timings.map(timing => [timing.stage, timing.durationMs, timing.failed]),
+      [['scriptConstructor', 0, false], ['scriptOnStart', 7, false]]);
+    gate.resolve(); await tick();
+    assert.deepEqual(node.events, ['before-await', 'after-await']);
+    assert.equal(timings.length, 2);
+  } finally { clearTimeout(timer); gate.resolve(); await pending; runtime.dispose(); }
+});
+
+test('队列中已 dispose 的脚本保持取消语义，不产生虚构 constructor/onStart 分段', async () => {
+  const queued = deferred<void>(), gate = deferred<void>();
+  const scheduler = new ModelInitializationScheduler(6, undefined, async () => {
+    queued.resolve(); await gate.promise;
+  }, { deferFirstSlice: true });
+  const f = fixture(undefined, { scheduler });
+  const timings: InitializationTiming[] = [];
+  const node: { script?: unknown } = {};
+  const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'CANCEL', scriptAssets: [asset] }, {
+    onInitializationTiming: (timing: InitializationTiming) => timings.push(timing),
+  });
+  const pending = runtime.start(); f.respond(); f.releaseCompiler();
+  await queued.promise; runtime.dispose(); gate.resolve(); await pending;
+  assert.equal(node.script, undefined); assert.equal(timings.length, 0);
+  assert.equal(f.diagnostics().cancelledInitializations, 1);
+  assert.equal(runtime.getInitializationError(), null);
+});
+
+test('贴图参数使用已恢复缓存URL，未登记逻辑图片明确失败而不把未知协议交给脚本', async () => {
+  for (const registered of [true, false]) {
+    const localUrl = 'editor-asset://local/cache/logo.png';
+    const f = fixture(undefined, { resolveTexture: () => registered ? localUrl : null, warn: () => {} });
+    const node: { value?: string; started?: boolean } = {};
+    const runtime = new f.ExternalModelScriptRuntime(node, { assetCode: 'IMAGE', scriptAssets: [asset],
+      parameterConfig: { parameters: [{ key: 'logo', type: 'texture' }] } });
+    runtime.updateParameterValues({ logo: 'editor-image://platform/logo' });
+    const pending = runtime.start();
+    f.respond('export default class Runtime { constructor(node){this.node=node;} onStart(){this.node.started=true;this.node.value=this.logo;} }');
+    f.releaseCompiler(); await pending;
+    if (registered) { assert.equal(node.value, localUrl); assert.equal(runtime.getInitializationError(), null); }
+    else { assert.equal(node.started, undefined); assert.match(runtime.getInitializationError(), /图片未登记/); }
     runtime.dispose();
   }
 });

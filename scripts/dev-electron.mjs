@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const HOSTNAME = '127.0.0.1';
@@ -9,9 +10,6 @@ const MAX_PORT_ATTEMPTS = 300;
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const viteCliPath = path.join(ROOT_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
-const electronCommand = process.platform === 'win32'
-  ? path.join(ROOT_DIR, 'node_modules', 'electron', 'dist', 'electron.exe')
-  : path.join(ROOT_DIR, 'node_modules', '.bin', 'electron');
 
 const childProcesses = new Set();
 let isShuttingDown = false;
@@ -57,8 +55,10 @@ function spawnChild(command, args, env, options = {}) {
   });
 
   childProcesses.add(child);
-  child.once('error', () => {
+  child.once('error', (error) => {
     childProcesses.delete(child);
+    console.error(`[dev-electron] 无法启动 ${command}：${error.message}`);
+    shutdown(1);
   });
   child.once('exit', () => {
     childProcesses.delete(child);
@@ -96,6 +96,10 @@ function shutdown(exitCode = 0) {
 }
 
 async function main() {
+  // Electron 包负责首次下载及自定义运行时路径；直接拼接 dist 路径会绕过该准备流程。
+  console.log('[dev-electron] 检查 Electron 运行时，首次使用时可能需要下载...');
+  const electronCommand = createRequire(import.meta.url)('electron');
+  console.log(`[dev-electron] electron runtime: ${electronCommand}`);
   const preferredPort = Number(process.env.VITE_DEV_SERVER_PORT ?? DEFAULT_PORT);
   const port = await findAvailablePort(Number.isFinite(preferredPort) ? preferredPort : DEFAULT_PORT);
   const devServerUrl = `http://${HOSTNAME}:${port}`;

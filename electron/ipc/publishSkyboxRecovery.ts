@@ -114,6 +114,9 @@ export async function recoverPublishSkyboxReference(options: PublishSkyboxRecove
 function result(skybox: Skybox, sourcePath: string, hash: string, resourceId?: string, format?: 'hdr' | 'exr') {
   const next: Skybox = { ...skybox, sourcePath, packagePath: path.dirname(sourcePath), sourceUrl: encodeAssetUrl(sourcePath), assetRevision: hash,
     format: format ?? skybox.format };
+  delete next.sourceAvailable;
+  if (next.environment && typeof next.environment === 'object'
+    && (next.environment as Record<string, unknown>).sourceSha256 !== hash) delete next.environment;
   if (resourceId) next.dataPlatformResourceId = resourceId;
   else delete next.dataPlatformResourceId;
   return { skybox: next, sourcePath,

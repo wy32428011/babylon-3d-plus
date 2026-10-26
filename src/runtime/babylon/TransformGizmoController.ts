@@ -9,7 +9,6 @@ import { Scene } from '@babylonjs/core/scene.js';
 import type { DragEvent, DragStartEndEvent, IPositionGizmo, IRotationGizmo, IScaleGizmo, Observable } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
 import {
-  normalizeSkyboxSphereScale,
   sanitizeSceneEnvironmentTransform,
   type SceneEnvironmentTransform,
 } from '../../editor/model/SceneDocument';
@@ -85,7 +84,6 @@ type GizmoTarget = AbstractMesh | TransformNode;
 type PositionAxisGizmo = IPositionGizmo['xGizmo'];
 
 export type TransformGizmoTargetOptions = {
-  uniformScaleOnly?: boolean;
   supportedTools?: readonly TransformTool[];
   entityArrayEnabled?: boolean;
   entityArraySourceId?: string;
@@ -191,7 +189,6 @@ export class TransformGizmoController {
   private attachedSubTargetId: string | null = null;
   private attachedGroupId: string | null = null;
   private attachedEnvironment = false;
-  private attachedUniformScaleOnly = false;
   private attachedSupportedTools = new Set<TransformTool>(ALL_TRANSFORM_TOOLS);
   private attachedEntityArrayEnabled = true;
   private attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
@@ -303,7 +300,6 @@ export class TransformGizmoController {
   ): void {
     const nextEntityId = target ? entityId : null;
     const nextSubTargetId = target ? options.subTargetId ?? null : null;
-    const nextUniformScaleOnly = Boolean(target && options.uniformScaleOnly);
     const nextSupportedTools = new Set<TransformTool>(
       target ? options.supportedTools ?? ALL_TRANSFORM_TOOLS : ALL_TRANSFORM_TOOLS,
     );
@@ -316,7 +312,6 @@ export class TransformGizmoController {
       && this.attachedEntityId === nextEntityId
       && this.attachedSubTargetId === nextSubTargetId
       && this.attachedGroupId === null
-      && this.attachedUniformScaleOnly === nextUniformScaleOnly
       && areTransformToolSetsEqual(this.attachedSupportedTools, nextSupportedTools)
       && areRotationAxisSetsEqual(this.attachedRotationAxes, nextRotationAxes)
       && this.attachedEntityArrayEnabled === nextEntityArrayEnabled
@@ -329,7 +324,6 @@ export class TransformGizmoController {
     this.attachedSubTargetId = nextSubTargetId;
     this.attachedGroupId = null;
     this.attachedEnvironment = false;
-    this.attachedUniformScaleOnly = nextUniformScaleOnly;
     this.attachedSupportedTools = nextSupportedTools;
     this.attachedEntityArrayEnabled = nextEntityArrayEnabled;
     this.attachedRotationAxes = nextRotationAxes;
@@ -365,7 +359,6 @@ export class TransformGizmoController {
     this.attachedSubTargetId = null;
     this.attachedGroupId = nextGroupId;
     this.attachedEnvironment = false;
-    this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(['translate', 'rotate']);
     this.attachedEntityArrayEnabled = Boolean(nextArraySourceId);
     this.attachedRotationAxes = nextRotationAxes;
@@ -395,7 +388,6 @@ export class TransformGizmoController {
     this.attachedGroupId = null;
     this.attachedEnvironment = Boolean(target);
     this.attachedEntityArraySourceId = null;
-    this.attachedUniformScaleOnly = false;
     this.attachedSupportedTools = new Set<TransformTool>(ALL_TRANSFORM_TOOLS);
     this.attachedEntityArrayEnabled = false;
     this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
@@ -488,9 +480,6 @@ export class TransformGizmoController {
 
     const transform = this.readFiniteTransform(this.attachedTarget);
     if (!transform) return;
-    if (this.attachedUniformScaleOnly) {
-      this.attachedTarget.scaling.copyFromFloats(transform.scale.x, transform.scale.y, transform.scale.z);
-    }
     if (this.attachedGroupId) {
       if (this.activeGroupTool === 'rotate') {
         const deltaMatrix = createRelativeTransformMatrixData(this.dragStartTransform, transform);
@@ -556,9 +545,6 @@ export class TransformGizmoController {
     if (this.attachedGroupId && activeGroupTool !== 'rotate') {
       after = this.constrainGroupTranslationTransform(after, activeGroupTranslationAxes);
     }
-    if (this.attachedUniformScaleOnly) {
-      this.attachedTarget.scaling.copyFromFloats(after.scale.x, after.scale.y, after.scale.z);
-    }
 
     this.blockCanvasSelectionBriefly();
     if (this.attachedGroupId) {
@@ -607,7 +593,6 @@ export class TransformGizmoController {
     this.attachedSubTargetId = null;
     this.attachedGroupId = null;
     this.attachedEnvironment = false;
-    this.attachedUniformScaleOnly = false;
     this.attachedRotationAxes = new Set<TransformGizmoAxis>(ALL_TRANSFORM_AXES);
     this.dragStartTransform = null;
     this.activeTransformDrag = false;
@@ -948,11 +933,7 @@ export class TransformGizmoController {
       target.rotation.copyFromFloats(rotation.x, rotation.y, rotation.z);
     }
 
-    if (!this.attachedUniformScaleOnly) return transform;
-    return {
-      ...transform,
-      scale: normalizeSkyboxSphereScale(transform.scale),
-    };
+    return transform;
   }
 
   /** 返回当前 attachment 实际支持的工具；无效请求优先回退移动。 */
@@ -963,12 +944,12 @@ export class TransformGizmoController {
     return ALL_TRANSFORM_TOOLS.find((tool) => this.attachedSupportedTools.has(tool)) ?? 'translate';
   }
 
-  /** 环境和天空盒只允许统一缩放；普通实体保留三个轴向与统一缩放手柄。 */
+  /** 环境只允许统一缩放；普通实体保留三个轴向与统一缩放手柄。 */
   private updateScaleGizmoHandles(): void {
     const scaleGizmo = this.gizmoManager.gizmos.scaleGizmo;
     if (!scaleGizmo) return;
 
-    const axisEnabled = !this.attachedEnvironment && !this.attachedUniformScaleOnly;
+    const axisEnabled = !this.attachedEnvironment;
     scaleGizmo.xGizmo.isEnabled = axisEnabled;
     scaleGizmo.yGizmo.isEnabled = axisEnabled;
     scaleGizmo.zGizmo.isEnabled = axisEnabled;
