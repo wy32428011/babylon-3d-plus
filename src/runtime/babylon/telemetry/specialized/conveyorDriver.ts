@@ -317,13 +317,18 @@ export class ConveyorTelemetryDriver {
           : downstreamQueued
             ? CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS
             : CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
-        const deferReuse = !upstreamHoldsNewTask
+        const deferReuse = (
+          state.platformPlacedCargo
+          && this.hasDownstreamSubscriberForTask(state, heldCargo.task)
+        ) || (
+          !upstreamHoldsNewTask
           && canHandDownstream
           && heldCargo.task === state.pendingPreviousTask
           && heldCargo.task !== state.pendingTask
-          && state.pendingTaskAgeSeconds < reuseGraceSeconds;
+          && state.pendingTaskAgeSeconds < reuseGraceSeconds
+        );
         if (deferReuse) {
-          // 宽限期内先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
+          // 宽限期或出口门控期间先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
           this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);
         } else if (upstreamHoldsNewTask) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
@@ -512,12 +517,13 @@ export class ConveyorTelemetryDriver {
       for (const [subscriberCode, pull] of [...state.externalPulls.entries()]) {
         const subscriber = this.findModelByAssetCode(subscriberCode);
         const subscriberState = subscriber?.conveyorTelemetry ?? null;
-        // 登记自愈合：订阅者已不想要（task 变化/已有货）→ 摘除登记
-        if (!subscriber || !subscriberState || subscriberState.cargoCode !== null
+        // 登记自愈合：订阅者已不想要该 task → 摘除登记；暂时有货则保留并等待下帧
+        if (!subscriber || !subscriberState
           || (subscriberState.pendingTask !== pull.task && subscriberState.waitingTask !== pull.task)) {
           state.externalPulls.delete(subscriberCode);
           continue;
         }
+        if (subscriberState.cargoCode !== null) continue;
         const cargo = this.findHeldCargoByTask(pull.holderAssetCode, pull.task);
         if (!cargo) continue;
         // RGV 持货门控：仅放货到位才允许摘除，防止行车中途摘货（stacker 持货语义不变）
@@ -750,7 +756,7 @@ export class ConveyorTelemetryDriver {
 
   /**
    * 在本机 downstreamLinks 中找该货物的最先登记订阅者（Map 插入序）；
-   * 顺带自愈合：订阅者已不想要（task 变化/已有货）→ 摘除登记看下一个。
+   * 顺带自愈合：订阅者已不想要该 task → 摘除登记看下一个；暂时有货则保留登记等待。
    */
   private findDeliveryTarget(
     model: ModelRuntimeEntry,
@@ -761,11 +767,12 @@ export class ConveyorTelemetryDriver {
       if (link.task !== cargo.task) continue;
       const subscriber = this.findModelByAssetCode(subscriberCode);
       const subscriberState = subscriber?.conveyorTelemetry ?? null;
-      if (!subscriber || !subscriberState || subscriberState.cargoCode !== null
+      if (!subscriber || !subscriberState
         || (subscriberState.pendingTask !== link.task && subscriberState.waitingTask !== link.task)) {
         state.downstreamLinks.delete(subscriberCode);
         continue;
       }
+      if (subscriberState.cargoCode !== null) return null;
       return { subscriber, link };
     }
     return null;

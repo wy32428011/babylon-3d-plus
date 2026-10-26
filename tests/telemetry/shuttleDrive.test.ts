@@ -790,6 +790,62 @@ test('卸货到 conveyor 站台：伸满落座后保持原货物静止，货叉�
   }
 });
 
+test('卸货到 conveyor 站台：收叉归零时站台占用则保留原货重试，释放后交接同一实例', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const platformState: { cargoCode: string | null } = { cargoCode: 'cargo' };
+    const conveyorModel = {
+      conveyorCapable: true,
+      conveyorTelemetry: platformState,
+    } as unknown as ModelRuntimeEntry;
+    Object.assign(h.context.host, {
+      resolveBuiltInSlotHost: (locatorEntityId: string) => locatorEntityId === h.ref.locator?.entityId
+        ? { model: conveyorModel, locator: h.ref.locator }
+        : null,
+    });
+    const handoffCalls: string[] = [];
+    let transferred: unknown = null;
+    h.context.placeShuttleCargoIntoConveyorPlatform = (locatorEntityId: string, cargoKey: string) => {
+      handoffCalls.push(locatorEntityId);
+      if (platformState.cargoCode !== null) return false;
+      transferred = h.driver.detachClaimedCargoByKey(cargoKey);
+      return transferred !== null;
+    };
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7010 });
+    h.apply(PLACE, 0.1, 21);
+    const cargoKey = h.model.shuttleTelemetry.cargoKey!;
+    const cargo = h.state.shuttleCargoMeshes.get(cargoKey)!;
+    const heldPosition = cargo.root.position.clone();
+
+    for (let frame = 0; frame < 20 && h.model.shuttleTelemetry.forkOffset !== 0; frame += 1) h.apply(PLACE);
+    assert.equal(h.model.shuttleTelemetry.forkOffset, 0);
+    assert.equal(h.state.shuttleCargoMeshes.get(cargoKey), cargo, '站台占用不得销毁已落座货物');
+    assert.equal(h.model.shuttleTelemetry.cargoPendingPlatformLocatorId, h.ref.locator.entityId);
+    assert.equal(h.ref.disposedShuttleCargos.length, 0);
+    assert.ok(Vector3.Distance(cargo.root.position, heldPosition) < 1e-9, '等待期间货物必须保持静止');
+
+    const callsBeforeRetry = handoffCalls.length;
+    h.apply(PLACE, 0.1, 3);
+    assert.ok(handoffCalls.length > callsBeforeRetry, '货叉归零后必须持续重试站台交接');
+    assert.equal(h.state.shuttleCargoMeshes.get(cargoKey), cargo);
+
+    platformState.cargoCode = null;
+    h.apply(PLACE);
+    assert.equal(transferred, cargo, '站台释放后必须交接同一货物实例');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0);
+    assert.equal(h.model.shuttleTelemetry.cargoKey, null);
+    assert.equal(h.model.shuttleTelemetry.cargoPendingPlatformLocatorId, null);
+    assert.equal(h.ref.disposedShuttleCargos.length, 0);
+    const successCalls = handoffCalls.length;
+    h.apply(PLACE, 0.1, 10);
+    assert.equal(handoffCalls.length, successCalls, '交接完成后不得重复交付或刷货');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('卸货 Status 提前退出：收叉途中不交接，归零后补交付一次', () => {
   const h = makeHarness();
   try {

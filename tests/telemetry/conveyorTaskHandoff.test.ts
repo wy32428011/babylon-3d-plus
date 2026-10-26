@@ -1301,6 +1301,85 @@ test('线首站台：下游预订阅时放货不得直接交付，须走到本�
   }
 });
 
+test('线首站台：出口交付时下游暂时占用，保留订阅并在腾空后交付同一货物', () => {
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 }, B: { centerX: 4 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    h.apply('B', { task: 9, movement_x: 1 });
+    const cargo = h.placePlatformCargo('A', '9');
+    h.insertConveyorCargo('B', '8');
+
+    h.apply('A', { task: 0, movement_x: 1 }, 0.1, 200);
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, false, '前置：货物已到出口');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '下游占用时原货必须留在本机');
+    assert.equal(h.models.A.conveyorTelemetry.downstreamLinks.has('B'), true, '暂时占用不得删除订阅');
+    assert.equal(cargo.assetCode, 'A');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo', '不得覆盖下游上一箱货');
+
+    h.driver.detachClaimedCargoByKey(h.driver.getConveyorCargoKey('B', 'cargo'));
+    h.apply('A', { task: 0, movement_x: 0 });
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, null);
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo', '下游腾空后必须自动恢复交付');
+    assert.equal(cargo.assetCode, 'B');
+    assert.equal(onlyCargo(h.state).root, cargo.root, '必须继续交付同一货物实例');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('externalPull 接收方暂时占用：保留登记并在腾空后拉取同一货物', () => {
+  const h = makeHarness({ ST1: { centerX: -4, stacker: true }, CV2: { centerX: 0 } });
+  try {
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    assert.equal(h.models.CV2.conveyorTelemetry.externalPulls.size, 1);
+    h.insertConveyorCargo('CV2', '8');
+    const stackerCargo = h.insertStackerCargo('ST1', '7');
+
+    h.scan();
+    assert.equal(h.state.stackerCargoMeshes.size, 1, '接收方占用时不得摘除 stacker 原货');
+    assert.equal(h.models.CV2.conveyorTelemetry.externalPulls.size, 1, '暂时占用不得删除 externalPull');
+    assert.equal(stackerCargo.assetCode, 'ST1');
+
+    h.driver.detachClaimedCargoByKey(h.driver.getConveyorCargoKey('CV2', 'cargo'));
+    h.scan();
+    assert.equal(h.state.stackerCargoMeshes.size, 0);
+    assert.equal(stackerCargo.assetCode, 'CV2', '接收方腾空后必须恢复原拉取链路');
+    assert.equal(onlyCargo(h.state).root, stackerCargo.root);
+    assert.equal(h.models.CV2.conveyorTelemetry.externalPulls.size, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：出口门控期间新 task 超过宽限且上游已持新货，旧货仍不得销毁或改号', () => {
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 }, B: { centerX: 4 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    h.apply('B', { task: 9, movement_x: 1 });
+    const cargo = h.placePlatformCargo('A', '9');
+    h.models.A.conveyorTelemetry.upstreamLinks.set('UP', {
+      task: '10', holderAssetCode: 'UP', hops: 1, direction: 1,
+    });
+
+    h.apply('A', { task: 10, movement_x: 0 }, 1, 5);
+    assert.equal(h.models.A.conveyorTelemetry.pendingTaskAgeSeconds > 3, true, '前置：必须超过普通复用宽限');
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, true);
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.A.conveyorTelemetry.pendingTask, '10', '新 task 必须挂起等旧货交付');
+    assert.equal(cargo.task, '9', '规则三不得销毁已有有效订阅的门控旧货');
+    assert.equal(cargo.assetCode, 'A');
+
+    h.apply('A', { task: 10, movement_x: 1 }, 0.1, 200);
+    assert.equal(cargo.assetCode, 'B', '到出口后必须交付原 task 货物');
+    assert.equal(cargo.task, '9');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, null);
+    assert.equal(h.models.A.conveyorTelemetry.waitingTask, '10', '旧货交付后新 task 必须继续原等待流程');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('线首站台：放货落点已在出口时下一帧解除交付门控', () => {
   const h = makeHarness({ A: { centerX: 0, platformOffset: HALF_RANGE }, B: { centerX: 4 } });
   try {

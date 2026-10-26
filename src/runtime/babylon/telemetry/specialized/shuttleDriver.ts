@@ -30,6 +30,7 @@ import {
 } from '../../../mqtt/deviceTelemetry';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../SceneRuntime';
 import { writeDeviceTelemetryMetadata } from './telemetryMetadata';
+import { isConveyorRuntimeModel } from './specializedModelAssets';
 import {
   createCargoHandoffState,
   createCargoSpawnWorldRotation,
@@ -1253,7 +1254,7 @@ export class ShuttleTelemetryDriver {
    * 落货保持搬运朝向（货叉托举/放下均不改变货物姿态）：优先沿用绑定时锁定的朝向，
    * 其次取货物当前世界朝向，最后回退货格朝向；缩放不取货格镜像，避免与保留朝向错配。
    * 非 fetch 的 conveyor 站台目标在落货时登记待交接，货物仍由本机持有并静止，货叉归零后才交给 conveyor；
-   * 交接被拒（对方已有货等）保持原位，收叉完成时走原销毁路径。
+   * 交接仅因站台占用被拒时保留原位并重试，其他失败仍走原销毁路径。
    */
   private unbindShuttleCargo(
     model: ModelRuntimeEntry,
@@ -1321,10 +1322,14 @@ export class ShuttleTelemetryDriver {
       this.host.handleFetchRowSync(state.cargoFetchRow as number);
     } else if (state.cargoFetchRow === null) {
       const pendingLocatorId = state.cargoPendingPlatformLocatorId;
-      if (pendingLocatorId !== null
-        && this.context.placeShuttleCargoIntoConveyorPlatform(pendingLocatorId, cargoKey)) {
-        this.clearShuttleCargoState(model);
-        return;
+      if (pendingLocatorId !== null) {
+        if (this.context.placeShuttleCargoIntoConveyorPlatform(pendingLocatorId, cargoKey)) {
+          this.clearShuttleCargoState(model);
+          return;
+        }
+        const platformHost = this.host.resolveBuiltInSlotHost(pendingLocatorId);
+        if (platformHost && isConveyorRuntimeModel(platformHost.model)
+          && (platformHost.model.conveyorTelemetry?.cargoCode ?? null) !== null) return;
       }
       this.disposeShuttleCargoByKey(cargoKey);
     }
