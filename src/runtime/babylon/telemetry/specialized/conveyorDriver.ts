@@ -271,6 +271,7 @@ export class ConveyorTelemetryDriver {
         state.cargoCode = null;
         state.handoffEntryOffset = null;
         state.entryHandoffPending = false;
+        state.platformPlacedCargo = false;
         if (heldTask) {
           this.notifyTaken(model, heldTask, null, movementDirection !== 0 ? movementDirection : this.resolveFlowDirection(model));
         }
@@ -332,6 +333,7 @@ export class ConveyorTelemetryDriver {
           state.cargoCode = null;
           state.handoffEntryOffset = null;
           state.entryHandoffPending = false;
+          state.platformPlacedCargo = false;
           this.notifyTaken(model, oldTask, null, flowDirection);
           state.waitingTask = state.pendingTask;
           this.sendSubscribe(model, state.pendingTask, probeDirection);
@@ -374,6 +376,7 @@ export class ConveyorTelemetryDriver {
           state.handoffEntryOffset = null;
           state.entryHandoffPending = false;
           state.platformInboundCargo = false;
+          state.platformPlacedCargo = false;
           state.cargoDriveEngaged = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
@@ -447,17 +450,17 @@ export class ConveyorTelemetryDriver {
         minOffset = Math.max(minOffset, perpendicularEndOffsets.negative);
       }
     }
+    const flowDirection = state.platformInboundCargo && state.platformInboundDirection !== 0
+      ? state.platformInboundDirection
+      : this.resolveFlowDirection(model);
+    const isAtFlowEnd = () => flowDirection * plan.forwardSign >= 0
+      ? state.cargoTravelOffset >= maxOffset - CONVEYOR_TRAVEL_ENDPOINT_EPSILON
+      : state.cargoTravelOffset <= minOffset + CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
     // 字段接管是暂时的：movement 归 0 后持货已被驱动过且未达流向终点则按流向重新登记自驱续行，
     // 否则接管期间 movement 非 0 消息已清零自驱（见帧首），字段静默后货物会滞留行程中段。
     // 从未被驱动过的持货（stacker 站台放货落座）不续行，保持滞留停泊等待 task 复用。
     if (movementDirection === 0 && state.selfDriveDirection === 0 && state.cargoDriveEngaged) {
-      const flowDirection = state.platformInboundCargo && state.platformInboundDirection !== 0
-        ? state.platformInboundDirection
-        : this.resolveFlowDirection(model);
-      const atFlowEnd = flowDirection * plan.forwardSign >= 0
-        ? state.cargoTravelOffset >= maxOffset - CONVEYOR_TRAVEL_ENDPOINT_EPSILON
-        : state.cargoTravelOffset <= minOffset + CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
-      if (!atFlowEnd) state.selfDriveDirection = flowDirection;
+      if (!isAtFlowEnd()) state.selfDriveDirection = flowDirection;
     }
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
     // 直角交接插值期间冻结走行：目标点固定在拐角，货物沿上游轴滑到拐角后再沿本机轴驱动。
@@ -470,6 +473,7 @@ export class ConveyorTelemetryDriver {
       state.cargoDriveEngaged = true;
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
+    if (state.platformPlacedCargo && isAtFlowEnd()) state.platformPlacedCargo = false;
     // 货物已驶入常规行程后解除拐角进入放宽，反向再走也不会退到机外。
     if (state.handoffEntryOffset !== null && Math.abs(state.cargoTravelOffset) <= travelHalfRange + CONVEYOR_TRAVEL_ENDPOINT_EPSILON) {
       state.handoffEntryOffset = null;
@@ -522,6 +526,8 @@ export class ConveyorTelemetryDriver {
         if (this.isLiftHeldCargo(cargo) && !this.context.isLiftCargoReadyForExternalPull(cargo)) continue;
         // stacker mode==4 延后交接门控：落货站台后待收叉完毕的滞留货由推送路径交付，pull 不得提前摘走
         if (this.context.isStackerCargoPendingPlatformHandoff(cargo)) continue;
+        // shuttle 站台货同样等货叉实际归零才交付，收叉前不得被订阅波拉走
+        if (this.context.isShuttleCargoPendingPlatformHandoff(cargo)) continue;
         state.externalPulls.delete(subscriberCode);
         this.trace(`外部拉取 ${pull.holderAssetCode} task=${pull.task} -> ${subscriberCode} hops=${pull.hops}`);
         const detached = this.context.detachClaimedCargoByReference(cargo);
@@ -734,7 +740,7 @@ export class ConveyorTelemetryDriver {
     const state = model.conveyorTelemetry;
     if (state.cargoCode === null) return;
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
-    if (!cargo || !cargo.task) return;
+    if (!cargo || !cargo.task || state.platformPlacedCargo) return;
     const target = this.findDeliveryTarget(model, cargo);
     if (!target) return;
     const detached = this.context.detachClaimedCargoByReference(cargo);
@@ -881,6 +887,7 @@ export class ConveyorTelemetryDriver {
     // 上游来货恒以站台为终点：记录交付流向，走行钳制按流向收敛到站台支撑位（无站台则不钳）。
     subscriberState.platformInboundCargo = this.resolvePlatformLocator(subscriber) !== null;
     subscriberState.platformInboundDirection = direction;
+    subscriberState.platformPlacedCargo = false;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(subscriber.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
 
     this.sendUnsubscribe(subscriber, task, direction);
@@ -1189,6 +1196,7 @@ export class ConveyorTelemetryDriver {
         model.conveyorTelemetry.handoffEntryOffset = null;
         model.conveyorTelemetry.entryHandoffPending = false;
         model.conveyorTelemetry.platformInboundCargo = false;
+        model.conveyorTelemetry.platformPlacedCargo = false;
       }
     }
     this.state.conveyorCargoMeshes.delete(key);
@@ -1250,6 +1258,9 @@ export class ConveyorTelemetryDriver {
     state.handoffEntryOffset = null;
     state.entryHandoffPending = false;
     state.platformInboundCargo = false;
+    // 线首站台货须先完成本机走行，不能被已登记的下游订阅从站台直接接走。
+    state.platformPlacedCargo = this.resolveProbeNeighbor(model, this.resolveFlowDirection(model)) === null
+      && state.upstreamLinks.size === 0;
     // 站台落座为滞留停泊：未驱动前不允许字段静默续行，等待 task 复用才驶离。
     state.cargoDriveEngaged = false;
     // 等待中的 task 由放入货物兑现：仅限匿名货或 task 本就一致（线首站台未发订阅，退订为无害空操作）。

@@ -424,12 +424,14 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       }
     }
     for (const [key, cargo] of [...this.state.shuttleCargoMeshes]) {
-      if (key !== claimingCargoKey && cargo.task === task) {
+      if (key !== claimingCargoKey && cargo.task === task
+        && !this.shuttleDriver.isShuttleCargoPendingPlatformHandoff(cargo)) {
         return this.shuttleDriver.detachClaimedCargoByKey(key);
       }
     }
     for (const [key, cargo] of [...this.state.liftCargoMeshes]) {
-      if (key !== claimingCargoKey && cargo.task === task) {
+      if (key !== claimingCargoKey && cargo.task === task
+        && this.liftDriver.isLiftCargoReadyForExternalPull(cargo)) {
         return this.liftDriver.detachClaimedCargoByKey(key);
       }
     }
@@ -568,6 +570,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** stacker 持货外部拉取门控：委托 stackerDriver 判定（mode==4 待收叉完毕的站台滞留货不允许摘除）。 */
   isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean {
     return this.stackerDriver.isStackerCargoPendingPlatformHandoff(cargo);
+  }
+
+  /** shuttle 站台货待收叉门控：货叉归零前不允许外部拉取或全局 task 接管。 */
+  isShuttleCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean {
+    return this.shuttleDriver.isShuttleCargoPendingPlatformHandoff(cargo);
   }
 
   // ===== 帧内私有方法 =====

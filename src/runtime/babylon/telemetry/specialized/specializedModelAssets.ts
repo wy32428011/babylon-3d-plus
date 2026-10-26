@@ -211,6 +211,7 @@ export function createShuttleTelemetryState(root: TransformNode): ShuttleModelTe
     cargoHoldScaling: null,
     cargoFetchRow: null,
     cargoPlaceTarget: null,
+    cargoPendingPlatformLocatorId: null,
     lastStatus: null,
     forkPhase: 'idle',
     statusActionDone: false,
@@ -250,6 +251,7 @@ export function resetShuttleTelemetryState(model: ModelRuntimeEntry): void {
   model.shuttleTelemetry.cargoHoldScaling = null;
   model.shuttleTelemetry.cargoFetchRow = null;
   model.shuttleTelemetry.cargoPlaceTarget = null;
+  model.shuttleTelemetry.cargoPendingPlatformLocatorId = null;
   model.shuttleTelemetry.lastStatus = null;
   model.shuttleTelemetry.forkPhase = 'idle';
   model.shuttleTelemetry.statusActionDone = false;
@@ -458,6 +460,7 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     entryHandoffPending: false,
     platformInboundCargo: false,
     platformInboundDirection: 1,
+    platformPlacedCargo: false,
   };
 }
 
@@ -486,6 +489,7 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.entryHandoffPending = false;
   model.conveyorTelemetry.platformInboundCargo = false;
   model.conveyorTelemetry.platformInboundDirection = 1;
+  model.conveyorTelemetry.platformPlacedCargo = false;
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */

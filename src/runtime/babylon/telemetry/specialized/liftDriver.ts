@@ -376,8 +376,12 @@ export class LiftTelemetryDriver {
     }
     // 标注对账（先于平移推进计算：强制补交付路径下 latch 已死、ws 非 3/5，平移推进须由对账状态接管，
     // 否则 step1→step2 排队平移启动后 progress 停摆，第二箱卡死在平移起点）
-    const forceBack = !frozen && this.isLiftStationForceReconcilable(snapshot, state, 1, 'task_num_fin_second_up');
-    const forceFront = !frozen && this.isLiftStationForceReconcilable(snapshot, state, 0, 'task_num_fin_first_up');
+    // 标注归零只登记补交付需求：载货台移动中货物继续随台，必须在当前送料层再次到位后才可出机，
+    // 同时保证 outgoingEntityId 已在上方刷新为当前层，不向旧层远程交付。
+    const forceBack = arrived && state.targetSide === 1
+      && this.isLiftStationForceReconcilable(snapshot, state, 1, 'task_num_fin_second_up');
+    const forceFront = arrived && state.targetSide === 1
+      && this.isLiftStationForceReconcilable(snapshot, state, 0, 'task_num_fin_first_up');
     const forceReconciling = forceBack || forceFront;
 
     // 已开始的交接/排队平移不受 work_state 回落（0/6/7/11）冻结：载货台提前升降时上台插值仍须收敛到工位锚点，

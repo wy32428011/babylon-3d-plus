@@ -171,6 +171,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     },
   };
 
+  let shuttleHandoffPending = false;
   const context = {
     scene,
     state,
@@ -180,9 +181,9 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     getOrCreateStackerCargo: () => { throw new Error('not used'); },
     getOrCreateConveyorCargo: () => { throw new Error('driver 内部自建，不应走 context'); },
     adoptGlobalCargoByTask: () => null,
-    // 镜像 SpecializedTelemetryRuntime.detachClaimedCargoByReference：按引用从三张表摘除并清理遥测引用
+    // 镜像 SpecializedTelemetryRuntime.detachClaimedCargoByReference：按引用从外部持货表摘除并清理遥测引用
     detachClaimedCargoByReference: (cargo: ConveyorCargoRuntimeEntry) => {
-      const tables = [state.stackerCargoMeshes, state.conveyorCargoMeshes, state.rgvCargoMeshes];
+      const tables = [state.stackerCargoMeshes, state.conveyorCargoMeshes, state.rgvCargoMeshes, state.shuttleCargoMeshes];
       for (const table of tables) {
         for (const [key, entry] of [...table]) {
           if (entry !== (cargo as unknown)) continue;
@@ -206,6 +207,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     },
     // 本套测试无 mode==4 站台待交接状态，门控恒 false
     isStackerCargoPendingPlatformHandoff: () => false,
+    isShuttleCargoPendingPlatformHandoff: () => shuttleHandoffPending,
   };
   const driver = new ConveyorTelemetryDriver(context as never);
 
@@ -242,6 +244,25 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       state.stackerCargoMeshes.set(JSON.stringify([assetCode, 'front']), entry as ConveyorCargoRuntimeEntry);
       return entry;
     },
+    /** 向 shuttle 货物表插入持有货物，并模拟收叉待交接门控。 */
+    insertShuttleCargo: (assetCode: string, task: string, pending = true) => {
+      const root = new TransformNode(`${assetCode}_cargo_root`, scene);
+      root.rotationQuaternion = Quaternion.Identity();
+      const entry = {
+        assetCode,
+        containerCode: '',
+        task,
+        root,
+        outputOwner: null,
+        fallback: null,
+        generatorEntityId: null,
+        handoff: null,
+      };
+      state.shuttleCargoMeshes.set(JSON.stringify([assetCode, 'cargo']), entry as ConveyorCargoRuntimeEntry);
+      shuttleHandoffPending = pending;
+      return entry;
+    },
+    setShuttleHandoffPending: (pending: boolean) => { shuttleHandoffPending = pending; },
     /** 向 conveyor 货物表插入持有货物并置 holder 遥测引用（模拟输送线已持有的货箱）。 */
     insertConveyorCargo: (assetCode: string, task: string) => {
       const root = new TransformNode(`${assetCode}_cargo_root`, scene);
@@ -258,6 +279,19 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       };
       state.conveyorCargoMeshes.set(JSON.stringify([assetCode, 'cargo']), entry as ConveyorCargoRuntimeEntry);
       models.get(assetCode)!.conveyorTelemetry.cargoCode = 'cargo';
+      return entry;
+    },
+    /** 模拟 shuttle/stacker 向设备内置站台放货。 */
+    placePlatformCargo: (assetCode: string, task = '') => {
+      const root = new TransformNode(`${assetCode}_platform_cargo_root`, scene);
+      const entry = {
+        assetCode: 'SHUTTLE', containerCode: '', task, root,
+        outputOwner: null, fallback: null, generatorEntityId: null, handoff: null,
+        axialLengthCache: null, lockedWorldRotation: null,
+      } as unknown as ConveyorCargoRuntimeEntry;
+      const platform = platformLocators.get(`e_${assetCode}`);
+      assert.ok(platform, `${assetCode} 必须配置内置站台`);
+      assert.ok(driver.acceptPlatformPlacedCargo(models.get(assetCode)!, platform, entry), '站台放货必须被接收');
       return entry;
     },
     /** 向 RGV 货物表插入持有货物（模拟 RGV 行车中已持有的在途货箱，司机遥测引用由调用方自理）。 */
@@ -853,6 +887,29 @@ test('stacker 持货拉取：订阅触达非 conveyor 邻居登记 externalPulls
   }
 });
 
+test('shuttle 待收叉站台货：externalPull 不得提前摘除，释放后按原订阅链路交接', () => {
+  const h = makeHarness({ SH1: { centerX: -4, stacker: true }, CV2: { centerX: 0 } });
+  try {
+    const shuttleCargo = h.insertShuttleCargo('SH1', '7');
+
+    h.apply('CV2', { task: 7, movement_x: 1 });
+    assert.equal(h.state.shuttleCargoMeshes.size, 1, '收叉前货物必须留在 shuttle 表');
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '收叉前不得进入 conveyor 持货表');
+    assert.equal(h.models.CV2.conveyorTelemetry.externalPulls.size, 1, '等待期间必须保留外部拉取登记');
+
+    h.setShuttleHandoffPending(false);
+    h.scan();
+    assert.equal(h.state.shuttleCargoMeshes.size, 0, '门控释放后必须摘除 shuttle 原引用');
+    const pushed = onlyCargo(h.state);
+    assert.equal(pushed.root, shuttleCargo.root, '必须接管 shuttle 同一货物实例');
+    assert.equal(pushed.assetCode, 'CV2');
+    assert.equal(h.models.CV2.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.CV2.conveyorTelemetry.externalPulls.size, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('链式接力：同帧逐级传递，同一货物实例沿链路传到末端', () => {
   const h = makeHarness({
     CV1: { centerX: -4, origin: true },
@@ -1207,6 +1264,78 @@ test('线首站台：新 task 不自建不订阅等待 stacker；放货落座站
       `站台滞留货物必须随 movement 走向出口端（${HALF_RANGE}），实际 ${offset}`);
   } finally {
     h.dispose();
+  }
+});
+
+test('线首站台：下游预订阅时放货不得直接交付，须走到本机出口（1033/1034 回归）', () => {
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 }, B: { centerX: 4 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    h.apply('B', { task: 9, movement_x: 1 });
+    assert.ok(h.models.A.conveyorTelemetry.downstreamLinks.has('B'), '下游必须已向上游站台机登记订阅');
+
+    const cargo = h.placePlatformCargo('A');
+    assert.equal(cargo.task, '9');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, null, '落座当帧不得被预订阅直接接走');
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, true);
+    assert.equal(h.models.A.conveyorTelemetry.selfDriveDirection, 0, '落座不得自动启动');
+
+    h.apply('A', { task: 0, movement_x: 1 });
+    const drivenOffset = h.models.A.conveyorTelemetry.cargoTravelOffset;
+    assert.ok(drivenOffset > -1.5 && drivenOffset < HALF_RANGE, '货物必须先随字段在 1034 机内走行');
+    h.apply('A', { task: 0, movement_x: 0 }, 0.1, 3);
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '未到出口仍不得交付');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, null);
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, true);
+
+    h.apply('A', { task: 0, movement_x: 0 }, 0.1, 200);
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, null, '到出口后才允许交付');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, false);
+    assert.ok(Math.abs(h.models.A.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6);
+    assert.ok(Math.abs(h.models.B.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6);
+    assert.equal(cargo.assetCode, 'B');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：放货落点已在出口时下一帧解除交付门控', () => {
+  const h = makeHarness({ A: { centerX: 0, platformOffset: HALF_RANGE }, B: { centerX: 4 } });
+  try {
+    h.apply('A', { task: 9, movement_x: 1 });
+    h.apply('B', { task: 9, movement_x: 1 });
+    h.placePlatformCargo('A');
+    h.apply('A', { task: 9, movement_x: 0 });
+    assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, false);
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, 'cargo', '解除门控当帧仍保持原持货');
+    h.apply('A', { task: 9, movement_x: 0 });
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo', '出口货不得被门控永久阻塞');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：货物被取走或销货后清理出口门控', () => {
+  for (const action of ['pickup', 'dispose'] as const) {
+    const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5, autoDispose: true }, B: { centerX: 4 } });
+    try {
+      h.apply('A', { task: 9, movement_x: 1 });
+      h.apply('B', { task: 9, movement_x: 1 });
+      const cargo = h.placePlatformCargo('A');
+      assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, true);
+      if (action === 'pickup') {
+        assert.equal(h.driver.adoptPlatformCargoForStacker(h.models.A, 'SH1'), cargo);
+      } else {
+        h.apply('A', { task: 9, movement_x: 0, mode: 2, front_has_goods: 0, back_has_goods: 0 });
+      }
+      assert.equal(h.models.A.conveyorTelemetry.cargoCode, null);
+      assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, false);
+      assert.equal(h.state.conveyorCargoMeshes.size, 0);
+    } finally {
+      h.dispose();
+    }
   }
 });
 

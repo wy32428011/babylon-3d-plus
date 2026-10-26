@@ -5,6 +5,7 @@ import { MeshBuilder, NullEngine, Quaternion, Scene, TransformNode, Vector3 } fr
 
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ShuttleTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/shuttleDriver';
+import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
 import { createShuttleTelemetryState } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { createSpecializedTelemetrySharedState } from '../../src/runtime/babylon/telemetry/specialized/types';
 import type { LocatorRuntimeEntry, ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
@@ -738,31 +739,117 @@ test('留存格口接单排同步：放货建立持久抑制并刷新同排，�
   }
 });
 
-test('卸货到 conveyor 站台：落货当场交付（placeShuttleCargoIntoConveyorPlatform），不补建第二个货物', () => {
+test('卸货到 conveyor 站台：伸满落座后保持原货物静止，货叉归零才交接且不重复刷货', () => {
   const h = makeHarness();
   try {
     makeShuttleGeometry(h);
     h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
-    // 模拟交接成功：与 SpecializedTelemetryRuntime.placeShuttleCargoIntoConveyorPlatform 同语义，摘除货物并清理引用
-    h.context.placeShuttleCargoIntoConveyorPlatform = (_locatorEntityId: string, cargoKey: string) => {
+    const handoffCalls: string[] = [];
+    h.context.placeShuttleCargoIntoConveyorPlatform = (locatorEntityId: string, cargoKey: string) => {
+      handoffCalls.push(locatorEntityId);
       h.driver.detachClaimedCargoByKey(cargoKey);
       return true;
     };
     const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7007 });
 
-    h.apply(PLACE, 0.1, 1);
-    assert.equal(h.state.shuttleCargoMeshes.size, 1, '卸货相位必须补建叉上货物');
+    h.apply(PLACE, 0.1, 21);
+    const cargoKey = h.model.shuttleTelemetry.cargoKey!;
+    const cargo = h.state.shuttleCargoMeshes.get(cargoKey)!;
+    const heldPosition = cargo.root.position.clone();
+    assert.ok(cargo, '伸满落座后货物仍必须由 shuttle 持有');
+    assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false, '伸满必须立即解绑落货');
+    assert.equal(h.model.shuttleTelemetry.cargoPendingPlatformLocatorId, h.ref.locator.entityId);
+    assert.ok(h.model.shuttleTelemetry.forkOffset > 0, '落座后货叉必须仍在收回途中');
+    assert.equal(h.driver.isShuttleCargoPendingPlatformHandoff(cargo), true);
+    const runtime = new SpecializedTelemetryRuntime(h.scene, {
+      collectModels: () => [{ entityId: 'e1', model: h.model }],
+    } as never);
+    runtime.state.shuttleCargoMeshes.set(cargoKey, cargo);
+    assert.equal(runtime.adoptGlobalCargoByTask('7007', 'other'), null, '全局 task 不得接管待收叉站台货');
+    assert.equal(runtime.state.shuttleCargoMeshes.get(cargoKey), cargo);
+    assert.deepEqual(handoffCalls, [], '收叉前不得调用站台交接');
 
-    // 伸满解绑落货：当场交接给 conveyor，货物离开 shuttle 货物表
+    h.apply(PLACE, 0.1, 5);
+    assert.equal(h.state.shuttleCargoMeshes.get(cargoKey), cargo, '收叉途中必须保留同一货物实例');
+    assert.ok(Vector3.Distance(cargo.root.position, heldPosition) < 1e-9, '待交接货物必须静止在支撑位');
+    assert.deepEqual(handoffCalls, [], '收叉途中仍不得交接');
+
+    for (let frame = 0; frame < 20 && h.model.shuttleTelemetry.forkOffset !== 0; frame += 1) h.apply(PLACE);
+    assert.equal(h.model.shuttleTelemetry.forkOffset, 0);
+    assert.deepEqual(handoffCalls, [h.ref.locator.entityId], '货叉归零帧必须交接一次');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0);
+    assert.equal(h.model.shuttleTelemetry.cargoKey, null);
+    assert.equal(h.model.shuttleTelemetry.cargoPendingPlatformLocatorId, null);
+    assert.equal(h.driver.isShuttleCargoPendingPlatformHandoff(cargo), false, '完成后待交接查询必须清除');
+
     h.apply(PLACE, 0.1, 20);
-    assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false, '伸满必须解绑落货');
-    assert.equal(h.state.shuttleCargoMeshes.size, 0, '落货当场交接成功后货物必须离开 shuttle 货物表');
-    assert.equal(h.model.shuttleTelemetry.cargoKey, null, '交接成功后货物引用必须清空');
+    assert.deepEqual(handoffCalls, [h.ref.locator.entityId], '后续同相位帧不得重复交接');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0, '交接后不得补建第二个货物');
+  } finally {
+    h.dispose();
+  }
+});
 
-    // 后续收叉帧：不得因 cargoKey 为空而补建第二个货物
-    h.apply(PLACE, 0.1, 10);
-    assert.equal(h.state.shuttleCargoMeshes.size, 0, '交接成功后不得补建第二个货物');
-    assert.equal(h.model.shuttleTelemetry.cargoBoundToFork, false, '叉上不得再有绑定货物');
+test('卸货 Status 提前退出：收叉途中不交接，归零后补交付一次', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const handoffCalls: string[] = [];
+    h.context.placeShuttleCargoIntoConveyorPlatform = (locatorEntityId: string, cargoKey: string) => {
+      handoffCalls.push(locatorEntityId);
+      h.driver.detachClaimedCargoByKey(cargoKey);
+      return true;
+    };
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7008 });
+    h.apply(PLACE, 0.1, 21);
+    const cargo = h.state.shuttleCargoMeshes.get(h.model.shuttleTelemetry.cargoKey!)!;
+    assert.ok(h.model.shuttleTelemetry.forkOffset > 0);
+
+    const MOVE = targetFrame(5, 10, 1, 2, 2, { task: 7008 });
+    h.apply(MOVE);
+    assert.ok(h.model.shuttleTelemetry.forkOffset > 0, 'Status 退出帧仍在收叉');
+    assert.equal(h.state.shuttleCargoMeshes.get(h.model.shuttleTelemetry.cargoKey!), cargo);
+    assert.deepEqual(handoffCalls, [], 'Status 提前退出不得绕过收叉门控');
+
+    h.apply(MOVE, 0.1, 20);
+    assert.equal(h.model.shuttleTelemetry.forkOffset, 0);
+    assert.deepEqual(handoffCalls, [h.ref.locator.entityId], '收叉归零后必须补交付');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('卸货目标跳变 catch-up：加速收叉前保留站台货，归零后按原站台交付', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    const handoffCalls: string[] = [];
+    h.context.placeShuttleCargoIntoConveyorPlatform = (locatorEntityId: string, cargoKey: string) => {
+      handoffCalls.push(locatorEntityId);
+      h.driver.detachClaimedCargoByKey(cargoKey);
+      return true;
+    };
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7009 });
+    h.apply(PLACE, 0.1, 21);
+    const originalLocatorId = h.ref.locator.entityId;
+    const cargo = h.state.shuttleCargoMeshes.get(h.model.shuttleTelemetry.cargoKey!)!;
+    assert.ok(h.model.shuttleTelemetry.forkOffset > 0);
+
+    const RETARGET = targetFrame(3, 5, 1, 2, 2, { task: 7009 });
+    h.apply(RETARGET);
+    assert.equal(h.model.shuttleTelemetry.forkCatchUp, true);
+    assert.ok(h.model.shuttleTelemetry.forkOffset > 0);
+    assert.equal(h.state.shuttleCargoMeshes.get(h.model.shuttleTelemetry.cargoKey!), cargo);
+    assert.deepEqual(handoffCalls, [], 'catch-up 强制完成动作不得提前交接');
+
+    h.apply(RETARGET, 0.1, 10);
+    assert.equal(h.model.shuttleTelemetry.forkOffset, 0);
+    assert.equal(h.model.shuttleTelemetry.forkCatchUp, false);
+    assert.deepEqual(handoffCalls, [originalLocatorId], '加速收叉归零后必须向原站台补交付');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0);
   } finally {
     h.dispose();
   }

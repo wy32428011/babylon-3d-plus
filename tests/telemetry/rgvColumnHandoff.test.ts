@@ -171,6 +171,7 @@ function makeHarness() {
     },
     isRgvCargoReadyForExternalPull: (cargo: GeneratedCargoRuntimeEntry) => rgvDriver.isRgvCargoReadyForExternalPull(cargo),
     isStackerCargoPendingPlatformHandoff: () => false,
+    isShuttleCargoPendingPlatformHandoff: () => false,
   };
   conveyorDriver = new ConveyorTelemetryDriver(context as never);
   rgvDriver = new RgvTelemetryDriver(context as never);

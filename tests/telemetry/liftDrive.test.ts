@@ -6,6 +6,7 @@ import { MeshBuilder, NullEngine, Quaternion, Scene, TransformNode, Vector3 } fr
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ConveyorTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/conveyorDriver';
 import { LiftTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/liftDriver';
+import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
 import {
   createConveyorTelemetryState,
   createLiftTelemetryState,
@@ -225,11 +226,13 @@ function makeHarness(options: HarnessOptions = {}) {
     isRgvCargoReadyForExternalPull: () => false,
     isLiftCargoReadyForExternalPull: (cargo: GeneratedCargoRuntimeEntry) => liftDriver.isLiftCargoReadyForExternalPull(cargo),
     isStackerCargoPendingPlatformHandoff: () => false,
+    isShuttleCargoPendingPlatformHandoff: () => false,
   };
   liftDriver = new LiftTelemetryDriver(context as never);
   const conveyorDriver = new ConveyorTelemetryDriver(context as never);
 
   return {
+    scene,
     state,
     logs,
     delivered,
@@ -935,7 +938,7 @@ test('空载运动观察不缓存轨迹轴，绑定层晚就绪后业务仍正�
   } finally { h.dispose(); }
 });
 
-test('双货连续送第二箱错过窗口：latch 失效后标注归零触发强制补交付，货物不再滞留', () => {
+test('双货连续送第二箱错过窗口：换层途中标注归零仍随台等待，回到送料层后强制补交付', () => {
   const h = makeHarness();
   try {
     const { a, b } = adoptTwoCargos(h);
@@ -957,25 +960,62 @@ test('双货连续送第二箱错过窗口：latch 失效后标注归零触发�
     assert.deepEqual(h.delivered, [a], 'latch 失效后 B 不得走正常路径交付');
     assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, JSON.stringify(['LIFT1', 0]), 'B 必须滞留 step1');
 
-    // PLC 侧两箱均已卸出：标注归零 → 强制补交付接管（承接冷却消退后启动 step1→step2 排队平移；
-    // latch 已死、ws=0，平移推进由对账状态驱动，否则 B 卡死在平移起点）
-    const drained = { reference_upper_step: 0, level_upper: 0, work_state: 0, task_num_fin_first_up: 0, task_num_fin_second_up: 0 };
-    runUntil(h, drained, () => h.liftModel.liftTelemetry.stations[1].cargoKey === JSON.stringify(['LIFT1', 1]), 30);
+    // 换层途中 PLC 标注归零：只登记对账需求，B 继续随载货台升降，不得向旧送料层远程交付
+    const movingDrained = { ...retargeting, task_num_fin_first_up: 0, task_num_fin_second_up: 0 };
+    const offsetBeforeDrain = h.liftModel.liftTelemetry.liftOffset;
+    h.applyLift(movingDrained);
+    assert.ok(h.liftModel.liftTelemetry.liftOffset < offsetBeforeDrain, '标注归零时载货台必须仍在换层途中');
+    assert.deepEqual(h.delivered, [a], '升降途中标注归零不得触发补交付');
+    assert.equal(h.liftDriver.isLiftCargoReadyForExternalPull(b), false, '升降途中货物不得被外部拉取');
+    assert.ok(
+      Math.abs(b.root.position.y - (DECK_TOP_BASE_Y + h.liftModel.liftTelemetry.liftOffset)) < 1e-6,
+      '等待补交付期间 B 必须随载货台同高',
+    );
+
+    // 回到当前送料层并再次到位：才允许强制对账，先完成 step1→step2 排队平移
+    const returning = { reference_upper_step: 2, level_upper: 2, work_state: 0, task_num_fin_first_up: 0, task_num_fin_second_up: 0 };
+    runUntil(h, returning, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+    runUntil(h, returning, () => h.liftModel.liftTelemetry.stations[1].cargoKey === JSON.stringify(['LIFT1', 1]), 30);
     assert.equal(h.liftModel.liftTelemetry.stations[0].cargoKey, null, 'B 必须 rekey 平移到 step2');
 
     // 平移完成但 COUT 仍被 A 占用：B 留 step2 锚点每帧重试，不丢不毁
-    runUntil(h, drained, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard, 30);
-    runFrames(h, drained, 3);
+    runUntil(h, returning, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard, 30);
+    runFrames(h, returning, 3);
     assert.deepEqual(h.delivered, [a], '接收方占用期间 B 不得交付');
     assert.equal(h.state.liftCargoMeshes.size, 1, 'B 滞留期间不得销毁');
     assert.ok(Math.abs(b.root.position.x - STATION_OFFSET) < 1e-6, 'B 必须停在 step2 锚点原位');
 
     // 接收方腾空：当帧强制补交付成功，货物不再滞留
     ejectConveyorCargo(h);
-    h.applyLift(drained);
+    h.applyLift(returning);
     assert.deepEqual(h.delivered, [a, b], '接收方空闲后 B 必须强制补交付');
     assert.equal(h.state.liftCargoMeshes.size, 0, '两箱都必须离台');
     assert.ok(h.logs.some((message) => message.includes('强制补交付')), '必须产生强制补交付告警');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('全局 task 接管 lift 货：升降中被拒，送料层到位后允许', () => {
+  const h = makeHarness();
+  try {
+    const { a } = adoptTwoCargos(h);
+    const cargoKey = JSON.stringify(['LIFT1', 1]);
+    const runtime = new SpecializedTelemetryRuntime(h.scene, {
+      collectModels: () => [{ entityId: 'e_LIFT1', model: h.liftModel }],
+    } as never);
+    runtime.state.liftCargoMeshes.set(cargoKey, a);
+
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    h.applyLift(outgoing);
+    assert.equal(h.liftModel.liftTelemetry.arrivedTargetKey, null, '前置：载货台必须正在升降');
+    assert.equal(runtime.adoptGlobalCargoByTask(a.task, 'other'), null, '升降中全局 task 不得摘除 lift 货');
+    assert.equal(runtime.state.liftCargoMeshes.get(cargoKey), a);
+
+    runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+    assert.equal(runtime.adoptGlobalCargoByTask(a.task, 'other'), a, '到位且货物在台上后必须允许接管');
+    assert.equal(runtime.state.liftCargoMeshes.size, 0);
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null, '接管后必须清理原工位引用');
   } finally {
     h.dispose();
   }

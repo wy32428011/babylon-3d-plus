@@ -380,6 +380,8 @@ export type ConveyorModelTelemetryState = {
   platformInboundCargo: boolean;
   /** 交付流向（settleCargoTransfer 的 direction，±1）：×forwardSign 得偏移空间的站台钳制方向。 */
   platformInboundDirection: number;
+  /** 外部设备放入线首站台的货：到达本机流向出口前禁止下游订阅交付。 */
+  platformPlacedCargo: boolean;
 };
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
@@ -577,6 +579,8 @@ export type ShuttleModelTelemetryState = {
   cargoFetchRow: number | null;
   /** 放货入场锁定的目标格（列/层/留存开关）：相位退出或目标字段变化仍按该格留存。 */
   cargoPlaceTarget: SlotPlaceTarget | null;
+  /** 已落座、待货叉归零后交接的 conveyor 站台；等待期间货物仍由 shuttle 持有。 */
+  cargoPendingPlatformLocatorId: string | null;
   /** 上一帧原始 Status；相位退出边沿兜底收尾用。 */
   lastStatus: number | null;
   /** 货叉相位：idle 收回位 / extending 伸出中 / retracting 收回中。 */
@@ -842,6 +846,8 @@ export interface SpecializedTelemetryDriverContext {
   isRgvCargoReadyForExternalPull(cargo: GeneratedCargoRuntimeEntry): boolean;
   /** stacker 持货外部拉取门控：mode==4 落货站台后待收叉完毕的货物不允许 pull 提前摘除。 */
   isStackerCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean;
+  /** shuttle 持货门控：站台货已落座但货叉未归零时不允许 pull 或全局 task 接管。 */
+  isShuttleCargoPendingPlatformHandoff(cargo: GeneratedCargoRuntimeEntry): boolean;
   /** lift 从来料层 conveyor 取货：无视 task 接管该 conveyor 当前持货（无货返回 null）。 */
   adoptConveyorCargoForLift(entityId: string, liftAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /**
