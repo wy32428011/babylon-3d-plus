@@ -1,5 +1,29 @@
 # 任务记录
 
+## 2026-10-26 中台静态打开图片审计修复
+
+- 图片审计从整个React界面逐项扫描改为唯一场景canvas的owner/runtime绑定，并交叉核验真实绘制canvas；保留只读descriptor、Proxy/getter拒绝、完整图片URL/修订/registry/API/物理文件SHA校验。补充有界并发、阶段进度、请求/总时限及清理时限。
+- 已有图片审计16/16通过，未新增或修改测试。本轮未自行重建产品；启动指纹对应现存构建，其他任务的碰撞修复/构建保留。
+- `output/babylon-optimization-20261026/static-audit-fix/open-3/result.json` 完整单次静态验收通过：打开202.31秒，76个引用文件匹配；18图片槽位/2张图片审计99.36秒完成，清理无错误，验证进程全部退出。两次前置失败仍保留，不合并成成功性能样本。
+- MQTT与GI未执行，实验开关不变；完整五冷五暖及性能门槛仍待验收。本次未提交、推送、部署或覆盖原工程；细节见既有Babylon专项清单。
+
+## 2026-10-26 手动漫游碰撞协调器注册修复
+
+- 启动手动漫游后，`moveWithCollisions()` 触发尚未注册的 `Scene.CollisionCoordinatorFactory`，使 Scene View 报 `DefaultCollisionCoordinator needs to be imported`。
+- 在公共 `babylonSideEffects.ts` 补充 `Collisions/collisionCoordinator.js` 副作用导入，让手动漫游使用的模块图提前注册默认碰撞协调器。
+- 已对照本地 Babylon 实现并审阅变更；未运行测试、构建或真实页面验证，已运行实例是否加载修复尚未确认。
+- 后续按用户要求重新执行 `npm run build`（包含 Viewer）和 `npm run build:electron`，均成功；启动 `dist/index.html` 正式构建，在最近场景 `2026cemat展会` 进入运行态并启用手动漫游。角色实际前进约 2.49 米，移动期间推进 51 帧，退出及重新启用均正常，页面异常与控制台 error 均为 0。
+- 构建日志、坐标/状态记录及截图保存于 `output/manual-roam-recovery-20261026/`；编辑器保留运行。此次验证为本地正式构建，未发布或替换远端数字孪生产物。
+
+## 2026-10-26 Babylon 加载渲染计划续作核查
+
+- 对照用户指定计划及现有专项代码，更新 `docs/tasks/2026-10-26-babylon-load-render.md` 唯一清单，区分历史完成、条件停止和待验收。
+- 补齐固定包SHA在模型重载及GLB/脚本请求中的一致性、声明模型脚本集合换代、所有模板入口的实际声明捕获、生成器/库位目标签名；新增打开前设置的共享Geometry同构建对照开关，保留原默认与已有lease。
+- 现有定向检查42/42通过；开关变更后共享生命周期相关16/16通过（与前组重叠）。日志在 `output/babylon-optimization-20261026/continuation-contracts.log` 与 `continuation-sharing.log`；后续Editor/Electron/Viewer构建通过，未新增或修改测试。
+- 用户选择原383实体工厂，并因无MQTT要求先做静态打开。当前同构建六轮A/B/C/C/B/A完整像素一致：原版中位72.50秒、材质候选60.45秒（−16.61%）、加准备门51.68秒（−28.71%）；见 `continuation-383/local-comparison.json`，不混算旧版本结果。
+- 中台原工程单次最终就绪188.78秒，包含自动全库同步，源/逻辑投影一致并保存实际截图。后置图片CDP遍历长时间未完成，按静态范围收口关闭专用窗口；整套审计保留FAIL而非通过，任务进程已退出，用户原Editor/开发服务保留。详见专项记录与 `continuation-383/remote-open-stable/`。
+- 完整中台五冷五暖、持续动作、完整GI/Viewer及默认晋级未完成，未宣称达到30%/15%。修正静态验收工具的生产迁移/内置ENV输入比较及自动同步后二次就绪判定。保留入场Conflicts与Python缓存改动，未提交或发布。
+
 ## 2026-10-26 烘焙路径与 MQTT 回退 Git 交付
 
 - 已拉取远端，当前分支无需额外合并；提交烘焙短目录、旧任务兼容及 Viewer MQTT 地址回退改动和说明。

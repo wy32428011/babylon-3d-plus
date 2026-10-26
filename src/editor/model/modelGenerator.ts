@@ -1,4 +1,4 @@
-import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
+import { modelRuntimeCapabilitiesField, modelRuntimeConfigurationKey } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type {
@@ -378,6 +378,15 @@ export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget
     sourcePath: target.modelAsset.sourcePath,
     sourceUrl: target.modelAsset.sourceUrl,
     assetRevision: target.modelAsset.assetRevision ?? null,
+    sourceSnapshot: target.modelAsset.sourceSnapshot ?? null,
+    dataPlatformModel: target.modelAsset.dataPlatformModel ?? null,
+    // 生成输出在签名相同时直接复用；声明撤销或配置换代必须先释放旧共享实例再重新准入。
+    ...(target.modelAsset.runtimeCapabilities ? {
+      runtimeCapabilities: target.modelAsset.runtimeCapabilities,
+      capabilityConfiguration: modelRuntimeConfigurationKey(target.modelAsset),
+      capabilityScripts: target.modelAsset.scriptAssets ?? [],
+      parameterValues: target.modelAsset.parameterValues ?? null,
+    } : {}),
   });
 }
 

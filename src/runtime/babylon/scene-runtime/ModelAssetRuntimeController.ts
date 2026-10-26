@@ -1,7 +1,6 @@
 import { AssetContainer } from '@babylonjs/core/assetContainer.js';
 import { loadCapabilityModelTemplate } from '../modelRuntimeCapabilities.ts';
 import { modelRuntimeConfigurationKey } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
-import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 
@@ -248,7 +247,7 @@ export class ModelAssetRuntimeController {
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope);
     const { rootUrl, fileName } = this.splitAssetUrl(
-      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.sourceSnapshot?.contentSha256 ?? modelAsset.assetRevision),
     );
     const sequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     try {
@@ -256,7 +255,7 @@ export class ModelAssetRuntimeController {
         createModelAssetTemplateKey(modelAsset),
         sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
           this.dependencies.readiness.updateModelLoadProgressUnit(sequence, event);
-        }, traceScope, trace, resolveModelAssetSharedInstancingPolicy(modelAsset).mode === 'shared-geometry-clone'),
+        }, traceScope, trace),
         signal,
         this.shaderWarmup.getMetrics().enabled && canPrepareSharedTemplate(modelAsset)
           ? source => this.shaderWarmup.registerContainer(source) : undefined,
@@ -278,7 +277,7 @@ export class ModelAssetRuntimeController {
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope, { entityId });
     const { rootUrl, fileName } = this.splitAssetUrl(
-      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.sourceSnapshot?.contentSha256 ?? modelAsset.assetRevision),
     );
 
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
@@ -289,7 +288,7 @@ export class ModelAssetRuntimeController {
           createModelAssetTemplateKey(modelAsset),
           sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
             this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
-          }, traceScope, trace, true), modelAsset, loadSignal,
+          }, traceScope, trace), modelAsset, loadSignal,
           (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }), trace,
         );
         try {
@@ -697,12 +696,14 @@ export class ModelAssetRuntimeController {
   public createModelAssetSignature(modelAsset: ModelAssetComponent): string {
     return JSON.stringify({
       sourceUrl: modelAsset.sourceUrl,
+      templateKey: createModelAssetTemplateKey(modelAsset),
       assetRevision: modelAsset.assetRevision ?? null,
       lengthUnit: modelAsset.lengthUnit,
       unitScaleToMeters: modelAsset.unitScaleToMeters,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
       ...(modelAsset.runtimeCapabilities ? { runtimeCapabilities: modelAsset.runtimeCapabilities,
-        capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset) } : {}),
+        capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset),
+        capabilityScripts: modelAsset.scriptAssets ?? [] } : {}),
     });
   }
 
@@ -757,7 +758,6 @@ export class ModelAssetRuntimeController {
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
     traceScope: SceneLoadTraceScope | null = this.dependencies.readiness.loadDiagnostics.captureTrace(),
     trace?: SceneAssetTrace,
-    captureCapabilities = false,
   ): Promise<AssetContainer> {
     const queuedAt = readRuntimeTimestampMs();
     const context = { resource: fileName, resourceOrdinal: trace?.resourceOrdinal };
@@ -767,8 +767,8 @@ export class ModelAssetRuntimeController {
         queueToken?.end();
         this.dependencies.readiness.loadDiagnostics.record('assetQueue', readRuntimeTimestampMs() - queuedAt);
         return this.dependencies.readiness.loadDiagnostics.measureAsync('assetReadDecode',
-          () => captureCapabilities ? loadCapabilityModelTemplate(rootUrl, fileName, this.context.scene, onProgress)
-            : SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, onProgress), context, traceScope);
+          // 所有入口共享同一模板缓存；先独占加载的模板也必须保留实际源声明，避免准入依赖加载顺序。
+          () => loadCapabilityModelTemplate(rootUrl, fileName, this.context.scene, onProgress), context, traceScope);
       },
       loadSignal,
     ).catch(error => {

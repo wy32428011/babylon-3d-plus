@@ -589,6 +589,11 @@ export class SceneRuntime {
   /** 只影响本 Scene 的有界矩阵上传实验；不写场景文件，缺省关闭。 */
   setSparseMatrixUploadsEnabled(enabled: boolean): void { setSparseMatrixUploadsEnabled(this.scene, enabled); }
 
+  /** 同构建 A/B：应在打开场景前设置，不原地切换已创建实例的共享资源所有权。 */
+  setReadonlyGeometrySharingEnabled(enabled: boolean): void {
+    this.assets.sharedModelAssetCache.setReadonlyGeometrySharingEnabled(enabled);
+  }
+
   setSkyboxEnvironmentResolver(resolver: import('./SceneSkyboxRuntime').SkyboxEnvironmentResolver,
     onPrepared?: import('./SceneSkyboxRuntime').SkyboxEnvironmentPrepared,
     onReadiness?: (state: import('./SceneSkyboxRuntime').SkyboxReadiness) => void): void {

@@ -1,5 +1,15 @@
 # 实现经验
 
+## 静态图片审计应绑定真实视口（2026-10-26）
+
+- 通过CDP逐属性扫描整个React界面，会把模型库UI规模转化为大量跨进程等待；本例16路并发仍未在180秒内完成运行时发现。
+- 从唯一场景canvas沿owner定位runtime，并核验engine的实际绘制canvas，再执行原有实例/字节校验；保留只读descriptor与Proxy拒绝，补充阶段进度和有限超时。本例18槽位/2张图片完整核对约99秒完成，不能把审计耗时当加载或GPU指标。
+
+## Babylon 按需导入须保留碰撞协调器注册（2026-10-26）
+
+- 手动漫游调用 `moveWithCollisions()` 时，单独导入 Mesh/Scene 不会注册默认碰撞协调器，`Scene.CollisionCoordinatorFactory` 会抛出缺少 `DefaultCollisionCoordinator` 导入的异常。
+- 在公共副作用入口导入 `@babylonjs/core/Collisions/collisionCoordinator.js`；该入口调用 `RegisterCollisionCoordinator()`，仅导入类型或纯实现不能替代注册。
+
 ## Babylon共享几何与局部缓冲更新须明确所有权（2026-10-26）
 
 - 触发：从完整独占容器改为共享Geometry，以及将thinInstance全量上传改为局部上传。
