@@ -11,7 +11,7 @@ export type SceneResourceReferences = {
   skyboxes: Array<{ skybox: SceneResourceObject }>;
   cadReferences: Array<{ cad: SceneResourceObject }>;
   images: SceneResourceObject[];
-  entityResources: Array<{ value: SceneResourceObject; kind: 'skybox' | 'other' }>;
+  entityResources: Array<{ value: SceneResourceObject; kind: 'skybox' | 'other'; rebuildable?: boolean }>;
   clickEventBindings: Array<{ deviceType: SceneResourceObject }>;
 };
 
@@ -127,7 +127,11 @@ export function collectSceneResourceReferences(
     }
     if (components.skybox !== undefined) {
       const skybox = readObject(components.skybox, `实体 ${entityId} skybox`);
-      if (skybox) { result.skyboxes.push({ skybox }); result.entityResources.push({ value: skybox, kind: 'skybox' }); }
+      if (skybox) {
+        result.skyboxes.push({ skybox }); result.entityResources.push({ value: skybox, kind: 'skybox' });
+        const environment = object(skybox.environment);
+        if (environment) result.entityResources.push({ value: environment, kind: 'other', rebuildable: skybox.sourceAvailable !== false });
+      }
     }
     if (components.cadReference !== undefined) {
       const cad = readObject(components.cadReference, `实体 ${entityId} cadReference`);
@@ -148,7 +152,11 @@ export function collectSceneResourceReferences(
     }
     if (settings?.skybox !== null && settings?.skybox !== undefined) {
       const skybox = readObject(settings.skybox, 'scene.sceneSettings.skybox');
-      if (skybox) result.skyboxes.push({ skybox });
+      if (skybox) {
+        result.skyboxes.push({ skybox }); result.entityResources.push({ value: skybox, kind: 'skybox' });
+        const environment = object(skybox.environment);
+        if (environment) result.entityResources.push({ value: environment, kind: 'other', rebuildable: skybox.sourceAvailable !== false });
+      }
     }
   }
   return result;

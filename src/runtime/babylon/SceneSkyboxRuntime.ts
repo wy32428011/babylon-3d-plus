@@ -1,115 +1,67 @@
 import { refreshSceneLightingMaterialDrawCaches } from './refreshDetachedInstanceSourceMaterials.ts';
 import { Material } from '@babylonjs/core/Materials/material.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
-import { EnvCubeTexture } from '@babylonjs/core/Materials/Textures/envCubeTexture.js';
-import { HDRFiltering } from '@babylonjs/core/Materials/Textures/Filtering/hdrFiltering.js';
-import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
-import { Color3 } from '@babylonjs/core/Maths/math.color.js';
-import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
-import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
-import { Scene } from '@babylonjs/core/scene.js';
+import type { CubeTexture } from '@babylonjs/core/Materials/Textures/cubeTexture.js';
+import { Camera } from '@babylonjs/core/Cameras/camera.js';
+import { Matrix } from '@babylonjs/core/Maths/math.vector.js';
+import type { Observer } from '@babylonjs/core/Misc/observable.js';
+import type { Mesh } from '@babylonjs/core/Meshes/mesh.js';
+import type { Scene } from '@babylonjs/core/scene.js';
+import '@babylonjs/core/Helpers/sceneHelpers.js';
 import type { TransformComponent } from '../../editor/model/components';
-import {
-  normalizeSkyboxSphereScale,
-  SKYBOX_SPHERE_DIAMETER_METERS,
-  SKYBOX_SPHERE_SEGMENTS,
-  type SceneSkyboxSettings,
-} from '../../editor/model/SceneDocument';
-import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
-import { loadSkyboxTexture, type SkyboxLoadStage } from './skyboxTextureLoad';
-import { prepareSkyboxData, type SkyboxDecodeMetrics } from './skyboxDecodedData';
-import { PreparedSkyboxTexture } from './PreparedSkyboxTexture';
-import { BilinearHDRCubeTexture, BilinearEXRCubeTexture } from './BilinearSkyboxTexture';
-import { waitForSkyboxPrefilter } from './skyboxPrefilter';
+import type { SceneSkyboxSettings } from '../../editor/model/SceneDocument';
+import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource,
+  type SkyboxEnvironmentResource, type SkyboxPreparationStage } from '../../../electron/shared/sceneSkyboxContract.ts';
+import { loadSkyboxEnvironment, type SkyboxEnvironmentLoadStage } from './skyboxEnvironmentResource.ts';
 import { SandboxEnvironmentRuntime, type SandboxEnvironmentOptions } from './SandboxEnvironmentRuntime';
-import type { CubeMapInfo } from '@babylonjs/core/Misc/HighDynamicRange/panoramaToCubemap.js';
-import {
-  clearSceneSelectionHighlight,
-  createSceneSelectionHighlightLayer,
-  setSceneSelectionHighlightGroups,
-  type SceneSelectionHighlightLayer,
-} from './sceneSelectionHighlight';
-
-type SkyboxTexture = EnvCubeTexture;
 
 export type SceneSkyboxRuntimeTarget = {
   entityId: string | null;
   skybox: SceneSkyboxSettings;
   transform: TransformComponent;
   visible: boolean;
-  pickable: boolean;
-  selected: boolean;
+  pickable?: boolean;
+  selected?: boolean;
 };
+export type SkyboxEnvironmentPrepared = (entityId: string | null, source: SceneSkyboxSettings, environment: SkyboxEnvironmentResource) => void;
+export type SkyboxEnvironmentResolver = (source: SceneSkyboxSettings, signal: AbortSignal,
+  progress: (stage: SkyboxPreparationStage) => void) => Promise<SkyboxEnvironmentResource>;
 
 type ActiveSkybox = {
   entityKey: string;
   signature: string | null;
-  texture: SkyboxTexture | null;
-  mesh: Mesh;
-  material: PBRMaterial;
+  texture: CubeTexture | null;
+  environment: SkyboxEnvironmentResource | null;
+  mesh: Mesh | null;
+  material: PBRMaterial | null;
 };
-
-type PendingSkybox = {
-  token: number;
-  entityKey: string;
-  signature: string;
-  controller: AbortController;
-};
-
+type PendingSkybox = { token: number; entityKey: string; signature: string; controller: AbortController };
 export type SkyboxReadiness = { phase: 'idle' | 'loading' | 'ready' | 'error'; message: string | null; sourceUrl: string | null };
-
-export type SkyboxLightingOverrides = {
-  visible: boolean; intensity: number; source?: 'scene' | 'sandbox'; rotationDegrees?: number;
-};
-
+export type SkyboxLightingOverrides = { visible: boolean; intensity: number; source?: 'scene' | 'sandbox'; rotationDegrees?: number };
+type LoadStage = SkyboxEnvironmentLoadStage | 'preparing';
 const DEFAULT_ENVIRONMENT_INTENSITY = 1;
 const LEGACY_SKYBOX_ENTITY_KEY = '__legacy_scene_skybox';
-const SKYBOX_PLACEHOLDER_COLOR = Color3.FromHexString('#263d4d');
+const BACKDROP_SIZE = 1000;
 
 export function createSceneSkyboxSignature(skybox: SceneSkyboxSettings): string {
-  // 完整内容哈希可跨 SOURCE/共享缓存路径复用；弱修订仍按 URL 隔离。
+  if (skybox.environment && skyboxEnvironmentMatchesSource(skybox, skybox.environment)) {
+    const resource = normalizeSkyboxEnvironmentResource(skybox.environment);
+    return ['env', resource.sha256, resource.recipeKey, resource.faceSize].join('|');
+  }
+  // 旧工程先由编辑器适配器准备；此身份只用于等待去重，不把原图交给运行时纹理加载器。
   const content = /^[a-f\d]{64}$/i.test(skybox.assetRevision ?? '')
     ? `sha256:${skybox.assetRevision!.toLowerCase()}` : `${skybox.sourceUrl}|${skybox.assetRevision ?? ''}`;
-  return [skybox.format, content, skybox.resolution].join('|');
+  return ['unprepared', skybox.format, content, skybox.resolution].join('|');
 }
+function getEntityKey(target: SceneSkyboxRuntimeTarget): string { return target.entityId ?? LEGACY_SKYBOX_ENTITY_KEY; }
 
-function createVersionedRuntimeUrl(skybox: SceneSkyboxSettings): string {
-  const runtimeUrl = resolveRuntimeAssetUrl(skybox.sourceUrl);
-  const hashIndex = runtimeUrl.indexOf('#');
-  const urlWithoutHash = hashIndex >= 0 ? runtimeUrl.slice(0, hashIndex) : runtimeUrl;
-  const hash = hashIndex >= 0 ? runtimeUrl.slice(hashIndex) : '';
-  const query = [
-    ...(skybox.assetRevision ? [`assetRevision=${encodeURIComponent(skybox.assetRevision)}`] : []),
-    `skyboxResolution=${skybox.resolution}`,
-  ].join('&');
-  return `${urlWithoutHash}${urlWithoutHash.includes('?') ? '&' : '?'}${query}${hash}`;
-}
-
-function degreesToRadians(degrees: number): number {
-  return degrees * Math.PI / 180;
-}
-
-function getEntityKey(target: SceneSkyboxRuntimeTarget): string {
-  return target.entityId ?? LEGACY_SKYBOX_ENTITY_KEY;
-}
-
-/** 管理可移动球形 HDR/EXR 天空盒、异步纹理替换和 PBR 环境照明。 */
+/** 统一管理原生无限远天空与环境照明；原图准备由编辑器注入，Viewer 没有转换回退。 */
 export class SceneSkyboxRuntime {
   private lightingOverrides: SkyboxLightingOverrides | null = null;
   private readonly sandboxEnvironment: SandboxEnvironmentRuntime;
-  setLightingOverrides(value: SkyboxLightingOverrides | null): void {
-    const sourceChanged = (this.lightingOverrides?.source ?? 'scene') !== (value?.source ?? 'scene');
-    const lightingChanged = this.lightingOverrides?.intensity !== value?.intensity;
-    this.lightingOverrides = value;
-    this.sandboxEnvironment.sync(value?.source === 'sandbox', value?.rotationDegrees ?? 0);
-    // 显示开关和内置纹理异步完成都不能重置昼夜组件当前有效强度。
-    if (this.active && this.desired) this.applyTarget(this.active, this.desired, false);
-    if ((sourceChanged || lightingChanged) && (sourceChanged || value?.source === 'sandbox' || (this.active && this.desired))) {
-      this.applyEnvironment(true);
-    }
-  }
-
+  private environmentResolver: SkyboxEnvironmentResolver | null = null;
+  private onEnvironmentPrepared: SkyboxEnvironmentPrepared | undefined;
+  private readinessListener: ((state: SkyboxReadiness) => void) | undefined;
   private active: ActiveSkybox | null = null;
   private pending: PendingSkybox | null = null;
   private desired: SceneSkyboxRuntimeTarget | null = null;
@@ -118,352 +70,256 @@ export class SceneSkyboxRuntime {
   private failedTarget: { entityKey: string; signature: string } | null = null;
   private receivedBytes = 0;
   private totalBytes: number | null = null;
-  private loadStage: SkyboxLoadStage | null = null;
-  private loadTimings: Partial<Record<SkyboxLoadStage, number>> = {};
-  private decodedDataMetrics: SkyboxDecodeMetrics | null = null;
-  private readonly selectionHighlightLayer: SceneSelectionHighlightLayer;
+  private loadStage: LoadStage | null = null;
+  private preparationStage: SkyboxPreparationStage | null = null;
+  private loadTimings: Partial<Record<LoadStage, number>> = {};
+  private readonly cameraObserver: Observer<Camera> | null;
+  private backdropProjection: Matrix | null = null;
+  private backdropProjectionApplied = false;
 
-  constructor(
-    private readonly scene: Scene,
+  constructor(private readonly scene: Scene,
     private readonly pushLog: (message: string) => void = () => undefined,
     private readonly onReadinessChanged: (state: SkyboxReadiness) => void = () => undefined,
-    environmentOptions: Pick<SandboxEnvironmentOptions, 'loadTexture'> = {},
-  ) {
+    environmentOptions: Pick<SandboxEnvironmentOptions, 'loadTexture'> = {}) {
     this.sandboxEnvironment = new SandboxEnvironmentRuntime(scene, { ...environmentOptions, pushLog: this.pushLog,
-      onChanged: () => { this.applyEnvironment(false); this.onReadinessChanged(this.getReadiness()); } });
-    this.selectionHighlightLayer = createSceneSelectionHighlightLayer(
-      scene,
-      'EditorSkyboxSelectionHighlightLayer',
-      this.pushLog,
-    );
+      onChanged: () => { this.applyEnvironment(false); this.publishReadiness(this.getReadiness()); } });
+    this.cameraObserver = scene.onBeforeCameraRenderObservable?.add(() => {
+      this.restoreBackgroundProjection(); this.updateBackdropSize();
+    }) ?? null;
+  }
+
+  setEnvironmentResolver(resolver: SkyboxEnvironmentResolver, onPrepared?: SkyboxEnvironmentPrepared,
+    onReadiness?: (state: SkyboxReadiness) => void): void {
+    this.environmentResolver = resolver; this.onEnvironmentPrepared = onPrepared; this.readinessListener = onReadiness;
+  }
+  private publishReadiness(state: SkyboxReadiness): void {
+    this.onReadinessChanged(state);
+    this.readinessListener?.(state);
+  }
+
+  setLightingOverrides(value: SkyboxLightingOverrides | null): void {
+    const neededBefore = this.requiresSkybox();
+    const sourceChanged = (this.lightingOverrides?.source ?? 'scene') !== (value?.source ?? 'scene');
+    const lightingChanged = this.lightingOverrides?.intensity !== value?.intensity;
+    this.lightingOverrides = value;
+    this.sandboxEnvironment.sync(value?.source === 'sandbox', value?.rotationDegrees ?? 0);
+    if (this.active && this.desired) this.applyTarget(this.active, this.desired, false);
+    if ((sourceChanged || lightingChanged) && (sourceChanged || value?.source === 'sandbox' || (this.active && this.desired))) this.applyEnvironment(true);
+    if (this.desired && neededBefore !== this.requiresSkybox()) this.sync(this.desired);
   }
 
   sync(target: SceneSkyboxRuntimeTarget | null): void {
     this.desired = target;
     if (!target) {
-      this.cancelPending();
-      this.disposeActive(true);
-      this.loadError = null;
-      this.failedTarget = null;
-      this.onReadinessChanged(this.getReadiness());
-      return;
+      this.cancelPending(); this.disposeActive(true); this.loadError = null; this.failedTarget = null;
+      this.publishReadiness(this.getReadiness()); return;
     }
-
     const entityKey = getEntityKey(target);
     if (this.active?.entityKey !== entityKey) {
-      this.cancelPending();
-      this.disposeActive(true);
-      this.active = this.createActiveSkybox(entityKey, target.entityId);
+      this.cancelPending(); this.disposeActive(true); this.active = this.createActiveSkybox(entityKey);
     }
     if (!this.active) return;
-
     this.applyTarget(this.active, target);
+    if (!this.requiresSkybox()) {
+      this.cancelPending(); this.publishReadiness(this.getReadiness()); return;
+    }
     const signature = createSceneSkyboxSignature(target.skybox);
-    if (this.active.signature === signature && this.active.texture) {
+    if (this.active.texture && (this.active.signature === signature
+      || (target.skybox.environment?.sha256 === this.active.environment?.sha256 && target.skybox.environment?.faceSize === target.skybox.resolution))) {
+      this.active.signature = signature;
       const hadError = this.loadError !== null;
-      this.loadError = null;
-      this.failedTarget = null;
-      // 用户在新纹理尚未完成解码时切回当前有效资源，立即释放无效任务，避免继续占用 CPU/GPU。
+      this.loadError = null; this.failedTarget = null;
       if (this.pending && (this.pending.entityKey !== entityKey || this.pending.signature !== signature)) {
-        this.cancelPending();
-        this.onReadinessChanged(this.getReadiness());
+        this.cancelPending(); this.publishReadiness(this.getReadiness());
       }
-      if (hadError) this.onReadinessChanged(this.getReadiness());
+      if (hadError) this.publishReadiness(this.getReadiness());
+      else this.readinessListener?.(this.getReadiness());
       return;
     }
     if (this.pending?.entityKey === entityKey && this.pending.signature === signature) return;
     if (this.failedTarget?.entityKey === entityKey && this.failedTarget.signature === signature) return;
-
-    this.cancelPending();
-    this.startLoad(target, entityKey, signature);
+    this.cancelPending(); this.startLoad(target, entityKey, signature);
   }
 
-  hasEntity(entityId: string): boolean {
-    return this.active?.entityKey === entityId;
-  }
-
-  getMesh(entityId: string): Mesh | null {
-    return this.hasEntity(entityId) ? this.active?.mesh ?? null : null;
-  }
-
+  hasEntity(entityId: string): boolean { return this.active?.entityKey === entityId; }
+  getMesh(entityId: string): Mesh | null { return this.hasEntity(entityId) ? this.active?.mesh ?? null : null; }
   getReadiness(): SkyboxReadiness {
     const environment = this.sandboxEnvironment.getReadiness();
-    // 内置照明不需要隐藏的天空背景；保留背景诊断，重新显示时再恢复其等待或失败状态。
-    if (this.lightingOverrides?.source === 'sandbox'
-      && (!this.desired?.visible || this.lightingOverrides.visible === false)) return environment;
+    if (!this.requiresSkybox()) return environment;
     if (environment.phase === 'error') return environment;
-    if (this.loadError && this.desired) return { phase: 'error', message: this.loadError, sourceUrl: this.desired.skybox.sourceUrl };
+    if (this.loadError && this.desired) return { phase: 'error', message: this.loadError, sourceUrl: this.readSourceUrl() };
     if (environment.phase === 'loading') return environment;
-    if (!this.desired) return environment;
     return { phase: this.pending ? 'loading' : this.active?.texture ? 'ready' : environment.phase,
-      message: null, sourceUrl: this.desired.skybox.sourceUrl };
+      message: null, sourceUrl: this.readSourceUrl() };
   }
-
   retry(): void {
     this.sandboxEnvironment.retry();
-    if (!this.loadError || this.pending || !this.desired) return;
+    if (!this.loadError || this.pending || !this.desired || !this.requiresSkybox()) return;
     this.startLoad(this.desired, getEntityKey(this.desired), createSceneSkyboxSignature(this.desired.skybox));
   }
-
   getLoadDiagnostics() {
-    return { receivedBytes: this.receivedBytes, totalBytes: this.totalBytes, stage: this.pending || this.loadError ? this.loadStage : null, timings: { ...this.loadTimings }, decoded: this.decodedDataMetrics };
+    return { receivedBytes: this.receivedBytes, totalBytes: this.totalBytes, stage: this.pending || this.loadError ? this.loadStage : null,
+      timings: { ...this.loadTimings }, preparationStage: this.preparationStage, decoded: null };
   }
-
   dispose(): void {
-    this.desired = null;
-    this.cancelPending();
+    this.desired = null; this.cancelPending();
+    if (this.cameraObserver) this.scene.onBeforeCameraRenderObservable.remove(this.cameraObserver);
     if (this.scene.environmentTexture === this.sandboxEnvironment.getTexture()) this.updateEnvironmentTexture(null);
-    this.sandboxEnvironment.dispose();
-    this.disposeActive(true);
-    this.selectionHighlightLayer.dispose();
+    this.sandboxEnvironment.dispose(); this.disposeActive(true);
   }
-
-  private createActiveSkybox(entityKey: string, entityId: string | null): ActiveSkybox {
-    const mesh = MeshBuilder.CreateSphere(
-      entityId ? `${entityId}_skyboxSphere` : 'LegacySceneSkyboxSphere',
-      {
-        diameter: SKYBOX_SPHERE_DIAMETER_METERS,
-        segments: SKYBOX_SPHERE_SEGMENTS,
-        sideOrientation: Mesh.DOUBLESIDE,
-      },
-      this.scene,
-    );
-    const material = new PBRMaterial(
-      entityId ? `${entityId}_skyboxMaterial` : 'LegacySceneSkyboxMaterial',
-      this.scene,
-    );
-    material.backFaceCulling = false;
-    material.disableLighting = true;
-    material.twoSidedLighting = true;
-    material.microSurface = 1;
-    material.albedoColor = SKYBOX_PLACEHOLDER_COLOR;
-    material.emissiveColor = SKYBOX_PLACEHOLDER_COLOR.scale(0.35);
-    mesh.material = material;
-    mesh.metadata = { ...(mesh.metadata ?? {}), ...(entityId ? { editorEntityId: entityId } : {}), editorSkyboxSphere: true };
-    mesh.isPickable = Boolean(entityId);
-    mesh.renderOutline = false;
-    return { entityKey, signature: null, texture: null, mesh, material };
+  private requiresSkybox(): boolean {
+    return Boolean(this.desired?.visible && ((this.lightingOverrides?.visible ?? true) || this.lightingOverrides?.source !== 'sandbox'));
+  }
+  private readSourceUrl(): string | null { return this.desired?.skybox.environment?.sourceUrl ?? this.desired?.skybox.sourceUrl ?? null; }
+  private createActiveSkybox(entityKey: string): ActiveSkybox {
+    return { entityKey, signature: null, texture: null, environment: null, mesh: null, material: null };
   }
 
   private startLoad(target: SceneSkyboxRuntimeTarget, entityKey: string, signature: string): void {
-    const token = ++this.loadToken;
-    const url = createVersionedRuntimeUrl(target.skybox);
-    const controller = new AbortController();
-    const engine = this.scene.getEngine();
-    this.loadError = null;
-    this.failedTarget = null;
-    this.loadStage = null;
-    this.loadTimings = {};
-    this.receivedBytes = 0;
-    this.totalBytes = null;
-    this.decodedDataMetrics = null;
-    let preparedData: CubeMapInfo | null = null;
+    const token = ++this.loadToken, controller = new AbortController();
+    this.loadError = null; this.failedTarget = null; this.loadStage = null; this.preparationStage = null;
+    this.loadTimings = {}; this.receivedBytes = 0; this.totalBytes = null;
     this.pending = { token, entityKey, signature, controller };
-    this.onReadinessChanged(this.getReadiness());
-    this.pushLog(`正在加载球形天空盒：${target.skybox.format.toUpperCase()}，${target.skybox.resolution} × ${target.skybox.resolution}。`);
-    void loadSkyboxTexture<SkyboxTexture>(url, controller.signal, {
-      transformBlob: async (blob, signal) => {
-        preparedData = await prepareSkyboxData(blob, target.skybox.format, target.skybox.resolution, signal, {
-          onMetrics: metrics => {
-            if (!signal.aborted && token === this.loadToken) this.decodedDataMetrics = metrics;
-          },
+    this.publishReadiness(this.getReadiness());
+    let environment: SkyboxEnvironmentResource;
+    const load = (resource: SkyboxEnvironmentResource) => {
+      controller.signal.throwIfAborted();
+      environment = normalizeSkyboxEnvironmentResource(resource);
+      if (!skyboxEnvironmentMatchesSource(target.skybox, environment)) throw new Error('天空 ENV 与当前源版本或分辨率不一致。');
+      this.preparationStage = null;
+      return loadSkyboxEnvironment(this.scene.getEngine(), environment, controller.signal,
+        (received, total) => { if (!controller.signal.aborted && token === this.loadToken) { this.receivedBytes = received; this.totalBytes = total; } },
+        (stage, duration) => {
+          if (controller.signal.aborted || token !== this.loadToken) return;
+          this.loadStage = stage;
+          if (duration !== null) this.loadTimings[stage] = duration;
+          this.publishReadiness(this.getReadiness());
         });
-        // 预解码子类不再读取原始 EXR，极小的 Blob 仅用于驱动 Babylon 的原有上传回调。
-        return preparedData ? new Blob([new Uint8Array(1)]) : blob;
-      },
-      onProgress: (receivedBytes, totalBytes) => {
-        if (controller.signal.aborted || token !== this.loadToken) return;
-        // 下载字节仅供每秒采样，不按网络分块触发 React 或全场景进度计算。
-        this.receivedBytes = receivedBytes;
-        this.totalBytes = totalBytes;
-      },
-      onStage: (stage, durationMs) => {
-        if (controller.signal.aborted || token !== this.loadToken) return;
-        this.loadStage = stage;
-        if (durationMs !== null) this.loadTimings[stage] = durationMs;
-        this.onReadinessChanged(this.getReadiness());
-      },
-      create: (blobUrl, onLoad, onError) => {
-        // 传入 Engine，避免 Babylon 在提前 dispose 时遗留纹理及预过滤 pending token。
-        const texture = preparedData
-          ? new PreparedSkyboxTexture(blobUrl, engine, target.skybox.resolution, preparedData, target.skybox.format, onLoad, onError)
-          : target.skybox.format === 'exr'
-          ? new BilinearEXRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError)
-          : new BilinearHDRCubeTexture(blobUrl, engine, target.skybox.resolution, false, true, false, false, onLoad, onError);
-        texture.name = `SceneSkyboxTexture:${signature}`;
-        texture.isBlocking = false;
-        return texture;
-      },
-      prepare: async texture => {
-        // 保持原来的 4096 采样预过滤质量，在可捕获异常的任务内执行。
-        if (engine._features.allowTexturePrefiltering) {
-          await waitForSkyboxPrefilter(engine, () => new HDRFiltering(engine).prefilter(texture));
-        }
-      },
-    }).then(texture => this.commitLoadedSkybox(token, entityKey, signature, texture))
-      .catch(error => {
-        if (controller.signal.aborted || token !== this.loadToken) return;
-        this.handleLoadError(token, entityKey, signature, error);
-      });
-  }
-
-  private commitLoadedSkybox(
-    token: number,
-    entityKey: string,
-    signature: string,
-    texture: SkyboxTexture,
-  ): void {
-    const desired = this.desired;
-    const active = this.active;
-    if (
-      !desired
-      || !active
-      || token !== this.loadToken
-      || this.pending?.token !== token
-      || active.entityKey !== entityKey
-      || getEntityKey(desired) !== entityKey
-      || createSceneSkyboxSignature(desired.skybox) !== signature
-    ) {
-      if (this.pending?.token === token) this.pending = null;
-      texture.dispose();
-      return;
-    }
-
+    };
     try {
-      const previousTexture = active.texture;
-      this.installReflectionTexture(active, texture);
-      active.texture = texture;
-      active.signature = signature;
-      this.pending = null;
-      this.loadError = null;
-      this.applyTarget(active, desired);
-      if (previousTexture && previousTexture !== texture) previousTexture.dispose();
-      this.onReadinessChanged(this.getReadiness());
-      this.pushLog(`球形天空盒已加载：${desired.skybox.format.toUpperCase()}，${desired.skybox.resolution} × ${desired.skybox.resolution}。`);
+      let loading: Promise<CubeTexture>;
+      if (this.environmentResolver) {
+        this.loadStage = 'preparing';
+        const started = performance.now();
+        loading = this.environmentResolver(target.skybox, controller.signal, stage => {
+          if (controller.signal.aborted || token !== this.loadToken) return;
+          this.preparationStage = stage; this.publishReadiness(this.getReadiness());
+        }).then(resource => { this.loadTimings.preparing = performance.now() - started; return load(resource); });
+      } else {
+        if (!target.skybox.environment) throw new Error('天空缺少预过滤 ENV 产物，请在新版编辑器中准备资源并重新发布。');
+        loading = load(target.skybox.environment);
+      }
+      void loading.then(texture => this.commitLoadedSkybox(token, entityKey, signature, texture, environment))
+        .catch(error => { if (!controller.signal.aborted && token === this.loadToken) this.handleLoadError(token, entityKey, signature, error); });
+    } catch (error) { this.handleLoadError(token, entityKey, signature, error); }
+  }
+
+  private commitLoadedSkybox(token: number, entityKey: string, signature: string, texture: CubeTexture, environment: SkyboxEnvironmentResource): void {
+    const desired = this.desired, previous = this.active;
+    if (!desired || !previous || token !== this.loadToken || this.pending?.token !== token
+      || previous.entityKey !== entityKey || getEntityKey(desired) !== entityKey || createSceneSkyboxSignature(desired.skybox) !== signature) {
+      if (this.pending?.token === token) this.pending = null;
+      texture.dispose(); return;
+    }
+    const candidate: ActiveSkybox = { entityKey, signature, texture, environment, mesh: null, material: null };
+    try {
+      this.installReflectionTexture(candidate, texture);
+      this.applyTarget(candidate, desired, false);
+      this.active = candidate;
+      this.applyEnvironment(true);
+      this.onEnvironmentPrepared?.(desired.entityId, desired.skybox, environment);
+      this.pending = null; this.loadError = null; this.failedTarget = null;
+      previous.mesh?.dispose(false, true);
+      if (previous.texture !== texture) previous.texture?.dispose();
+      this.publishReadiness(this.getReadiness());
+      this.pushLog(`原生无限远天空已加载：ENV，${environment.faceSize} × ${environment.faceSize}。`);
     } catch (error) {
-      if (this.pending?.token === token) this.pending = null;
-      texture.dispose();
-      const message = error instanceof Error ? error.message : String(error);
-      this.loadError = message;
-      this.failedTarget = { entityKey, signature };
-      this.onReadinessChanged(this.getReadiness());
-      this.pushLog(`球形天空盒材质创建失败，已保留原有效果：${message}`);
+      this.active = previous; candidate.mesh?.dispose(false, true); texture.dispose();
+      this.applyEnvironment(false);
+      this.handleLoadError(token, entityKey, signature, error);
     }
   }
-
-  private handleLoadError(
-    token: number,
-    entityKey: string,
-    signature: string,
-    exception: unknown,
-  ): void {
-    if (
-      token !== this.loadToken
-      || this.pending?.token !== token
-      || this.pending.entityKey !== entityKey
-      || this.pending.signature !== signature
-    ) {
-      if (this.pending?.token === token) this.pending = null;
-      return;
-    }
+  private handleLoadError(token: number, entityKey: string, signature: string, exception: unknown): void {
+    if (token !== this.loadToken || this.pending?.token !== token || this.pending.entityKey !== entityKey || this.pending.signature !== signature) return;
     this.pending = null;
-    const detail = (exception instanceof Error ? exception.message : exception ? String(exception) : '')
-      || 'Babylon 未返回底层错误详情，文件可能损坏或编码不受支持。';
-    this.loadError = detail;
-    this.failedTarget = { entityKey, signature };
-    this.onReadinessChanged(this.getReadiness());
-    this.pushLog(`球形天空盒加载失败，已保留原有效果：${detail}`);
+    const detail = (exception instanceof Error ? exception.message : exception ? String(exception) : '') || '天空 ENV 读取或上传失败。';
+    this.loadError = detail; this.failedTarget = { entityKey, signature };
+    this.publishReadiness(this.getReadiness());
+    this.pushLog(`天空背景加载失败，已保留原有效果：${detail}`);
   }
-
-  private installReflectionTexture(active: ActiveSkybox, texture: SkyboxTexture): void {
-    const previousReflection = active.material.reflectionTexture;
-    const reflectionTexture = texture.clone();
-    reflectionTexture.coordinatesMode = Texture.SKYBOX_MODE;
-    reflectionTexture.level = 1;
-    active.material.reflectionTexture = reflectionTexture;
-    active.material.albedoColor = Color3.Black();
-    active.material.emissiveColor = Color3.Black();
-    if (previousReflection && previousReflection !== reflectionTexture) previousReflection.dispose();
+  private installReflectionTexture(active: ActiveSkybox, texture: CubeTexture): void {
+    const mesh = this.scene.createDefaultSkybox(texture, true, BACKDROP_SIZE, 0, false);
+    if (!mesh || !(mesh.material instanceof PBRMaterial)) throw new Error('Babylon 原生天空盒创建失败。');
+    mesh.name = 'SceneInfiniteSkybox';
+    mesh.isPickable = false;
+    // 旧排除器兼容标记保留，避免阴影/碰撞插件把背景纳入业务几何。
+    mesh.metadata = { runtimeSkybox: true, editorSkyboxSphere: true };
+    mesh.material.disableDepthWrite = true;
+    mesh.onBeforeBindObservable.add(() => this.applyBackgroundProjection());
+    mesh.onAfterRenderObservable.add(() => this.restoreBackgroundProjection());
+    active.mesh = mesh; active.material = mesh.material;
   }
-
   private applyTarget(active: ActiveSkybox, target: SceneSkyboxRuntimeTarget, updateEnvironment = true): void {
-    const transform = target.transform;
-    active.mesh.position = new Vector3(transform.position.x, transform.position.y, transform.position.z);
-    active.mesh.rotationQuaternion = null;
-    active.mesh.rotation = new Vector3(transform.rotation.x, transform.rotation.y, transform.rotation.z);
-    const scale = normalizeSkyboxSphereScale(transform.scale);
-    active.mesh.scaling = new Vector3(scale.x, scale.y, scale.z);
-    active.mesh.setEnabled(target.visible && (this.lightingOverrides?.visible ?? true));
-    active.mesh.isPickable = target.visible && (this.lightingOverrides?.visible ?? true) && target.pickable && Boolean(target.entityId);
-    this.syncSelectionHighlight(active.mesh, target.visible && (this.lightingOverrides?.visible ?? true) && target.selected);
-
-    const rotationY = degreesToRadians(target.skybox.rotationDegrees);
+    active.mesh?.setEnabled(target.visible && (this.lightingOverrides?.visible ?? true));
+    const rotationY = target.skybox.rotationDegrees * Math.PI / 180;
     if (active.texture && active.texture.rotationY !== rotationY) {
       active.texture.rotationY = rotationY;
-      // Engine 纹理没有所属 Scene，旋转后显式刷新接收环境照明的材质。
       this.scene.markAllMaterialsAsDirty(Material.TextureDirtyFlag);
       if (this.scene.environmentTexture === active.texture) refreshSceneLightingMaterialDrawCaches(this.scene);
     }
-    const reflectionTexture = active.material.reflectionTexture as SkyboxTexture | null;
-    if (reflectionTexture) reflectionTexture.rotationY = rotationY;
-
+    const reflection = active.material?.reflectionTexture as CubeTexture | null;
+    if (reflection) reflection.rotationY = rotationY;
+    this.updateBackdropSize(active);
     if (updateEnvironment && this.lightingOverrides?.source !== 'sandbox') this.applyEnvironment(true);
   }
-
-  /** 背景网格和照明源分别选择；内置环境不依赖天空盒实体显隐。 */
+  private updateBackdropSize(active = this.active): void {
+    const camera = this.scene.activeCamera;
+    if (!active?.mesh || !camera) return;
+    const ortho = camera.mode === Camera.ORTHOGRAPHIC_CAMERA
+      ? Math.max(Math.abs(camera.orthoLeft ?? 0), Math.abs(camera.orthoRight ?? 0), Math.abs(camera.orthoTop ?? 0), Math.abs(camera.orthoBottom ?? 0)) * 4 : 0;
+    const size = Math.max(BACKDROP_SIZE, Number.isFinite(camera.maxZ) ? camera.maxZ * 4 : 0, camera.minZ * 16, ortho);
+    const scale = size / BACKDROP_SIZE;
+    if (active.mesh.scaling.x !== scale) active.mesh.scaling.setAll(scale);
+  }
+  /** 无限远方向背景使用透视投影；只替换本次背景 draw 的矩阵，不改变正交业务相机。 */
+  private applyBackgroundProjection(): void {
+    const camera = this.scene.activeCamera;
+    if (!camera || camera.mode !== Camera.ORTHOGRAPHIC_CAMERA) return;
+    const originalMode = camera.mode;
+    try {
+      camera.mode = Camera.PERSPECTIVE_CAMERA;
+      (this.backdropProjection ??= Matrix.Identity()).copyFrom(camera.getProjectionMatrix(true));
+    } finally {
+      camera.mode = originalMode;
+      camera.getProjectionMatrix(true);
+    }
+    this.scene.setTransformMatrix(camera.getViewMatrix(), this.backdropProjection!);
+    this.backdropProjectionApplied = true;
+  }
+  private restoreBackgroundProjection(): void {
+    if (!this.backdropProjectionApplied) return;
+    this.backdropProjectionApplied = false;
+    this.scene.updateTransformMatrix(true);
+  }
   private applyEnvironment(updateIntensity: boolean): void {
     const sandbox = this.lightingOverrides?.source === 'sandbox';
-    const texture = sandbox ? this.sandboxEnvironment.getTexture()
-      : this.desired?.visible ? this.active?.texture ?? null : null;
+    const texture = sandbox ? this.sandboxEnvironment.getTexture() : this.desired?.visible ? this.active?.texture ?? null : null;
     const intensity = updateIntensity ? this.lightingOverrides?.intensity
       ?? (this.desired?.visible ? this.desired.skybox.intensity : DEFAULT_ENVIRONMENT_INTENSITY) : undefined;
     this.updateEnvironmentTexture(texture, intensity);
   }
-
   private updateEnvironmentTexture(texture: Scene['environmentTexture'], intensity?: number): void {
-    const changed = this.scene.environmentTexture !== texture
-      || (intensity !== undefined && this.scene.environmentIntensity !== intensity);
+    const changed = this.scene.environmentTexture !== texture || (intensity !== undefined && this.scene.environmentIntensity !== intensity);
     this.scene.environmentTexture = texture;
     if (intensity !== undefined) this.scene.environmentIntensity = intensity;
     if (changed) refreshSceneLightingMaterialDrawCaches(this.scene);
   }
-
-  private cancelPending(): void {
-    this.loadToken += 1;
-    if (!this.pending) return;
-    this.pending.controller.abort();
-    this.pending = null;
-  }
-
+  private cancelPending(): void { this.loadToken++; this.pending?.controller.abort(); this.pending = null; }
   private disposeActive(resetScene: boolean): void {
-    const active = this.active;
-    if (!active) {
-      if (resetScene && this.lightingOverrides?.source !== 'sandbox') {
-        this.updateEnvironmentTexture(null, this.lightingOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY);
-      }
-      return;
-    }
-
-    this.active = null;
-    if (resetScene && this.lightingOverrides?.source !== 'sandbox' && this.scene.environmentTexture === active.texture) {
+    const active = this.active; this.active = null;
+    if (resetScene && this.lightingOverrides?.source !== 'sandbox' && (!active || this.scene.environmentTexture === active.texture)) {
       this.updateEnvironmentTexture(null, this.lightingOverrides?.intensity ?? DEFAULT_ENVIRONMENT_INTENSITY);
     }
-    this.clearSelectionHighlight();
-    active.mesh.dispose(false, true);
-    active.texture?.dispose();
-  }
-
-  /** 天空盒与普通模型共享同一深红光晕主题，但使用独立选择层避免污染模型分组。 */
-  private syncSelectionHighlight(mesh: Mesh, selected: boolean): void {
-    if (!selected || mesh.isDisposed() || mesh.getTotalVertices() <= 0) {
-      this.clearSelectionHighlight();
-      return;
-    }
-
-    setSceneSelectionHighlightGroups(this.selectionHighlightLayer, [[mesh]]);
-  }
-
-  private clearSelectionHighlight(): void {
-    clearSceneSelectionHighlight(this.selectionHighlightLayer, this.scene);
+    active?.mesh?.dispose(false, true); active?.texture?.dispose();
   }
 }

@@ -24,6 +24,8 @@ import { subscribeLightingGeometryUpdates } from './lightingGeometryUpdates.ts';
 
 export type LightingRuntimeSource = {
   mesh: AbstractMesh;
+  /** 薄批render carrier与业务原mesh不同时，保留既有resolvedSource的精确对象身份。 */
+  logicalMesh?: AbstractMesh;
   entry: LightingClassificationEntry;
   getWorldMatrix: () => Matrix | null;
   instance?: { batch: LightingInstanceBatch; mesh: AbstractMesh; sourceIndex: number };
@@ -569,7 +571,8 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
       availableNodeKeys: availableNodeKeys ?? (entityId === '$environment' ? environmentNodeKeys : [partKey]) });
     const key = `${entityId}/${nodeKey}`;
     output.push({
-      mesh, entry: { key, entityId, nodeKey, name: actualNode.name || mesh.name, ...effective.settings, reason: effective.reason,
+      mesh, ...(actualNode instanceof AbstractMesh && actualNode !== mesh ? { logicalMesh: actualNode } : {}),
+      entry: { key, entityId, nodeKey, name: actualNode.name || mesh.name, ...effective.settings, reason: effective.reason,
         parentDynamic: effective.parentDynamic, ...(identity ? { resourceIdentity: identity } : {}),
         automaticMobility: automatic.mobility, automaticReason: automatic.reason, motionRole: effective.motionRole,
         deviceType: policyContext.deviceType, fieldSources: effective.fieldSources, sourceLabel: effective.sourceLabel,

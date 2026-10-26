@@ -24,6 +24,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [最近完成与变更记录](docs/changelog.md)
 - [极致性能实施说明](docs/extreme-performance-implementation.md)
 - [性能指南检测与无损优化](docs/babylon-perf-guide-audit.md)
+- [Babylon 只读几何声明与稀疏矩阵上传](docs/babylon-model-runtime-optimization.md)（旧模型策略不变；局部上传实验默认关闭）
 - [测试入口、平台与隔离要求清单](docs/test-inventory.md)
 - [S1 工程治理实施与验收记录](docs/optimization-s1-validation.md)
 - [项目专项优化计划](docs/project-optimization-plan.md)、[P1 执行和验收记录](docs/tasks/2026-10-21-project-optimization.md)、[P2 执行和验收记录](docs/tasks/2026-10-21-project-optimization-p2.md)、[P3 执行和验收记录](docs/tasks/2026-10-22-project-optimization-p3.md) 与 [P4 执行和验收记录](docs/tasks/2026-10-22-project-optimization-p4.md)（P3模块解耦、P4类型安全与测试治理已完成本地验收；P2总验收未完成，动静合批缺省关闭）。
@@ -43,6 +44,12 @@ npm run dev:electron
 ```
 
 运行环境要求：Node.js `^22.15.0 || >=24.0.0`（覆盖 ESLint 与测试模块加载 hook 的要求）；CI 使用 Node.js 22。
+
+开发启动器通过 Electron 包提供的路径入口准备运行时；首次使用时可能显示 `Downloading Electron binary...`，后续复用已下载的运行时。准备或进程启动失败会在终端输出 `[dev-electron]` 错误并以非零状态退出。需要提前下载时，可运行 `npx install-electron --no`。
+
+Windows 下若 Electron 子进程报 `spawn ...electron.exe EACCES`，先核对实际系统错误：Win32 `740` 表示请求提权，可能是该 EXE 的“兼容性 → 以管理员身份运行”设置。开发启动和本地集成测试使用普通权限；确认该原因后，只备份并取消对应 Electron 路径的强制管理员标记即可，无需重装运行时或扩大目录权限。其他 `EACCES` 原因仍需按实际错误排查。
+
+`[typescript] 缺少 N/M 个 Electron 产物，本次强制重建。` 是构建恢复通知。首次运行或清理 `dist-electron` 后，脚本会重新生成 JavaScript/CJS 和类型声明，即使保留了 `.tsbuildinfo` 缓存也能恢复；产物齐全后再次启动沿用增量编译。若随后仍启动失败，应查看这条提示之后的编译或 `[dev-electron]` 错误。
 
 若 Electron 窗口只显示标题栏或菜单栏，优先查看启动终端中的 `[electron]` 日志；渲染入口异常会显示“编辑器启动失败”，WebGL/Babylon 初始化异常会显示在 Scene 面板内，不再静默白屏。若提示“硬件加速 WebGL 创建失败”，请先更新显卡驱动，并在 Windows“图形设置”中将 `ZENDING 3D EDITOR` 设为“高性能”；编辑器不会退回 SwiftShader/WARP 软件渲染。
 
@@ -147,7 +154,7 @@ Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑
 
 场景文件的核心约定：
 
-- 新保存场景文件外层 `version` 为 `6`，新版加载器兼容 version 1–6；统一配置使用 `sceneSettings.lighting.version: 2` 与 `sceneSettings.appearance.version: 1`，不混同文件版本。旧场景经过共享迁移器只读转换，新保存只写统一结构；新文件需要配套新版编辑器与 Viewer，旧版本不会静默按旧阴影默认值读取。
+- 新保存场景文件外层 `version` 为 `6`，新版加载器兼容 version 1–6；统一配置缺省使用 `sceneSettings.lighting.version: 2` 与 `sceneSettings.appearance.version: 1`，不混同文件版本。显式启用 Gamma RGBM 新编码或有限 Mip 时使用可选 lighting v3，旧无新特性场景保持 v2。旧编辑器会拒绝 v3，启用前应保留原工程副本；新文件需要配套新版编辑器与 Viewer。设置、预算和支持条件见[混合光照说明](docs/hybrid-lighting.md)。
 - 长度单位固定为米：`1 scene unit = 1 m`。
 - 所有模型最终都按米进入场景：内置模型使用显式米制基准；普通模型、模型生成器导入目标和环境模型通过 `lengthUnit + unitScaleToMeters` 把厘米/毫米源几何换算到米；普通模型缺少单位声明时按 `meter / 1`，不根据几何大小或参数脚本猜测；直接导入的环境 GLB 按 `meter / 1` 登记。
 - 新保存的场景文件会写入 `units.length = "meter"`；旧版没有 `units` 字段的场景文件会按米兼容加载。
@@ -168,8 +175,8 @@ Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑
 - 场景属性的“场景”分组在名称下展示“模型总面数”，按三角面统计普通/内置模型、完整逻辑实例、环境和实际生成货物；“统计明细”可展开核对场景模型与环境模型。隐藏实体、父组显隐、相机裁剪、双面材质与位置缩放不会改变几何总量，参数关闭的内部部件按当前结果排除。编辑辅助、天空盒、线点与 CAD 线稿不计入；加载未完成或失败时显示明确状态，不把部分结果当作完整总数。计数及明细展开仅保存在编辑器运行状态，不写入场景文件或撤销历史。
 - 场景准备会预取并解码模型生成器默认目标、规则目标及组合成员，复用现有模板缓存；Editor 和 Viewer 就绪后首次生成可直接复用已解码模板。预取不创建货物或提前执行参数脚本，保留画质、实例隔离及跨设备动作；失败时生成路径仍按原规则重试或回退。配置变化、删除及场景释放会归还预取引用，详见 [动态货物模板启动预取](docs/scene-capacity-performance.md#动态货物模板启动预取)。
 - `sceneSettings.environment` 记录环境模型包路径、显示名称、文件大小、源单位、`unitScaleToMeters`、摆放模式、根节点 position / XYZ rotation / 统一 scale、显隐、透明度、缩略图、当前激活变体和包内变体列表。新环境默认作为唯一全局场景底座，按包围盒 X/Z 居中、Y=0 落地；旧场景缺少新字段时继续使用右边界 `X=-2m` 的 `legacy-left` 兼容摆放，并可在 Inspector 显式转换。环境不进入 Hierarchy、默认不可拾取，不启用 GLB 相机、灯光、动画或模型脚本；环境 PBR/Standard 材质保留原始底色与纹理；默认原貌模式与场景光源隔离，hybrid 模式让环境参与场景受光；显隐与编辑透明度仍由环境设置控制，物理材质透明度另行保留；半透明使用关闭深度写入的幽灵显示。环境切换、变体、源单位修正、重置和重导先后台加载候选资源，成功后原子替换，失败时保留当前有效环境。
-- `sceneSettings.skybox` 记录授权资源包/文件路径、`editor-asset://` URL、格式、`assetRevision`、旋转、强度和分辨率；运行时使用 Babylon HDR/EXR CubeTexture，在加载和预过滤成功后原子替换可见背景与环境反射。
-- 唯一照明配置保存在 `sceneSettings.lighting`（version 2），其中 `main`、`fill`、`environmentIntensity`、`disabledLightIds`、`allowDayNightCycle`、`shadows`、`bake`、`policy` 和 `result` 分别承载灯光、控制状态、阴影、烘焙、规则和结果；纯外观位于 `sceneSettings.appearance`（version 1）。旧 `theme`、`shadows`、`lightingBake`、`lightingPolicy`、`lightingBakeResult` 只用于兼容读取，新写删除这些旧字段。对象/部件例外仍在 `components.lighting`，按字段恢复继承由 `inheritPolicy` 记录；实体、动作、材质和未知扩展数据保留。临时生成部件采用资源或类型规则，真实场景宿主和逻辑阵列实例仍可分别编辑。新 v2 GI 只有输入与产物严格等价才可随地址迁移；旧 v1 与已有过期结果不会通过重签变成有效。
+- 天空盒是“无限远天空背景”：场景实体 `components.skybox` 保存原始 HDR/EXR 引用（`sourcePath/sourceUrl/assetRevision`）、编辑器编译出的 Babylon 原生 `environment`（`format: 'env'`、`sourceSha256`、`recipeKey`、`sha256`、`byteLength`、`faceSize`）、旋转、强度和分辨率；旧 `sceneSettings.skybox` 与旧球体实体在加载时迁移，场景文件版本为 7（1–6 仍可读取）。运行时使用 `scene.createDefaultSkybox` 创建 `infiniteDistance` 天空盒，跟随相机、不参与拾取、不受场景尺寸/可视距离影响，当照明来源选择“场景天空盒”时，同一 ENV 也作为 `scene.environmentTexture`，选择 Sandbox 时保持其独立照明；Viewer 与编辑器运行时只加载 Babylon 原生预过滤 `.env`，不再解码 HDR/EXR 或执行 `HDRFiltering` 预过滤。
+- 唯一照明配置保存在 `sceneSettings.lighting`（缺省 version 2，可选新编码 version 3），其中 `main`、`fill`、`environmentIntensity`、`disabledLightIds`、`allowDayNightCycle`、`shadows`、`bake`、`policy` 和 `result` 分别承载灯光、控制状态、阴影、烘焙、规则和结果；纯外观位于 `sceneSettings.appearance`（version 1）。旧 `theme`、`shadows`、`lightingBake`、`lightingPolicy`、`lightingBakeResult` 只用于兼容读取，新写删除这些旧字段。对象/部件例外仍在 `components.lighting`，按字段恢复继承由 `inheritPolicy` 记录；实体、动作、材质和未知扩展数据保留。临时生成部件采用资源或类型规则，真实场景宿主和逻辑阵列实例仍可分别编辑。有效 GI 只有输入与产物严格等价才可随地址迁移；旧 v1 与已有过期结果不会通过重签变成有效。
 
 ## 当前限制
 
@@ -214,7 +221,7 @@ Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑
 - Project 面板会合并本地天空盒与数据中台天空盒；即使名称相同也分别显示且本地资源优先。数据中台资源使用稳定 `dataPlatformResourceId` 标识，按 `revision` 与 SHA-256 增量更新，并发下载上限为 `2`，单个文件最大 `512 MiB`，单次同步计划最大 `8 GiB`。
 - 同步采用整批校验与原子切换：任一分页、下载、格式或 SHA 校验失败时继续使用旧资源库，并在天空盒 Tab 显示失败状态与重试入口；再次同步未发生变化的资源不会重复下载。
 - 数据中台以同一稳定 ID 替换天空盒后，已引用该资源的场景会重新关联到新文件，同时保留强度、分辨率、旋转和天空盒实体 Transform；该变更进入正常 dirty/undo 历史。远端删除资源后，新选择列表会隐藏对应卡片，但已打开场景仍可使用标记为 orphaned 的兼容缓存。
-- SOURCE ZIP、Viewer DIST ZIP 和独立部署导出只包含场景实际引用的天空盒，并把资源 URL 改写为包内离线路径；Viewer 不依赖数据中台即可运行。若场景引用的 orphaned 兼容缓存已经缺失或校验失败，发布会明确失败，而不是生成缺少资源的包。
+- SOURCE ZIP、Viewer DIST ZIP 和独立部署导出只包含场景实际引用的天空盒，并把资源 URL 改写为包内离线路径；Viewer 不依赖数据中台即可运行。若场景引用的 orphaned 兼容缓存已经缺失或校验失败，发布会明确失败，而不是生成缺少资源的包。 SOURCE ZIP 同时携带原始 HDR/EXR 与 ENV，便于继续编辑和重建；Viewer DIST ZIP 与独立部署只携带 ENV，场景中的原图字段清空并标记 `sourceAvailable=false`。Viewer 模板通过 manifest 的 `sceneFileVersions`/`skybox` 能力声明支持原生 ENV，缺少该能力的旧模板会在导出前被拒绝。
 
 ## 场景 Web 部署导出
 
@@ -270,6 +277,7 @@ release/win-unpacked/ZENDING 3D EDITOR.exe
 
 - 安装器允许用户选择安装目录，并创建桌面快捷方式和开始菜单快捷方式。若旧版使用“为所有用户安装”并位于 `C:\Program Files\ZENDING 3D EDITOR`，升级时应选择相同安装模式和目录，或先卸载旧版，避免保留两个同名快捷方式继续启动旧 EXE。
 - 最近项目与最近场景记录写入 Electron 的 `userData` 目录，不写入只读安装目录；数据中台服务地址和可选自定义工作区保存在同目录的 `data-platform-config.json`，旧版仅含服务地址的 v1 配置会继续兼容读取。
+- 数据中台工程打开时，Windows 对刚解压或替换目录的短暂 `EPERM/EACCES/EBUSY` 占用会自动重试（七档等待合计最多 4.35 秒）；持续失败保留错误并恢复旧工程，回滚不完整时报告并保留恢复目录。首次失败只留下已知空初始化目录时可直接重新打开；未绑定目录中存在文件、未知目录或链接时仍拒绝覆盖。
 - 数据中台下载的工程场景默认写入工作区 `Projects/{projectId}`，共享模型库写入 `SharedResources`；默认开发态工作区为应用根目录，默认安装态为 `userData/data-platform-workspace`，也可从首页选择其他可写目录。安装、升级程序不会覆盖工作区，也不会放宽安装目录 ACL；切换工作区不会自动迁移或删除旧数据。
 - 模型库、环境模型库、天空盒库、场景 JSON、CAD 文件和模型脚本仍保存在用户选择的项目目录中；安装或升级程序不会删除项目数据。
 - 卸载默认保留 `userData`，包括最近项目记录、数据中台配置以及 `data-platform-workspace` 中的场景和共享模型，便于重新安装后继续使用。

@@ -17,7 +17,8 @@ const resolveBabylonImports = source => source.replace(/(["'])(@babylonjs\/[^"']
 /** 直接执行真实模块；仅把包路径改为绝对 URL，使临时内存模块使用同一份已安装依赖。 */
 async function loadRealNamespace() {
   const sideEffects = await readFile(new URL('../../src/runtime/babylon/babylonSideEffects.ts', import.meta.url), 'utf8');
-  const source = namespaceSource.replace("'./babylonSideEffects.js'", JSON.stringify(moduleUrl(resolveBabylonImports(sideEffects))));
+  const source = namespaceSource.replace("'./babylonSideEffects.js'", JSON.stringify(moduleUrl(resolveBabylonImports(sideEffects))))
+    .replace("'./cloneDetachedModelMaterial'", JSON.stringify(new URL('../../src/runtime/babylon/cloneDetachedModelMaterial.ts', import.meta.url).href));
   const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   return import(moduleUrl(resolveBabylonImports(output)));
 }
@@ -32,7 +33,7 @@ function namespaceFixture(loader) {
   const output = ts.transpileModule(source + '\n({ resolveBabylonScriptRuntimeNamespace });',
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
   const common = { Vector3: class Vector3 {}, TransformNode: class TransformNode {}, ParticleSystem: class ParticleSystem {} };
-  return { ...runInNewContext(output, { BabylonCore: common, loadFullBabylonNamespace: loader }), common };
+  return { ...runInNewContext(output, { BabylonCore: common, loadFullBabylonNamespace: loader, cloneDetachedModelMaterial: () => null }), common };
 }
 
 test('常用根路径、深层路径和类型导入均不加载完整 Babylon namespace', async () => {
@@ -78,6 +79,18 @@ test('ParticleSystem 命名导入始终加载完整 namespace 以保留额外原
   const fixture = namespaceFixture(async () => { requests += 1; return complete; });
   assert.equal(await fixture.resolveBabylonScriptRuntimeNamespace('import { ParticleSystem as Particles } from "@babylonjs/core/Particles/particleSystem";'), complete);
   assert.equal(requests, 1);
+});
+
+test('项目材质扩展仅由显式导入启用，不污染旧命名空间身份', async () => {
+  let requests = 0;
+  const fixture = namespaceFixture(async () => { requests++; return { Other: class {} }; });
+  const legacy = await fixture.resolveBabylonScriptRuntimeNamespace('import { Vector3 } from "@babylonjs/core";');
+  const project = await fixture.resolveBabylonScriptRuntimeNamespace('import { cloneDetachedModelMaterial } from "zending-3d-runtime";');
+  assert.equal(legacy, fixture.common);
+  assert.equal(Object.hasOwn(legacy, 'cloneDetachedModelMaterial'), false);
+  assert.equal(project.Vector3, legacy.Vector3);
+  assert.equal(typeof project.cloneDetachedModelMaterial, 'function');
+  assert.equal(requests, 0);
 });
 
 test('真实已安装 Babylon 模块保留 FreeCamera、AnimationEvent 及完整 namespace 导出', async () => {

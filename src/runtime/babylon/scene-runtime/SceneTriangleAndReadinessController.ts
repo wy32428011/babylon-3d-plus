@@ -1,5 +1,6 @@
 import type { SceneModelStatisticsSnapshot } from '../../../editor/model/sceneModelStatistics';
 import { countModelMeshTriangles } from '../modelTriangleStatistics';
+import { getMatrixUploadMetrics } from '../thinInstanceSparseUpdates';
 
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
@@ -81,15 +82,16 @@ export class SceneTriangleAndReadinessController {
 
   /** 入场准备完成后仍需验证材质就绪与实际渲染；两个阶段独立计量。 */
   async waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
+    const traceScope = this.loadDiagnostics.captureTrace();
     do {
-      await this.dependencies.outputs.generatorAssetPreloader.waitForReady(signal);
+      await this.loadDiagnostics.measureAsync('cargoReady', () => this.dependencies.outputs.generatorAssetPreloader.waitForReady(signal), undefined, traceScope);
       if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
-      await this.loadDiagnostics.measureAsync('gpuCapabilityProbe', () => prepareGpuCapabilityProfile(this.context.scene.getEngine() as Engine, signal));
+      await this.loadDiagnostics.measureAsync('gpuCapabilityProbe', () => prepareGpuCapabilityProfile(this.context.scene.getEngine() as Engine, signal), undefined, traceScope);
       if (this.dependencies.assets.shaderWarmup.getMetrics().enabled) {
-        await this.loadDiagnostics.measureAsync('shaderWarmup', () => this.dependencies.assets.shaderWarmup.prepare(signal));
+        await this.loadDiagnostics.measureAsync('shaderWarmup', () => this.dependencies.assets.shaderWarmup.prepare(signal), undefined, traceScope);
       }
       if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
-      await this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal));
+      await this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal), undefined, traceScope);
       // 等首帧期间配置仍可变化；新目标也必须完成预取才能结算当前准备。
     } while (this.dependencies.outputs.generatorAssetPreloader.getMetrics().pendingCount > 0);
   }
@@ -264,6 +266,7 @@ export class SceneTriangleAndReadinessController {
         pendingModelCount: [...this.dependencies.assets.models.values()].filter((model) => !model.measurementReady).length,
         failedModelAcquisitions: this.failedModelAcquisitions,
         modelCache: this.dependencies.assets.sharedModelAssetCache.getMetrics(),
+        matrixUploads: getMatrixUploadMetrics(this.context.scene),
         cargoPreload: this.dependencies.outputs.generatorAssetPreloader.getMetrics(),
         environmentCache: this.dependencies.environment.environmentAssetCache.getMetrics(),
         entrance: this.dependencies.effects.getModelEntranceSnapshot(), resources: this.context.getResourceLoadDiagnostics?.call(this.context.callbackReceiver) ?? null },
@@ -465,6 +468,7 @@ export class SceneTriangleAndReadinessController {
     this.invalidateModelStatistics();
     if (this.dependencies.document.disposed || this.dependencies.assets.modelPresentationRefreshPending) return;
     this.dependencies.assets.modelPresentationRefreshPending = true;
+    const traceScope = this.loadDiagnostics.captureTrace();
     queueMicrotask(() => {
       if (!this.dependencies.assets.modelPresentationRefreshPending || this.dependencies.document.disposed) return;
       this.dependencies.assets.modelPresentationRefreshPending = false;
@@ -472,7 +476,7 @@ export class SceneTriangleAndReadinessController {
         this.loadDiagnostics.measure('presentationRefresh', () => {
           this.dependencies.selection.rebuildModelSelectionOutline();
           this.dependencies.transforms.refreshGroupTransformPreviewTargets();
-        });
+        }, undefined, traceScope);
       } catch (error) {
         Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [`模型选择与分组呈现刷新失败：${error instanceof Error ? error.message : String(error)}`]);
       }

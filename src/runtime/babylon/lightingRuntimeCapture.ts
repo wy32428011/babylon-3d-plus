@@ -1,13 +1,12 @@
+import { resolveSceneSkyboxReference } from '../../../electron/shared/sceneSkyboxContract.ts';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig.ts';
+import { lightingMaterialOverrideFingerprint, getLightingMaterialSourceOwner } from './lightingMaterialOverrides.ts';
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
 import { Light } from '@babylonjs/core/Lights/light.js';
 import { PointLight } from '@babylonjs/core/Lights/pointLight.js';
 import { RectAreaLight } from '@babylonjs/core/Lights/rectAreaLight.js';
 import { SpotLight } from '@babylonjs/core/Lights/spotLight.js';
-import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
-import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
-import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { Matrix, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
@@ -93,11 +92,16 @@ export function captureLightingEnvironment(scene: Scene, document: SceneDocument
       ...(light instanceof RectAreaLight ? { width: light.width, height: light.height } : {}),
     });
   }
-  const skybox = document.sceneSettings.skybox;
-  // 内置预览环境与天空背景独立；不能把仍保留的背景 HDR 当作实际 GI 照明输入。
+  const resolvedSkybox = resolveSceneSkyboxReference(document);
+  const skybox = resolvedSkybox?.skybox;
+  // ENV 只负责运行时；烘焙始终读取真正的 HDR/EXR 源，不因换格式退化为平均辐照度。
   const useSceneEnvironment = getSceneLightingConfig(document).environment?.source !== 'sandbox';
-  const hdrUrl = useSceneEnvironment && skybox?.sourceUrl && (skybox.format === 'hdr' || /\.(?:hdr|exr)(?:[?#]|$)/i.test(decodeURIComponent(skybox.sourceUrl))) ? skybox.sourceUrl : undefined;
   const intensity = Math.max(0, scene.environmentIntensity);
+  if (useSceneEnvironment && resolvedSkybox?.visible && skybox?.sourceAvailable === false && intensity > 0) {
+    throw new Error('当前运行包不包含天空原图，不能重新烘焙；请打开 SOURCE 工程。');
+  }
+  const hdrUrl = useSceneEnvironment && resolvedSkybox?.visible && typeof skybox?.sourceUrl === 'string'
+    && (skybox.format === 'hdr' || skybox.format === 'exr') && skybox.sourceUrl ? skybox.sourceUrl : undefined;
   if (!hdrUrl && scene.environmentTexture) {
     const polynomial = scene.environmentTexture.sphericalPolynomial;
     if (polynomial) {
@@ -107,20 +111,13 @@ export function captureLightingEnvironment(scene: Scene, document: SceneDocument
     }
   }
   return { lights, environment: hdrUrl && intensity > 0
-    ? { color: ambient.map(value => value / intensity) as [number, number, number], intensity, textureUrl: hdrUrl, rotation: (skybox?.rotationDegrees ?? 0) * Math.PI / 180 }
+    ? { color: ambient.map(value => value / intensity) as [number, number, number], intensity, textureUrl: hdrUrl, rotation: resolvedSkybox?.rotation ?? 0 }
     : { color: ambient, intensity: 1 } };
 }
 
 /** 快速材质指纹用于运行中的静态失效检测，不读取 GPU 像素或遍历顶点。 */
 export function lightingMaterialFingerprint(mesh: AbstractMesh): string {
-  const materials = mesh.material instanceof MultiMaterial ? mesh.material.subMaterials : [mesh.material];
-  return lightingContentHash(materials.map(material => {
-    if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) return material?.uniqueId ?? null;
-    const base = material instanceof PBRMaterial ? material.albedoColor : material.diffuseColor;
-    return [material.uniqueId, base.asArray(), material.emissiveColor.asArray(), material.alpha, material.backFaceCulling,
-      material instanceof PBRMaterial ? [material.metallic, material.roughness] : material.specularPower,
-      material.getActiveTextures().map(texture => [texture.uniqueId, texture.level, texture.getTextureMatrix()?.updateFlag])];
-  }));
+  return lightingMaterialOverrideFingerprint(mesh.material, getLightingMaterialSourceOwner(mesh));
 }
 
 export async function captureRuntimeLightingInput(scene: Scene, document: SceneDocument, sources: readonly LightingRuntimeSource[], jobId: string,

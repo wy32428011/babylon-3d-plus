@@ -130,7 +130,7 @@ export function useSceneAssetDropHandler({
       event.preventDefault();
       clickSnapshotRef.current = null;
       const currentSkybox = getSceneSkyboxSettings(sceneDocument);
-      placeSkybox(createSceneSkyboxFromAsset(skyboxAsset, currentSkybox), placementPosition);
+      placeSkybox(createSceneSkyboxFromAsset(skyboxAsset, currentSkybox));
       return;
     }
 

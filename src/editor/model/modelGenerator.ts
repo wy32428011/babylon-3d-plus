@@ -1,3 +1,4 @@
+import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type {
@@ -33,6 +34,7 @@ type ModelGeneratorSourceAsset = {
   lengthUnit?: ModelAssetTemplate['lengthUnit'];
   unitScaleToMeters?: number;
   scriptAssets?: ModelScriptAsset[];
+  runtimeCapabilities?: ModelAssetTemplate['runtimeCapabilities'];
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
   parameterConfig?: ModelAssetTemplate['parameterConfig'];
@@ -162,6 +164,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     ...(value.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(value.dataPlatformModel) }),
     ...(assetRevision ? { assetRevision } : {}),
     ...(sourceSnapshot ? { sourceSnapshot } : {}),
+    ...modelRuntimeCapabilitiesField(value.runtimeCapabilities),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets ? { scriptAssets } : {}),
@@ -197,6 +200,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
+    ...modelRuntimeCapabilitiesField(asset.runtimeCapabilities),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets?.length ? { scriptAssets } : {}),

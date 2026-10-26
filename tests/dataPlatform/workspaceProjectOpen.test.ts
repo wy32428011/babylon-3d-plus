@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
-test('真实 Electron：SOURCE版本1至6打开、未来7拒绝且用户内容保留', { timeout: 60_000 }, async () => {
+test('真实 Electron：SOURCE版本1至7打开、未来8拒绝、Windows文件锁恢复且用户内容保留', { timeout: 90_000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'workspace-project-open-'));
   const env = { ...process.env, ZENDING_WORKSPACE_OPEN_TEST_ROOT: root };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -20,7 +20,7 @@ test('真实 Electron：SOURCE版本1至6打开、未来7拒绝且用户内容�
     });
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
-    const timeout = setTimeout(() => child.kill(), 50_000);
+    const timeout = setTimeout(() => child.kill(), 80_000);
     try {
       const code = await new Promise((resolve, reject) => {
         child.once('error', reject);

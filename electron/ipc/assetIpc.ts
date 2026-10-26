@@ -1,3 +1,4 @@
+import { registerSkyboxPreparationIpc } from './skyboxPreparationIpc.ts';
 import { app, dialog, ipcMain } from 'electron';
 import { importManualRoamAvatarIntoProject } from './manualRoamAvatarStore.js';
 import { importCadFileIntoProject } from './projectCadAssetStore.js';
@@ -61,6 +62,7 @@ function normalizeImportModelLibraryKind(request: ImportModelFolderRequest | und
 }
 
 export function registerAssetIpc(): void {
+  registerSkyboxPreparationIpc();
   ipcMain.handle('assets:scan', async (): Promise<AssetEntry[]> => {
     const result = await dialog.showOpenDialog({
       title: '选择 Assets 目录',

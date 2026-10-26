@@ -42,6 +42,7 @@ import {
   prepareDeploymentExport,
 } from './deploymentExportScene.js';
 import { writePrecompiledDeploymentScripts } from './deploymentPrecompiledScripts.js';
+import { assertViewerCoreIntegrity, assertViewerTemplateSupportsScene, selectRuntimeTemplateFiles } from './viewerTemplateCapabilities.js';
 
 const EXPORT_START_CHANNEL = 'deployment-export:start';
 const EXPORT_CANCEL_CHANNEL = 'deployment-export:cancel';
@@ -183,14 +184,17 @@ async function runDeploymentExport(
 
     emitProgress('preflight', '正在检查 Viewer 模板…', 6);
     const templateRoot = resolveViewerTemplateRoot();
-    const templateFiles = await createTemplateCopyPlan(templateRoot, forbiddenOutputPaths, signal);
+    let templateFiles = await createTemplateCopyPlan(templateRoot, forbiddenOutputPaths, signal);
+    await assertViewerCoreIntegrity(templateFiles, signal);
     const prepared = await prepareDeploymentExport(
       request.sceneContent,
       request.suggestedName,
       forbiddenOutputPaths,
       signal,
       (message) => emitProgress('preflight', message, 8),
+      { validateOpeningViewer: content => assertViewerTemplateSupportsScene(content, templateFiles, signal) },
     );
+    templateFiles = await selectRuntimeTemplateFiles(templateFiles, signal);
     assertNoCopyPlanCollisions(templateFiles, prepared.assetFiles);
     throwIfDeploymentExportAborted(signal);
 

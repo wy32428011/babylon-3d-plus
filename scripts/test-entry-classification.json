@@ -3193,10 +3193,10 @@
     },
     {
       "file": "scripts/smoke-published-cache.mjs",
-      "sha256": "aa71c6d124b2e2463d316414dfc00b778fb1d72c4fdb1203f0f1091ed5134890",
+      "sha256": "b404eda0af6fa7a7fef5d5fe6a783cc84a267937cb2b97ad2d94ce62658ee4fe",
       "disposition": "asset-required",
       "domain": null,
-      "command": "node scripts/smoke-published-cache.mjs <含Draco的GLB路径> [含KTX2的GLB路径]",
+      "command": "node scripts/smoke-published-cache.mjs <含Draco的GLB路径> [含KTX2的GLB路径] [新输出目录]",
       "purpose": "browser / WebGL 候选；包含文件/源码断言候选；按原脚本独立执行和检查前置",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
@@ -3217,31 +3217,31 @@
           "text": "import { readFile, mkdir, writeFile } from 'node:fs/promises';"
         },
         {
-          "line": 3,
+          "line": 4,
           "text": "import path from 'node:path';"
         },
         {
-          "line": 4,
-          "text": "import { createServer } from 'vite';"
+          "line": 5,
+          "text": "import { build } from 'vite';"
         },
         {
-          "line": 5,
+          "line": 7,
           "text": "import { chromium } from 'playwright';"
         },
         {
-          "line": 8,
+          "line": 10,
           "text": "const modelPath = process.argv[2];"
         },
         {
-          "line": 14,
+          "line": 16,
           "text": "if (process.argv[3]) {"
         },
         {
-          "line": 15,
+          "line": 17,
           "text": "const bytes = await readFile(process.argv[3]);"
         },
         {
-          "line": 35,
+          "line": 40,
           "text": "import { Engine, Scene, SceneLoader, ArcRotateCamera, Vector3, HemisphericLight, Texture } from '@babylonjs/core';"
         }
       ]
@@ -3356,7 +3356,7 @@
     },
     {
       "file": "scripts/smoke-published-response-cache.mjs",
-      "sha256": "152d88001dfc19eb4aa6b5b59ea2b931463183fadcc56e11c31b449ba6a7e4fd",
+      "sha256": "d79f16c9b41e01c330d1d14cfb6b71be09e39dc0f5c935ed9b2be904bf1409de",
       "disposition": "browser-webgl",
       "domain": null,
       "command": "node --experimental-transform-types scripts/smoke-published-response-cache.mjs",
@@ -3370,39 +3370,39 @@
       ],
       "evidence": [
         {
-          "line": 1,
+          "line": 2,
           "text": "import assert from 'node:assert/strict';"
         },
         {
-          "line": 2,
+          "line": 3,
           "text": "import { createHash } from 'node:crypto';"
         },
         {
-          "line": 3,
+          "line": 4,
           "text": "import { readFile, mkdir, writeFile } from 'node:fs/promises';"
         },
         {
-          "line": 4,
+          "line": 5,
           "text": "import { createServer } from 'node:http';"
         },
         {
-          "line": 5,
-          "text": "import { gzipSync } from 'node:zlib';"
-        },
-        {
           "line": 6,
-          "text": "import path from 'node:path';"
+          "text": "import { precompressDeploymentFiles } from '../dist-electron/ipc/deploymentPrecompression.js';"
         },
         {
           "line": 7,
-          "text": "import ts from 'typescript';"
+          "text": "import path from 'node:path';"
         },
         {
           "line": 8,
+          "text": "import ts from 'typescript';"
+        },
+        {
+          "line": 9,
           "text": "import { chromium } from 'playwright';"
         },
         {
-          "line": 26,
+          "line": 40,
           "text": "import { installPublishedResponseCache } from './helper.js';"
         }
       ]
@@ -3464,50 +3464,28 @@
     },
     {
       "file": "scripts/smoke-real-project-loading.mjs",
-      "sha256": "de8374bdac1e623ec18b9ff41ee3de9c70450e5eb4336c52bd7213b72399287e",
+      "sha256": "75d040aab38ad693dfb27afcfdf2c7e57b3734651fbd9584ba34adb034564451",
       "disposition": "asset-required",
       "domain": null,
-      "command": "node scripts/smoke-real-project-loading.mjs --url <中台地址> --project <项目名称>",
-      "purpose": "browser / WebGL 候选；按原脚本独立执行和检查前置",
+      "command": "node scripts/smoke-real-project-loading.mjs --paired --url <中台地址> --project-id <项目ID> --freeze-scene <scene> --read-only-manifest <manifest> --resolved-baseline <baseline> --budget-file <budget> --cold 5 --warm 5 --output <全新output>",
+      "purpose": "真实Home打开的只读元数据前置、SOURCE/已批准resolved/实际图片字节冻结及冷暖配对；显式verification-only仅单次收尾验证、不代表性能验收",
       "prerequisites": [
-        "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
-        "包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程",
-        "本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本",
-        "本机 Electron 二进制；保留临时 userData、TEST_ROOT 与 IPC 初始化；不能用普通 node 代替 Electron",
-        "需调用方提供当前可访问的真实 CAD/GLB/EXR/scene 文件、业务工程或对应发布输出；读取下面 evidence 中的参数/默认路径，禁止把缺失输入计通过"
+        "先显式POST-only前置冻结可信URL/请求；未知请求与输入漂移拒绝，无上传/发布/invoke或生产MQTT消息",
+        "完整构建与bundled Electron；独立userData/workspace，同一来源/硬件/分辨率，正式窗口禁止profile或并行GPU/构建/扫描",
+        "原SOURCE和已批准resolved严格分别校验，活跃logical图片需实际参数URL到原字节SHA；单次verification-only不作五冷五暖或30%通过"
       ],
       "evidence": [
         {
-          "line": 1,
-          "text": "import assert from 'node:assert/strict';"
+          "line": 27,
+          "text": "const p0Mode = values.paired || values['prepare-read-only-manifest'];"
         },
         {
-          "line": 2,
-          "text": "import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';"
+          "line": 450,
+          "text": "async function p0CopyPreparationReport(target) {"
         },
         {
-          "line": 3,
-          "text": "import path from 'node:path';"
-        },
-        {
-          "line": 4,
-          "text": "import { tmpdir } from 'node:os';"
-        },
-        {
-          "line": 5,
-          "text": "import { parseArgs } from 'node:util';"
-        },
-        {
-          "line": 6,
-          "text": "import { _electron } from 'playwright';"
-        },
-        {
-          "line": 20,
-          "text": "const root = await mkdtemp(path.join(tmpdir(), 'twin-real-loading-'));"
-        },
-        {
-          "line": 183,
-          "text": "env:{...process.env,OPEN_DEVTOOLS:'false'} });"
+          "line": 494,
+          "text": "async function runSceneOpenP0() {"
         }
       ]
     },
@@ -4372,26 +4350,26 @@
     },
     {
       "file": "scripts/test-entry-manifest.json",
-      "sha256": "ce713ba0b6d6a26d12cdc7dec44d93a0bd218d851de15aa6abfdf0ba90d6019c",
+      "sha256": "6a0ec8df4df38218638c4f5c710af36568c770a14e16b55b7b3ea9117e838a81",
       "disposition": "metadata",
       "domain": null,
       "command": "npm run test:entries",
-      "purpose": "需人工判定；按原脚本独立执行和检查前置",
+      "purpose": "npm测试与手动验收入口的用途/前置/分类元数据；静态登记不推断执行通过",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
         "NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS"
       ],
       "evidence": [
         {
-          "line": 1,
-          "text": "{"
+          "text": "{",
+          "line": 1
         },
         {
-          "line": 2,
-          "text": "\"schemaVersion\": 1,"
+          "text": "\"schemaVersion\": 1,",
+          "line": 2
         }
       ],
-      "reviewNote": "保留既有入口对象，追加 GLB 标准预览合同及真实 Electron 离线验收入口。"
+      "reviewNote": "保留既有登记；2026-10-26仅追加六个原生天空入口，逐一核对命令与GPU/Electron/Blender前置，不把登记视为运行通过。同日Babylon专项追加两个定向入口，Electron入口须构建并显式提供已有开发服务，非GI夹具不证明工厂或GI性能。"
     },
     {
       "file": "scripts/test-groups.mjs",
@@ -4948,7 +4926,8 @@
     },
     {
       "file": "tests/dataPlatform/workspaceProjectOpen.integration.mjs",
-      "sha256": "e3c4da3ec5734e0a3ca47df267cc785bae3bd5c2b779d243c1a310d53190d94f",
+      "sha256": "02abc697d5ab06facea9eadf6bd90d964db613bc377ada254ee966b16b846083",
+      "reviewNote": "2026-10-25 原生天空迁移：仅将已支持外层版本扩展到7、未来版本拒绝样例改为8；保留原图/业务数据/锁恢复/回滚断言及Electron隔离前置。与本任务入场备份逐项对照后更新摘要。",
       "disposition": "electron-integration",
       "domain": null,
       "command": "electron tests/dataPlatform/workspaceProjectOpen.integration.mjs",
@@ -4972,7 +4951,7 @@
         },
         {
           "line": 3,
-          "text": "import { createWriteStream } from 'node:fs';"
+          "text": "import { createWriteStream, promises as fs } from 'node:fs';"
         },
         {
           "line": 4,
@@ -6289,7 +6268,7 @@
     },
     {
       "file": "tests/digitalTwin/releaseCacheManifestPackages.integration.mjs",
-      "sha256": "5395f1c7888cdbefa955c7e259e4a8f454c02572d3d400e8762cbb192f19fc93",
+      "sha256": "b69a1995dfe4afe5d30b938d3bb1721271e0554ef914d3263fabd97ab0c0aa99",
       "disposition": "electron-integration",
       "domain": null,
       "command": "electron tests/digitalTwin/releaseCacheManifestPackages.integration.mjs",
@@ -6330,11 +6309,11 @@
           "text": "import unzipper from 'unzipper';"
         },
         {
-          "line": 9,
+          "line": 11,
           "text": "const root = await mkdtemp(path.join(tmpdir(), 'zending-release-cache-package-'));"
         },
         {
-          "line": 22,
+          "line": 26,
           "text": "const templateRoot = path.join(root, 'dist-viewer-template');"
         }
       ]
@@ -7871,7 +7850,7 @@
     },
     {
       "file": "tests/editor/dataPlatformScreenScene.test.ts",
-      "sha256": "3ad491fcadb0f953b91fa4b2b196192400f421cfca2ca25c0965386c12000db0",
+      "sha256": "45d48fce9689d137333a0ee895c7e666d2251e52c433f8e91374477895624160",
       "disposition": "node-contract",
       "domain": "effects",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/dataPlatformScreenScene.test.ts",
@@ -7882,23 +7861,23 @@
       ],
       "evidence": [
         {
-          "line": 3,
+          "line": 4,
           "text": "import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';"
         },
         {
-          "line": 5,
+          "line": 6,
           "text": "const viteServer = await createP4SsrTestModules(["
         },
         {
-          "line": 39,
-          "text": "test('dataPlatformScreen 随 v6 场景文件序列化往返，并兼容 v3 的别名字段迁移', () => {"
+          "line": 40,
+          "text": "test('dataPlatformScreen 随当前场景文件序列化往返，并兼容 v3 的别名字段迁移', () => {"
         },
         {
-          "line": 54,
-          "text": "assert.equal(serialized.version, 6);"
+          "line": 55,
+          "text": "assert.equal(serialized.version, CURRENT_SCENE_FILE_VERSION);"
         }
       ],
-      "reviewNote": "正式effects域和Viewport原用例真实红后，按P4入场已是6的场景格式合同修2文件的输出版本期望及标题；本文件仅1个assert期望5→6，其余原assert和v3/v4输入不变；shared版本文件/serialize函数与baseline不变；agent实际9/9绿，登记不额外执行",
+      "reviewNote": "2026-10-25 原生天空迁移复核：输出版本断言改用 CURRENT_SCENE_FILE_VERSION，并同步标题与证据行；v3/v4 输入、全部业务字段断言、原SSR入口和运行前置不变。登记本身不代表本次运行通过。",
       "moduleGraph": [
         [
           "/src/editor/model/SceneDocument.ts",
@@ -7909,7 +7888,7 @@
     },
     {
       "file": "tests/editor/dataPlatformViewportScreen.test.ts",
-      "sha256": "3c5fd1a4a34da793187985131101c0f75d4556edeb175379dc2232d91ce5fe09",
+      "sha256": "b187690157325d9bdf3c60fa0103ece26527ff594754d5f07b56dd175081a87b",
       "disposition": "node-contract",
       "domain": "effects",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/dataPlatformViewportScreen.test.ts",
@@ -7920,27 +7899,27 @@
       ],
       "evidence": [
         {
-          "line": 3,
+          "line": 4,
           "text": "import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';"
         },
         {
-          "line": 5,
+          "line": 6,
           "text": "const viteServer = await createP4SsrTestModules(["
         },
         {
-          "line": 45,
-          "text": "test('完整大屏以 v6 场景配置序列化，并兼容旧 v4 文件', () => {"
+          "line": 46,
+          "text": "test('完整大屏以当前场景配置序列化，并兼容旧 v4 文件', () => {"
         },
         {
-          "line": 54,
-          "text": "assert.equal(serialized.version, 6);"
+          "line": 55,
+          "text": "assert.equal(serialized.version, CURRENT_SCENE_FILE_VERSION);"
         },
         {
-          "line": 58,
+          "line": 59,
           "text": "const legacy = { ...serialized, version: 4 };"
         }
       ],
-      "reviewNote": "正式effects域和Viewport原用例真实红后，按P4入场已是6的场景格式合同修2文件的输出版本期望及标题；本文件仅1个assert期望5→6，其余原assert和v3/v4输入不变；shared版本文件/serialize函数与baseline不变；agent实际9/9绿，登记不额外执行",
+      "reviewNote": "2026-10-25 原生天空迁移复核：输出版本断言改用 CURRENT_SCENE_FILE_VERSION，并同步标题与证据行；v3/v4 输入、全部业务字段断言、原SSR入口和运行前置不变。登记本身不代表本次运行通过。",
       "moduleGraph": [
         [
           "/src/editor/model/SceneDocument.ts",
@@ -8101,7 +8080,7 @@
     },
     {
       "file": "tests/editor/editorPerformanceRunSession.test.ts",
-      "sha256": "90f5cab75dca481152a8ca0abff438e3224fa2d8eb4df720c006c4d2b8614803",
+      "sha256": "27fc24276fb1eee936a484524458af213a587b476bb21d9d58d21bbff5be58bd",
       "disposition": "node-contract",
       "domain": "observability",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/editorPerformanceRunSession.test.ts",
@@ -8111,27 +8090,27 @@
       ],
       "evidence": [
         {
-          "line": 72,
+          "line": 83,
           "text": "test('遥测使用本次运行增量，复制快照且报告不含业务字段', () => {"
         },
         {
-          "line": 91,
+          "line": 102,
           "text": "test('停止后报告冻结保留，晚到采样和普通运行数据不会污染，下次运行独立重置', () => {"
         },
         {
-          "line": 114,
+          "line": 125,
           "text": "test('采样历史有界且仅保留运行中最近一分钟，停止后不会因稍后复制而过期', () => {"
         },
         {
-          "line": 135,
+          "line": 146,
           "text": "test('无效计时和 Draw 保留不可用，兼容计数不会产生负增量', () => {"
         },
         {
-          "line": 145,
+          "line": 156,
           "text": "assert.equal(report.samples[0].frameTimeMs, null);"
         },
         {
-          "line": 154,
+          "line": 165,
           "text": "test('报告区分秒级样本分位数与逐帧统计，提前停止有明确空样本结果', () => {"
         }
       ]
@@ -10018,7 +9997,7 @@
     },
     {
       "file": "tests/lightingBake/cycles_atlas_integrity_checks.py",
-      "sha256": "8383731160428923f3061b33f1fd61ca2d4d6704eb2fd3592bb06809a4807fe0",
+      "sha256": "fc7a9fc4d5f6f7d015705f0b415fceb9c2a90918d3d073d537e2a06e26ce2c3c",
       "disposition": "blender",
       "domain": null,
       "command": "blender --background --python tests/lightingBake/cycles_atlas_integrity_checks.py --",
@@ -10033,23 +10012,23 @@
           "text": "import bpy"
         },
         {
-          "line": 87,
+          "line": 88,
           "text": "parser.add_argument(\"--input\", type=Path, default=ROOT / \"tests\" / \"lightingBake\" / \"fixtures\" / \"actual-seven-surfaces.json\")"
         },
         {
-          "line": 88,
+          "line": 89,
           "text": "parser.add_argument(\"--output\", type=Path)"
         },
         {
-          "line": 89,
+          "line": 90,
           "text": "parser.add_argument(\"--all\", action=\"store_true\")"
         },
         {
-          "line": 90,
+          "line": 91,
           "text": "parser.add_argument(\"--diagnostic\", action=\"store_true\")"
         },
         {
-          "line": 91,
+          "line": 92,
           "text": "parser.add_argument(\"--orientation-only\", action=\"store_true\")"
         }
       ]
@@ -10092,7 +10071,7 @@
     },
     {
       "file": "tests/lightingBake/cycles_partition_checks.py",
-      "sha256": "4ec3c2fa34763b8edcaa38b143e701e913c45b62d8f5a80b66547fab0cc0be33",
+      "sha256": "f78a9a599bfdb00ec07c754e58b97e0b1c940457a2610e541670d453a48adabb",
       "disposition": "blender",
       "domain": null,
       "command": "blender --background --python tests/lightingBake/cycles_partition_checks.py --",
@@ -12935,7 +12914,7 @@
       "file": "tests/lightingBake/sceneLightingRuntime.test.mjs",
       "disposition": "node-contract",
       "domain": "resources",
-      "command": "npm run test:lighting-optimization",
+      "command": "npm run test:lighting-bake",
       "purpose": "光照预算、会话、产物或查询的定向合同回归",
       "prerequisites": [
         "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
@@ -12950,7 +12929,7 @@
           "text": "import { existsSync, readFileSync } from 'node:fs';"
         }
       ],
-      "sha256": "45d6359d8a61fcd0ec3ecf7c3aaa5365dfb575f6d7bd161d57a8bafe5dd7d4b7"
+      "sha256": "b0e06d236240dd44a532b4180554b47944a201c6df73712b377e549fae91e602"
     },
     {
       "file": "tests/runtime/hybridShadows.test.ts",
@@ -13181,7 +13160,7 @@
           "text": "from __future__ import annotations"
         }
       ],
-      "sha256": "aa10946b4b7d446c9709b42f3061fd530685e89589e61f70aa12e36d3f3b3a88"
+      "sha256": "91852fdabdb4976a84ac9c6187a50e0a7b18a4169813957ae59ee06119df9814"
     },
     {
       "file": "tests/runtime/lightingCaptureMetrics.test.ts",
@@ -13223,7 +13202,7 @@
           "text": "import { existsSync, promises as fs } from 'node:fs';"
         }
       ],
-      "sha256": "f19b15b08ad0f3c0735ca5f59d6ae13cc131176517fdbe9222c61e1220b32ade"
+      "sha256": "6aa8538cd1e72eeafb739ea1e6c286179568cdb9a803bc6ec37b23c17c76f297"
     },
     {
       "file": "tests/runtime/lightingTextureFailure.test.ts",
@@ -13240,11 +13219,512 @@
           "text": "import assert from 'node:assert/strict';"
         },
         {
-          "line": 2,
+          "line": 3,
           "text": "import { existsSync } from 'node:fs';"
         }
       ],
-      "sha256": "cdefc1a68acc707dd1772f995ae0af42a1083564ac70a2825fb16efcda453c75"
+      "sha256": "e52a8fcb11dff829a2942d8ca64f502b55b3a88e300d42c3fcd2e036e1ae483d"
+    },
+    {
+      "file": "tests/lightingBake/cycles_geometry_bake_checks.py",
+      "sha256": "8c8de80ac4590a8e1fff942dcfed7b01c80cc77c09ee3e8d57a1ff3430af566b",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：GI几何烘焙与焊接后属性的逐角点回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"用冻结 Q0 脚本和候选真实 CPU 烘焙，对照 PNG 与所有导出角点。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_geometry_binary_bake_checks.py",
+      "sha256": "747c426411e64b1b5751a1cfea7a231c8c31c100115d7b1879df30629477383a",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：二进制GI几何烘焙结果回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"用冻结 B6 脚本和候选真实 CPU 烘焙，对照 PNG 与二进制所有导出角点。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_geometry_binary_checks.py",
+      "sha256": "dd559c06263abf4a2eedb50aea37da54e2f7662b5fe140c06d1f9e3bdd012a57",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：二进制GI几何编码核对，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"stdlib 聚焦检查实际生产 gate；真实 Blender 导出另由集成夹具验证。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "import ast"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_geometry_weld_checks.py",
+      "sha256": "784a9da224b542528ce36513869fafe29af948cbb29885030d45fba3741c50fd",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：几何精确焊接（逐属性字节索引）回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"在真实 Blender 网格上与独立旧角点导出逐字节比较；不改烘焙配置。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_pixel_processing_checks.py",
+      "sha256": "11c373789c259472cfa71c4a00843bb85b169f556f35e2ffa576e11f5e79ae5c",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：numpy像素处理与RGBM编码等价回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"用旧标量算法核对像素向量化；不依赖 bpy，可由系统 Python 执行。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_probe_batch_checks.py",
+      "sha256": "d9e08b6f7f332448881f175eacb731bacab2295c1aa41af753a397fc171336d6",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：1024²探针批次布局与采样位置回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"用实际 Blender 网格验证 4096 探针容量、面顺序、UV 和可调批次，无渲染噪声。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_probe_gpu_checks.py",
+      "sha256": "2001b6d6f53da456c562aba565b535d524c03037ca1637ff5921012d8b68dfd2",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：GPU显存自适应缩批与数据块故障注入回归，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"真实 Blender 数据块上的探针 GPU 预算/失败注入；不冒充硬件 GPU 实测。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_q0_bake_checks.py",
+      "sha256": "8c510eb005b27213f6cd70f57043c3f01040dc48d1be2ab67991b8a8252384b2",
+      "disposition": "blender",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles.integration.mjs",
+      "purpose": "真实Blender：Q0烘焙共用检查辅助，由统一Cycles集成入口调度",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"真实 Cycles 中逐项验证 B1、B2，再验证组合；保留每次 bake 与 PNG 对照。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/lightingGeometryBinary.integration.mjs",
+      "sha256": "a0ce19c4625bcf5ef12014930565a443384fba46daedae55ec6c65b3e5f777c8",
+      "disposition": "electron-integration",
+      "domain": null,
+      "command": "node tests/lightingBake/lightingGeometryBinary.integration.mjs",
+      "purpose": "B7二进制GI几何从真实烘焙到SOURCE/DIST打包的集成检查",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { createHash } from 'node:crypto';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/lightingGeometryBinary.load-abba.mjs",
+      "sha256": "75f0bfb4f2f3a337852d71294de37304989ded3d95f9bdb8265ee17a398b864f",
+      "disposition": "performance",
+      "domain": null,
+      "command": "node tests/lightingBake/lightingGeometryBinary.load-abba.mjs",
+      "purpose": "B7二进制与JSON几何加载耗时A/B/B/A计时工具",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global document */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/lightingGeometryBinary.webgl.mjs",
+      "sha256": "4054af7411673caecc8ab83cec64e3e11cb6507a9864e91bc3e7ff9237fcb80f",
+      "disposition": "browser-webgl",
+      "domain": null,
+      "command": "node tests/lightingBake/lightingGeometryBinary.webgl.mjs",
+      "purpose": "B7二进制GI几何的硬件WebGL着色器与拾取检查",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖和本机 Playwright 兼容 Edge；必须为硬件WebGL，软件renderer失败",
+        "独立动态loopback Vite服务；结束关闭自有browser/server；不修改用户场景"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global document */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/lightingGeometryBinaryFixture.ts",
+      "sha256": "f78a20b32c403a0587898aa96ba295d362a2e4f65c59044caf7dd4f733a324f3",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node --check tests/lightingBake/lightingGeometryBinaryFixture.ts",
+      "purpose": "B7二进制GI几何测试夹具，被单元测试与发布缓存烟测共用",
+      "prerequisites": [
+        "真实引擎/界面需独立运行；语法和工具存在不代表实际链路通过。"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/** 按公开容器合同独立构造夹具；不调用产品编码器。 */"
+        },
+        {
+          "line": 2,
+          "text": "export const geometryFixture = { version: 2 as const, key: 'a/root', positions: [-0, 0, 0, 1, 0, 0, 0, 1, 0],"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/lightingGeometryVersions.webgl.mjs",
+      "sha256": "749cbf953e4177b1004eb6625e19f33b885c2ccaf3ed9de04a6068333ee403a6",
+      "disposition": "browser-webgl",
+      "domain": null,
+      "command": "node tests/lightingBake/lightingGeometryVersions.webgl.mjs",
+      "purpose": "GI几何v1/v2格式的硬件WebGL像素等价检查",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖和本机 Playwright 兼容 Edge；必须为硬件WebGL，软件renderer失败",
+        "独立动态loopback Vite服务；结束关闭自有browser/server；不修改用户场景"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global document */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ]
+    },
+    {
+      "file": "tests/runtime/generatedCargoPool.webgl.mjs",
+      "sha256": "a6184b751785a1b6596ff327dbfadab1edb9c263eb00b951f1e583d23a23db11",
+      "disposition": "browser-webgl",
+      "domain": null,
+      "command": "node tests/runtime/generatedCargoPool.webgl.mjs",
+      "purpose": "LD5货物对象池候选的硬件WebGL生命周期检查（候选默认关闭）",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖和本机 Playwright 兼容 Edge；必须为硬件WebGL，软件renderer失败",
+        "独立动态loopback Vite服务；结束关闭自有browser/server；不修改用户场景"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "/* global window */"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_zero_direct_pass_checks.py",
+      "disposition": "tooling",
+      "command": "npm run test:phase2-bake-contract",
+      "purpose": "B4无bpy独立标量/调用/回退/清理oracle，由Node合同入口执行",
+      "prerequisites": [
+        "可执行Python3；仅CPU fake bpy，不替代真实Cycles/GPU"
+      ],
+      "domain": null,
+      "sha256": "15a672e866564e35c480657815a00f0a1a6e750bd1a7283465d6f19f66cd96b6",
+      "evidence": [
+        {
+          "line": 153,
+          "text": "print(\"CYCLES_ZERO_DIRECT_PASS_CONTRACT \" + json.dumps(report))"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_zero_direct_pass_blender_checks.py",
+      "disposition": "blender",
+      "command": "blender --background --factory-startup --disable-autoexec --python-exit-code 1 --python tests/lightingBake/cycles_zero_direct_pass_blender_checks.py -- --baseline-script <frozen-baseline.py> --output <new-directory>",
+      "purpose": "真实Cycles六场景完整float32/PNG对照，基线与候选SHA绑定",
+      "prerequisites": [
+        "已验证Blender5.2.2或兼容版本；提供冻结旧脚本与全新输出目录；串行运行，不能与GPU/构建/性能采样并行"
+      ],
+      "domain": null,
+      "sha256": "9174ac192b184287c12eda7fa5599378dd0abef1d6edd4259f14d39d764cd47b",
+      "evidence": [
+        {
+          "line": 12,
+          "text": "import bpy"
+        },
+        {
+          "line": 127,
+          "text": "parser.add_argument(\"--baseline-script\", type=Path, required=True)"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/phase2GiBusinessSubset.mjs",
+      "disposition": "tooling",
+      "command": "node --test tests/lightingBake/phase2GiBusinessSubset.test.mjs",
+      "purpose": "真实业务子场景副本准备器，由专属单元验证资源与源文件不变",
+      "prerequisites": [
+        "仅新建任务output副本；不覆盖原场景或资产；准备通过不表示真实GI成功"
+      ],
+      "domain": null,
+      "sha256": "7f8c1544e3ee18eb200a03a6bfe0fa9e172597cc72851d1ebc17f7933ed08dba",
+      "evidence": [
+        {
+          "line": 11,
+          "text": "export async function prepareBusinessGiSubset({ sourceScene, output, entityIds, environment, previewBudget = false, environmentOnly = false }) {"
+        }
+      ],
+      "reviewNote": "新增environmentOnly分支保留全部原环境/灯光，通用业务分支仍按明确模型根准备；准备不表示实际GI成功。"
+    },
+    {
+      "file": "tests/lightingBake/phase2GiEnvironmentPlan.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node tests/lightingBake/phase2GiEnvironmentPlan.mjs",
+      "purpose": "只生成完整原环境独立GI的预注册计划，不执行捕获或烘焙",
+      "prerequisites": [
+        "需实际原场景/环境文件和全新output；不能把静态推算当实际准入或成功"
+      ],
+      "sha256": "59ba24719cb9e498b0789ceeacd15ae8af3dfddfd4a7ea65a6a3334e09946859",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { createHash } from 'node:crypto';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_nonreceiver_uv_candidate.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node tests/lightingBake/cycles_nonreceiver_uv_candidate.mjs --output <new-output-directory>",
+      "purpose": "冻结未优化主py与独立非receiver UV候选，不改产品",
+      "prerequisites": [
+        "只研究未优化基线；已接线时须用模块API显式source提供冻结原版，不允许覆盖原件或旧证据"
+      ],
+      "sha256": "45a7d61904ab1d0c1eb0cf64eab38078f6c9084c9f7fcb2b59ba967c5f1b26c0",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 2,
+          "text": "import { promises as fs } from 'node:fs';"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_nonreceiver_uv_checks.py",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "npm run test:phase2-bake-contract",
+      "purpose": "独立AST提取实际UV guard检查严格false/完整UV/未知回退",
+      "prerequisites": [
+        "Python3与PHASE2_NONRECEIVER_UV_CANDIDATE冻结文件；无bpy，不替代实际Blender"
+      ],
+      "sha256": "513bf586fe69f7c9e060a8f31c846e139cddb647edc9a766540d17669da47de9",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"仅AST提取候选纯谓词；不导入bpy、不执行Cycles或修改产品文件。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/cycles_nonreceiver_uv_blender_checks.py",
+      "disposition": "blender",
+      "domain": null,
+      "command": "blender --background --factory-startup --disable-autoexec --python-exit-code 1 --python tests/lightingBake/cycles_nonreceiver_uv_blender_checks.py -- --baseline-script <frozen.py> --candidate-script <candidate.py> --output <new-output>",
+      "purpose": "真实9例AA/AB完整irradiance/PNG/receiver几何/UV/TBN/probe逐bit oracle",
+      "prerequisites": [
+        "实际Blender5.2.2或兼容、冻结SHA及全新output；CPU2线程/16samples，隔离GPU/build/性能任务"
+      ],
+      "sha256": "82c124857a05353f4d546c86192dd9120a0d42e51954a668366626e09f00ba0c",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"研究候选真实Cycles oracle；只读冻结脚本，只写独立output，不改用户Blender/原资产。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/phase2MipPngBlenderOracle.py",
+      "disposition": "blender",
+      "domain": null,
+      "command": "blender --background --factory-startup --disable-autoexec --python-exit-code 1 --python tests/lightingBake/phase2MipPngBlenderOracle.py -- --output <new-output>",
+      "purpose": "真实PNG量化/行向和EXTEND角点/几何seed逐位置微oracle",
+      "prerequisites": [
+        "实际Blender/NumPy与全新output；仅微型真实烘焙，不能计为完整业务GI或性能验收"
+      ],
+      "sha256": "baa6c12f860fbff09cc4f13ba0d2d96c698f1412c896b38335f80cce85a49f07",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"B9 微型实测：真实 Blender PNG 量化/行向和 EXTEND 边角；不烘焙项目场景。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/phase2_gamma_embedded_checks.py",
+      "disposition": "blender",
+      "domain": null,
+      "command": "npm run smoke:phase2-gamma-embedded -- --engine <absolute-blender.exe> --output <new-output>",
+      "purpose": "实际Blender嵌入解释器Gamma helper bytecode guard/失败恢复及真实PNG保存",
+      "prerequisites": [
+        "Blender/全新output；保留ignore_environment事实与严格平面目录，不用普通Python替代"
+      ],
+      "sha256": "22e6b601f4b0ee0522f952640b1e3625dae366d7a76bba09150d11ae8f5b2116",
+      "evidence": [
+        {
+          "line": 1,
+          "text": "\"\"\"真实 Blender 嵌入解释器的 Gamma helper 导入/PNG/状态恢复微回归，不执行 Cycles。\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "from __future__ import annotations"
+        }
+      ]
+    },
+    {
+      "file": "tests/lightingBake/phase2GiReceiverRoi.mjs",
+      "disposition": "tooling",
+      "domain": null,
+      "command": "node scripts/phase2-gi-receiver-roi.mjs prepare --source <scene> --plan <frozen-plan> --output <new-output>",
+      "purpose": "ROI准备/实际身份绑定/收据与唯一fresh capture预算门helper；静态工具和CPU合同不代表实际Editor或烘焙完成",
+      "prerequisites": [
+        "只在独立output副本，原env几何和全部灯保持；未绑定/未知/未核预算不得bake",
+        "真实Editor观察/Store捕获/Blender/SOURCE/DIST/Viewer另由既有业务driver显式串行执行；当前仅离线prepare通过"
+      ],
+      "sha256": "f31a7c27712f97ac985b69b8cbb5b067a66a97f084667b249af5ca73850c1b5a",
+      "evidence": [
+        {
+          "line": 23,
+          "text": "export async function readReceiverRoiPlan(planFile) {"
+        },
+        {
+          "line": 175,
+          "text": "export async function prepareReceiverRoiProject({ sourceScene, planFile, output }) {"
+        }
+      ]
     }
   ]
 }

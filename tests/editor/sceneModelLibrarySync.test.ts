@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 
-const source = await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8');
+const source = (await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const start = source.indexOf('  const startModelLibrarySync = useCallback(');
 const end = source.indexOf('\n\n  useEffect(', start);
 
@@ -28,6 +28,8 @@ function fixture(ready = true) {
     setIsStartingLibrarySync: (value: boolean) => calls.push(`starting:${value}`),
     setLibraryStatuses: () => calls.push('status'),
     startExplicitSceneModelSync: async (syncLibrary: boolean) => calls.push(`scene-sync:${syncLibrary}`),
+    // 自动启动按真实产品合同先确认中台已配置；手动入口不受该只读检查影响。
+    window: { editorApi: { getDataPlatformConfig: async () => ({ baseUrl: 'https://configured.example.test' }) } },
   };
   runInNewContext(stripTypeScriptTypes(source.slice(start, end)) + '\nglobalThis.start = startModelLibrarySync;', scope);
   return { calls, scope, session, run: (automatic = true) => scope.start(automatic) };
@@ -41,6 +43,15 @@ test('后台全库同步与手动同步共用完整替换事务', async () => {
 test('主动同步进入完整场景事务，不把后台启动成功当作替换完成', async () => {
   const f = fixture(); await f.run(false);
   assert.deepEqual(f.calls, ['starting:true', 'scene-sync:true', 'starting:false']);
+});
+
+test('未配置中台时自动同步只完成配置检查，显式手动入口仍交给完整事务处理', async () => {
+  const f = fixture();
+  f.scope.window.editorApi.getDataPlatformConfig = async () => ({ baseUrl: '' });
+  await f.run(true);
+  assert.deepEqual(f.calls, ['starting:true', 'starting:false']);
+  await f.run(false);
+  assert.deepEqual(f.calls, ['starting:true', 'starting:false', 'starting:true', 'scene-sync:true', 'starting:false']);
 });
 
 test('场景必需资源未就绪时不启动后台全库任务', async () => {

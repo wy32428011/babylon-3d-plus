@@ -28,7 +28,7 @@ type Dependencies = {
   readonly assets: Pick<ModelAssetRuntimeController, 'models' | 'applyModelInteractivity' | 'suspendModelArrayHost' | 'restoreModelArrayHostMeshes' | 'refreshModelMeshes' | 'refreshModelEntityMeshes'>;
   readonly variants: Pick<ParameterVariantHostPool, 'disposeModelArrayParameterVariantsForSource' | 'modelArrayParameterVariantByEntityId' | 'rekeyReusableModelArrayParameterVariant' | 'syncModelArrayParameterVariant' | 'modelArrayParameterVariants' | 'disposeMissingModelArrayParameterVariants' | 'restoreModelArrayParameterVariantHost' | 'hideModelArrayParameterVariantHost'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'syncConveyorTrajectoriesForArrayInstances'>;
-  readonly readiness: Pick<SceneTriangleAndReadinessController, 'modelReadinessErrors'>;
+  readonly readiness: Pick<SceneTriangleAndReadinessController, 'modelReadinessErrors' | 'loadDiagnostics'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'rebuildModelSelectionOutline' | 'outlinedModelArrayBatches'>;
   readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'isModelBoundsMesh'>;
@@ -700,64 +700,71 @@ export class ModelArrayRuntimeController {
       });
     }
 
-    model.root.computeWorldMatrix(true);
-    if (!model.modelArrayBatch || model.modelArraySourceSignature !== sourceSignature) {
-      let candidate: EntityArrayThinInstanceBatch | null = null;
-      try {
-        candidate = EntityArrayThinInstanceBatch.create(options.sourceEntityId, sourceMeshes, {
-          interactive: true,
-          mergeStaticMeshesByMaterial: true,
-          sourceRootWorldMatrix: model.root.getWorldMatrix().clone(),
-          metadata: {
-            modelArraySourceEntityId: options.sourceEntityId,
-            ...(options.variantKey ? { modelArrayParameterVariant: true } : {}),
-          },
-          namePrefix: options.namePrefix,
-          resolveLayerMask: options.resolveLayerMask,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [`模型“${entity.name}”阵列批次创建失败：${message}`]);
-      }
+    const batchToken = this.dependencies.readiness.loadDiagnostics.beginTraceTask('modelArrayBatch', { entityId: entity.id });
+    let batchFailed = true;
+    try {
+      model.root.computeWorldMatrix(true);
+      if (!model.modelArrayBatch || model.modelArraySourceSignature !== sourceSignature) {
+        let candidate: EntityArrayThinInstanceBatch | null = null;
+        try {
+          candidate = EntityArrayThinInstanceBatch.create(options.sourceEntityId, sourceMeshes, {
+            interactive: true,
+            mergeStaticMeshesByMaterial: true,
+            sourceRootWorldMatrix: model.root.getWorldMatrix().clone(),
+            metadata: {
+              modelArraySourceEntityId: options.sourceEntityId,
+              ...(options.variantKey ? { modelArrayParameterVariant: true } : {}),
+            },
+            namePrefix: options.namePrefix,
+            resolveLayerMask: options.resolveLayerMask,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [`模型“${entity.name}”阵列批次创建失败：${message}`]);
+        }
 
-      if (!candidate || !candidate.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
-        candidate?.dispose();
-        if (model.modelArrayBatch) this.dependencies.assets.suspendModelArrayHost(model);
-        else if (options.variantKey) this.dependencies.assets.suspendModelArrayHost(model);
-        else this.dependencies.assets.applyModelInteractivity(model, entity.id);
+        if (!candidate || !candidate.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
+          candidate?.dispose();
+          if (model.modelArrayBatch) this.dependencies.assets.suspendModelArrayHost(model);
+          else if (options.variantKey) this.dependencies.assets.suspendModelArrayHost(model);
+          else this.dependencies.assets.applyModelInteractivity(model, entity.id);
+          this.reportModelArrayBatchFailure(
+            entity,
+            model,
+            failureSignature,
+            candidate
+              ? '矩阵数量超过保护上限、Transform 非法或参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列'
+              : '参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列',
+          );
+          return;
+        }
+
+        const previousBatch = model.modelArrayBatch;
+        model.modelArrayBatch = candidate;
+        model.modelArraySourceSignature = sourceSignature;
+        for (const mesh of candidate.meshes) this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, candidate);
+        if (previousBatch) this.disposeModelArrayBatchResources(previousBatch);
+      } else if (!model.modelArrayBatch.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
+        this.dependencies.assets.suspendModelArrayHost(model);
         this.reportModelArrayBatchFailure(
           entity,
           model,
           failureSignature,
-          candidate
-            ? '矩阵数量超过保护上限、Transform 非法或参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列'
-            : '参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列',
+          '矩阵数量超过保护上限、Transform 非法或参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列',
         );
         return;
       }
 
-      const previousBatch = model.modelArrayBatch;
-      model.modelArrayBatch = candidate;
-      model.modelArraySourceSignature = sourceSignature;
-      for (const mesh of candidate.meshes) this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, candidate);
-      if (previousBatch) this.disposeModelArrayBatchResources(previousBatch);
-    } else if (!model.modelArrayBatch.updateEntityTransforms(model.root.getWorldMatrix().clone(), visibleInstances)) {
+      for (const mesh of model.modelArrayBatch.meshes) {
+        this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
+      }
+      model.modelArrayFailureSignature = '';
       this.dependencies.assets.suspendModelArrayHost(model);
-      this.reportModelArrayBatchFailure(
-        entity,
-        model,
-        failureSignature,
-        '矩阵数量超过保护上限、Transform 非法或参数脚本输出 Mesh 不支持批量实例，已保留上一份有效阵列',
-      );
-      return;
+      this.dependencies.transforms.refreshGroupTransformPreviewTargets();
+      batchFailed = false;
+    } finally {
+      batchToken?.end(batchFailed ? 'error' : 'ok', batchFailed ? 'operation-failed' : undefined);
     }
-
-    for (const mesh of model.modelArrayBatch.meshes) {
-      this.modelArrayBatchByMeshUniqueId.set(mesh.uniqueId, model.modelArrayBatch);
-    }
-    model.modelArrayFailureSignature = '';
-    this.dependencies.assets.suspendModelArrayHost(model);
-    this.dependencies.transforms.refreshGroupTransformPreviewTargets();
   }
 
   /** 同一失败形态只记录一次，避免场景同步循环刷屏。 */

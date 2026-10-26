@@ -2,6 +2,8 @@ import type { RefObject } from 'react';
 import type { ScenePerformanceMonitor } from '../../../runtime/babylon/ScenePerformanceMonitor';
 import type { EditorPerformanceRunSession } from '../../runtime/editorPerformanceRunSession';
 import { getScenePreparationTimings } from '../../loading/scenePreparationProgress';
+import { readSceneProjectOpenReport } from '../../loading/projectOpenTrace';
+import { useEditorStore } from '../../store/editorStore';
 
 type Options = {
   performanceMonitorRef: RefObject<ScenePerformanceMonitor | null>;
@@ -51,6 +53,9 @@ export function createScenePerformanceReportHandlers({
     try {
       const report = JSON.parse(monitor.createReport());
       report.scenePreparation = getScenePreparationTimings();
+      try { const sessionId = report.scenePreparation.sceneSessionId;
+        report.projectOpen = await readSceneProjectOpenReport(sessionId, window.editorApi?.getProjectOpenTrace, () => useEditorStore.getState().sceneSessionId === sessionId); }
+      catch { report.projectOpen = { status: 'diagnostic-unavailable', openId: report.scenePreparation.openId }; }
       await copyScenePerformanceReport(JSON.stringify(report, null, 2));
       pushLog('Scene View 性能报告已复制到剪贴板。');
     } catch (error) {

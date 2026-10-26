@@ -24,7 +24,7 @@ export function prepareModelAssetTemplate(source: AssetContainer): void {
  * 从只读解析模板创建完整工作容器。参数脚本可能直接改顶点、材质、贴图变换和动画，
  * 因此只共享内部纹理像素（Babylon 自带引用计数），其余可变对象均按实体隔离。
  */
-export function cloneModelAssetContainer(source: AssetContainer): AssetContainer {
+export function cloneModelAssetContainer(source: AssetContainer, shareReadonlyGeometry = false): AssetContainer {
   const scene = source.scene;
   const working = new AssetContainer(scene);
   const materials = new Map<Material, Material>();
@@ -92,8 +92,11 @@ export function cloneModelAssetContainer(source: AssetContainer): AssetContainer
       if (node instanceof AbstractMesh) {
         working.meshes.push(node);
         if (node instanceof Mesh) {
-          node.makeGeometryUnique();
-          if (node.geometry) working.geometries.push(node.geometry);
+          // 仅已验证的新包可共享只读 Geometry；不加入工作容器的 dispose 清单，源 lease 负责恢复/释放。
+          if (!shareReadonlyGeometry) {
+            node.makeGeometryUnique();
+            if (node.geometry) working.geometries.push(node.geometry);
+          }
           if (node.morphTargetManager) {
             const manager = node.morphTargetManager;
             working.morphTargetManagers.push(manager);

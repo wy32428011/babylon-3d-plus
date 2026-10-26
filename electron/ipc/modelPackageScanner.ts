@@ -1,3 +1,4 @@
+import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharacters.ts';
 import { precompileModelScriptFile } from './modelScriptCompiler.js';
 import { promises as fs } from 'node:fs';
@@ -7,6 +8,8 @@ import type { AssetEntry, ImportModelFolderSkippedEntry, ModelPackageVariant } f
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { encodeAssetUrl } from './assetRegistry.js';
 import { MAX_GLB_FILE_BYTES, GLB_FILE_SIZE_LIMIT_MESSAGE } from '../shared/glbFilePolicy.js';
+import { analyzeGltfJson, DEFAULT_THRESHOLDS } from '../shared/modelDensityAnalysis.js';
+import type { SourceModelDensity } from '../shared/modelDensityTypes.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
@@ -14,6 +17,8 @@ export const MAX_GLB_MODEL_FILE_BYTES = MAX_GLB_FILE_BYTES;
 const MAX_GLB_JSON_CHUNK_BYTES = 64 * 1024 * 1024;
 const GLB_JSON_CHUNK_TYPE = 0x4e4f534a;
 const GLB_BINARY_CHUNK_TYPE = 0x004e4942;
+const sourceDensityCache = new Map<string, Promise<SourceModelDensity>>();
+const MAX_SOURCE_DENSITY_CACHE_ENTRIES = 128;
 const SUPPORTED_GLTF_REQUIRED_EXTENSIONS = new Set([
   'EXT_mesh_gpu_instancing',
   'EXT_meshopt_compression',
@@ -47,6 +52,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   thumbnailPath?: string;
   thumbnailUrl?: string;
   parameterConfig?: unknown;
+  runtimeCapabilities?: AssetEntry['runtimeCapabilities'];
   parameterScriptMetadata?: unknown[];
   animationScriptMetadata?: unknown[];
   dataDrivenConfig?: unknown;
@@ -223,6 +229,41 @@ async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocume
   }
 }
 
+/** 源模型诊断失败不影响合法模型导入；缓存只保存有界摘要，不保留 GLB JSON/BIN。 */
+export async function inspectSourceModelDensity(modelFilePath: string, unitScaleToMeters: number, sourceScripted = false): Promise<SourceModelDensity> {
+  const unavailable = (message: string): SourceModelDensity => ({ schemaVersion: 1, scope: 'source-glb-json', status: 'unavailable',
+    unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
+    triangles: null, uniqueTriangles: null, meshCount: null, sourceScripted, unknownReasons: [message], findings: [], findingCount: 0 });
+  if (path.extname(modelFilePath).toLowerCase() !== '.glb') return unavailable('未计算：仅支持源 GLB JSON，未读取 glTF 外部资源。');
+  try {
+    const stat = await fs.lstat(modelFilePath);
+    const key = `${path.resolve(modelFilePath)}|${stat.dev}|${stat.ino}|${stat.size}|${stat.mtimeMs}|${unitScaleToMeters}|${sourceScripted}`;
+    const existing = sourceDensityCache.get(key);
+    if (existing) return structuredClone(await existing);
+    const pending = (async (): Promise<SourceModelDensity> => {
+      try {
+        const parsed = await parseGlbContainer(modelFilePath);
+        if (!isPlainObject(parsed.gltf.asset) || parsed.gltf.asset.version !== '2.0') return unavailable('未计算：源模型不是 glTF 2.0。');
+        const result = analyzeGltfJson(parsed.gltf, DEFAULT_THRESHOLDS, { unitScaleToMeters });
+        const after = await fs.lstat(modelFilePath);
+        if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino) return unavailable('未计算：诊断期间源模型发生变化，请刷新资源库。');
+        const reasons = [...result.unknownReasons];
+        if (sourceScripted) reasons.push('仅统计源 GLB；脚本生成或参数更新后的最终几何未知。');
+        return { schemaVersion: 1, scope: 'source-glb-json', status: reasons.length ? 'partial' : 'computed',
+          unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
+          triangles: result.triangles, uniqueTriangles: result.uniqueTriangles, meshCount: result.meshCount, sourceScripted,
+          unknownReasons: reasons.slice(0, 16), findings: result.findings.slice(0, 20).map(finding => ({ ...finding, mesh: finding.mesh.slice(0, 160) })), findingCount: result.findings.length,
+          sourceFile: { size: stat.size, mtimeMs: stat.mtimeMs } };
+      } catch { return unavailable('未计算：源 GLB JSON 无法解析；模型仍按原导入规则处理。'); }
+    })();
+    sourceDensityCache.set(key, pending);
+    while (sourceDensityCache.size > MAX_SOURCE_DENSITY_CACHE_ENTRIES) sourceDensityCache.delete(sourceDensityCache.keys().next().value!);
+    const result = await pending;
+    if (result.status === 'unavailable') sourceDensityCache.delete(key);
+    return structuredClone(result);
+  } catch { return unavailable('未计算：源模型文件当前不可读取。'); }
+}
+
 /**
  * 以有界读取校验环境 GLB 的结构、自包含 URI、必需扩展和可渲染 Mesh。
  * 二进制主体不会整体载入内存，文件边界遵循统一GLB容器策略。
@@ -243,6 +284,11 @@ export async function validateGlbModelFile(modelFilePath: string): Promise<boole
   } catch {
     return false;
   }
+}
+
+/** 有界读取普通GLB的JSON首块；复用容器校验，不读取BIN主体或施加环境自包含规则。 */
+export async function readGlbModelJsonDocument(modelFilePath: string): Promise<Readonly<Record<string, unknown>>> {
+  return (await parseGlbContainer(modelFilePath)).gltf;
 }
 
 /** 校验完整环境 GLB 契约，调用方只需要布尔结果时使用。 */
@@ -555,6 +601,7 @@ async function readModelPackageMetadata(
       displayName: extractDisplayNameFromMetadata(parsed),
       parameterConfig: extractModelParameterConfigFromMetadata(parsed) ?? extractModelParameterConfigFromParameterScripts(parsed),
       parameterScriptMetadata: extractJsonArrayMetadata(parsed, 'parameterScripts'),
+      ...modelRuntimeCapabilitiesField(isPlainObject(parsed) ? parsed.runtimeCapabilities : undefined),
       animationScriptMetadata: extractJsonArrayMetadata(parsed, 'animationScripts'),
       dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
       builtInSlotBinding: extractJsonObjectFromMetadata(parsed, 'builtInSlotBinding'),
@@ -638,6 +685,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
   const modelFileName = path.basename(modelFilePath);
   const packageName = path.basename(packagePath);
   const modelFileStat = await fs.stat(modelFilePath);
+  const sourceModelDensity = await inspectSourceModelDensity(modelFilePath, metadata.unitScaleToMeters, scriptPaths.length > 0);
 
   return {
     asset: {
@@ -653,12 +701,14 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       scriptPaths,
       scriptAssets,
       parameterScriptMetadata: metadata.parameterScriptMetadata,
+      ...modelRuntimeCapabilitiesField(metadata.runtimeCapabilities),
       animationScriptMetadata: metadata.animationScriptMetadata,
       defaultAssetCode: defaultAssetCode ?? metadata.defaultAssetCode,
       displayName: metadata.displayName ?? packageName ?? path.parse(modelFileName).name,
       lengthUnit: metadata.lengthUnit,
       unitScaleToMeters: metadata.unitScaleToMeters,
       fileSizeBytes: modelFileStat.size,
+      sourceModelDensity,
       parameterConfig: metadata.parameterConfig,
       dataDrivenConfig: metadata.dataDrivenConfig,
       builtInSlotBindingConfig: metadata.builtInSlotBinding,

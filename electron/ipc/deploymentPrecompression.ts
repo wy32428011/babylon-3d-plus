@@ -41,6 +41,14 @@ function decodeManifestPath(value: string): string {
   }
   return segments.join('/');
 }
+/**
+ * 侧车必须小于原文件该比例才保留。GLB 多为已压缩二进制（Draco/KTX2），收益不足 10% 的侧车只会
+ * 额外占用 ZIP 与 2 GiB 解压预算，因此跳过；其它文本/二进制类型保持“更小即保留”的原规则。
+ */
+const GLB_MINIMUM_SIZE_RATIO = 0.9;
+function minimumRatio(relativePath: string): number {
+  return /\.glb$/i.test(relativePath) ? GLB_MINIMUM_SIZE_RATIO : 1;
+}
 function limit(value: number | undefined, fallback: number): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result < 0) throw new Error('预压缩预算参数无效。');
@@ -74,7 +82,8 @@ export async function precompressDeploymentFiles(stagingRoot: string, manifest: 
     const file = byPath.get(key);
     if (!file || file.size !== entry.size || !/^[a-f0-9]{64}$/i.test(entry.sha256)) throw new Error('预压缩原文件与清单大小或校验信息不一致。');
     // B7 的原精度 binary 几何也需要可选传输压缩；解压后的原文仍按原清单校验。
-    if (CONTROL_FILES.has(relativePath.toLowerCase()) || !/\.(?:m?js|css|json|wasm|bin)$/i.test(relativePath)) continue;
+    // GLB 只改传输编码，浏览器解压后字节与原清单 SHA 相同；未压缩环境模型实测可省约 20%。
+    if (CONTROL_FILES.has(relativePath.toLowerCase()) || !/\.(?:m?js|css|json|wasm|bin|glb)$/i.test(relativePath)) continue;
     for (const encoding of ['br', 'gzip'] as const) {
       const suffix = encoding === 'br' ? '.br' : '.gz', destination = resolveDeploymentDestination(stagingRoot, relativePath + suffix);
       work.push({ file, sourcePath: relativePath, destination, relativePath: relativePath + suffix, encoding, sha256: entry.sha256.toLowerCase() });
@@ -114,7 +123,7 @@ export async function precompressDeploymentFiles(stagingRoot: string, manifest: 
         const index = next++, item = tasks[index];
         try {
           const candidate = await compressCandidate(item, workerSignal, temporaryFiles);
-          if (candidate.size >= item.file.size) {
+          if (candidate.size >= item.file.size * minimumRatio(item.sourcePath)) {
             await fs.rm(candidate.temporary); temporaryFiles.delete(candidate.temporary);
             result.skipped.push({ path: item.relativePath, reason: 'not-smaller' });
           } else candidates[index] = candidate;

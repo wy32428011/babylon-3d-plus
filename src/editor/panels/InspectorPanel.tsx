@@ -13,10 +13,6 @@ import { formatCadReferenceUnitSummary } from '../cad/cadUnits';
 import { SCENE_LENGTH_UNIT_SYMBOL, formatModelLengthUnit } from '../model/sceneUnits';
 import {
   SCENE_SKYBOX_RESOLUTIONS,
-  getSkyboxSphereDiameterMeters,
-  SKYBOX_SPHERE_DIAMETER_METERS,
-  SKYBOX_SPHERE_SCALE_MAX,
-  SKYBOX_SPHERE_SCALE_MIN,
   type SceneSkyboxResolution,
 } from '../model/SceneDocument';
 import {
@@ -221,13 +217,6 @@ export function InspectorPanel(props: InspectorPanelProps) {
     updateSelectedSkybox({ resolution });
   }
 
-  function handleSkyboxScaleChange(rawValue: string) {
-    if (rawValue === '') return;
-    const scale = Number(rawValue);
-    if (!Number.isFinite(scale)) return;
-    updateSelectedTransform('scale', 'x', scale);
-  }
-
   function handleCadReferenceOpacityChange(rawValue: string) {
     if (rawValue === '') return;
 
@@ -378,9 +367,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
   const layerChangePlatformEntity = modelAsset ? findLayerChangePlatformEntity(scene, selectedEntity.id) : null;
   const transformDisabled = isLocked || isBuiltInBound;
-  const transformFields: readonly TransformField[] = light
+  const transformFields: readonly TransformField[] = skybox ? [] : light
     ? getLightEditorCapabilities(light.lightKind).transformFields
-    : skybox || autoPatrol || manualRoamSpawn
+    : autoPatrol || manualRoamSpawn
       ? fields.filter((field) => field !== 'scale')
       : fields;
 
@@ -510,24 +499,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : null}
       {skybox ? (
         <fieldset className="transform-fieldset">
-          <legend>球形天空盒</legend>
-          <p className="muted asset-path" title={skybox.sourcePath}>{skybox.sourcePath}</p>
-          <p className="muted">格式：{skybox.format.toUpperCase()} · 基础直径：{SKYBOX_SPHERE_DIAMETER_METERS} m</p>
-          <label className="number-row">
-            <span>尺寸倍率</span>
-            <input
-              disabled={isLocked}
-              max={SKYBOX_SPHERE_SCALE_MAX}
-              min={SKYBOX_SPHERE_SCALE_MIN}
-              step="0.1"
-              type="number"
-              value={transform.scale.x}
-              onChange={(event) => handleSkyboxScaleChange(event.target.value)}
-            />
-          </label>
-          <p className="muted">
-            实际直径：{MODEL_MEASUREMENT_FORMATTER.format(getSkyboxSphereDiameterMeters(transform.scale))} m
-          </p>
+          <legend>无限远天空背景</legend>
+          <p className="muted asset-path" title={skybox.sourcePath}>{skybox.sourcePath || '运行包仅保留源身份'}</p>
+          <p className="muted">源格式：{skybox.format.toUpperCase()} · 运行格式：ENV</p>
           <div className="inspector-row">
             <span>环境反射强度</span>
             <output aria-label="环境反射强度">{scene.sceneSettings.lighting.environmentIntensity}</output>
@@ -545,7 +519,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               ))}
             </select>
           </label>
-          <p className="muted">使用 position 移动球心，rotation Y 旋转环境；尺寸倍率始终等比缩放球体。</p>
+          <p className="muted">背景始终位于无限远。水平旋转在场景设置中调整，旧位置和尺寸仅保留为兼容数据。</p>
         </fieldset>
       ) : null}
       {locator ? (

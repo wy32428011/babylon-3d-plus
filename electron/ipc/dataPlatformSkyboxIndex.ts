@@ -1,23 +1,16 @@
 import { promises as fs } from 'node:fs';
-import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { ProjectSkyboxAssetEntry } from '../types.js';
 import type { DataPlatformSkyboxRecord } from './dataPlatformSkyboxContract.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
-
-// 源码测试直接执行 .ts，Electron 构建产物执行 .js；按当前扩展名复用 Task1 契约，避免复制校验逻辑。
-const require = createRequire(import.meta.url);
-type DataPlatformSkyboxContractModule = typeof import('./dataPlatformSkyboxContract.js');
-type AssetRegistryModule = typeof import('./assetRegistry.js');
-type SkyboxAssetStoreModule = typeof import('./skyboxAssetStore.js');
-const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
-const {
+// 静态依赖交由 ESM 排序初始化；构建器会将 .ts 重写为 .js，避免同步 require 提前读取未初始化导出。
+import {
   assertUniqueSkyboxRecords,
   MAX_SKYBOX_FILE_BYTES,
   normalizePositiveIdentifier,
-} = require(`./dataPlatformSkyboxContract${runtimeExtension}`) as DataPlatformSkyboxContractModule;
-const { encodeAssetUrl } = require(`./assetRegistry${runtimeExtension}`) as AssetRegistryModule;
-const { inspectSkyboxAssetFile } = require(`./skyboxAssetStore${runtimeExtension}`) as SkyboxAssetStoreModule;
+} from './dataPlatformSkyboxContract.ts';
+import { encodeAssetUrl } from './assetRegistry.ts';
+import { inspectSkyboxAssetFile } from './skyboxAssetStore.ts';
 
 export const DATA_PLATFORM_SKYBOX_INDEX_VERSION = 1 as const;
 export const MAX_SKYBOX_SYNC_DOWNLOAD_BYTES = 8 * 1024 ** 3;

@@ -28,6 +28,7 @@ export function isManualRoamCollisionExcludedMesh(mesh: AbstractMesh): boolean {
     || metadata?.editorManualRoamSpawn
     || metadata?.editorShadowCatcher
     || metadata?.editorSkyboxSphere
+    || metadata?.runtimeSkybox
   ) return true;
   const name = mesh.name.toLowerCase();
   return name.includes('skybox')

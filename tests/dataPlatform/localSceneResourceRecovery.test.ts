@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { CURRENT_SCENE_FILE_VERSION } from '../../electron/shared/sceneFileVersion.ts';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
@@ -138,8 +139,8 @@ test('远程 API 地址和非资源文本不列入文件预检', async t => {
   const recovered = JSON.parse(result.sceneContent), settings = recovered.scene.sceneSettings;
   assert.equal(settings.lighting.version, 2); assert.equal(settings.appearance.version, 1);
   delete recovered.scene.sceneSettings;
-  assert.equal(recovered.version, 6);
-  assert.deepEqual(recovered, { ...document, version: 6 }); assert.deepEqual(result.issues, []); assert.deepEqual(result.missing, []);
+  assert.equal(recovered.version, CURRENT_SCENE_FILE_VERSION);
+  assert.deepEqual(recovered, { ...document, version: CURRENT_SCENE_FILE_VERSION }); assert.deepEqual(result.issues, []); assert.deepEqual(result.missing, []);
 });
 
 test('网络补齐映射仍校验文件且保留查询参数，取消不产生部分提交', async t => {

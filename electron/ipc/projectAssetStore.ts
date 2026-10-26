@@ -1,3 +1,4 @@
+import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -26,7 +27,8 @@ import {
   encodeAssetUrl,
   normalizeFilePath,
 } from './assetRegistry.js';
-import { scanModelPackage, validateEnvironmentGlbFile } from './modelPackageScanner.js';
+import { scanModelPackage, validateEnvironmentGlbFile, inspectSourceModelDensity } from './modelPackageScanner.js';
+import { isSourceModelDensity } from '../shared/modelDensityTypes.js';
 import {
   listIndexedDataPlatformSkyboxes,
   mergeSkyboxAssets,
@@ -472,12 +474,15 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     scriptPaths,
     scriptAssets,
     parameterScriptMetadata: normalizeOptionalMetadataArray(asset.parameterScriptMetadata),
+    ...modelRuntimeCapabilitiesField(asset.runtimeCapabilities),
     animationScriptMetadata: normalizeOptionalMetadataArray(asset.animationScriptMetadata),
     defaultAssetCode,
     displayName: typeof asset.displayName === 'string' ? asset.displayName : undefined,
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     fileSizeBytes,
+    sourceModelDensity: isSourceModelDensity(asset.sourceModelDensity)
+      && asset.sourceModelDensity.unitScaleToMeters === unitInfo.unitScaleToMeters ? asset.sourceModelDensity : undefined,
     parameterConfig: isPlainObject(asset.parameterConfig) ? asset.parameterConfig : undefined,
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
@@ -936,6 +941,13 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const error of indexedEnvironments.errors) console.warn(`[data-platform-environment] ${error}`);
   }
 
+  // 老索引没有该可选字段也能显示提示；只在资源卡列表请求时检查源文件，摘要按文件身份/单位缓存。
+  // 不把诊断放进工程打开和同步事务的所有索引读取，避免增加关键路径的全库 JSON 扫描。
+  for (const asset of new Set([...assets, ...localAssets])) {
+    asset.sourceModelDensity = await inspectSourceModelDensity(asset.path, asset.unitScaleToMeters ?? 1,
+      Boolean(asset.scriptPaths?.length || asset.scriptAssets?.length));
+  }
+
   for (const asset of assets) {
     authorizeAssetFile(asset.path);
     if (asset.thumbnailPath) authorizeAssetFile(asset.thumbnailPath);
@@ -1078,6 +1090,8 @@ export async function importEnvironmentModelFileIntoProject(
       lengthUnit: DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.lengthUnit,
       unitScaleToMeters: DEFAULT_ENVIRONMENT_MODEL_LENGTH_UNIT_INFO.unitScaleToMeters,
     };
+    importedAsset.sourceModelDensity = await inspectSourceModelDensity(importedAsset.path, importedAsset.unitScaleToMeters!,
+      Boolean(importedAsset.scriptPaths?.length || importedAsset.scriptAssets?.length));
 
     authorizeAssetFile(importedAsset.path);
     const projectAssets = [

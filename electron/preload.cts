@@ -249,6 +249,9 @@ contextBridge.exposeInMainWorld('editorApi', {
   importEnvironmentModelFile: (): Promise<ImportEnvironmentModelFileResult> => ipcRenderer.invoke('assets:importEnvironmentModelFile'),
   /** 透传项目级 HDR/EXR 天空盒导入请求。 */
   importSkyboxFile: (): Promise<ImportSkyboxFileResult> => ipcRenderer.invoke('assets:importSkyboxFile'),
+  prepareSkyboxEnvironment: (source: import('./shared/sceneSkyboxContract.js').SkyboxPreparationSource): Promise<import('./shared/sceneSkyboxContract.js').SkyboxPreparationTicket> => ipcRenderer.invoke('assets:prepareSkyboxEnvironment', source),
+  commitSkyboxEnvironment: (request: { token: string; bytes: Uint8Array }): Promise<import('./shared/sceneSkyboxContract.js').SkyboxEnvironmentResource> => ipcRenderer.invoke('assets:commitSkyboxEnvironment', request),
+  cancelSkyboxEnvironment: (token: string): Promise<boolean> => ipcRenderer.invoke('assets:cancelSkyboxEnvironment', token),
   listModelPackageVariants: (request: ListModelPackageVariantsRequest): Promise<ModelPackageVariant[]> =>
     ipcRenderer.invoke('assets:listModelPackageVariants', request),
   getDigitalTwinPublishContext: (request?: DigitalTwinPublishContextRequest): Promise<DigitalTwinPublishContext> =>

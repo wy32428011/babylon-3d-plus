@@ -4,6 +4,7 @@ import { SceneLoadingMask } from '../../shared/ui/SceneLoadingMask';
 import { RemoteDownloadDetail } from './RemoteDownloadDetail';
 import { sceneRemoteDownloadStore } from './sceneRemoteDownloadProgress';
 import { environmentPreparationStore } from './environmentPreparationProgress';
+import { skyboxRuntimeStatus } from './skyboxRuntimeStatus';
 import { useEditorStore } from '../store/editorStore';
 import {
   getScenePreparationSnapshot,
@@ -27,6 +28,7 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
     environmentPreparationStore.getSnapshot,
     environmentPreparationStore.getSnapshot,
   );
+  const skybox = useSyncExternalStore(skyboxRuntimeStatus.subscribe, skyboxRuntimeStatus.getSnapshot, skyboxRuntimeStatus.getSnapshot);
   const downloads = useSyncExternalStore(
     sceneRemoteDownloadStore.subscribe,
     sceneRemoteDownloadStore.getSnapshot,
@@ -122,6 +124,8 @@ export function ScenePreparationOverlay({ onCancel, cancelling = false }: { onCa
         }
       }}
       action={<>
+          {skybox.sceneSessionId === state.sceneSessionId && skybox.phase === 'error'
+            ? <button type="button" disabled={environment.retrying} onClick={() => skyboxRuntimeStatus.retry(state.sceneSessionId)}>重试天空 ENV</button> : null}
           {environmentError ? <button disabled={environment.retrying} onClick={() => void environmentPreparationStore.retry()} type="button">{localScene || explicitModelSync ? '重新同步场景资源' : '重试环境模型同步'}</button> : null}
           {environmentError && environmentRecoveryChoice ? <button data-environment-recovery-accept type="button"
             disabled={environment.retrying || cancelling} onClick={() => {

@@ -1,3 +1,5 @@
+import { verifySkyboxEnvironmentFile } from './skyboxEnvironmentResources.ts';
+import type { SkyboxEnvironmentResource } from '../shared/sceneSkyboxContract.ts';
 import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { collectSceneResourceReferences, collectSceneSkyboxReferences, collectLightingPolicyResourceModels, type SceneModelReference } from '../shared/sceneResourceTraversal.js';
 import type { PrecompiledDeploymentScript } from './deploymentPrecompiledScripts.js';
@@ -11,9 +13,8 @@ import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
 import { getSceneLightingBakeError } from '../shared/sceneLightingBakeContract.js';
 import { captureSceneLightingBakeRelocation, restoreSceneLightingBakeAfterMappedRewrite, stripLightingPolicyIdentityLocationHints } from '../shared/sceneLightingBakeRelocation.js';
 import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
-import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { readUtf8File } from '../shared/strictUtf8.js';
+import { readModelResourceDependencies } from './modelResourceDependencies.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
@@ -51,7 +52,6 @@ import {
 } from './deploymentSkyboxCache.js';
 
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
-const MAX_GLTF_JSON_BYTES = 64 * 1024 * 1024;
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const SCRIPT_EXTENSION = '.ts';
 const SCRIPT_DECLARATION_EXTENSION = '.d.ts';
@@ -123,6 +123,7 @@ type MutableSkyboxReference = { skybox: PlainObject };
 
 type ResolvedSkyboxReference = MutableSkyboxReference & {
   sourcePath: string;
+  environment: SkyboxEnvironmentResource;
   bundle: ResourceBundle;
 };
 
@@ -271,6 +272,8 @@ export async function prepareDeploymentExport(
     ));
   }
 
+  if (options.validateOpeningViewer) await options.validateOpeningViewer(JSON.stringify(sceneFile));
+
   const resolvedCadReferences: ResolvedCadReference[] = [];
   for (const reference of references.cadReferences) {
     resolvedCadReferences.push(await resolveCadReference(reference, bundles, signal));
@@ -309,6 +312,13 @@ export async function prepareDeploymentExport(
     lightingReferenceMap.set(reference, requireMappedUrl(sourceUrlMap, imagePath, '模型参数图片'));
   }
   const deploymentFileBySource = new Map(assetFiles.map(file => [toLocalPathKey(file.sourcePath), file]));
+  for (const skybox of resolvedSkyboxes) {
+    const file = deploymentFileBySource.get(toLocalPathKey(skybox.sourcePath));
+    if (!file) throw new Error('部署清单遗漏天空 ENV。');
+    file.expectedSize = skybox.environment.byteLength;
+    file.expectedSha256 = skybox.environment.sha256;
+    file.integrityLabel = '天空预过滤 ENV 固定产物';
+  }
   for (const asset of lightingAssets) {
     const file = deploymentFileBySource.get(toLocalPathKey(asset.sourcePath));
     if (!file) throw new Error('部署清单遗漏光照资产：' + asset.asset.id);
@@ -515,7 +525,11 @@ async function resolveModelBundle(
   // 无索引的包内子模型也保留 Model/Combo 资源目录，发布后才能继续匹配同设备的多个快照。
   const platformPackageRoot = /^(.+?[\\/](?:model|combo)-[1-9]\d{0,63}(?:-[^\\/]+)?)[\\/]/i.exec(sourcePath)?.[1];
   const sourceDirectory = platformPackageRoot ?? path.dirname(sourcePath);
-  return getOrCreateBundle(bundles, 'models', sourceDirectory, await isTrustedCompletePackageRoot(sourceDirectory));
+  // 库根loose模型在SOURCE中是单文件；目录授权不等于把整个模型库声明为一个包。
+  // 显式脚本与glTF依赖仍由下游逐项收集，索引/声明的专属包保留上方完整包路径。
+  const looseAtModelsRoot = !platformPackageRoot && path.basename(sourceDirectory).toLowerCase() === 'models'
+    && path.basename(path.dirname(sourceDirectory)).toLowerCase() === 'assets';
+  return getOrCreateBundle(bundles, 'models', sourceDirectory, !looseAtModelsRoot && await isTrustedCompletePackageRoot(sourceDirectory));
 }
 
 /** 解析环境包、环境变体和 activeVariantUrl。 */
@@ -570,7 +584,7 @@ async function resolveEnvironmentReference(
   };
 }
 
-/** 解析单个 HDR/EXR 天空盒；带稳定资源 ID 时复用共享缓存校验契约。 */
+/** 原图仍按旧授权/中台身份校验，DIST 只收集与该原图匹配的预过滤 ENV。 */
 async function resolveSkyboxReference(
   reference: MutableSkyboxReference,
   projectContext: ProjectAssetContext | null,
@@ -581,44 +595,33 @@ async function resolveSkyboxReference(
   validationCache: DeploymentSkyboxValidationCache,
 ): Promise<ResolvedSkyboxReference> {
   throwIfDeploymentExportAborted(signal);
-  const indexed = await resolveDeploymentSkyboxReference(
-    reference.skybox,
-    projectContext,
-    validationCache,
-    signal,
+  const indexed = reference.skybox.sourceAvailable === false ? null : await resolveDeploymentSkyboxReference(
+    reference.skybox, projectContext, validationCache, signal,
   );
+  let checkedSource = reference.skybox;
   if (indexed) {
-    const bundle = getOrCreateBundle(
-      bundles,
-      'skyboxes',
-      indexed.packageRoot,
-      false,
-      `project/assets/skyboxes/Skybox-${indexed.entry.resourceId}`,
-      indexed.entry,
-    );
-    addExplicitFileToBundle(bundle, indexed.sourcePath);
+    checkedSource = { ...reference.skybox, sourcePath: indexed.sourcePath };
     if (indexed.entry.status === 'orphaned' && !warnedOrphanedSkyboxIds.has(indexed.entry.resourceId)) {
       warnedOrphanedSkyboxIds.add(indexed.entry.resourceId);
       warnings.push(createDataPlatformSkyboxOrphanedWarning(indexed.entry));
     }
-    return { ...reference, sourcePath: indexed.sourcePath, bundle };
+  } else if (reference.skybox.sourceAvailable !== false) {
+    const sourcePath = resolveLocalAssetPath(reference.skybox.sourcePath, reference.skybox.sourceUrl, '天空原图');
+    assertSkyboxFileExtension(sourcePath, reference.skybox.format);
+    const packageRoot = readOptionalLocalPath(reference.skybox.packagePath, '天空盒源包路径') ?? path.dirname(sourcePath);
+    if (!isPathInsideOrEqual(packageRoot, sourcePath)) throw new Error('天空原图路径逃逸资源包根目录。');
+    if (projectContext && isPathInsideOrEqual(projectContext.projectRoot, packageRoot)) await assertProjectPackageInsideRoot(packageRoot, projectContext);
+    else assertAuthorizedDeploymentSourceFile(sourcePath, '天空原图');
+    checkedSource = { ...reference.skybox, sourcePath };
   }
-
-  const sourcePath = resolveLocalAssetPath(reference.skybox.sourcePath, reference.skybox.sourceUrl, '天空盒资源');
-  assertSkyboxFileExtension(sourcePath, reference.skybox.format);
-  const packagePathHint = readOptionalLocalPath(reference.skybox.packagePath, '天空盒包路径');
-  const packageRoot = packagePathHint ?? path.dirname(sourcePath);
-  if (!isPathInsideOrEqual(packageRoot, sourcePath)) throw new Error('天空盒文件路径逃逸天空盒包根目录。');
-
-  if (projectContext && isPathInsideOrEqual(projectContext.projectRoot, packageRoot)) {
-    await assertProjectPackageInsideRoot(packageRoot, projectContext);
-  } else {
-    assertAuthorizedDeploymentSourceFile(sourcePath, '天空盒资源');
-  }
-
-  const bundle = getOrCreateBundle(bundles, 'skyboxes', packageRoot, false);
-  addExplicitFileToBundle(bundle, sourcePath);
-  return { ...reference, sourcePath, bundle };
+  const authorized = (file: string) => isAuthorizedAssetFile(file)
+    || Boolean(projectContext && (isPathInsideOrEqual(projectContext.projectRoot, file)
+      || projectContext.dataPlatformSkyboxRoot && isPathInsideOrEqual(projectContext.dataPlatformSkyboxRoot, file)));
+  const verified = await verifySkyboxEnvironmentFile(checkedSource, signal, authorized);
+  const bundle = getOrCreateBundle(bundles, 'skyboxes', path.dirname(verified.sourcePath), false,
+    `project/assets/skyboxes/Env-${verified.resource.sha256.slice(0, 16)}`);
+  addExplicitFileToBundle(bundle, verified.sourcePath);
+  return { ...reference, sourcePath: verified.sourcePath, environment: verified.resource, bundle };
 }
 
 /** 解析单个 CAD 文件，并按明确文件模式登记。 */
@@ -639,12 +642,13 @@ async function resolveCadReference(
 async function addModelFileAndDependencies(bundle: ResourceBundle, sourcePath: string, signal: AbortSignal): Promise<void> {
   if (!isPathInsideOrEqual(bundle.sourceRoot, sourcePath)) throw new Error('模型文件路径逃逸模型包根目录。');
   addExplicitFileToBundle(bundle, sourcePath);
-  if (path.extname(sourcePath).toLowerCase() !== '.gltf') return;
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (extension !== '.gltf' && (extension !== '.glb' || bundle.copyCompleteDirectory)) return;
 
   const sourceKey = toLocalPathKey(sourcePath);
   let dependencyPromise = bundle.gltfDependencyCache.get(sourceKey);
   if (!dependencyPromise) {
-    dependencyPromise = readGltfDependencies(sourcePath, bundle.sourceRoot, signal);
+    dependencyPromise = readModelResourceDependencies(sourcePath, bundle.sourceRoot, signal);
     bundle.gltfDependencyCache.set(sourceKey, dependencyPromise);
   }
 
@@ -653,61 +657,6 @@ async function addModelFileAndDependencies(bundle: ResourceBundle, sourcePath: s
   } catch (error) {
     if (bundle.gltfDependencyCache.get(sourceKey) === dependencyPromise) bundle.gltfDependencyCache.delete(sourceKey);
     throw error;
-  }
-}
-
-/** 安全读取 glTF JSON 中的本地 URI，并拒绝远程依赖与包根逃逸。 */
-async function readGltfDependencies(gltfPath: string, packageRoot: string, signal: AbortSignal): Promise<string[]> {
-  throwIfDeploymentExportAborted(signal);
-  const stat = await fs.lstat(gltfPath);
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('glTF 主文件不是安全的普通文件。');
-  if (stat.size > MAX_GLTF_JSON_BYTES) throw new Error('glTF JSON 超过安全解析上限。');
-
-  let document: unknown;
-  try {
-    document = JSON.parse(await readUtf8File(gltfPath, 'glTF 文件')) as unknown;
-  } catch {
-    throw new Error('glTF JSON 无法解析。');
-  }
-
-  const gltf = requirePlainObject(document, 'glTF 文档');
-  const uris: string[] = [];
-  collectUriValues(gltf.buffers, uris, 'glTF buffers');
-  collectUriValues(gltf.images, uris, 'glTF images');
-  const dependencies = new Set<string>();
-
-  for (const uri of uris) {
-    throwIfDeploymentExportAborted(signal);
-    if (/^data:/i.test(uri)) continue;
-    if (/^[a-z][a-z\d+.-]*:/i.test(uri) || uri.startsWith('//')) {
-      throw new Error('glTF 包含无法离线导出的远程资源 URI。');
-    }
-
-    let decodedPath: string;
-    try {
-      decodedPath = decodeURIComponent(uri.split(/[?#]/, 1)[0] ?? '');
-    } catch {
-      throw new Error('glTF 资源 URI 编码不正确。');
-    }
-
-    if (!decodedPath || path.isAbsolute(decodedPath) || path.win32.isAbsolute(decodedPath)) {
-      throw new Error('glTF 资源 URI 不是安全相对路径。');
-    }
-    const dependencyPath = path.resolve(path.dirname(gltfPath), decodedPath);
-    if (!isPathInsideOrEqual(packageRoot, dependencyPath)) throw new Error('glTF 资源 URI 逃逸模型包根目录。');
-    dependencies.add(dependencyPath);
-  }
-  return [...dependencies];
-}
-
-/** 从 glTF buffers/images 数组中收集非空 uri 字段。 */
-function collectUriValues(value: unknown, target: string[], label: string): void {
-  if (value === undefined) return;
-  if (!Array.isArray(value)) throw new Error(`${label} 格式不正确。`);
-  for (const entry of value) {
-    if (!isPlainObject(entry) || entry.uri === undefined) continue;
-    if (typeof entry.uri !== 'string' || !entry.uri) throw new Error(`${label} URI 格式不正确。`);
-    target.push(entry.uri);
   }
 }
 
@@ -1054,10 +1003,14 @@ function rewriteEnvironmentReferences(references: ResolvedEnvironmentReference[]
 /** 将天空盒路径改写为部署虚拟 URL，并保留场景级渲染参数。 */
 function rewriteSkyboxReferences(references: ResolvedSkyboxReference[], sourceUrlMap: Map<string, string>): void {
   for (const reference of references) {
-    const skyboxUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '天空盒资源');
-    reference.skybox.packagePath = createVirtualDirectoryUrl(reference.bundle.destinationRoot);
-    reference.skybox.sourcePath = skyboxUrl;
-    reference.skybox.sourceUrl = skyboxUrl;
+    const skyboxUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '天空 ENV');
+    reference.skybox.environment = { ...reference.environment,
+      packagePath: createVirtualDirectoryUrl(reference.bundle.destinationRoot), sourcePath: skyboxUrl, sourceUrl: skyboxUrl };
+    // DIST 不伪装成可烘焙源工程，不留下指向未打包 HDR/EXR 的本机地址。
+    reference.skybox.packagePath = '';
+    reference.skybox.sourcePath = '';
+    reference.skybox.sourceUrl = '';
+    reference.skybox.sourceAvailable = false;
   }
 }
 

@@ -114,10 +114,10 @@ export async function loadSkyboxTexture<T extends DisposableTexture>(url: string
       processing = true;
       try {
         options.onStage?.('decoding', performance.now() - decodeStartedAt);
-        if (!signal.aborted) {
+        if (!signal.aborted && options.prepare) {
           const prepareStartedAt = performance.now();
           options.onStage?.('prefiltering', null);
-          await options.prepare?.(texture!);
+          await options.prepare(texture!);
           options.onStage?.('prefiltering', performance.now() - prepareStartedAt);
         }
         finish();

@@ -21,9 +21,9 @@ export class PlayerInitialLoadMonitor {
       progress.totalCount, progress.currentFile, progress.filePercent, skybox.stage, skybox.receivedBytes, snapshot.resourceBytes, snapshot.startupStage]);
     if (this.startedAt === null) this.startedAt = now;
     if (signature !== this.signature) { this.signature = signature; this.lastProgressAt = now; }
-    const stage = snapshot.startupStage || (skybox.stage === 'reading' ? '下载天空盒' : skybox.stage === 'decoding' ? '解码天空盒'
-      : skybox.stage === 'prefiltering' ? '准备天空盒光照' : progress.loading ? '加载模型资源' : '验证场景首帧');
-    const bytes = skybox.stage === 'reading'
+    const stage = snapshot.startupStage || (skybox.stage === 'env-read' ? '下载天空 ENV' : skybox.stage === 'env-upload' ? '上传天空 ENV'
+      : skybox.stage === 'preparing' ? '准备天空资源' : progress.loading ? '加载模型资源' : '验证场景首帧');
+    const bytes = skybox.stage === 'env-read'
       ? ` ${(skybox.receivedBytes / 1_000_000).toFixed(1)}${skybox.totalBytes === null ? '' : ` / ${(skybox.totalBytes / 1_000_000).toFixed(1)}`} MB`
       : '';
     const kind = now - this.lastProgressAt >= PLAYER_SCENE_LOADING_STALL_MS ? 'stalled'

@@ -1,4 +1,6 @@
 import { AssetContainer } from '@babylonjs/core/assetContainer.js';
+import { loadCapabilityModelTemplate } from '../modelRuntimeCapabilities.ts';
+import { modelRuntimeConfigurationKey } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
 import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
@@ -8,6 +10,7 @@ import type { ISceneLoaderProgressEvent } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
 import type { ModelAssetComponent } from '../../../editor/model/components';
 import { ExternalModelScriptRuntime } from '../ExternalModelScriptRuntime';
+import type { SceneAssetTrace, SceneLoadTraceScope } from '../SceneLoadDiagnostics.ts';
 import { isMeasurableModelMesh } from '../modelMeasurement';
 import { getMeshesWorldBottomCenter } from '../runtimeNodeGeometry';
 import { resolveRuntimeAssetUrl } from '../../assets/editorAssetUrl';
@@ -197,35 +200,37 @@ export class ModelAssetRuntimeController {
     this.dependencies.selection.applyModelSelection(pending, selected);
     this.applyModelInteractivity(pending, entity.id);
 
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal, entity.id)
-      .then((loadedAssets) => this.dependencies.readiness.loadDiagnostics.measure('modelInitialize', () => {
+      .then((loadedAssets) => {
         const activeEntry = this.models.get(entity.id);
         if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
           loadedAssets.handle.dispose();
           return;
         }
-
-        activeEntry.cancelLoad = null;
-        activeEntry.assetHandle = loadedAssets.handle;
-        if (loadedAssets.kind === 'owned-container') {
-          activeEntry.meshes = loadedAssets.meshes;
-          this.parentTopLevelModelNodes(activeEntry, loadedAssets.transformNodes);
-        } else {
-          for (const rootNode of loadedAssets.rootNodes) {
-            rootNode.parent = activeEntry.contentRoot;
+        return this.dependencies.readiness.loadDiagnostics.withTrace(traceScope, () => this.dependencies.readiness.loadDiagnostics.measure('modelInitialize', () => {
+          activeEntry.cancelLoad = null;
+          activeEntry.assetHandle = loadedAssets.handle;
+          if (loadedAssets.kind === 'owned-container') {
+            activeEntry.meshes = loadedAssets.meshes;
+            this.parentTopLevelModelNodes(activeEntry, loadedAssets.transformNodes);
+          } else {
+            for (const rootNode of loadedAssets.rootNodes) {
+              rootNode.parent = activeEntry.contentRoot;
+            }
           }
-        }
 
-        const latestEntity = activeEntry.entitySnapshot ?? entity;
-        this.refreshModelEntityMeshes(latestEntity, activeEntry);
-        this.normalizeModelContentOrigin(activeEntry);
-        this.dependencies.parameters.applyModelParameters(latestEntity, activeEntry);
-        this.syncExternalModelScripts(latestEntity, activeEntry);
-        this.dependencies.selection.applyModelSelection(activeEntry, activeEntry.highlighted);
-        this.applyModelInteractivity(activeEntry, latestEntity.id);
-        this.dependencies.presentation.syncConveyorTrajectory(latestEntity, activeEntry);
-        this.dependencies.readiness.scheduleModelPresentationRefresh();
-      }))
+          const latestEntity = activeEntry.entitySnapshot ?? entity;
+          this.refreshModelEntityMeshes(latestEntity, activeEntry);
+          this.normalizeModelContentOrigin(activeEntry);
+          this.dependencies.parameters.applyModelParameters(latestEntity, activeEntry);
+          this.syncExternalModelScripts(latestEntity, activeEntry);
+          this.dependencies.selection.applyModelSelection(activeEntry, activeEntry.highlighted);
+          this.applyModelInteractivity(activeEntry, latestEntity.id);
+          this.dependencies.presentation.syncConveyorTrajectory(latestEntity, activeEntry);
+          this.dependencies.readiness.scheduleModelPresentationRefresh();
+        }, { entityId: entity.id }, traceScope));
+      })
       .catch((error) => {
         const activeEntry = this.models.get(entity.id);
         if (activeEntry?.loadToken === loadToken) {
@@ -240,6 +245,8 @@ export class ModelAssetRuntimeController {
 
   /** 仅预取并解码模板，不创建业务实例或执行脚本；句柄随生成器配置归还。 */
   public async preloadModelRuntimeAsset(modelAsset: ModelAssetComponent, signal?: AbortSignal): Promise<SharedModelTemplateLease> {
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
+    const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope);
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
     );
@@ -249,10 +256,11 @@ export class ModelAssetRuntimeController {
         createModelAssetTemplateKey(modelAsset),
         sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
           this.dependencies.readiness.updateModelLoadProgressUnit(sequence, event);
-        }),
+        }, traceScope, trace, resolveModelAssetSharedInstancingPolicy(modelAsset).mode === 'shared-geometry-clone'),
         signal,
         this.shaderWarmup.getMetrics().enabled && canPrepareSharedTemplate(modelAsset)
           ? source => this.shaderWarmup.registerContainer(source) : undefined,
+        trace,
       );
     } finally {
       this.dependencies.readiness.settleModelLoadProgressUnit(sequence);
@@ -267,6 +275,8 @@ export class ModelAssetRuntimeController {
     entityId?: string,
     forceOwnedContainer = false,
   ): Promise<LoadedModelRuntimeAssets> {
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
+    const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope, { entityId });
     const { rootUrl, fileName } = this.splitAssetUrl(
       this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
     );
@@ -274,15 +284,31 @@ export class ModelAssetRuntimeController {
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     try {
       const instancingPolicy = resolveModelAssetSharedInstancingPolicy(modelAsset);
+      if (!forceOwnedContainer && instancingPolicy.mode === 'shared-geometry-clone') {
+        const acquired = await this.sharedModelAssetCache.acquireCapabilityContainer(
+          createModelAssetTemplateKey(modelAsset),
+          sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
+            this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
+          }, traceScope, trace, true), modelAsset, loadSignal,
+          (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }), trace,
+        );
+        try {
+          acquired.container.addAllToScene();
+          return { kind: 'owned-container', handle: { kind: 'owned-container', animationGroups: acquired.container.animationGroups,
+            runtimeCapabilities: acquired.runtimeCapabilities, dispose: acquired.dispose },
+          meshes: acquired.container.meshes, transformNodes: acquired.container.transformNodes };
+        } catch (error) { acquired.dispose(); throw error; }
+      }
       if (!forceOwnedContainer && instancingPolicy.mode === 'shared-instance') {
         const sharedInstance = await this.sharedModelAssetCache.instantiate(
           createModelAssetTemplateKey(modelAsset),
           (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
             this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
-          }),
+          }, traceScope, trace),
           (sourceName) => sourceName,
           loadSignal,
           (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }),
+          trace,
         );
         return {
           kind: 'shared-instance',
@@ -299,9 +325,10 @@ export class ModelAssetRuntimeController {
         createModelAssetTemplateKey(modelAsset),
         (sourceSignal) => this.loadAssetContainer(rootUrl, fileName, sourceSignal, (event) => {
           this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
-        }),
+        }, traceScope, trace),
         loadSignal,
         (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }),
+        trace,
       );
       try {
         container.addAllToScene();
@@ -320,7 +347,11 @@ export class ModelAssetRuntimeController {
         throw error;
       }
     } catch (error) {
-      if (!(error instanceof Error && error.name === 'AbortError')) this.dependencies.readiness.failedModelAcquisitions += 1;
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      if (!aborted) {
+        this.dependencies.readiness.failedModelAcquisitions += 1;
+        this.dependencies.readiness.loadDiagnostics.recordProjectOpenModelAcquisitionFailure(traceScope);
+      }
       throw error;
     } finally {
       this.dependencies.readiness.settleModelLoadProgressUnit(loadSequence);
@@ -410,6 +441,7 @@ export class ModelAssetRuntimeController {
   public syncExternalModelScripts(entity: Entity, model: ModelRuntimeEntry): void {
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     this.syncModelAssetExternalScripts(modelAsset, model, (current) => this.dependencies.readiness.loadDiagnostics.measure('modelScriptRefresh', () => {
       const latestEntity = current.entitySnapshot ?? entity;
       this.refreshModelEntityMeshes(latestEntity, current);
@@ -420,7 +452,7 @@ export class ModelAssetRuntimeController {
       this.dependencies.presentation.syncConveyorTrajectory(latestEntity, current);
       this.dependencies.locators.refreshBuiltInSlotBindings(latestEntity.id);
       this.dependencies.readiness.scheduleModelPresentationRefresh();
-    }));
+    }, { entityId: entity.id }, traceScope));
   }
 
   /** 同步生成模型外置脚本；只注入生成器快照，不注册独立遥测运动实体。 */
@@ -501,6 +533,7 @@ export class ModelAssetRuntimeController {
     onSettled: (current: ModelRuntimeEntry) => void,
   ): void {
     if (!model.assetHandle) return;
+    const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     // 阵列会把脚本宿主 Mesh 移出 scene.meshes；生命周期执行前临时恢复，兼容按场景列表查找部件的模型包。
     // 参数/脚本更新的最终批次统一由 onSettled 原子提交；上下文注入阶段只恢复宿主，不得提前缩减旧批次覆盖。
     // 异步 start 完成前保持根节点启用，避免旧脚本把 enabled=false 捕获为参数基线。
@@ -513,7 +546,7 @@ export class ModelAssetRuntimeController {
     this.dependencies.parameters.syncModelScriptMetadata(model.contentRoot, modelAsset);
     const settle = (current: ModelRuntimeEntry): void => {
       try {
-        onSettled(current);
+        this.dependencies.readiness.loadDiagnostics.withTrace(traceScope, () => onSettled(current));
       } finally {
         this.dependencies.arrays.endModelArrayHostRenderSuppression(current);
         this.dependencies.readiness.invalidateModelStatistics();
@@ -560,7 +593,17 @@ export class ModelAssetRuntimeController {
       this.dependencies.readiness.invalidateModelStatistics();
       model.stackerTelemetryReady = false;
       model.externalScriptRuntime?.dispose();
-      model.externalScriptRuntime = new ExternalModelScriptRuntime(model.contentRoot, modelAsset);
+      const entityId = model.entitySnapshot?.id ?? model.root.name;
+      model.externalScriptRuntime = new ExternalModelScriptRuntime(model.contentRoot, modelAsset, {
+        expectedScriptHashes: model.assetHandle.runtimeCapabilities?.scripts,
+        onInitializationStageStart: stage => {
+          const token = this.dependencies.readiness.loadDiagnostics.beginTraceTask(stage, { entityId }, traceScope);
+          return failed => token?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined);
+        },
+        onInitializationTiming: ({ stage, scriptAsset, durationMs, failed }) => {
+          this.dependencies.readiness.loadDiagnostics.record(stage, durationMs, failed, { resource: scriptAsset.sourceUrl || scriptAsset.name, entityId });
+        },
+      });
       model.externalScriptSignature = signature;
       this.dependencies.telemetry.updateModelExternalScriptRuntimeContext(model, runtimeMode, null, true);
       model.externalScriptRuntime.updateAssetCode(modelAsset.assetCode);
@@ -571,7 +614,7 @@ export class ModelAssetRuntimeController {
       // 此阶段为脚本 start 的整体等待；不将其误报为纯 CPU 初始化或解码时间。
       void this.dependencies.readiness.loadDiagnostics.measureAsync('scriptInitialize', () => runtime.start(), {
         resource: modelAsset.sourceUrl, entityId: model.entitySnapshot?.id ?? model.root.name,
-      })
+      }, traceScope)
         .then(() => {
           const current = this.findActiveModelRuntimeEntry(runtime);
           if (!current || current.loadToken !== loadToken) return;
@@ -658,6 +701,8 @@ export class ModelAssetRuntimeController {
       lengthUnit: modelAsset.lengthUnit,
       unitScaleToMeters: modelAsset.unitScaleToMeters,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
+      ...(modelAsset.runtimeCapabilities ? { runtimeCapabilities: modelAsset.runtimeCapabilities,
+        capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset) } : {}),
     });
   }
 
@@ -710,16 +755,27 @@ export class ModelAssetRuntimeController {
     fileName: string,
     loadSignal?: AbortSignal,
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
+    traceScope: SceneLoadTraceScope | null = this.dependencies.readiness.loadDiagnostics.captureTrace(),
+    trace?: SceneAssetTrace,
+    captureCapabilities = false,
   ): Promise<AssetContainer> {
     const queuedAt = readRuntimeTimestampMs();
+    const context = { resource: fileName, resourceOrdinal: trace?.resourceOrdinal };
+    const queueToken = this.dependencies.readiness.loadDiagnostics.beginTraceTask('assetQueue', context, traceScope);
     return this.assetLoadScheduler.run(
       () => {
+        queueToken?.end();
         this.dependencies.readiness.loadDiagnostics.record('assetQueue', readRuntimeTimestampMs() - queuedAt);
         return this.dependencies.readiness.loadDiagnostics.measureAsync('assetReadDecode',
-          () => SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, onProgress), fileName);
+          () => captureCapabilities ? loadCapabilityModelTemplate(rootUrl, fileName, this.context.scene, onProgress)
+            : SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, onProgress), context, traceScope);
       },
       loadSignal,
-    );
+    ).catch(error => {
+      queueToken?.end(error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error',
+        error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'operation-failed');
+      throw error;
+    });
   }
 
   /** 把完整资源 URL 拆成 Babylon SceneLoader 需要的 rootUrl 和 fileName。 */

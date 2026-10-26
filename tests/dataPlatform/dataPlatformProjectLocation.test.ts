@@ -22,6 +22,24 @@ function metadata(baseUrl = current, projectId = id) {
     latestVersionId: null, latestVersionNumber: null, resourceRevision: '0', entryScenePath: null, syncedAt: new Date().toISOString() });
 }
 const scoped = (root: string) => path.join(root, 'Platforms', createHash('sha256').update(current).digest('hex'), 'Projects', id);
+
+async function snapshotTree(root: string): Promise<unknown[]> {
+  const entries: unknown[] = [];
+  async function visit(relative: string): Promise<void> {
+    const absolute = path.join(root, relative);
+    const stat = await fs.lstat(absolute);
+    if (stat.isSymbolicLink()) {
+      entries.push({ relative, type: 'link', target: await fs.readlink(absolute), mtime: stat.mtimeMs });
+    } else if (stat.isDirectory()) {
+      entries.push({ relative, type: 'directory', mtime: stat.mtimeMs });
+      for (const name of (await fs.readdir(absolute)).sort()) await visit(path.join(relative, name));
+    } else {
+      entries.push({ relative, type: 'file', content: (await fs.readFile(absolute)).toString('base64'), mtime: stat.mtimeMs });
+    }
+  }
+  await visit('');
+  return entries;
+}
 test('跨中台同 ID 选择独立目录且预检不写入文件', async t => {
   const root = await fixture(t); const legacy = path.join(root, 'Projects', id);
   await binding.writeDataPlatformBinding(legacy, metadata(old));
@@ -58,6 +76,70 @@ test('独立目录无绑定但已有文件时拒绝覆盖', async t => {
   const root = await fixture(t); await fs.mkdir(scoped(root), { recursive: true });
   await fs.writeFile(path.join(scoped(root), 'saved.scene.json'), '{}');
   await assert.rejects(resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }), /未绑定/);
+});
+
+test('首次打开失败留下的完整或部分空初始化骨架允许重试，预检不改目录', async t => {
+  const cases = [
+    ['.babylon-editor', 'Assets', 'Assets/Models', 'Assets/Environments', 'Assets/Skyboxes', 'Assets/Images', 'Scenes'],
+    ['.babylon-editor', 'Assets/Models'],
+  ];
+  for (const directories of cases) {
+    const root = await fixture(t);
+    for (const directory of directories) await fs.mkdir(path.join(scoped(root), directory), { recursive: true });
+    const before = await snapshotTree(root);
+    assert.deepEqual(await resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }),
+      { projectRoot: scoped(root), legacy: false });
+    assert.deepEqual(await snapshotTree(root), before, '接受空骨架不应创建绑定、补目录或改写现有条目');
+  }
+});
+
+test('空初始化骨架内任何文件均拒绝复用，包括空资产索引，并原样保留', async t => {
+  for (const [relative, content] of [
+    ['Assets/Models/用户模型.glb', '用户模型不可覆盖'],
+    ['Scenes/用户场景.scene.json', '{}'],
+    ['.babylon-editor/asset-index.json', ''],
+  ]) {
+    const root = await fixture(t);
+    const file = path.join(scoped(root), relative);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, content);
+    const before = await snapshotTree(root);
+    await assert.rejects(resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }), /未绑定/);
+    assert.deepEqual(await snapshotTree(root), before, `拒绝 ${relative} 后保留全部目录、文件内容和修改时间`);
+  }
+});
+
+test('空初始化骨架出现未知空目录也拒绝复用，预检不删除目录', async t => {
+  for (const relative of ['用户目录', 'Assets/Models/用户模型', '.babylon-editor/未知事务']) {
+    const root = await fixture(t);
+    await fs.mkdir(path.join(scoped(root), relative), { recursive: true });
+    const before = await snapshotTree(root);
+    await assert.rejects(resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }), /未绑定/);
+    assert.deepEqual(await snapshotTree(root), before);
+  }
+});
+
+test('Assets 下已知初始化目录为 junction 时拒绝，即使目标为空也不穿透或改写', async t => {
+  const root = await fixture(t); const outside = await fixture(t);
+  await fs.mkdir(path.join(scoped(root), 'Assets'), { recursive: true });
+  await fs.symlink(outside, path.join(scoped(root), 'Assets', 'Models'), process.platform === 'win32' ? 'junction' : 'dir');
+  const before = await snapshotTree(root);
+  const outsideBefore = await snapshotTree(outside);
+  await assert.rejects(resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }), /未绑定|链接/);
+  assert.deepEqual(await snapshotTree(root), before);
+  assert.deepEqual(await snapshotTree(outside), outsideBefore, '不能进入空 junction 目标创建内容或绑定');
+});
+
+test('空初始化骨架例外不放宽旧目录和明确工程根的绑定要求', async t => {
+  const root = await fixture(t); const legacy = path.join(root, 'Projects', id);
+  await fs.mkdir(path.join(legacy, 'Assets', 'Models'), { recursive: true });
+  await fs.mkdir(path.join(legacy, '.babylon-editor'), { recursive: true });
+  const before = await snapshotTree(root);
+  assert.deepEqual(await resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id }),
+    { projectRoot: scoped(root), legacy: false });
+  await assert.rejects(resolveDataPlatformProjectLocation({ workspaceRoot: root, baseUrl: current, projectId: id,
+    preferredProjectRoot: legacy }), /未绑定/);
+  assert.deepEqual(await snapshotTree(root), before);
 });
 test('明确工程根要求合法同源绑定，不能使用工作区或共享缓存', async t => {
   const root = await fixture(t); const project = path.join(root, 'custom-project');

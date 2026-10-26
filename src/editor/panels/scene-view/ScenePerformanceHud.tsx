@@ -12,6 +12,8 @@ type Props = {
   performanceRunSnapshot: EditorPerformanceRunSnapshot | null;
   handleCopyPerformanceRunReport: () => Promise<void>;
   handleCopyPerformanceReport: () => Promise<void>;
+  adaptiveResolutionEnabled?: boolean;
+  onAdaptiveResolutionChange?: (enabled: boolean) => void;
 };
 
 /** HUD 只展示两位以内的稳定数字，原始报告仍保留完整精度。 */
@@ -20,7 +22,7 @@ function formatPerformanceMetric(value: number | null, digits = 1): string {
 }
 
 /** 性能 HUD 保持使用主面板的原有采样快照与展开状态。 */
-export function ScenePerformanceHud({ showPerformanceHud, hasStoppedPerformanceReport, isPerformanceHudExpanded, performanceSnapshot, isPerformanceRun, setPerformanceRunHudExpanded, setPerformanceHudExpanded, performanceRunSnapshot, handleCopyPerformanceRunReport, handleCopyPerformanceReport }: Props) {
+export function ScenePerformanceHud({ showPerformanceHud, hasStoppedPerformanceReport, isPerformanceHudExpanded, performanceSnapshot, isPerformanceRun, setPerformanceRunHudExpanded, setPerformanceHudExpanded, performanceRunSnapshot, handleCopyPerformanceRunReport, handleCopyPerformanceReport, adaptiveResolutionEnabled, onAdaptiveResolutionChange }: Props) {
   return <>
         {showPerformanceHud || hasStoppedPerformanceReport ? (
           <div className={showPerformanceHud && isPerformanceHudExpanded ? 'scene-performance-hud expanded' : 'scene-performance-hud'}>
@@ -72,6 +74,12 @@ export function ScenePerformanceHud({ showPerformanceHud, hasStoppedPerformanceR
                     <div><dt>诊断写入（本次）</dt><dd>{performanceRunSnapshot.telemetry.diagnosticWrites.toLocaleString()}</dd></div>
                   </> : null}
                 </dl>
+                {onAdaptiveResolutionChange ? <label className="scene-performance-adaptive-option"
+                  title="相机移动时临时降低分辨率，静止0.5秒后恢复；仅本次编辑器会话，不修改场景文件。">
+                  <input type="checkbox" checked={adaptiveResolutionEnabled === true}
+                    onChange={event => onAdaptiveResolutionChange(event.target.checked)} />
+                  移动时降低分辨率（本次会话）
+                </label> : null}
                 {isPerformanceRun ? <p className="scene-performance-run-note">1 Hz 采样，CPU 为秒级均值；报告保留本次最近一分钟。</p> : null}
                 <button className="scene-performance-copy" onClick={() => void (isPerformanceRun ? handleCopyPerformanceRunReport() : handleCopyPerformanceReport())} type="button">
                   {isPerformanceRun ? '复制本次性能运行报告' : '复制最近一分钟报告'}

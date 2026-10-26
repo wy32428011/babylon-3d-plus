@@ -26,6 +26,9 @@ export type PlayerRuntimeConfig = {
     showGrid: boolean;
     allowCameraControl: boolean;
     showStatusOverlay: boolean;
+    /** 显式启用不透明画布；省略时保持旧 Viewer 的透明上下文。 */
+    opaqueCanvas?: boolean;
+    adaptiveResolution?: boolean;
   };
   mqtt: MqttConfig;
   digitalTwin?: {
@@ -276,7 +279,8 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
   const viewer = assertObject(config.viewer, 'runtime-config.viewer');
   assertKeys(page, ['title', 'loadingText', 'backgroundColor'], 'runtime-config.page');
   assertKeys(paths, ['scene', 'assetManifest', 'assetBase'], 'runtime-config.paths');
-  assertKeys(viewer, ['showGrid', 'allowCameraControl', 'showStatusOverlay'], 'runtime-config.viewer');
+  assertKeys(viewer, ['showGrid', 'allowCameraControl', 'showStatusOverlay',
+    ...['opaqueCanvas', 'adaptiveResolution'].filter(key => Object.hasOwn(viewer, key))], 'runtime-config.viewer');
   const backgroundColor = assertString(page.backgroundColor, 'runtime-config.page.backgroundColor', 7);
   if (!/^#[0-9a-f]{6}$/i.test(backgroundColor)) throw new Error('runtime-config.page.backgroundColor 必须是 #RRGGBB。');
 
@@ -310,6 +314,8 @@ export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
       showGrid: assertBoolean(viewer.showGrid, 'runtime-config.viewer.showGrid'),
       allowCameraControl: assertBoolean(viewer.allowCameraControl, 'runtime-config.viewer.allowCameraControl'),
       showStatusOverlay: assertBoolean(viewer.showStatusOverlay, 'runtime-config.viewer.showStatusOverlay'),
+      ...(Object.hasOwn(viewer, 'opaqueCanvas') ? { opaqueCanvas: assertBoolean(viewer.opaqueCanvas, 'runtime-config.viewer.opaqueCanvas') } : {}),
+      ...(Object.hasOwn(viewer, 'adaptiveResolution') ? { adaptiveResolution: assertBoolean(viewer.adaptiveResolution, 'runtime-config.viewer.adaptiveResolution') } : {}),
     },
     mqtt: parseMqttConfig(config.mqtt),
     ...(digitalTwin ? { digitalTwin } : {}),

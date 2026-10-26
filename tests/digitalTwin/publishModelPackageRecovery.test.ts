@@ -96,7 +96,7 @@ test('version 6 通过真实模型就绪与本地恢复入口，保留参数和�
   assert.deepEqual(await fs.readFile(asset.sourcePath), bytes);
 });
 
-for (const version of [7, '6']) test(`模型发布拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async t => {
+for (const version of [8, '7']) test(`模型发布拒绝未支持或非数字的版本 ${JSON.stringify(version)}`, async t => {
   const f = await fixture(t), asset = await f.writePackage(f.scope.projectRoot);
   const content = JSON.stringify({ ...scene(asset), version });
   await assert.rejects(recovery.assertPublishSceneModelsReady(content, f.signal, f.scope), /场景格式|版本/);

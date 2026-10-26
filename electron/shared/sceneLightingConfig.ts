@@ -1,9 +1,10 @@
 import { DEFAULT_LIGHTING_BAKE_SETTINGS, normalizeSceneLightingBakeSettings, validateSceneLightingBakeSnapshot,
   type SceneLightingBakeSettings, type SceneLightingBakeSnapshot } from './sceneLightingBakeData.ts';
 import { LIGHTING_POLICY_FIELDS, normalizeSceneLightingPolicy, type SceneLightingPolicy } from './sceneLightingPolicy.ts';
+import { assertLightingLightmapVersion } from './sceneLightingTextureCodec.ts';
 
 export type SceneLightingConfig = {
-  version: 2;
+  version: 2 | 3;
   main: { source: 'managed' | 'scene'; enabled: boolean; color: string; azimuthDegrees: number; elevationDegrees: number; intensity: number };
   fill: { intensity: number; color: string; groundColor: string };
   environmentIntensity: number;
@@ -26,6 +27,8 @@ export type SceneAppearanceConfig = {
   glowIntensity: number;
   bloomEnabled: boolean;
   bloomWeight: number;
+  /** 显式启用Bloom离屏管线MSAA；旧场景缺字段时保持原单采样+FXAA。 */
+  bloomMsaaEnabled?: boolean;
   fogEnabled: boolean;
   fogColor: string;
   fogStart: number;
@@ -80,9 +83,13 @@ function policyWithExtensions(value: unknown): SceneLightingPolicy | undefined {
     }) } : {}) };
   }) };
 }
-function resultWithExtensions(value: unknown): SceneLightingBakeSnapshot | null {
+function resultWithExtensions(value: unknown, version: 2 | 3): SceneLightingBakeSnapshot | null {
   const normalized = validateSceneLightingBakeSnapshot(value);
-  if (!normalized) return null;
+  if (!normalized) {
+    if (version === 3 && value !== null && value !== undefined) throw new Error('场景光照配置中的烘焙结果格式或贴图编码无效。');
+    return null;
+  }
+  assertLightingLightmapVersion(version, undefined, normalized.assets.filter(asset => asset.kind === 'lightmap').map(asset => asset.encoding));
   const raw = object(value), assets = Array.isArray(raw.assets) ? raw.assets : [], surfaces = Array.isArray(raw.surfaces) ? raw.surfaces : [];
   const assetById = new Map(assets.map(item => { const value = object(item); return [value.id, value] as const; }));
   const surfaceByKey = new Map(surfaces.map(item => { const value = object(item); return [value.key, value] as const; }));
@@ -95,11 +102,14 @@ function resultWithExtensions(value: unknown): SceneLightingBakeSnapshot | null 
 /** 新配置是唯一写合同；缺省值补齐，明确未知版本拒绝，避免未来版本被静默降级。 */
 export function normalizeSceneLightingConfig(value: unknown): SceneLightingConfig {
   const raw = object(value), d = DEFAULT_SCENE_LIGHTING_CONFIG;
-  requireVersion(raw, 2, '场景光照配置');
+  if (raw.version !== undefined && raw.version !== 2 && raw.version !== 3) throw new Error(`场景光照配置版本不受支持：${String(raw.version)}`);
+  const version = raw.version === 3 ? 3 : 2;
+  const bake = { ...object(raw.bake), ...normalizeSceneLightingBakeSettings(raw.bake) };
+  assertLightingLightmapVersion(version, bake.lightmapEncoding, [], bake.lightmapMipLevels);
   const main = object(raw.main), fill = object(raw.fill), shadows = object(raw.shadows), policy = policyWithExtensions(raw.policy);
   const disabledLightIds = [...new Set((Array.isArray(raw.disabledLightIds) ? raw.disabledLightIds : [])
     .filter((id): id is string => typeof id === 'string').map(id => id.trim()).filter(Boolean))];
-  return { ...without(raw, ['policy', 'result']), version: 2,
+  return { ...without(raw, ['policy', 'result']), version,
     main: { ...main, source: main.source === 'scene' ? 'scene' : 'managed', enabled: boolean(main.enabled, d.main.enabled),
       color: color(main.color, d.main.color), azimuthDegrees: finite(main.azimuthDegrees, d.main.azimuthDegrees, 0, 360),
       elevationDegrees: finite(main.elevationDegrees, d.main.elevationDegrees, -90, 90), intensity: finite(main.intensity, d.main.intensity, 0, 20) },
@@ -114,8 +124,8 @@ export function normalizeSceneLightingConfig(value: unknown): SceneLightingConfi
       quality: shadows.quality === 'performance' || shadows.quality === 'quality' ? shadows.quality : 'balanced',
       darkness: finite(shadows.darkness, d.shadows.darkness, 0, .85), distanceMeters: finite(shadows.distanceMeters, d.shadows.distanceMeters, 0, 800),
       bias: finite(shadows.bias, d.shadows.bias, 0, .02), normalBias: finite(shadows.normalBias, d.shadows.normalBias, 0, .2) },
-    bake: { ...object(raw.bake), ...normalizeSceneLightingBakeSettings(raw.bake) },
-    ...(policy ? { policy } : {}), result: resultWithExtensions(raw.result),
+    bake,
+    ...(policy ? { policy } : {}), result: resultWithExtensions(raw.result, version),
   };
 }
 
@@ -124,7 +134,7 @@ export function normalizeSceneAppearanceConfig(value: unknown): SceneAppearanceC
   const raw = object(value), d = DEFAULT_SCENE_APPEARANCE_CONFIG;
   requireVersion(raw, 1, '场景外观配置');
   const fogStart = finite(raw.fogStart, d.fogStart, 0, 100000);
-  return { ...raw, version: 1,
+  const normalized: SceneAppearanceConfig = { ...raw, version: 1,
     backgroundColor: color(raw.backgroundColor, d.backgroundColor), skyboxVisible: boolean(raw.skyboxVisible, d.skyboxVisible),
     exposure: finite(raw.exposure, d.exposure, .1, 4), contrast: finite(raw.contrast, d.contrast, .1, 3),
     toneMappingEnabled: boolean(raw.toneMappingEnabled, false), glowIntensity: finite(raw.glowIntensity, d.glowIntensity, 0, 3),
@@ -132,6 +142,10 @@ export function normalizeSceneAppearanceConfig(value: unknown): SceneAppearanceC
     fogEnabled: boolean(raw.fogEnabled, false), fogColor: color(raw.fogColor, d.fogColor), fogStart,
     fogEnd: Math.max(fogStart + 1, finite(raw.fogEnd, d.fogEnd, 1, 200000)),
   };
+  // 可选字段缺失时不补键，避免旧场景序列化和既有签名产生无关漂移。
+  if (typeof raw.bloomMsaaEnabled === 'boolean') normalized.bloomMsaaEnabled = raw.bloomMsaaEnabled;
+  else delete normalized.bloomMsaaEnabled;
+  return normalized;
 }
 
 function visible(entity: Obj, entities: Obj): boolean {

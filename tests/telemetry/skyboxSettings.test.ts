@@ -24,17 +24,9 @@ const {
   createEmptySceneDocument,
   createSkyboxEntity,
   getSceneSkyboxSettings,
-  getSkyboxSphereDiameterMeters,
-  isPointInsideSkyboxSphere,
-  normalizeSkyboxSphereScale,
   sanitizeSceneSkybox,
   sanitizeSceneViewDistance,
-  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   SCENE_VIEW_DISTANCE_DEFAULT,
-  SKYBOX_FOCUS_VIEW_DISTANCE_METERS,
-  SKYBOX_SPHERE_DIAMETER_METERS,
-  SKYBOX_SPHERE_SCALE_MAX,
-  SKYBOX_SPHERE_SCALE_MIN,
 } = sceneDocumentModule;
 const { deserializeScene, serializeScene } = sceneSerializerModule;
 const { createDeploymentSceneSummary } = deploymentExportModule;
@@ -178,14 +170,14 @@ test('天空盒稳定资源 ID 不从原型或 getter 继承，实体组件与�
   assert.equal(getterReads, 0);
 });
 
-test('version 3 实体保存加载与 version 1/2 场景设置迁移保真稳定资源 ID，缺失字段仍兼容', () => {
+test('version 7 保存与历史场景迁移保真稳定资源 ID，缺失字段仍兼容', () => {
   const resourceId = '2052912068767571969';
   const entityScene = createEmptySceneDocument('Stable ID Entity');
   const entity = createSkyboxEntity({ ...VALID_SKYBOX, dataPlatformResourceId: resourceId });
   entityScene.entityIds.push(entity.id);
   entityScene.entities[entity.id] = entity;
   const serialized = serializeScene(entityScene);
-  assert.equal((JSON.parse(serialized) as { version: number }).version, 3);
+  assert.equal((JSON.parse(serialized) as { version: number }).version, 7);
   assert.equal(getSceneSkyboxSettings(deserializeScene(serialized))?.dataPlatformResourceId, resourceId);
 
   for (const version of [1, 2] as const) {
@@ -386,7 +378,7 @@ test('真实手写 version 1/2 场景 fixture 缺失字段兼容并保真合法�
   }
 });
 
-test('天空盒资源创建为可移动球体实体，Transform Y 旋转映射为天空纹理水平旋转', () => {
+test('天空配置保留旧位姿数据，Transform Y 映射为水平朝向', () => {
   const entity = createSkyboxEntity(
     { ...VALID_SKYBOX, rotationDegrees: 135, intensity: 1.7, resolution: 1024 },
     { x: 4, y: 6, z: 8 },
@@ -408,35 +400,22 @@ test('天空盒资源创建为可移动球体实体，Transform Y 旋转映射�
   const defaultEntity = createSkyboxEntity(VALID_SKYBOX);
   assert.deepEqual(defaultEntity.components.transform.position, { x: 0, y: 0, z: 0 });
   assert.deepEqual(defaultEntity.components.transform.scale, { x: 1, y: 1, z: 1 });
-  assert.equal(SKYBOX_SPHERE_DIAMETER_METERS, 10000);
-  assert.equal(getSkyboxSphereDiameterMeters(defaultEntity.components.transform.scale), 10000);
 });
 
-test('天空盒尺寸始终等比缩放，旧三轴取最大绝对值并限制到 0.1-1.0', () => {
-  assert.equal(SKYBOX_SPHERE_SCALE_MIN, 0.1);
-  assert.equal(SKYBOX_SPHERE_SCALE_MAX, 1);
-  assert.deepEqual(normalizeSkyboxSphereScale({ x: -0.5, y: 0.8, z: 2 }), { x: 1, y: 1, z: 1 });
-  assert.deepEqual(normalizeSkyboxSphereScale({ x: 0.01, y: -0.02, z: 0.03 }), { x: 0.1, y: 0.1, z: 0.1 });
-  assert.equal(getSkyboxSphereDiameterMeters({ x: 0.5, y: 0.5, z: 0.5 }), 5000);
-  assert.equal(
-    isPointInsideSkyboxSphere(
-      { position: { x: 10, y: 0, z: 0 }, scale: { x: 0.5, y: 0.5, z: 0.5 } },
-      { x: 2509, y: 0, z: 0 },
-    ),
-    true,
-  );
-  assert.equal(
-    isPointInsideSkyboxSphere(
-      { position: { x: 10, y: 0, z: 0 }, scale: { x: 0.5, y: 0.5, z: 0.5 } },
-      { x: 2511, y: 0, z: 0 },
-    ),
-    false,
-  );
-  assert.equal(sanitizeSceneViewDistance(5000, SCENE_SKYBOX_VIEW_DISTANCE_MIN), 12000);
-  assert.equal(SKYBOX_FOCUS_VIEW_DISTANCE_METERS, 20000);
+test('无限远天空不再调整用户可视距离，旧位姿作为兼容数据原样保存', () => {
+  const scene = createEmptySceneDocument('Legacy Skybox Pose');
+  const skybox = createSkyboxEntity(VALID_SKYBOX, { x: 10, y: 20, z: 30 });
+  skybox.components.transform.scale = { x: -0.5, y: 0.8, z: 2 };
+  skybox.components.transform.rotation.x = 0.2;
+  scene.entityIds.push(skybox.id); scene.entities[skybox.id] = skybox;
+  scene.sceneSettings.camera.viewDistance = 500;
+  const restored = deserializeScene(serializeScene(scene));
+  assert.deepEqual(restored.entities[skybox.id].components.transform, skybox.components.transform);
+  assert.equal(restored.sceneSettings.camera.viewDistance, 500);
+  assert.equal(sanitizeSceneViewDistance(5000), 5000);
 });
 
-test('球形天空盒实体可随 version 3 场景保存加载，旧场景级天空盒会自动迁移为实体', () => {
+test('天空配置随新版保存，旧场景级配置迁移为实体但不改旧尺寸和相机距离', () => {
   const scene = createEmptySceneDocument('Skybox Roundtrip');
   const entity = createSkyboxEntity({ ...VALID_SKYBOX, rotationDegrees: 90 });
   entity.components.transform.scale = { x: -0.5, y: 0.8, z: 2 };
@@ -448,8 +427,8 @@ test('球形天空盒实体可随 version 3 场景保存加载，旧场景级天
   assert.equal(restored.sceneSettings.skybox, null);
   assert.deepEqual(getSceneSkyboxSettings(restored), { ...VALID_SKYBOX, rotationDegrees: 90 });
   assert.equal(restored.entityIds.length, 1);
-  assert.equal(restored.sceneSettings.camera.viewDistance, SCENE_SKYBOX_VIEW_DISTANCE_MIN);
-  assert.deepEqual(restored.entities[entity.id].components.transform.scale, { x: 1, y: 1, z: 1 });
+  assert.equal(restored.sceneSettings.camera.viewDistance, 5000);
+  assert.deepEqual(restored.entities[entity.id].components.transform.scale, { x: -0.5, y: 0.8, z: 2 });
 
   const legacyScene = createEmptySceneDocument('Legacy Skybox');
   legacyScene.sceneSettings.camera.viewDistance = 5000;
@@ -457,7 +436,7 @@ test('球形天空盒实体可随 version 3 场景保存加载，旧场景级天
   const restoredLegacy = deserializeScene(serializeScene(legacyScene));
   assert.equal(restoredLegacy.sceneSettings.skybox, null);
   assert.equal(restoredLegacy.entityIds.length, 1);
-  assert.equal(restoredLegacy.sceneSettings.camera.viewDistance, SCENE_SKYBOX_VIEW_DISTANCE_MIN);
+  assert.equal(restoredLegacy.sceneSettings.camera.viewDistance, 5000);
   assert.deepEqual(
     restoredLegacy.entities[restoredLegacy.entityIds[0]].components.transform.position,
     { x: 0, y: 0, z: 0 },
@@ -474,7 +453,7 @@ test('球形天空盒实体可随 version 3 场景保存加载，旧场景级天
   assert.equal(restoredDisabled.sceneSettings.camera.viewDistance, 5000);
 });
 
-test('场景加载拒绝重复球形天空盒实体', () => {
+test('场景加载拒绝重复天空配置实体', () => {
   const scene = createEmptySceneDocument('Duplicate Skyboxes');
   const first = createSkyboxEntity(VALID_SKYBOX);
   const second = createSkyboxEntity({ ...VALID_SKYBOX, sourcePath: VALID_SKYBOX.sourcePath.replace(/\.hdr$/i, '-2.hdr') });
@@ -549,55 +528,27 @@ test('部署导出摘要把球形天空盒实体计入唯一资源', () => {
 });
 
 
-test('独立 Viewer 导出会收集和改写天空盒，并接受编辑器当前 version 3 场景', () => {
-  const runtimeSource = readFileSync('src/runtime/babylon/SceneSkyboxRuntime.ts', 'utf8');
-  assert.match(runtimeSource, /skyboxResolution/);
-  assert.match(runtimeSource, /MeshBuilder\.CreateSphere/);
-  assert.doesNotMatch(runtimeSource, /MeshBuilder\.CreateBox/);
-
-  const source = readFileSync('electron/ipc/deploymentExportScene.ts', 'utf8');
-  assert.match(source, /type BundleCategory = .*'skyboxes'/);
-  assert.match(source, /sceneSettings.skybox/);
-  assert.match(source, /components.skybox/);
-  assert.match(source, /resolveSkyboxReference/);
-  assert.match(source, /rewriteSkyboxReferences/);
-  assert.match(source, /sceneFile.version !== 1 && sceneFile.version !== 2 && sceneFile.version !== 3/);
-
-  const sceneViewSource = readFileSync('src/editor/panels/SceneViewPanel.tsx', 'utf8');
-  assert.match(sceneViewSource, /SKYBOX_ASSET_DRAG_MIME_TYPE/);
-  assert.match(
-    sceneViewSource,
-    /placeSkybox\(createSceneSkyboxFromAsset\(skyboxAsset, currentSkybox\), placementPosition\)/,
-  );
-  assert.doesNotMatch(sceneViewSource, /SKYBOX_SPHERE_DIAMETER_METERS/);
-  assert.match(sceneViewSource, /SKYBOX_FOCUS_VIEW_DISTANCE_METERS/);
-  assert.match(sceneViewSource, /components\.skybox/);
-
-  const sceneRuntimeSource = readFileSync('src/runtime/babylon/SceneRuntime.ts', 'utf8');
-  assert.match(sceneRuntimeSource, /isPointInsideSkyboxSphere/);
-  assert.match(
-    sceneRuntimeSource,
-    /private readEntityIdFromMesh[\s\S]*?this\.skyboxRuntime\.hasEntity\(entityId\)[\s\S]*?: null;/,
-  );
-
-  const inspectorSource = readFileSync('src/editor/panels/InspectorPanel.tsx', 'utf8');
-  assert.match(inspectorSource, /尺寸倍率/);
-  assert.match(inspectorSource, /实际直径/);
-
-  const gizmoSource = readFileSync('src/runtime/babylon/TransformGizmoController.ts', 'utf8');
-  assert.match(gizmoSource, /uniformScaleOnly/);
-
-  const sceneSettingsSource = readFileSync('src/editor/panels/SceneSettingsPanel.tsx', 'utf8');
-  assert.match(sceneSettingsSource, /SCENE_SKYBOX_VIEW_DISTANCE_MIN/);
-
-  const editorStoreSource = readFileSync('src/editor/store/editorStore.ts', 'utf8');
-  assert.match(editorStoreSource, /visible:\s*options\.revealEntity \? true : existing\.visible/);
-  assert.match(editorStoreSource, /revealEntity:\s*true/);
-
-  const projectServiceSource = readFileSync('electron/ipc/dataPlatformProjectService.ts', 'utf8');
-  assert.match(projectServiceSource, /Skyboxes/);
-  assert.match(projectServiceSource, /setSharedProjectSkyboxRoot\(context\.sharedResourcesRoot\)/);
-
-  const projectIpcSource = readFileSync('electron/ipc/projectIpc.ts', 'utf8');
-  assert.match(projectIpcSource, /authorizeSceneSkyboxFile/);
+test('原生天空与 ENV 发布接线不再包含球体编辑和运行期转换', () => {
+  const runtime = readFileSync('src/runtime/babylon/SceneSkyboxRuntime.ts', 'utf8');
+  assert.match(runtime, /createDefaultSkybox\(texture, true, BACKDROP_SIZE, 0, false\)/);
+  assert.doesNotMatch(runtime, /import[^;]*(?:HDRFiltering|PreparedSkyboxTexture|BilinearSkyboxTexture|skyboxDecodedData)/);
+  assert.doesNotMatch(runtime, /CreateSphere|createSceneSelectionHighlightLayer/);
+  const loader = readFileSync('src/runtime/babylon/skyboxEnvironmentResource.ts', 'utf8');
+  assert.match(loader, /prefiltered: true, forcedExtension: '\.env'/);
+  assert.match(loader, /resource\.sha256/);
+  const deployment = readFileSync('electron/ipc/deploymentExportScene.ts', 'utf8');
+  assert.match(deployment, /verifySkyboxEnvironmentFile/);
+  assert.match(deployment, /rewriteSkyboxReferences/);
+  assert.match(deployment, /reference\.skybox\.sourceAvailable = false/);
+  const drag = readFileSync('src/editor/panels/scene-view/useSceneAssetDropHandler.ts', 'utf8');
+  assert.match(drag, /placeSkybox\(createSceneSkyboxFromAsset\(skyboxAsset, currentSkybox\)\)/);
+  const inspector = readFileSync('src/editor/panels/InspectorPanel.tsx', 'utf8');
+  assert.doesNotMatch(inspector, /SKYBOX_SPHERE|实际直径|handleSkyboxScaleChange/);
+  assert.match(inspector, /无限远天空背景/);
+  const gizmo = readFileSync('src/runtime/babylon/TransformGizmoController.ts', 'utf8');
+  assert.doesNotMatch(gizmo, /uniformScaleOnly|normalizeSkyboxSphereScale/);
+  const settings = readFileSync('src/editor/panels/SceneSettingsPanel.tsx', 'utf8');
+  assert.doesNotMatch(settings, /SCENE_SKYBOX_VIEW_DISTANCE_MIN/);
+  const operations = readFileSync('src/editor/store/slices/sceneEnvironmentOperations.ts', 'utf8');
+  assert.match(operations, /visible: options\.revealEntity \? true : existing\.visible/);
 });

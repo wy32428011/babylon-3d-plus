@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { statSync, utimesSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { app } from 'electron';
 import unzipper from 'unzipper';
+import { skyboxEnvironmentFixture } from '../helpers/skyboxEnvironmentFixture.mjs';
 
 const PROJECT_ID = '2054201280000000001';
 const EDITOR_PROJECT_ID = '2054201280000000101';
@@ -123,7 +124,7 @@ function createDataPlatformSkyboxSceneContent(resourceId, baseUrl, overrides = {
   }, null, 2)}\n`;
 }
 
-function createLocalSkyboxSceneContent(sourcePath) {
+function createLocalSkyboxSceneContent(sourcePath, environment) {
   const sourceUrl = `editor-asset://local/${encodeURIComponent(sourcePath)}`;
   return `${JSON.stringify({
     version: 3,
@@ -144,6 +145,7 @@ function createLocalSkyboxSceneContent(sourcePath) {
           format: 'hdr',
           intensity: 1,
           rotationY: 0,
+          ...(environment ? { resolution: environment.faceSize, assetRevision: environment.sourceRevision, environment } : {}),
         },
       },
     },
@@ -818,8 +820,11 @@ async function run() {
 
   try {
     await mkdir(userDataRoot, { recursive: true });
-    await mkdir(path.join(fakeAppRoot, 'dist-viewer-template'), { recursive: true });
-    await writeFile(path.join(fakeAppRoot, 'dist-viewer-template', 'index.html'), '<!doctype html><html><body><div id="root"></div></body></html>\n', 'utf8');
+    // 场景版本 7 要求 Viewer 模板携带真实能力清单与入口完整性；复制已构建模板（不含编辑器内置天空库），缺失时提示先构建。
+    const builtViewerTemplate = path.resolve('dist-viewer-template');
+    await stat(path.join(builtViewerTemplate, 'viewer-capabilities.json')).catch(() => { throw new Error('缺少 dist-viewer-template，请先运行 npm run build:viewer。'); });
+    await cp(builtViewerTemplate, path.join(fakeAppRoot, 'dist-viewer-template'), { recursive: true,
+      filter: source => !/[\/]builtin-skybox(?:-environment)?s(?:[\/]|$)/.test(source) });
     app.setPath('userData', userDataRoot);
 
     originalGetAppPath = app.getAppPath.bind(app);
@@ -1182,7 +1187,21 @@ async function run() {
     mock.setRemoteStatus(createRemoteStatus());
     mock.resetRequests();
 
-    const indexedSkyboxSceneContent = createDataPlatformSkyboxSceneContent(PRIMARY_SKYBOX_ID, mock.baseUrl);
+    // 渲染进程在发布前会完成 ENV 编译并写入场景；集成测试直接以主进程入口运行，因此用合法 ENV 夹具模拟该结果。
+    const { SKYBOX_ENVIRONMENT_RECIPE } = await import('../../dist-electron/shared/sceneSkyboxContract.js');
+    const writeSkyboxEnvironment = async (sourceData, sourceRevision) => {
+      const sourceSha256 = sha256(sourceData), bytes = skyboxEnvironmentFixture(256), environmentSha256 = sha256(bytes);
+      const packagePath = path.join(projectRoot, '.babylon-editor', 'skybox-derived', sourceSha256, 'integration-fixture');
+      const sourcePath = path.join(packagePath, `${environmentSha256}.env`);
+      await mkdir(packagePath, { recursive: true });
+      await writeFile(sourcePath, bytes);
+      authorizeAssetFile(sourcePath);
+      return { version: 1, format: 'env', sourceSha256, sourceRevision, recipeKey: SKYBOX_ENVIRONMENT_RECIPE, sha256: environmentSha256,
+        byteLength: bytes.length, faceSize: 256, sourceUrl: `editor-asset://local/${encodeURIComponent(sourcePath)}`, sourcePath, packagePath };
+    };
+    const primaryEnvironment = await writeSkyboxEnvironment(primarySkyboxData, '1');
+    const indexedSkyboxSceneContent = createDataPlatformSkyboxSceneContent(PRIMARY_SKYBOX_ID, mock.baseUrl,
+      { resolution: 256, assetRevision: '1', environment: primaryEnvironment });
     const expectedSkyboxPath = `project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`;
     const expectedSkyboxUrl = `editor-asset://local/${encodeURIComponent(expectedSkyboxPath)}`;
     const expectedSkyboxPackageUrl = `editor-asset://local/${encodeURIComponent(`project/assets/skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/`)}`;
@@ -1243,25 +1262,32 @@ async function run() {
     const indexedSourceEntries = await readZipEntries(mock.getUploadedPackage(INDEXED_SKYBOX_REQUEST_ID, 'SOURCE'));
     assertOfflineSourceSkyboxPackage(indexedSourceEntries, 'SOURCE 发布包');
     const indexedDistEntries = await readZipEntries(mock.getUploadedPackage(INDEXED_SKYBOX_REQUEST_ID, 'DIST'));
-    const packagedSkyboxPaths = [...indexedDistEntries.keys()].filter((entryPath) => (
-      entryPath.startsWith('project/assets/skyboxes/') && /\.(?:hdr|exr)$/i.test(entryPath)
-    ));
-    assert.deepEqual(packagedSkyboxPaths, [expectedSkyboxPath], '发布包只能包含场景实际引用的天空盒。');
-    assert.deepEqual(indexedDistEntries.get(expectedSkyboxPath), primarySkyboxData);
-    assert.equal(indexedDistEntries.has(`project/assets/skyboxes/Skybox-${UNUSED_SKYBOX_ID}/skybox.hdr`), false);
+    // DIST 只携带 Babylon 原生 ENV：原图字段清空并标记不可用，Viewer 不再接触 HDR/EXR。
+    const environmentSha256 = primaryEnvironment.sha256;
+    const expectedEnvironmentPath = `project/assets/skyboxes/Env-${environmentSha256.slice(0, 16)}/${environmentSha256}.env`;
+    const expectedEnvironmentUrl = `editor-asset://local/${encodeURIComponent(expectedEnvironmentPath)}`;
+    const packagedSkyboxPaths = [...indexedDistEntries.keys()].filter((entryPath) => entryPath.startsWith('project/assets/skyboxes/'));
+    assert.deepEqual(packagedSkyboxPaths, [expectedEnvironmentPath], '发布包只能包含场景实际引用的天空 ENV，不得携带 HDR/EXR。');
+    assert.deepEqual(indexedDistEntries.get(expectedEnvironmentPath), await readFile(primaryEnvironment.sourcePath));
     const packagedSkyboxScene = JSON.parse(indexedDistEntries.get('project/scene.json').toString('utf8'));
     const packagedSettingsSkybox = packagedSkyboxScene.scene.sceneSettings.skybox;
     const packagedEntitySkybox = packagedSkyboxScene.scene.entities['skybox-reference'].components.skybox;
     for (const packagedSkybox of [packagedSettingsSkybox, packagedEntitySkybox]) {
-      assert.equal(packagedSkybox.packagePath, expectedSkyboxPackageUrl);
-      assert.equal(packagedSkybox.sourcePath, expectedSkyboxUrl);
-      assert.equal(packagedSkybox.sourceUrl, expectedSkyboxUrl);
+      assert.equal(packagedSkybox.sourceAvailable, false);
+      assert.equal(packagedSkybox.packagePath, '');
+      assert.equal(packagedSkybox.sourcePath, '');
+      assert.equal(packagedSkybox.sourceUrl, '');
       assert.equal(packagedSkybox.dataPlatformResourceId, PRIMARY_SKYBOX_ID);
+      assert.equal(packagedSkybox.environment.format, 'env');
+      assert.equal(packagedSkybox.environment.sha256, environmentSha256);
+      assert.equal(packagedSkybox.environment.sourceSha256, primaryEnvironment.sourceSha256);
+      assert.equal(packagedSkybox.environment.sourceUrl, expectedEnvironmentUrl);
+      assert.equal(packagedSkybox.environment.sourcePath, expectedEnvironmentUrl);
     }
     const packagedManifest = JSON.parse(indexedDistEntries.get('project/asset-manifest.json').toString('utf8'));
     assert.deepEqual(
       packagedManifest.assets.filter((asset) => asset.path.startsWith('./skyboxes/')).map((asset) => asset.path),
-      [`./skyboxes/Skybox-${PRIMARY_SKYBOX_ID}/skybox.hdr`],
+      [`./skyboxes/${expectedEnvironmentPath.slice('project/assets/skyboxes/'.length)}`],
     );
     const viewerText = [...indexedDistEntries.entries()]
       .filter(([entryPath]) => /\.(?:html|js|css|json|md)$/i.test(entryPath))
@@ -1312,7 +1338,12 @@ async function run() {
     await writeFile(primarySkyboxPath, primarySkyboxData);
     await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
     await resetSkyboxPublishState();
-    const distSnapshot = await createStableSkyboxSnapshot();
+    // DIST 不再复制 HDR/EXR，最终复制绑定的是 ENV：在复制阶段原地替换同尺寸、同 mtime 的 ENV 必须被 SHA-256 拒绝。
+    const environmentFile = primaryEnvironment.sourcePath;
+    const environmentBytes = await readFile(environmentFile);
+    const fixedEnvironmentTime = new Date(Math.floor(Date.now() / 1000) * 1000);
+    utimesSync(environmentFile, fixedEnvironmentTime, fixedEnvironmentTime);
+    const distSnapshot = await stat(environmentFile);
     let distReplaced = false;
     await assert.rejects(
       publishModule.publishDigitalTwin(
@@ -1321,13 +1352,18 @@ async function run() {
         (progress) => {
           if (!distReplaced && progress.phase === 'dist-package' && progress.detail === '正在复制场景资源并计算哈希…') {
             distReplaced = true;
-            overwriteSkyboxPreservingSnapshot(distSnapshot);
+            const tamperedEnvironment = Buffer.from(environmentBytes);
+            tamperedEnvironment[tamperedEnvironment.length - 1] ^= 1;
+            writeFileSync(environmentFile, tamperedEnvironment);
+            utimesSync(environmentFile, distSnapshot.atime, distSnapshot.mtime);
+            assert.equal(statSync(environmentFile).mtimeMs, distSnapshot.mtimeMs, 'TOCTOU 测试必须保持预检 mtime 快照。');
           }
         },
       ),
       /SHA-256|完整性|最终复制/,
     );
     assert.equal(distReplaced, true);
+    await writeFile(environmentFile, environmentBytes);
     assert.equal(mock.requests.some((request) => request.path.endsWith('/publish-tasks/prepare')), false);
     await expectFileMissing(path.join(app.getPath('temp'), 'zending-digital-twin-publish', DIST_SKYBOX_TOCTOU_REQUEST_ID));
 
@@ -1383,9 +1419,13 @@ async function run() {
     await writeDataPlatformSkyboxIndex(manualSkyboxRoot, createSkyboxEntries('active'));
     const localSkyboxPath = path.join(projectRoot, 'Assets', 'Skyboxes', 'LocalCompatibility', 'skybox.hdr');
     await mkdir(path.dirname(localSkyboxPath), { recursive: true });
-    await writeFile(localSkyboxPath, createHdrFixture('local-compatibility', 35));
-    const localPrepared = await prepareSkyboxScene(createLocalSkyboxSceneContent(localSkyboxPath));
-    assert.equal(localPrepared.assetFiles.filter((file) => /skybox\.hdr$/i.test(file.destinationRelativePath)).length, 1);
+    const localSkyboxData = createHdrFixture('local-compatibility', 35);
+    await writeFile(localSkyboxPath, localSkyboxData);
+    const localEnvironment = await writeSkyboxEnvironment(localSkyboxData, 'local-fixture');
+    const localPrepared = await prepareSkyboxScene(createLocalSkyboxSceneContent(localSkyboxPath, localEnvironment));
+    const localSkyboxFiles = localPrepared.assetFiles.filter((file) => /\.(?:hdr|exr|env)$/i.test(file.destinationRelativePath));
+    assert.deepEqual(localSkyboxFiles.map((file) => path.extname(file.destinationRelativePath).toLowerCase()), ['.env'],
+      'DIST 预检只携带天空 ENV，不携带 HDR/EXR 原图。');
 
     const originalJsonParse = JSON.parse;
     try {
@@ -1949,8 +1989,9 @@ async function run() {
       const { publishWithResourceRetry, createEmptySceneDocument, createSkyboxEntity, serializeScene, repairPublishSceneSkyboxes }
         = await import(pathToFileURL(path.join(testRoot, 'renderer', 'publish-renderer.mjs')).href);
       const { recoverPublishSceneResources } = await import('../../dist-electron/ipc/digitalTwinPublishResourceRecovery.js');
-      const { listBuiltinSkyboxAssets } = await import('../../dist-electron/ipc/builtinSkyboxAssets.js');
+      const { listBuiltinSkyboxAssets, getBuiltinSkyboxEnvironment } = await import('../../dist-electron/ipc/builtinSkyboxAssets.js');
       const [builtin] = await listBuiltinSkyboxAssets();
+      const builtinEnvironment = await getBuiltinSkyboxEnvironment(256);
       const builtinScene = createEmptySceneDocument('内置天空盒快照发布');
       builtinScene.sceneSettings.lighting.shadows.enabled = false;
       const skybox = createSkyboxEntity({ packagePath: builtin.packagePath, sourcePath: builtin.path,
@@ -1983,6 +2024,8 @@ async function run() {
                 projectRoot, sharedResourcesRoot, legacyWorkspaceRoot: workspaceRoot }, new AbortController().signal, () => {});
               const repaired = repairPublishSceneSkyboxes(JSON.parse(item.sceneContent).scene, recovery);
               assert.equal(repaired.restoredCount, 1, '旧天空盒身份及摘要应直接替换为当前本地发布副本');
+              // 真实渲染进程在恢复后会准备 ENV；内置天空盒直接复用随编辑器分发的 256 面 ENV。
+              repaired.scene.entities[skybox.id].components.skybox.environment = builtinEnvironment;
               preparedScenes.push({ sceneId: item.sceneId, sceneContent: serializeScene(repaired.scene) });
             }
             return preparedScenes.find(item => item.sceneId === preparation.scenes.find(scene => scene.isEntry).sceneId).sceneContent;
@@ -2005,8 +2048,12 @@ async function run() {
         for (const type of ['SOURCE', 'DIST']) {
           const entries = await readZipEntries(mock.getUploadedPackage(successfulRequestId, type));
           const hdrs = [...entries].filter(([name]) => /\.hdr$/i.test(name));
-          assert.equal(hdrs.length, 1, `${type}只包含一份实际引用的内置天空盒`);
-          assert.equal(sha256(hdrs[0][1]), builtin.assetRevision);
+          const envs = [...entries].filter(([name]) => /\.env$/i.test(name) && /skyboxes\//i.test(name));
+          // SOURCE 保留原图以便继续编辑；DIST 只携带运行时 ENV。
+          assert.equal(hdrs.length, type === 'SOURCE' ? 1 : 0, `${type}天空盒原图数量`);
+          if (type === 'SOURCE') assert.equal(sha256(hdrs[0][1]), builtin.assetRevision);
+          assert.equal(envs.length, 1, `${type}只包含一份实际引用的内置天空 ENV`);
+          assert.equal(sha256(envs[0][1]), builtinEnvironment.sha256);
           const packed = JSON.parse(entries.get(type === 'SOURCE' ? 'Scenes/main.scene.json' : 'project/scene.json').toString('utf8'));
           const packedSkybox = packed.scene.entities[skybox.id];
           assert.equal(packedSkybox.components.skybox.intensity, 0.8);

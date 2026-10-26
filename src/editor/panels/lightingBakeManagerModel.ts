@@ -275,8 +275,11 @@ export function getLightingManagerChangeSummary(draft: LightingManagerDraft): Li
     environmentIntensity: value.environmentIntensity, disabledLightIds: value.disabledLightIds, allowDayNightCycle: value.allowDayNightCycle });
   const physicalChanged = different(physical(before), physical(after));
   const calculation = (value: SceneLightingConfig) => ({ quality: value.bake.quality, atlasSize: value.bake.atlasSize,
-    texelsPerMeter: value.bake.texelsPerMeter, probeSpacing: value.bake.probeSpacing, device: value.bake.device, probeVolumes: value.bake.probeVolumes, maxTextureMiB: value.bake.maxTextureMiB });
+    texelsPerMeter: value.bake.texelsPerMeter, probeSpacing: value.bake.probeSpacing, device: value.bake.device, probeVolumes: value.bake.probeVolumes, maxTextureMiB: value.bake.maxTextureMiB,
+    lightmapEncoding: value.bake.lightmapEncoding ?? 'rgbm', lightmapMipLevels: value.bake.lightmapMipLevels ?? 0 });
   const calculationChanged = different(calculation(before), calculation(after));
+  const codecChanged = (before.bake.lightmapEncoding ?? 'rgbm') !== (after.bake.lightmapEncoding ?? 'rgbm');
+  const mipChanged = (before.bake.lightmapMipLevels ?? 0) !== (after.bake.lightmapMipLevels ?? 0);
   const rulesChanged = different(getLightingManagerPolicy(before.policy), getLightingManagerPolicy(after.policy));
   const exceptionsChanged = Object.entries(draft.entityLighting).some(([id, value]) => different(value ?? undefined, draft.baseScene.entities[id]?.components.lighting));
   const shadowsChanged = different(before.shadows, after.shadows)
@@ -298,7 +301,8 @@ export function getLightingManagerChangeSummary(draft: LightingManagerDraft): Li
   const categories = [appearanceChanged && '显示效果', physicalChanged && '物理照明', calculationChanged && '烘焙计算',
     rulesChanged && '分类规则', exceptionsChanged && '对象例外', shadowsChanged && '实时阴影', giApplicationChanged && '间接光应用']
     .filter((value): value is string => Boolean(value));
-  const giMessage = giInputChanged ? (before.result ? '应用后已有 GI 将过期，需要重新烘焙。' : 'GI 输入将更新，应用后可进行烘焙。')
+  const giMessage = codecChanged || mipChanged ? '光照贴图编码或Mip层级将更改，应用后需要重新烘焙；已有烘焙资产继续保留。'
+    : giInputChanged ? (before.result ? '应用后已有 GI 将过期，需要重新烘焙。' : 'GI 输入将更新，应用后可进行烘焙。')
     : giApplicationChanged ? (after.bake.enabled ? '启用 GI 应用；已有结果仍需通过有效性检查。' : '暂停应用 GI，已有烘焙资产继续保留。')
       : 'GI 输入保持不变；已有结果的有效性不受这些更改影响。';
   return { categories, rulesChanged, exceptionsChanged, giInputChanged, giApplicationChanged, giMessage };

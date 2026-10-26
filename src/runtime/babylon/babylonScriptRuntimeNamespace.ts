@@ -76,6 +76,7 @@ import { RenderingGroup } from '@babylonjs/core/Rendering/renderingGroup.js';
 import { RenderingManager } from '@babylonjs/core/Rendering/renderingManager.js';
 import { UtilityLayerRenderer } from '@babylonjs/core/Rendering/utilityLayerRenderer.js';
 import { Scene } from '@babylonjs/core/scene.js';
+import { cloneDetachedModelMaterial } from './cloneDetachedModelMaterial';
 
 export const BabylonCore = Object.freeze({
   AbstractMesh,
@@ -167,6 +168,8 @@ export const BabylonCore = Object.freeze({
 export type BabylonScriptRuntimeNamespace = Readonly<Record<string, unknown>>;
 
 let completeNamespaceRequest: Promise<BabylonScriptRuntimeNamespace> | null = null;
+const projectCore = Object.freeze({ ...BabylonCore, cloneDetachedModelMaterial });
+let projectComplete: BabylonScriptRuntimeNamespace | null = null;
 
 /** 与外置脚本现有 import 解析语法保持一致，不把类型导入或无效绑定当成运行时依赖。 */
 function requiresCompleteNamespace(sourceText: string): boolean {
@@ -186,6 +189,7 @@ function requiresCompleteNamespace(sourceText: string): boolean {
       const importedName = parts[0];
       const localName = parts[1] ?? importedName;
       if (!/^[A-Za-z_$][\w$]*$/.test(importedName ?? '') || !/^[A-Za-z_$][\w$]*$/.test(localName ?? '')) continue;
+      if (match[3] === 'zending-3d-runtime' && importedName === 'cloneDetachedModelMaterial') continue;
       // 粒子自定义着色器和序列化依赖额外的场景/Engine 原型注册，保持完整入口的既有能力。
       if (importedName === 'ParticleSystem' || !Object.hasOwn(BabylonCore, importedName)) return true;
     }
@@ -195,10 +199,13 @@ function requiresCompleteNamespace(sourceText: string): boolean {
 
 /** 常用命名导入走轻量集合；任意命名空间和其它既有 Babylon API 保留完整兼容，失败后允许重试。 */
 export async function resolveBabylonScriptRuntimeNamespace(sourceText: string): Promise<BabylonScriptRuntimeNamespace> {
-  if (!requiresCompleteNamespace(sourceText)) return BabylonCore;
+  const projectApi = /^\s*import\s+(?!type\s).+?\s+from\s+["']zending-3d-runtime["'];?\s*$/m.test(sourceText);
+  if (!requiresCompleteNamespace(sourceText)) return projectApi ? projectCore : BabylonCore;
   completeNamespaceRequest ??= import('@babylonjs/core/index.js').catch(error => {
     completeNamespaceRequest = null;
     throw error;
   });
-  return completeNamespaceRequest;
+  if (!projectApi) return completeNamespaceRequest;
+  const namespace = await completeNamespaceRequest;
+  return projectComplete ??= Object.freeze({ ...namespace, cloneDetachedModelMaterial });
 }

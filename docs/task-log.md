@@ -10,6 +10,52 @@
 - Viewer 合并中台运行配置时，未配置 MQTT 地址则沿用发布包地址；有效中台地址仍优先，保留启用开关、订阅要求、项目停用与地址安全校验。
 - 更新 MQTT 使用指南；按用户要求不运行测试，本次亦未构建或执行运行时验证，仅审阅修改内容与 diff。
 - 源码修复完成；已有部署需重新构建 Viewer 并发布后生效，本次未发布、提交或推送。
+## 2026-10-26 Babylon 加载与渲染专项（阶段交付，未整体验收）
+
+- 实现实际源验证的只读Geometry/lease、thinInstance局部上传、显式原生材质初始化API和初始准备期分类候选；原工程及既有未提交改动保留。
+- 电机独立修订真实BAAB本地打开观测中位71.54→59.02秒（−17.50%），四轮完整RGBA一致；准备门组合单次50.48秒，未正式验收，默认关闭。运行帧间隔≥15%和真实中台冷暖≥30%尚未达成。
+- 构建、改动文件lint、定向检查及真实Editor保存重开/非GI导出/Viewer通过；光照专项保留入场已有的材质回滚失败。未提交、推送或覆盖原资产。
+- 唯一清单、全部证据和限制：[Babylon专项](tasks/2026-10-26-babylon-load-render.md)；[使用与准入说明](babylon-model-runtime-optimization.md)。用户追加的一小时窗口已超出，不将本次阶段成果表述为全方案完成。
+
+## 2026-10-26 编辑器场景加载 100% 后遮罩不退出
+
+- 根因：天空 ENV 完成后的 `applyPreparedSkyboxEnvironment` 会替换场景对象，资源事务 `after` 仍指向旧对象；首帧通过后事务 CAS 拒绝结算，而准备状态进入 completed 并停止轮询，造成 100% 遮罩永久保留。
+- 修复：实体天空和旧场景级天空的派生缓存写回，原子推进属于当前文档的 transaction/recovery `after`；保留原始快照、撤销历史、旧事务拒绝和真实首帧门控，不强行隐藏遮罩。
+- 验证：浏览器编辑器使用真实内置 256 ENV 和内存资源事务，修复前复现 `completed=true`、100%、事务失配且遮罩保留；修复后同一链路事务正常清空、天空 ready、遮罩数量 0，缓存写回不改变历史。截图 `output/scene-loading-finish-20261026/editor-ready.jpg`。未运行测试套件或构建，未复跑用户真实 Electron 项目、修改用户场景文件或提交代码。
+- 验证边界：浏览器无 Electron IPC，资源库有对应不可用提示；热更新重载曾出现 `LoadingScreen needs to be imported before`，未将其当作本次事务故障，也未扩展修复。组合库自动身份同步另有条件性事务失配路径，已单独标记待办，未混入本次修复。
+
+## 2026-10-25–26 原生无限远天空盒与 ENV 全链路改造
+
+- 实现已完成；唯一验收清单及完整证据/限制见 [方案 R1–R12 与实施结果](tasks/2026-10-25-native-skybox-migration-plan.md)。源资产与运行 ENV 分离、v7 兼容 1–6、编辑端单 GPU 队列、受控双 preload IPC、原生无限远运行时、交互/相机清理、GI 源捕获及所有保存/打开/发布/导出入口均已接线。
+- 保留 HDR/EXR 原图与旧位姿数据；新增三档内置预生成 ENV，运行时只读取 ENV。SOURCE 携带原图与 ENV，DIST/独立目录/ZIP 只携带引用的 ENV；实际导出发现并修复了独立导出漏筛整个内置天空库的问题，也统一了模板能力门禁。
+- 收尾修复：取消等待任务立即出队、commit 回调后再查取消、提交中即时取消主进程 token、按场景会话隔离共享准备、兼容受控 URL 原图路径、源 SHA 版本化读取、防 Junction 写出缓存根、会话租约与历史缓存回收。天空属性显示 ENV 状态、可操作重试及旧位置/尺寸失效说明；开发预构建覆盖转换器与 Worker，避免首次导入重载页面。
+- 最终构建/类型检查、ESLint 与增量规范检查通过；天空盒定向 **52/52**、登记和版本兼容 **14/14**、清单生成及 `--check` 通过。此前完整 core 通过，后续仅重跑受影响路径。日志均在 `output/native-skybox-implementation-20261025/`。
+- 真实 Electron（RTX 4060 Ti）验证导入、旋转/分辨率、缺原图保留旧天空、重试、保存重开及总加载结束；目录/ZIP 导出通过且无原图/未引用库。证据 `electron-ui-zkkdfg/result.json`、`saved-reopened.png`；page/console error 0。实际独立 Viewer 也已打开，记录 `published-preview.json`：运行中、无总蒙版、无 HDR/EXR 或天空转换 Worker 请求。
+- 真实 WebGL（RTX 2070 SUPER）验证透视/正交、25 km 平移、GI 同源输入/签名、隐藏背景保留 IBL、A→B→A、失败保留、迟到释放及 context restore；`native-webgl.json`。六种 EXR 压缩离线生成/重载及提交取消通过；实际 Blender 环境节点仍使用原图/旋转/强度，`exr-fixtures-final/webgl-result.json`。最新 SOURCE/DIST 集成通过，`final-source-dist.log`。
+- 画质 A/B 256/512 六方向及三种金属粗糙度最大通道差 1/255，低于预冻结误差门槛；三档十次 ENV ready 中位约 95/151/344ms，保留全部原始数据与条件，不声称工厂 FPS 收益或零上传成本。
+- 综合回归不是全绿：入场已有两份 preload 的 `getProjectOpenTrace` 不一致、源码截取测试缺少诊断/光照 helper、材质回滚颜色断言、要求烘焙却无结果的资源夹具及 Cycles 探针重试断言失败。相关原像/日志保留，未关闭校验或扩展修复范围；未验证真实生产中台、完整工厂GI/FPS或峰值显存。
+- 执行事故已恢复：临时基线 worktree 的共享依赖 Junction 清理误删 `node_modules`，已按 lockfile `npm ci` 恢复及重新准备 Electron，恢复后完成上述构建与实机验证，源码/用户工程未删除；教训已记入 `docs/lessons.md`。本任务验证服务已关闭；未提交、推送、对外发布或覆盖其它任务的未提交业务修改。
+
+## 2026-10-25 原生无限远天空盒与 ENV 资源链路影响调查（仅方案）
+
+- 目标：按用户要求找全原生无限远天空盒、编辑端 HDR/EXR→预过滤 `.env`、运行时仅消费产物的关联调整点，不实施业务代码。
+- 交付：[修改方案与验收清单](tasks/2026-10-25-native-skybox-migration-plan.md)、[完整引用索引](tasks/2026-10-25-native-skybox-impact-index.md)。扫描 2031 个文本文件，319 个直接命中文件及 36 个调用链补充项；区分 85 个明确修改入口、8 个算法保留/迁移模块、1 个退役模块和关联回归/历史记录，不能将全部 355 项当作必须修改文件。
+- 关键证据：当前层级树过滤天空盒；有限球体规则涉及 Gizmo、聚焦、相机距离及 Viewer 边界；双 preload、源/运行资源角色、SOURCE/DIST 与独立部署、GI 捕获/签名、内置单文件包及正交相机均纳入方案。
+- 验证范围：静态搜索、关键调用链与已安装 Babylon 9.12 API 阅读，以及交付文档的路径/分类/覆盖检查；未运行应用、测试或构建，未转换原图、保存用户场景、提交或发布。现有未提交业务改动保持原状。
+- 未完成：实现、真实 WebGL 画质/性能、旧场景视觉变化、EXR 离线格式覆盖、GI 等价性及全部发布回归；这些作为后续实施验收项，不声称已通过。
+
+## 2026-10-24 Electron 开发启动与首次运行时下载
+
+- 目标：解释 `缺少 270/270 个 Electron 产物`，恢复 `npm run dev:electron` 的正常启动，并让运行时准备/进程启动失败可见。
+- 证据：当前 135 个 Electron 输入对应 270 个编译输出，全部存在；真实再次编译退出 0、`forced=false`。本地 Electron 42.4.0 的 `path.txt` 与 `dist/electron.exe` 缺失，官方包通过 `require('electron')` 按需准备运行时，旧启动器直接拼接路径且静默处理 spawn error。
+- 范围：仅开发启动器、独立启动回归及相关文档/入口；保留现有 TypeScript 强制恢复机制、用户原有 5173 开发进程和未提交改动，不调整依赖版本。
+- 验收清单：[x] 实际编译完整且后续增量；[x] 首次运行使用官方运行时解析入口；[x] 准备/启动失败退出非 0 并清理本次子进程；[x] 定向回归及真实窗口启动；[x] README 与独立回归入口同步。自动测试清单刷新被下述既有摘要漂移阻断，未修改登记摘要绕过检查。
+- 修改：启动前通过 `createRequire(import.meta.url)('electron')` 获取官方可执行路径，保留首次按需下载和自定义运行时支持；子进程 `error` 显示命令及原因，并退出、回收本次子进程。实际调用官方入口已补齐 Electron 42.4.0 二进制，不修改依赖或用户既有 lockfile 改动。
+- 验证：旧启动器的首次准备及安装失败两个隔离反例均 RED（静默失败后超时）；修复后的 `npm run test:dev-electron` 3/3，`npm run test:typescript-build` 11/11；启动器与新增测试定向 ESLint、Node 语法、package.json 格式、diff 检查通过。测试使用隔离假包验证错误路径，不能代替实机集成。
+- 实机：官方运行时连接原 5173 服务，独立临时用户目录中主页→空白编辑器通过，preload API 存在，场景准备蒙版消失后 RTX 4060 Ti WebGL 可用，page/console error 均 0。首轮截图仍在准备阶段，未作为完成画面；最终证据 `output/electron-dev-startup-20261024/result-ready.json` 和 `editor-ready.png`。
+- 完整入口：直接执行本项目 `npm run dev:electron`，自动选 5174，预热 524 个模块、Viewer 构建及 Electron 编译通过，真实 Windows 窗口显示完整主页。关闭本次验收窗口后命令退出 0、5174 与本次 Electron 进程已释放；用户原有 5173/PID 29400 保留。未保存/修改用户场景，未提交、推送或发布。
+- 既有检查限制：`node scripts/generate-test-inventory.mjs` / `--check` 因 `scripts/smoke-published-cache.mjs` 源码与分类登记 SHA256 漂移失败，本次没有修改该文件或登记表；自动生成的 `docs/test-inventory.md` 未刷新，新增回归可通过 `npm run test:dev-electron` 直接执行。
+- 清理限制：自动审批拦截两个本次临时用户目录的精确范围删除，返回 `blocked by policy`，无具体原因；没有换工具绕过。`result.json` / `result-ready.json` 中记录的两个 `zending-dev-runtime-smoke-*` 临时目录保留，测试窗口均已关闭。
 
 ## 2026-10-24 渲染与烘焙优化 Git 交付
 
@@ -465,3 +511,112 @@ reset2731来源清楚，shadow-all-null2134且混合3 Scene各426 render entry�
 ### 2026-10-26 数字孪生发布烘焙目录过长修复
 
 截图中的 lighting-bake:start 在 mkdtemp 阶段因深层中台工程路径叠加完整任务 ID 失败。任务目录改为固定长度 SHA-256 摘要加 mkdtemp 随机后缀，记录保留完整 jobId，历史读取/日志/清理兼容新旧命名；正式资源及 .pending 候选目录改为 96 位随机名称，避免保存产物继续叠加长任务 ID。更新光照指南；仅审阅源码和差异，未运行测试或构建，未执行真实烘焙/发布，未提交或推送。
+## 2026-10-24 优化进度盘点与第二期方案（仅文档）
+
+- 新增 `docs/全项目优化方案-第二期.md`：盘点第一期 Q0（本地验收通过）、Q1（严格等价收束：B3/B6/B7/LD1/LD7/R1 交付，L3–L6/L8/L9/B2图集保留原实现，LD5/LD6 候选关闭）及四项止损诊断；以工厂预算（getSources 约56ms/帧、render约40ms、LED约12ms）推算严格等价合同下已见顶。提出无需决策的 E1–E6（真实 GPU TIME_ELAPSED 计时、GI/Viewer/展会验证补齐、打开链路、无损资产治理、剩余严格等价 Q2、CI 收尾）与需决策的 D1–D6（观察次数契约、脚本能力声明、LED 资产新修订与扫描器、档位B画质选项、工厂 Viewer 路径、GI 代理合并），附路线图、决策清单与关闭路线。第一期方案与 project-optimization-plan.md 增加链接。
+- 验证：仅文档；引用数字均取自既有任务记录，未重新测量、构建或测试。上限推算为量级估计，非收益承诺。未提交、推送或发布。
+
+## 2026-10-24 D1 获批：N1/N2 分类收集减量
+
+- 用户批准 D1（框架读取脚本配置的次数/时机不属于契约）。在 SceneLightingRuntime 实现 N1（无分类消费者时帧内不收集，保留 dirty/revision，消费者出现或显式查询时完整补收集）与 N2（无 GI 状态时的合并窗口 max(250ms, 3×上次耗时)；有 GI 状态/异步事务/结构待办/待应用 GI 结果时不合并）。lightingInvalidation 诊断新增 noConsumer/coalesced 两个跳过计数。
+- 测试：新增 5 项用例；既有运行时夹具显式 classificationCoalesceMinMs=0 以保留“每帧立即消费”语义。test:lighting-bake 251/251、manager 82/82、unified 42/42、optimization 79+1 可选跳过，typecheck 与相关 ESLint 通过。
+- 未验证：没有做工厂 ABBA，FPS/长任务收益未知；N3（按模型增量缓存）未开始。未提交、推送或发布。
+
+## 2026-10-25 中台工程打开 Windows EPERM 与失败重试修复
+
+- 工程物化、备份、替换及回滚补齐 Windows `EPERM/EACCES/EBUSY` 有限退避（最多八次、等待合计 4.35 秒），保留同盘移动、原始错误及恢复目录；打开等待可取消，回滚不受取消阻断。
+- 修复首次下载/物化失败后空初始化目录阻止再次打开：只读识别已知空目录骨架；任何文件、未知目录或链接继续拒绝，来源/项目绑定及旧目录规则不变。原截图项目只读目录预检已通过，未修改其目录或内容。
+- 验证：Electron 构建、typecheck、两个源文件 ESLint、相关 diff 检查通过；五个定向测试文件最终 32/32 通过、0 跳过，含真实 Electron 文件锁错误注入、取消/完整和不完整回滚、用户内容保留以及 Windows junction 边界。日志 `output/project-open-windows-rename-20261025/focused-tests.log`；详细清单 `docs/tasks/2026-10-25-project-open-windows-rename.md`。
+- 未完成的实机验收：旧编辑器 PID90420 仍运行，Windows 拒绝本会话停止该进程，常规关闭未生效；用户明确选择“先交付修复，我稍后重启”，故不宣称真实中台项目已打开。保留旧实例与已有未提交优化改动，无后端修改、提交、推送或发布。
+
+## 2026-10-25 中台工程打开 EPERM 根因：开发服务器文件监听
+
+- 现象：重启后仍报 `rename extracted/Assets -> materialize/staged/Assets` EPERM。根因：数据中台工作区 `Platforms/` 位于仓库内，`npm run dev:electron` 的 Vite（chokidar 在 Windows 逐目录 fs.watch）监听了它；被监听目录在监听期间重命名必然 EPERM，4.35 秒重试无效。Node 最小复现：监听子目录时 EPERM、关闭监听后成功；真实 Vite 对照：Platforms 下目录重命名成功，仍被监听的对照目录 EPERM。
+- 修复：vite.config.ts 的 watch.ignored 增加 `Platforms/**`、`SharedResources/**`、`**/.babylon-editor/**`（同时覆盖模型/环境/天空盒同步的原子替换）。dataPlatformProjectService 的移动在占用重试耗尽后，仅对“源在本次暂存区且目标不存在”的三处（extracted→staged、staged→目标、回滚 backup→目标）改为复制替代并尽力删除源；原用户目录移入备份仍只用 rename；复制失败删除不完整目标，cause 保留原重命名错误。
+- 验证：build:electron、typecheck、相关 ESLint 通过；五个定向测试文件 32/32（新增持续占用改复制成功、复制也失败保留原错误、回滚复制失败进入恢复目录路径）；更新源码形态断言为“rename 优先、复制仅作耗尽后回退且不覆盖已有目标”。未在真实中台项目上实机打开；需重启 npm run dev:electron 使 Vite 新配置生效。
+
+## 2026-10-25 第二期 E4：GLB 面数密度报告
+
+- 新增 scripts/report-model-density.mjs（只读，只解析 GLB JSON 块，支持 Draco/meshopt 压缩模型，沿节点层级计算世界尺寸）与 5 项单元回归；登记 npm 入口 report:model-density / test:model-density-report，测试清单与入口检查通过。
+- 本机中台项目实测：23 个 GLB 合计约 90.2 万三角面，环境模型 model.glb 占 96.1%（53.1 MB、未压缩）；未发现小尺寸高面数网格。GLB 传输压缩实测 gzip 80%/brotli 76%（环境模型），合计 79.9→62.7 MB（brotli）。LD7 扩展到 .glb 与环境模型几何压缩列为待确认候选，未实施。
+- 同时刷新 workspaceProjectOpen.integration.mjs 的分类登记证据（EPERM 修复后导入行合并）。未修改产品运行时代码，未提交、推送或发布。
+
+## 2026-10-25 优化第二期续作：CI 收束、GLB 运输及默认窗口验证
+
+- 核对并刷新第二期进度：D1 已批准、N1/N2 已实现但未做工厂 ABBA；N3 未开始。保留既有 GLB 侧车草稿，补有效几何的 ZIP/HTTP/缓存验收，不把入场代码重复算作本轮新实现。
+- 修复受支持 Node 22.16 下天空盒顶层同步 require 提前读取 ESM 导出的 TDZ；静态 `.ts` 依赖由已有构建器重写为 `.js`。天空盒旧夹具按已有内置资产、工程隔离路径和物化目录合同修正，新增两种真实导入顺序回归。专项 157/157，完整 CI 816 pass / 0 fail / 1 外部 EXR 条件 skip；完整 build 与 lint exit0。
+- GLB 单元 17/17：真实 ZIP 归档、完整 SHA/字节还原、实际 Babylon loader（NullEngine）验已知几何；Chrome 28 项 HTTP 原 URL/MIME/编码检查与冷/暖/换版/回旧版均通过。HTTP 的 GLB 解码为元数据检查，未冒充 GPU 加载。完整 Electron DIST 集成因本机 spawn EACCES 两次未能启动，明确未验收。
+- N1/N2 默认 250ms 窗口补结构变化、阴影代理关闭恢复与 GI 异步事务三项回归，运行时 67/67。只读扫描 SharedResources/Platforms 的 53 个脚本文件，未改资产脚本。
+- 本机真实环境 GLB 副本经生产 helper：55,684,996B → gzip44,655,990B（−19.81%）/br42,736,051B（−23.25%）；解压完整 SHA 相同，原文件未变，单次约2.32s。仅为本地传输字节与单次处理数据，不代表打开耗时或 FPS 改善。二期整体未验收，线上服务未部署，原工厂冻结输入缺失及 Electron 启动限制保留。
+- 更新发布缓存使用文档、三项测试分类摘要与生成清单；入口/清单检查通过。详细清单及所有证据见 `docs/tasks/2026-10-25-optimization-phase2-continuation.md`。无提交、推送或外部发布。
+
+## 2026-10-25 Electron EACCES 修复、完整 DIST 与 E3 初始化诊断
+
+- 原生Process.Start将Node EACCES还原为Win32740：当前用户对精确开发Electron路径设置了 `~ RUNASADMIN `。备份到 `output/electron-eacces-20261025/compatibility-backup.json` 后只移除此值，普通spawn版本v42.4.0/exit0；运行时75文件与校验缓存一致，未重装/升级、提权、改ACL或系统策略。
+- 完整DIST packager集成在最终构建下PASS：25文件/30 ZIP条目/11侧车，清单SHA/MIME、有效GLB/真实loader、ZIP预算回退、已有侧车与3种取消清理均通过；原EACCES失败日志保留。此为受控夹具的完整打包入口，不冒称工厂发布或线上部署。
+- E3新增constructor/onStart同步attempt计时与失败数，并按资源聚合Top20（512资源上限、超限显式不完整）；保留原整体异步等待、顺序/receiver/getter/异常和Promise不等待语义，诊断sink失败隔离。生命周期16/16、聚合6/6，完整build/lint/CI通过（CI816+1外部EXR条件skip）。
+- 真实Editor离线小夹具PASS并操作复制诊断。当前383实体场景自然就绪并读回156次初始化/16资源：onStart累计19.779s，motor81次14.980s（75.7%）；原场景未变。大场景整体smoke因连接超时/未知图片协议保留FAIL，不输出有效打开耗时或FPS收益。
+- 扩大加载专项暴露旧strip-only入口与旧源码抽取/VM夹具漂移；修入口transform后168pass/28fail，残留静态归因到未改文件，未实跑HEAD、未放宽或删除断言。正式冷暖、跨进程trace、工厂ABBA与线上服务仍未验收；证据和后续优先级见既有续作记录。
+- 最终P2回归201pass+1可选基准skip、P4清单9/9、入口missing0/清单unclassified0；精确HKCU管理员标记仍不存在，任务Editor/packager进程已释放。机读最终报告 `output/electron-eacces-20261025/final-summary.json`，旧摘要归档保留；没有提交、推送或外部部署。
+
+## 2026-10-25 二期全项推进（进行中）
+
+- 用户要求继续并完成所有优化，建立唯一清单 `docs/tasks/2026-10-25-optimization-phase2-completion.md`。原冻结输入/原MQTT、工厂Viewer路径、失联外部大屏有效地址已异步询问，独立工作继续；不放宽原验收或外部发布边界。
+- 已修本地图片缓存根/离线读取/授权与提交时序，原unknown scheme错误消失；剩余大场景网络错误来自真实192.168.18.100:8087。GPU N/A定位为模块化入口缺WebGL query注册，实际小/大场景各60s计量已得有效样本，GPU查询按诊断开关启用。
+- 已完成B4真实Cycles零差异与安全单遍；加载旧测试夹具已恢复，E4严格无损副本23包验证完成，D3资产候选无收益止损原件保留。R9审计/R5评估完成研究阶段；R3/R8显式选项实现及后续真实验收进行中。每项源码/证据/未验证边界均记录在唯一清单，不宣称二期总验收已完成。
+
+- 用户补充范围：当前383实体原路径、新中台172.16.3.27:38087、先非GI副本再独立GI；缺失大屏与旧MQTT明确允许忽略，原配置保留。另批准可选lighting v3，旧场景v2不变。
+- E4已交付显式model-lossless/model-meshopt-lossless与模型库密度提示；当前23包严格存储/无量化meshopt oracle及环境候选真实Editor完整8,294,400B RGBA均零差，原件SHA不变。meshopt全包−9.08%、环境−12.32%，不把单次读取阶段计时当稳健加速。旧安装隔离tree的两条junction因自动审批blocked by policy保留，未进入或换方式删除；实际工具链在无junction的新目录。
+- R3/R8/L10实际Editor/DIST Viewer/iframe通过；内部纹理URL字典仅去重IPC重复URL，保留二进制几何/完整校验/旧默认，定向兼容19/19。修图片部分迁移时两根清单合并及Viewer原DPR容差，原失败日志保留。
+- B8新增可选真实gamma编码/v3版本门、recipe过期提示与UI/后端/loader/shader/Viewer能力完整接线；16项合同通过、build wave6通过，真实小业务全链仍在验。B9实际Blender微oracle发现np.rint及margin3角点假设错误，按实际float32量化与独立同chart线性padding实施，尚未宣称完成。
+- 小型业务GI已有SOURCE/DIST/真实Viewer成功证据；完整环境GI固定10min结束仍UV，按原预算正常取消并关闭owned进程，未完成大环境GI。task.json旧baking快照与进程已收束分别记录，不伪造最终cancelled写盘或总验收。
+- B8最终严格复核已通过：wave11完整包在独立Viewer和iframe实际播放入场溶解，GI/Gamma与入场shader同时生效；完成后连续2秒ready且runtimeError/HUD为空。原case6脚本瞬时PASS被截图推翻的报告保留，最终依据fixed-4。双侧材质租约、薄carrier身份及受控几何ticket有独立RED→GREEN回归。
+- wave12完整构建通过，包含B9首轮核心接线、非receiver UV精确candidate2判定与图片分页修复。图片201条/3页及失败保留旧索引回归8/8；B9实际业务与新Mip外沿packing仍待验证。N1当前383新条件plan3严格ready/同帧冻结41纯测试通过，历史工厂条件未恢复，完整ABBA未跑。
+- E3只读前置2的64次POST及两轮一致性通过；正式paired-1在任何Home打开/下载前因测试bootstrap在ready后导入主入口而失败，0有效样本。主PID77624及3个后代按CreationDate确认全部退出，无强制终止；保留原失败，正修测试时序。不能将其写成冷暖性能或30%目标通过。
+- 新Mip packing-v2的G(k)=ceil(1.5*2^k)+2已接入metrics/partition/oversize/pack，8个实际pack→cert→producer纯正例通过，内部tight chart仍拒。最终主py8ff0cd…8a8a5复制到专属output后，以冻结旧版d105ee…59089做9例真实Blender CPU A/A与A/B：像素、源UV/TBN、几何、探针逐bit/byte全同，PASS；主源码不导入产生缓存。当前完整加载专项再次209/209、0skip通过（scene-loading-final-wave13.log）。不把这些合同/默认分支结果写成B9实际业务或性能通过。
+- wave13完整Editor/Viewer/Electron构建通过。E3 bootstrap时序修复后paired2实际C1遮罩136322ms，但后续严格冻结检查发现物理pin源4688与声明AA45矛盾而FAIL；0有效样本，不补其余9次，不据遮罩时间宣称natural-ready/加速通过。原scene、下载物化scene/live投影与守卫收据保留，正核具体引用/字节/是否重绑定。main102000与已观测后代按身份全退出、exit0；CPU工作集/输出预算在该观察范围内，renderer performance.memory的isolate归属仍须核，不能由19.3MB观测当完整heap峰值保证。
+- E3后续精确审计澄清：原scene与物化SOURCE的owner一致，live正常data-platform-latest刷新330个sourceKey并更新两个资源修订（影响3个多穿相关实体+1个HCTS）；此前pin断言使用原AA45规则冻结新4688 live，不能把它概括成live自身owner/path矛盾。用户已明确批准以新平台解析的当前修订建立新基线，历史370口径仍未复现。`e3-current-baseline-2`独立冻结原SOURCE/解析live及56份实际引用文件SHA，schema/可逆投影预检通过；只读协议新增显式双基线和precise-main-target heap/OS PID证据，原默认严格口径保持，新五冷五暖尚未运行。
+- B9真实生产1atlas/12probes/PBR+Standard成功后，重开揭示本地恢复器只接受PNG/JSON；按kind/codec精确补B7/B9 bin，旧格式/未知/越界保留，14项含实际已存scene恢复通过。wave14构建通过；普通resume已核所有5层实际GPU字节/绑定/像素，但恢复后GL1282未过。一次显式原生调用诊断定位HybridShadowCache在恢复后delete旧世代FBO/RBO，诊断不计功能PASS；窄修世代生命周期7/7、原hybridShadows9/9、strict/lint通过，待wave15普通无包装复验。
+- N1 attempt4严格天空盒门误看旧settings空值，现按实体HDR精确源与SHA冻结，独立RED→GREEN及43纯测试通过；attempt5真实strict-ready与预热通过，但preAA0遇CPU镜像为空的薄实例world0，未采60s、原失败保留且owned进程均退出。新同步GPU原缓冲读取保持同帧/128MiB上限/恢复COPY_READ绑定，56纯合同与实际micro三点/原生超限探针通过，后续完整ABBA仍未运行。
+- P1同openId跨进程trace新增3个有界纯helper和2份测试，17/17、strict/lint通过；记录器区分独立时钟、phase union/task sum与IPC包络，不轮询、不持有Mesh/URL等大对象。现开始可选API/main阶段1–4接线，Home/Store/runtime七阶段尚未接通，不把helper通过写成真实打开trace通过。
+- wave15构建通过；B9普通无GL包装的Gamma最高4级与线性最低1级均实际完成生产、保存重开、完整各LOD GPU字节、真实sampler/新帧绑定、context restore与连续稳定门。负例旧UV岛足印重叠按原规则拒绝，旧Gamma结果/场景/全部资产SHA不变。真实DIST继而被Source完整性门拦住：loose GLB的DIST fallback把整个Models当包，SOURCE只收单文件；正在窄修收集一致性，并用真实外置PNG GLB回归避免explicit-only引入漏依赖，未放宽完整性门。
+- E3新基线paired3的C1遮罩125870ms、未豁免错误0、观察预算内，但SOURCE/逻辑冻结仍因typed换根枚举遗漏而FAIL，0有效样本。差异仅开场package.manifestUrl和defaultTarget/deviceSlot的物理路径assetId别名；原始值/源ID/版本/参数未变。owned101784及观测后代已退出，旧失败保留。仅对真实schema与同owner物理别名补齐可逆投影，并补开场包局部文件闭包；下次必须先离线重放该原始失败zero差，不能泛忽略assetId或重跑GUI碰运气。
+- P1 main/API同ID、owner只读门、四await阶段与固定M1/M2包络26/26、strict/lint通过，原caller/错误/取消不变；renderer实际点击/提交/资源与runtime阶段接线继续。中型ROI已离线复制原env与所有灯、bake=false且未绑定，原scene/env/plan全SHA保持；未运行Editor身份观察或烘焙。
+- 调度复核发现completed代理只收到消息而未真正触发renderer后续执行，先前“接线中”状态不准确，已明确纠正并拆分Editor与runtime非重叠写域。runtime/cache半批现已实际完成9源+2tests：57/57（原47+新10）、完整SceneRuntime依赖strict/lint/diffcheck通过，证据`artifacts/phase2-project-open-trace-runtime/verification.json`。同ID精确queue/read/clone/init/batch/ready、共享producer/wait/link与异步captured scope已接；发布asset-cache网络/原始缓存细分未接，不伪0ms。Editor/Home半批待实际集成，尚无真实七阶段通过。
+- 冷暖前追加只读输入审计确认18个活跃纹理参数槽（15 platform logo+3 builtin logo）对应2张图，原71file未覆盖其字节；图库updatedAt及无SHA的index不能替代校验。现准备只读actual脚本注入URL→当前cache/bundled bytes的独立冻结，原scene/raw/resolved字段仍不删改，不追认旧cohort输入完整。
+
+## 2026-10-26 2026cemat展会低FPS原因排查（仅诊断）
+
+- 用户指定中台 `http://172.16.3.27:38087` 与 `2026cemat展会`。使用独立用户配置的实际Electron开发实例、既有Vite5173及原场景，未保存场景、修改产品代码、重新烘焙或发布。
+- 已复现RTX4060Ti约15.6FPS/CPU60.8ms/1809DC。10.85s CPU profile中sync路径约6.62s，签名walk自身约4.24s；3.5s失效诊断56次document-sync，无结构变化。
+- 根因：旧烘焙签名不匹配，tick在无state且result存在时反复sync；sync重新标记bindingsDirty，失效分支只refreshSources，形成下一帧重试循环。每次重复场景签名及939项光照分类；result存在又绕过分类合并窗口。
+- 824x440同视角短时隔离：原15.60FPS；仅诊断阻断同一失效sync后58.29FPS（阴影/DC保持）；再关阴影60FPS/435DC。恢复原函数后dirty已被消费，须恢复原dirty重试状态才重新复现15.33FPS；不把这一状态差异隐藏为简单A/B。
+- 原文件保存签名ecb8bae89fd86c64、当前代码计算4db0bc7d121c08a9、打开后e0e1654870977a04。只能确认旧结果不匹配，未追溯历史编辑/烘焙操作。原场景SHA一致，诊断进程已关闭。5s对照不代表全屏/发布Viewer性能验收。
+- 原始报告、cpuprofile、临时对照及签名证据：`output/cemat-fps-diagnosis-20261026/`。本次排查完成，正式修复尚未实施。
+
+## 2026-10-26 修复展会场景的失效烘焙逐帧重试
+
+- 用户授权修复重复校验，要求保留过期提示、正确失效判断与原画质，并用2026cemat展会验证FPS。
+- `SceneLightingRuntime.sync`的关闭/失效/已失效快照分支改走现有`refreshBindingsForSources`，完成分类及绑定待办；沿用revision保护回调重入，不直接清空dirty。复用本次documentSignature，消除一次sync内重复哈希。签名、recipe、几何、材质、真实光照与异步提交校验均保留，未调整画质。
+- 既有定向回归9/9通过，覆盖静态姿态失效、动态几何与恢复、分类/绑定重入和已应用GI即时校验。未新增测试。真实场景新失效通知触发恰好1次document-sync，随后pending全false；临时文档主光变化改变签名，恢复原文档签名与过期提示均一致。
+- 实际Electron/Vite5173重新打开原场景，读回已加载修复代码，无运行时方法替换：824×440同保存视角20秒1169帧、58.4088FPS、CPU均16.3964ms、GPU均11.7904ms、帧间隔P95=19.5ms；1809DC、2048×2048三级高质量阴影保持，20秒分类收集0次、pending全false。此前同尺寸原状态5秒15.6046FPS/CPU60.7882ms；窗口时长不同，不冒称严格基准或发布版验收。
+- 原场景SHA保持，未保存/烘焙/发布，任务诊断实例已关闭。证据`output/cemat-fps-fix-20261026/summary.json`、`fps-824x440.json`、`invalidation-check.json`、`regression.log`及截图；同步更新混合光照指南。源码修复与本地开发入口实测完成，未做发行包构建或外部部署。
+
+## 2026-10-26 正式编辑器与Viewer重建（Viewer兼容选择待确认）
+
+- 用户要求重建编辑器/Viewer，以2026cemat展会验证且不降低画质、不发布中台；后续已明确同意只读取线上v20原DIST并本地替换Viewer，保持场景资产。
+- `npm run build`及补齐异步几何/资源失败重试后的最终build均exit0。产物为dist、dist-electron、dist-viewer-template。sync异步失败只在当前operation/key与source/binding revision一致且没有有效/待激活状态时完成本代绑定待办；新变更仍保留。相关旧加载恢复/异步变更/真失配回归7/7通过。
+- 最终file://正式编辑器实际打开原场景20秒58.7077FPS、CPU16.4782ms、1809DC，824×440、原高质量2048三级阴影保持；过期错误保留、分类收集0。原scene SHA仍1f407994…8dcf，诊断进程已关闭。
+- 本地正常DIST导出按原规则拒绝过期烘焙，未绕过。已通过只读GET导出线上v20（versionId2114548950415089666）的原始DIST，31,649,582B；平台返回的192.168.50.34:8080静态地址不可达，使用172.16.3.27:38087已验证下载接口。无prepare/上传/commit/部署请求。
+- 原v20在本地Chrome/RTX4060Ti运行12.7373FPS、CPU77.0314ms、20s重复document-sync256次，错误为几何/姿态与烘焙不一致。直接换新Viewer保留project全字节后被旧HDR无ENV的兼容门阻断；真实失败证据保留，未关天空/改画质/冒称通过。
+- 已向用户提出二选一，当前尚无回复：推荐只回补v20原Viewer内相同修复，保留旧天空实现与场景资产；或在独立副本转换天空资源以验证最新Viewer。未执行依赖该选择的后续操作。当前只完成构建及正式编辑器验收，发布场景最终验收未完成。
+- 全部证据及原始zip在`output/cemat-production-fix-20261026/`，断点`progress.json`。本次Chrome和loopback4570已关闭，临时数据及失败产物保留。主工程无commit/push/中台发布。
+
+## 2026-10-26 v20 Viewer兼容回补完成（不发布中台）
+
+- 用户明确选择“仅回补原Viewer，保持原画面”。以已冻结v20原包为基础，仅替换其一个sync方法，等价回补源码中的绑定待办收束、单次签名计算和有revision保护的异步失败收束；保留旧天空/材质/渲染实现。
+- 回补脚本`output/cemat-production-fix-20261026/backport-v20.cjs`严格绑定原程序SHA与唯一方法形状；语法解析通过。更新程序及对应br/gz、runtime-config缓存版本、release-cache-manifest共5文件；其余848文件相同，122个project文件全字节不变。压缩侧车解压等于程序；缓存清单327条全SHA/大小校验。
+- 实际本地Chrome/RTX4060Ti、同保存相机/824×440各20s：原12.7373FPS/CPU77.0314ms/P95=86.4ms；回补59.9952FPS/CPU11.5808ms/P95=18ms。1863DC、2048×2048三级quality阴影、原HDR512天空保持。稳态document-sync0、分类0；新失效通知仅同步1次并消费pending，几何/姿态失配提示仍在。
+- 原v20 GPU计时器不可用，不补造GPU数据。局部/favicon.ico404及加载期缓存ERR_ABORTED原始观察保存在network-observations；实际模型全部就绪，未把旧烘焙失配标成有效或另起烘焙。
+- 交付`2026cemat-v20-viewer-fps-fixed.zip`，31,664,779B；853文件归档读回与已验目录逐字节一致。SHA和完整结果见同目录summary.json及.sha256。最新通用dist/dist-electron/dist-viewer-template与正式编辑器58.7077FPS验收均保留；新模板直接替换旧HDR的失败记录也保留。
+- 原工程scene SHA保持，未上传/部署/commit/push。任务浏览器及loopback5087已关闭；进度已更新COMPLETE_LOCAL_ONLY。

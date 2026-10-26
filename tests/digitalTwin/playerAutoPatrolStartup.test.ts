@@ -8,7 +8,7 @@ test('发布 Viewer 在模型与环境结算后开始开场，自动巡检只等
   assert.match(playerSource, /const autoPatrolStartGate = new DeferredAutoPatrolStartGate\(\)/);
   assert.match(
     playerSource,
-    /const initialLoadGate = new PlayerInitialLoadGate\([\s\S]*?onSettled: startOpening/,
+    /const initialLoadGate = new PlayerInitialLoadGate\([\s\S]*?onSettled: \(\) => startOpening\(\)/,
   );
   assert.match(playerSource, /markInitialLoadComplete\(\);\s*autoPatrolStartGate\.markReady\(\)/);
   const openingStart = playerSource.slice(playerSource.indexOf('const startOpening ='), playerSource.indexOf('setInitialLoadCompleted(false)'));

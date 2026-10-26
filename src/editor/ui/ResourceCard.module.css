@@ -1,0 +1,20 @@
+.preview {
+  position: relative;
+}
+
+.densityBadge {
+  position: absolute;
+  inset-inline: 3px;
+  bottom: 3px;
+  overflow: hidden;
+  padding: 2px 3px;
+  border: 1px solid #8b682d;
+  border-radius: 3px;
+  background: #44351ee8;
+  color: #ffe2ac;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}

@@ -149,7 +149,7 @@ test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥'
   const visible = (patch = {}) => Boolean(evaluateSourceExpression(playerSource,
     controlCondition('ManualRoamControls'), { ...scope, ...patch }));
   assert.equal(visible(), true);
-  assert.equal(visible({ openingActive: true }), false, '开场期间不显示漫游控制');
+  assert.equal(visible({ openingActive: true }), true, '开场与业务解耦后不接管交互，开场期间仍显示漫游控制');
   assert.equal(visible({ phase: 'loading' }), false);
   assert.equal(visible({ phase: 'blocked' }), false);
   assert.equal(visible({ manualRoamControlsVisible: false }), false);

@@ -3,13 +3,15 @@ import packageInfo from '../../../package.json' with { type: 'json' };
 import { useEditorStore } from '../store/editorStore';
 import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
 import { createProjectOpenSession } from './projectLoadingCancellation';
+import { beginHomeProjectOpenTrace, beginProjectOpenRequest, finishProjectOpenTrace, finishUnboundProjectOpenTrace } from '../loading/projectOpenTrace';
+import type { ProjectOpenTraceContext } from '../../../electron/shared/projectOpenTrace';
 
 type HomePageProps = {
   onEnterBlankEditor: () => void;
-  onEnterProjectEditor: () => void;
+  onEnterProjectEditor: (openTrace?: ProjectOpenTraceContext) => void;
   onNewScene: () => void;
   onOpenSceneDialog: () => Promise<boolean>;
-  onOpenRecentScene: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean) => Promise<boolean>;
+  onOpenRecentScene: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean, openTrace?: ProjectOpenTraceContext) => Promise<boolean>;
 };
 
 type HomeStatus = {
@@ -17,19 +19,10 @@ type HomeStatus = {
   message: string;
 };
 
-type DataPlatformProjectOpenResult = {
-  projectRoot: string;
-  sceneFilePath: string | null;
-  source: 'package' | 'generated' | 'local';
-  warning: string | null;
-  conflictCopyPath: string | null;
-  modelSyncStarted: boolean;
-  skyboxSyncStarted: boolean;
-  binding: DataPlatformBindingSummary;
-};
+type DataPlatformProjectOpenResult = import('../../../electron/types').DataPlatformProjectOpenResult;
 
 type DataPlatformProjectOpenApi = {
-  openDataPlatformProject?: (request: { projectId: string }) => Promise<DataPlatformProjectOpenResult>;
+  openDataPlatformProject?: (request: { projectId: string; trace?: ProjectOpenTraceContext }) => Promise<DataPlatformProjectOpenResult>;
 };
 
 type DataPlatformEditorConfig = Pick<DataPlatformConfig, 'baseUrl' | 'workspaceRoot' | 'usesDefaultWorkspace'>;
@@ -106,13 +99,13 @@ async function requestDataPlatformProjects(projectName = ''): Promise<DataPlatfo
 }
 
 /** 打开数据中台项目，主进程负责准备本地项目与场景文件。 */
-async function requestOpenDataPlatformProject(projectId: string): Promise<DataPlatformProjectOpenResult> {
+async function requestOpenDataPlatformProject(projectId: string, trace?: ProjectOpenTraceContext): Promise<DataPlatformProjectOpenResult> {
   const dataPlatformProjectApi = getDataPlatformProjectOpenApi();
   if (!dataPlatformProjectApi.openDataPlatformProject) {
     throw new Error('打开数据中台项目需要 Electron 桌面环境。');
   }
 
-  return dataPlatformProjectApi.openDataPlatformProject({ projectId });
+  return dataPlatformProjectApi.openDataPlatformProject({ projectId, ...(trace ? { trace } : {}) });
 }
 
 /** 渲染进入编辑器前的启动台，集中承载项目与场景入口。 */
@@ -142,6 +135,7 @@ export function HomePage({
   const [isCancellingProjectOpen, setIsCancellingProjectOpen] = useState(false);
   const [canCancelProjectOpen, setCanCancelProjectOpen] = useState(false);
   const projectOpenSession = useRef(createProjectOpenSession());
+  const projectOpenTraceRef = useRef<ProjectOpenTraceContext | undefined>(undefined);
   const isConfigDialogOpenRef = useRef(false);
   const configDraftsDirtyRef = useRef(false);
   const dataPlatformRequestIdRef = useRef(0);
@@ -149,7 +143,7 @@ export function HomePage({
   const isChangingDataPlatformWorkspace = busyActionId === 'select-data-platform-workspace'
     || busyActionId === 'reset-data-platform-workspace';
 
-  useEffect(() => () => projectOpenSession.current.invalidate(), []);
+  useEffect(() => () => { projectOpenSession.current.invalidate(); if (projectOpenTraceRef.current) finishUnboundProjectOpenTrace(projectOpenTraceRef.current, 'stale'); }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -438,14 +432,20 @@ export function HomePage({
 
     const actionId = `data-platform-project:${project.id}`;
     const openRequest = projectOpenSession.current.begin();
+    let openTrace: ProjectOpenTraceContext | undefined;
+    // UUID由实际Home动作生成；诊断不可用时继续原业务入口。
+    try { openTrace = beginHomeProjectOpenTrace(crypto.randomUUID()); } catch { /* 仅诊断降级。 */ }
+    projectOpenTraceRef.current = openTrace;
     setCanCancelProjectOpen(true);
     setBusyActionId(actionId);
     setDataPlatformError(null);
     setStatus({ kind: 'info', message: `正在准备数据中台项目：${project.projectName}` });
 
+    const traceRequest = openTrace ? beginProjectOpenRequest(openTrace, 'openProject') : undefined;
     try {
-      const result = await requestOpenDataPlatformProject(project.id);
-      if (!projectOpenSession.current.isCurrent(openRequest)) return;
+      const result = await requestOpenDataPlatformProject(project.id, traceRequest?.context);
+      traceRequest?.finish('ok', result);
+      if (!projectOpenSession.current.isCurrent(openRequest)) { if (openTrace) finishProjectOpenTrace(openTrace, 'stale'); return; }
       setCanCancelProjectOpen(false);
       const sharedResourceSyncStarted = result.modelSyncStarted || result.skyboxSyncStarted;
       if (result.warning) {
@@ -465,17 +465,20 @@ export function HomePage({
       }
 
       if (result.sceneFilePath) {
-        const loaded = await onOpenRecentScene(result.sceneFilePath, () => projectOpenSession.current.isCurrent(openRequest), true);
-        if (!projectOpenSession.current.isCurrent(openRequest)) return;
+        const loaded = await onOpenRecentScene(result.sceneFilePath, () => projectOpenSession.current.isCurrent(openRequest), true, openTrace);
+        if (!projectOpenSession.current.isCurrent(openRequest)) { if (openTrace) finishProjectOpenTrace(openTrace, 'stale'); return; }
         if (!loaded) {
+          if (openTrace) finishProjectOpenTrace(openTrace, 'failed');
           setStatus({ kind: 'error', message: `数据中台项目场景加载失败：${result.sceneFilePath}` });
         }
         return;
       }
 
-      onEnterProjectEditor();
+      onEnterProjectEditor(openTrace);
     } catch (error) {
-      if (!projectOpenSession.current.isCurrent(openRequest)) return;
+      const current = projectOpenSession.current.isCurrent(openRequest);
+      traceRequest?.finish(current ? 'error' : 'stale'); if (openTrace) finishProjectOpenTrace(openTrace, current ? 'failed' : 'stale');
+      if (!current) return;
       const message = getHomeErrorMessage(error);
       setStatus({ kind: 'error', message: `打开数据中台项目失败：${message}` });
     } finally {
@@ -493,6 +496,7 @@ export function HomePage({
       return;
     }
     projectOpenSession.current.invalidate();
+    if (projectOpenTraceRef.current) finishProjectOpenTrace(projectOpenTraceRef.current, 'cancelled');
     setIsCancellingProjectOpen(true);
     try {
       await window.editorApi.closeDataPlatformProject();

@@ -208,7 +208,7 @@ test('version 6 经真实身份查询与精确映射恢复后模型就绪，业�
   assert.equal(f.calls.length, beforeReady);
 });
 
-for (const version of [7, '6']) test(`身份恢复拒绝未支持或非数字的版本 ${JSON.stringify(version)}，且不发远端请求`, async t => {
+for (const version of [8, '7']) test(`身份恢复拒绝未支持或非数字的版本 ${JSON.stringify(version)}，且不发远端请求`, async t => {
   const f = await fixture(t), document = JSON.parse(content([{ id: '11' }]));
   document.version = version;
   await f.writeMappings([f.entry()]);

@@ -2,6 +2,18 @@
   "schemaVersion": 1,
   "entries": [
     {
+      "name": "test:babylon-optimization:electron",
+      "command": "node --experimental-transform-types tests/editor/babylonOptimization.ui.mjs",
+      "category": "build-required",
+      "reason": "需先构建Editor/Viewer并通过preview_start提供BABYLON_TEST_URL；真实Electron非GI导入/保存/导出，不属于工厂性能验收。"
+    },
+    {
+      "name": "test:babylon-optimization",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/modelRuntimeCapabilities.test.ts tests/runtime/modelRuntimeCapabilitiesFlow.test.mjs tests/runtime/thinInstanceSparseUpdates.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/runtime/detachedModelMaterialClone.test.ts tests/runtime/materialInitRevision.test.mjs tests/runtime/babylonModuleCompatibility.test.mjs",
+      "category": "legacy",
+      "reason": "Babylon只读能力、模板隔离与稀疏矩阵的定向回归；真实GPU和业务性能单独验收。"
+    },
+    {
       "name": "test:typescript-build",
       "command": "node --test tests/buildTypeScript.test.mjs tests/buildTypescriptLightingOutputs.test.mjs",
       "category": "build-required",
@@ -369,7 +381,7 @@
     },
     {
       "name": "test:digital-twin:unit",
-      "command": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
+      "command": "node --experimental-transform-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
       "category": "legacy",
       "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
     },
@@ -381,7 +393,7 @@
     },
     {
       "name": "test:scene-loading",
-      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
       "category": "manual",
       "reason": "需要真实窗口、GPU、安装产物或专门环境，按该入口单独验收。"
     },
@@ -636,6 +648,162 @@
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneShaderWarmup.test.mjs",
       "category": "legacy",
       "reason": "默认关闭的有界模板shader准备候选：原生API guard、取消/释放/换代定向回归；实际变体覆盖及性能另验，单元通过不代表候选可启用。"
+    },
+    {
+      "name": "test:model-script-scanner",
+      "command": "node --test tests/runtime/modelScriptPatternScanner.test.mjs",
+      "category": "legacy",
+      "reason": "外置参数化脚本静态写法扫描器（逐帧全场遍历/强制矩阵/纹理重绘/带副作用getter）的单元回归；只读，不修改任何脚本。"
+    },
+    {
+      "name": "test:gpu-timer-probe",
+      "command": "node --test tests/runtime/gpuTimerProbe.test.mjs",
+      "category": "legacy",
+      "reason": "GPU 计时探针结果汇总（不可用/全部 disjoint/分位数）的单元回归，纯函数，无需 GPU。"
+    },
+    {
+      "name": "probe:gpu-timer",
+      "command": "node scripts/probe-gpu-timer.mjs",
+      "category": "manual",
+      "reason": "真实硬件 WebGL2 上探测 EXT_disjoint_timer_query_webgl2 的 TIME_ELAPSED 区间查询可用性（browser/electron 两种运行时）；结果依赖本机 GPU/驱动，不加入默认 core。"
+    },
+    {
+      "name": "test:model-density-report",
+      "command": "node --test tests/runtime/modelDensityReport.test.mjs",
+      "category": "legacy",
+      "reason": "GLB 面数密度/高模检测报告的单元回归（只解析 JSON 块，含缩放、实例、压缩扩展与损坏文件）；只读，不修改资产。"
+    },
+    {
+      "name": "test:optimization-phase2",
+      "command": "node --max-old-space-size=2048 --experimental-transform-types --test --test-concurrency=1 tests/runtime/phase2AdaptiveResolution.test.ts tests/runtime/phase2AssetRevisions.test.mjs tests/runtime/phase2BloomMsaa.test.mjs tests/runtime/phase2CachedImages.test.mjs tests/runtime/phase2FreezeAudit.test.mjs tests/runtime/phase2GpuPickingContract.test.mjs tests/runtime/phase2GpuQueryRegistration.test.mjs tests/runtime/phase2ModelDensity.test.mjs tests/runtime/phase2ModelOptimization.test.mjs tests/runtime/phase2QualityContracts.test.mjs tests/runtime/opaqueCanvasEngine.test.mjs tests/digitalTwin/playerOpaqueCanvas.test.ts tests/lightingBake/phase2GiBusinessSubset.test.mjs tests/lightingBake/phase2GiRuntimeQuery.test.mjs tests/runtime/phase2BakeTransportMemory.test.mjs tests/runtime/phase2QualityCodecCompatibility.test.mjs tests/runtime/phase2MeshoptLossless.test.mjs tests/lightingBake/phase2GiEnvironmentPlan.test.mjs tests/lightingBake/phase2GiArchiveReader.test.mjs tests/lightingBake/phase2GiBudget.test.mjs tests/runtime/phase2MipArchiveStore.test.mjs tests/runtime/phase2EntranceLightingOverride.test.mjs tests/runtime/phase2LightingClassificationAudit.test.mjs tests/runtime/phase2LedRootRevision.test.mjs tests/runtime/phase2EntranceLightingThinCarrier.test.mjs tests/dataPlatform/phase2ImageCatalogPagination.test.mjs tests/lightingBake/phase2GiReceiverRoi.test.mjs tests/runtime/phase2MipSceneRecovery.test.mjs tests/runtime/phase2HybridShadowContextLoss.test.mjs tests/runtime/phase2GlRestoreTrace.test.mjs tests/runtime/phase2ShadowCacheAudit.test.mjs tests/runtime/phase2MipsRestoreRgba.test.mjs tests/runtime/phase2LooseModelResourcePlan.test.mjs tests/runtime/phase2NativeRestoreControl.test.mjs",
+      "category": "legacy",
+      "reason": "二期CPU/状态/无损语义合同；新Node进程堆限2GiB；固定meshopt/LED fixture需显式环境变量，否则明确skip；GPU/发布/烘焙另验。"
+    },
+    {
+      "name": "test:phase2-bake-contract",
+      "command": "node --test tests/lightingBake/lightingBakeZeroDirectPass.test.mjs tests/lightingBake/lightingBakeNonreceiverUv.test.mjs",
+      "category": "manual",
+      "reason": "B4安全单遍及非receiver UV谓词合同，需Python；UV测试须显式PHASE2_NONRECEIVER_UV_CANDIDATE冻结文件，无隐式生成或修改产品。"
+    },
+    {
+      "name": "test:phase2-model-density:electron",
+      "command": "node --experimental-transform-types tests/runtime/phase2ModelDensity.integration.mjs",
+      "category": "manual",
+      "reason": "二期专项真实环境入口；保留Python/Electron/Chrome/Blender及显式scene/output参数前置，独立串行运行，不计默认core通过。"
+    },
+    {
+      "name": "smoke:phase2-gpu",
+      "command": "node scripts/phase2-runtime-audit.mjs",
+      "category": "manual",
+      "reason": "二期专项真实环境入口；保留Python/Electron/Chrome/Blender及显式scene/output参数前置，独立串行运行，不计默认core通过。"
+    },
+    {
+      "name": "smoke:phase2-viewer-options",
+      "command": "node scripts/phase2-viewer-options.mjs",
+      "category": "manual",
+      "reason": "二期专项真实环境入口；保留Python/Electron/Chrome/Blender及显式scene/output参数前置，独立串行运行，不计默认core通过。"
+    },
+    {
+      "name": "smoke:phase2-business-gi",
+      "command": "node scripts/phase2-gi-business.mjs",
+      "category": "manual",
+      "reason": "二期专项真实环境入口；保留Python/Electron/Chrome/Blender及显式scene/output参数前置，独立串行运行，不计默认core通过。"
+    },
+    {
+      "name": "test:phase2-codecs",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/phase2GammaCodec.test.mjs tests/runtime/phase2GammaIntegration.test.mjs tests/runtime/phase2GammaTaskLifecycle.test.mjs tests/runtime/phase2LightmapMips.test.mjs tests/runtime/phase2LightmapMipsAdapter.test.mjs tests/runtime/phase2LightmapMipsBytecode.test.mjs tests/runtime/phase2LightmapMipIntegration.test.mjs tests/runtime/phase2MipProducerWiring.test.mjs",
+      "category": "manual",
+      "reason": "新codec/容器/任务历史与真实Python标量合同，需Python和NumPy；GPU/完整Blender链独立手动验证。"
+    },
+    {
+      "name": "smoke:phase2-model-density",
+      "command": "node scripts/phase2-model-density-ui.mjs",
+      "category": "manual",
+      "reason": "实际Electron导入/模型库密度提示与场景原件SHA；专属output，串行GPU窗口。"
+    },
+    {
+      "name": "smoke:phase2-bloom-msaa",
+      "command": "node scripts/phase2-bloom-msaa-ui.mjs",
+      "category": "manual",
+      "reason": "实际物理MSAA/保存重开及DIST Viewer/iframe；需Chrome/Electron并串行运行。"
+    },
+    {
+      "name": "smoke:phase2-environment-storage",
+      "command": "node scripts/phase2-environment-storage-pixels.mjs",
+      "category": "manual",
+      "reason": "需显式scene/candidate/全新output；原GLB和候选实际Editor完整RGBA，保留原件及失败，不是性能A/B。"
+    },
+    {
+      "name": "smoke:phase2-mips",
+      "command": "node tests/runtime/phase2LightmapMipsWebGL.mjs",
+      "category": "manual",
+      "reason": "需显式全新--output；真实WebGL2全LOD/FBO/采样/context restore/释放，串行GPU窗口，不是Editor完整链或性能证明。"
+    },
+    {
+      "name": "smoke:phase2-mip-business",
+      "command": "node scripts/phase2-mips-business.mjs",
+      "category": "manual",
+      "reason": "真实UI/CPU生产/保存重开/各Mip层物理GPU字节/完整SOURCE与DIST/Viewer；显式新output与source/entity/levels/encoding或resume，无默认外部操作。"
+    },
+    {
+      "name": "smoke:phase2-gi-receiver-roi",
+      "command": "node scripts/phase2-gi-receiver-roi.mjs",
+      "category": "manual",
+      "reason": "显式prepare/bind/validate的真实独立ROI收据工具；原场景和环境只读，未绑定及未核预算不允许bake，Editor与烘焙另用既有driver。"
+    },
+    {
+      "name": "smoke:phase2-classification",
+      "command": "node scripts/phase2-lighting-classification-abba.mjs",
+      "category": "manual",
+      "reason": "仅--execute才启动当前383场景静态ABBA；须冻结plan/全新output，和其它GPU/build/测试隔离，不复用历史370/Intel/MQTT口径。"
+    },
+    {
+      "name": "smoke:phase2-gamma-embedded",
+      "command": "node --experimental-transform-types scripts/phase2-gamma-embedded.mjs",
+      "category": "manual",
+      "reason": "需--engine绝对Blender与--output全新目录；真实嵌入解释器PNG/bytecode guard微回归，不是完整业务烘焙。"
+    },
+    {
+      "name": "test:phase2-open-protocol",
+      "command": "node --max-old-space-size=2048 --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneOpenPairedPlan.test.mjs tests/runtime/sceneOpenReadOnlyGuard.test.mjs tests/runtime/sceneOpenManifestPrepare.test.mjs tests/runtime/phase2ProjectOpenTrace.test.ts tests/runtime/phase2ProjectOpenTraceStore.test.ts tests/runtime/phase2ProjectOpenTraceIpc.test.mjs tests/runtime/phase2ProjectOpenRuntimeTrace.test.ts tests/runtime/phase2ProjectOpenCacheTrace.test.ts tests/runtime/phase2ProjectOpenRendererTrace.test.mjs tests/runtime/sceneOpenLogicalImages.test.mjs",
+      "category": "legacy",
+      "reason": "真实中台paired打开工具的纯调度/守卫/声明前置/投影合同；不联网、不启动Editor、不把fixture通过当实机打开。"
+    },
+    {
+      "name": "test:native-skybox",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/skyboxEnvironmentContract.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/editor/skyboxPreparationService.test.ts tests/dataPlatform/skyboxDerivedAssetStore.test.ts tests/digitalTwin/builtinSkybox.test.ts tests/digitalTwin/publishedSkyboxCameraBounds.test.ts tests/telemetry/skyboxSettings.test.ts",
+      "category": "legacy",
+      "reason": "ENV契约、串行准备/取消、授权存储、旧场景与无限远语义；不把单元测试视为GPU证据。"
+    },
+    {
+      "name": "test:native-skybox:webgl",
+      "command": "node tests/runtime/nativeSkybox.webgl.mjs",
+      "category": "manual",
+      "reason": "真实Chrome/WebGL2：生成重载、正交透视、异步切换与context restore；自带本机服务和独立浏览器，不改用户工程。"
+    },
+    {
+      "name": "test:native-skybox:quality",
+      "command": "node tests/runtime/nativeSkyboxQuality.webgl.mjs",
+      "category": "manual",
+      "reason": "真实GPU的ENV编码A/B与耗时测量；误差门槛固定，运行时不得并发其它GPU负载；不等于完整工厂FPS。"
+    },
+    {
+      "name": "test:native-skybox:viewer",
+      "command": "node tests/runtime/nativeSkyboxViewer.webgl.mjs",
+      "category": "manual",
+      "reason": "先构建Viewer模板，再用真实Chrome验证ENV-only请求/交互/像素；本机临时服务，非外部发布。"
+    },
+    {
+      "name": "test:native-skybox:exr",
+      "command": "node tests/runtime/nativeSkyboxExr.webgl.mjs",
+      "category": "manual",
+      "reason": "先用已安装Blender执行tests/fixtures/nativeSkyboxExr.py生成新夹具目录；SKYBOX_EXR_FIXTURES指定目录，验证六种EXR离线生成与提交取消，不使用真实业务原图。"
+    },
+    {
+      "name": "test:native-skybox:ui",
+      "command": "npm run build:electron && node tests/editor/nativeSkybox.ui.mjs",
+      "category": "manual",
+      "reason": "真实Electron与GPU，隔离userData和工程，验证导入/保存/重开与preload IPC；自带服务与清理。"
     }
   ]
 }

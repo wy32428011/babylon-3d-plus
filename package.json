@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "dev:electron": "node scripts/dev-electron.mjs",
+    "test:dev-electron": "node --test tests/shared/devElectronStartup.test.mjs",
     "demo:stacker:scene": "node scripts/create-stacker-mqtt-demo-scene.mjs",
     "demo:stacker:mqtt": "node scripts/publish-stacker-full-demo.mjs",
     "demo:stacker:mqtt:legacy": "node scripts/simulate-stacker-mqtt.mjs",
@@ -84,6 +85,13 @@
     "smoke:installer:gpu": "npm run dist:win && npm run smoke:packaged:gpu",
     "test:data-platform-relink": "node --experimental-strip-types --test tests/dataPlatform/*.test.ts",
     "test:source-resource-plan": "npm run build:electron && node --test tests/digitalTwin/sourceResourcePlan.test.mjs",
+    "test:native-skybox": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/skyboxEnvironmentContract.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/editor/skyboxPreparationService.test.ts tests/dataPlatform/skyboxDerivedAssetStore.test.ts tests/digitalTwin/builtinSkybox.test.ts tests/digitalTwin/publishedSkyboxCameraBounds.test.ts tests/telemetry/skyboxSettings.test.ts",
+    "test:native-skybox:webgl": "node tests/runtime/nativeSkybox.webgl.mjs",
+    "test:native-skybox:quality": "node tests/runtime/nativeSkyboxQuality.webgl.mjs",
+    "test:native-skybox:viewer": "node tests/runtime/nativeSkyboxViewer.webgl.mjs",
+    "test:native-skybox:exr": "node tests/runtime/nativeSkyboxExr.webgl.mjs",
+    "test:native-skybox:ui": "npm run build:electron && node tests/editor/nativeSkybox.ui.mjs",
+    "build:builtin-skybox-env": "node scripts/prepare-builtin-skybox-env.mjs",
     "test:data-platform-skybox": "node --experimental-strip-types --test tests/dataPlatform/preloadProgressGate.test.ts tests/dataPlatform/skyboxContract.test.ts tests/dataPlatform/skyboxLifecycle.test.ts tests/dataPlatform/skyboxIndex.test.ts tests/dataPlatform/skyboxRelink.test.ts tests/digitalTwin/dataPlatformSkyboxSync.test.ts tests/digitalTwin/projectLibraryTabs.test.ts tests/digitalTwin/skyboxSyncController.test.ts",
     "smoke:data-platform-skybox:built": "node scripts/smoke-data-platform-skybox.mjs",
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",
@@ -99,9 +107,9 @@
     "smoke:folder-group-move": "node scripts/smoke-folder-group-move.mjs",
     "smoke:folder-group-runtime": "node scripts/smoke-folder-group-runtime.mjs",
     "smoke:transform-gizmo": "node scripts/smoke-transform-gizmo.mjs",
-    "test:digital-twin:unit": "node --experimental-strip-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
+    "test:digital-twin:unit": "node --experimental-transform-types --test tests/digitalTwin/*.test.ts tests/runtime/environmentAssetContainerCache.test.ts",
     "test:digital-twin:integration": "npm run build:electron && node scripts/run-digital-twin-publish-integration.mjs",
-    "test:scene-loading": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
+    "test:scene-loading": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/scenePreparationProgress.test.ts tests/editor/scenePreparationTimings.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationInteractionGateContract.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/remoteDownloadUiContract.test.ts tests/dataPlatform/sceneModelSyncConcurrency.test.ts tests/runtime/modelLoadingTraversal.test.ts tests/runtime/environmentTransformPreparation.test.ts tests/runtime/environmentAssetContainerCache.test.ts tests/runtime/sceneRenderReadiness.test.ts tests/runtime/sceneLoadDiagnostics.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/runtime/skyboxTextureLoad.test.ts tests/runtime/skyboxRuntimeState.test.ts tests/runtime/skyboxDecodedData.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/digitalTwin/playerInitialLoadState.test.ts tests/digitalTwin/playerLoadingProgress.test.ts tests/runtime/modelInitializationScheduler.test.ts tests/digitalTwin/playerInitialLoadRenderState.test.ts tests/digitalTwin/playerInitialLoadMonitor.test.ts tests/runtime/skyboxContentHash.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/digitalTwin/playerEnvironmentLoadContract.test.ts tests/runtime/skyboxPrefilter.test.ts",
     "smoke:scene-loading": "npm run build && node scripts/smoke-packaged-remote-scene.mjs --source",
     "test:local-scene-recovery": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/localSceneResourceRecovery.test.ts tests/dataPlatform/localSceneRecoveryService.test.ts tests/dataPlatform/localSceneRemoteRecovery.test.ts tests/dataPlatform/editorAssetFileError.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/localSceneEnvironmentChoice.test.ts tests/runtime/sceneResourceRetry.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/editor/sceneModelLibrarySync.test.ts",
     "test:builtin-slot-rows": "node --experimental-strip-types --test tests/editor/builtInSlotRowReconcile.test.ts",
@@ -150,7 +158,32 @@
     "test:generated-cargo-pool": "node --test --test-concurrency=1 tests/runtime/generatedCargoPool.test.mjs tests/runtime/generatedCargoPool.integration.test.mjs",
     "test:gpu-capability-profile": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/gpuCapabilityProfile.test.ts tests/runtime/gpuCapabilityProfileDiagnostics.test.mjs tests/editor/gpuCapabilityProfileUi.test.mjs",
     "test:gpu-capability-profile:webgl": "node tests/runtime/gpuCapabilityProfile.webgl.mjs",
-    "test:shader-warmup": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneShaderWarmup.test.mjs"
+    "test:shader-warmup": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneShaderWarmup.test.mjs",
+    "test:babylon-optimization": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/modelRuntimeCapabilities.test.ts tests/runtime/modelRuntimeCapabilitiesFlow.test.mjs tests/runtime/thinInstanceSparseUpdates.test.ts tests/runtime/modelAssetTemplateCache.test.ts tests/runtime/materialTextureClone.test.ts tests/runtime/externalModelScriptLoad.test.ts tests/runtime/detachedModelMaterialClone.test.ts tests/runtime/materialInitRevision.test.mjs tests/runtime/babylonModuleCompatibility.test.mjs",
+    "declare:model-readonly": "node --experimental-strip-types scripts/declare-model-runtime-capabilities.mjs",
+    "test:babylon-optimization:electron": "node --experimental-transform-types tests/editor/babylonOptimization.ui.mjs",
+    "test:model-script-scanner": "node --test tests/runtime/modelScriptPatternScanner.test.mjs",
+    "scan:model-scripts": "node scripts/scan-model-script-patterns.mjs",
+    "test:gpu-timer-probe": "node --test tests/runtime/gpuTimerProbe.test.mjs",
+    "probe:gpu-timer": "node scripts/probe-gpu-timer.mjs",
+    "test:model-density-report": "node --test tests/runtime/modelDensityReport.test.mjs",
+    "report:model-density": "node scripts/report-model-density.mjs",
+    "test:optimization-phase2": "node --max-old-space-size=2048 --experimental-transform-types --test --test-concurrency=1 tests/runtime/phase2AdaptiveResolution.test.ts tests/runtime/phase2AssetRevisions.test.mjs tests/runtime/phase2BloomMsaa.test.mjs tests/runtime/phase2CachedImages.test.mjs tests/runtime/phase2FreezeAudit.test.mjs tests/runtime/phase2GpuPickingContract.test.mjs tests/runtime/phase2GpuQueryRegistration.test.mjs tests/runtime/phase2ModelDensity.test.mjs tests/runtime/phase2ModelOptimization.test.mjs tests/runtime/phase2QualityContracts.test.mjs tests/runtime/opaqueCanvasEngine.test.mjs tests/digitalTwin/playerOpaqueCanvas.test.ts tests/lightingBake/phase2GiBusinessSubset.test.mjs tests/lightingBake/phase2GiRuntimeQuery.test.mjs tests/runtime/phase2BakeTransportMemory.test.mjs tests/runtime/phase2QualityCodecCompatibility.test.mjs tests/runtime/phase2MeshoptLossless.test.mjs tests/lightingBake/phase2GiEnvironmentPlan.test.mjs tests/lightingBake/phase2GiArchiveReader.test.mjs tests/lightingBake/phase2GiBudget.test.mjs tests/runtime/phase2MipArchiveStore.test.mjs tests/runtime/phase2EntranceLightingOverride.test.mjs tests/runtime/phase2LightingClassificationAudit.test.mjs tests/runtime/phase2LedRootRevision.test.mjs tests/runtime/phase2EntranceLightingThinCarrier.test.mjs tests/dataPlatform/phase2ImageCatalogPagination.test.mjs tests/lightingBake/phase2GiReceiverRoi.test.mjs tests/runtime/phase2MipSceneRecovery.test.mjs tests/runtime/phase2HybridShadowContextLoss.test.mjs tests/runtime/phase2GlRestoreTrace.test.mjs tests/runtime/phase2ShadowCacheAudit.test.mjs tests/runtime/phase2MipsRestoreRgba.test.mjs tests/runtime/phase2LooseModelResourcePlan.test.mjs tests/runtime/phase2NativeRestoreControl.test.mjs",
+    "test:phase2-bake-contract": "node --test tests/lightingBake/lightingBakeZeroDirectPass.test.mjs tests/lightingBake/lightingBakeNonreceiverUv.test.mjs",
+    "test:phase2-model-density:electron": "node --experimental-transform-types tests/runtime/phase2ModelDensity.integration.mjs",
+    "smoke:phase2-gpu": "node scripts/phase2-runtime-audit.mjs",
+    "smoke:phase2-viewer-options": "node scripts/phase2-viewer-options.mjs",
+    "smoke:phase2-business-gi": "node scripts/phase2-gi-business.mjs",
+    "test:phase2-codecs": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/phase2GammaCodec.test.mjs tests/runtime/phase2GammaIntegration.test.mjs tests/runtime/phase2GammaTaskLifecycle.test.mjs tests/runtime/phase2LightmapMips.test.mjs tests/runtime/phase2LightmapMipsAdapter.test.mjs tests/runtime/phase2LightmapMipsBytecode.test.mjs tests/runtime/phase2LightmapMipIntegration.test.mjs tests/runtime/phase2MipProducerWiring.test.mjs",
+    "smoke:phase2-model-density": "node scripts/phase2-model-density-ui.mjs",
+    "smoke:phase2-bloom-msaa": "node scripts/phase2-bloom-msaa-ui.mjs",
+    "smoke:phase2-environment-storage": "node scripts/phase2-environment-storage-pixels.mjs",
+    "smoke:phase2-mips": "node tests/runtime/phase2LightmapMipsWebGL.mjs",
+    "smoke:phase2-mip-business": "node scripts/phase2-mips-business.mjs",
+    "smoke:phase2-gi-receiver-roi": "node scripts/phase2-gi-receiver-roi.mjs",
+    "smoke:phase2-classification": "node scripts/phase2-lighting-classification-abba.mjs",
+    "smoke:phase2-gamma-embedded": "node --experimental-transform-types scripts/phase2-gamma-embedded.mjs",
+    "test:phase2-open-protocol": "node --max-old-space-size=2048 --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneOpenPairedPlan.test.mjs tests/runtime/sceneOpenReadOnlyGuard.test.mjs tests/runtime/sceneOpenManifestPrepare.test.mjs tests/runtime/phase2ProjectOpenTrace.test.ts tests/runtime/phase2ProjectOpenTraceStore.test.ts tests/runtime/phase2ProjectOpenTraceIpc.test.mjs tests/runtime/phase2ProjectOpenRuntimeTrace.test.ts tests/runtime/phase2ProjectOpenCacheTrace.test.ts tests/runtime/phase2ProjectOpenRendererTrace.test.mjs tests/runtime/sceneOpenLogicalImages.test.mjs"
   },
   "engines": {
     "node": "^22.15.0 || >=24.0.0"
@@ -162,12 +195,13 @@
     "@babylonjs/serializers": "9.12.0",
     "@linkiez/dxf-renew": "^7.4.5",
     "archiver": "^8.0.0",
+    "fflate": "0.8.2",
     "mqtt": "^5.15.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "typescript": "^6.0.3",
     "unzipper": "^0.12.5",
-    "zustand": "^5.0.14",
-    "typescript": "^6.0.3"
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -222,6 +256,11 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "public/builtin-skybox-environments",
+        "to": "builtin-skybox-environments",
+        "filter": ["**/*"]
       },
       {
         "from": "dist-viewer-template",

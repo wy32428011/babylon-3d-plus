@@ -71,6 +71,10 @@ function fixture(options = {}) {
     setShadowRoles: next => { if (failRoles) { failRoles = false; throw new Error('test commit failure'); } roles = new Map(next); },
     pushLog: message => log.push(message),
     onBindingsChanged: options.onBindingsChanged,
+    // 既有用例验证“每帧立即消费”语义；合并窗口由专门的用例以注入时钟覆盖。
+    classificationCoalesceMinMs: options.classificationCoalesceMinMs ?? 0,
+    now: options.now,
+    canDeferPreparationClassification: options.canDeferPreparationClassification,
     loadResources: async () => {
       if (mode === 'fail') throw new Error('test resource failure');
       if (mode === 'pause') await new Promise(resolve => { releaseLoader = resolve; });
@@ -106,6 +110,50 @@ function fixture(options = {}) {
     dispose() { runtime.dispose(); scene.dispose(); engine.dispose(); },
   };
 }
+
+test('准备期仅延后帧内分类，显式查询及首帧前补齐仍立即生效', () => {
+  let preparing = true;
+  const f = fixture({ canDeferPreparationClassification: () => preparing });
+  try {
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    f.runtime.sync(f.document);
+    const initial = f.sourceCalls;
+    f.runtime.markDirty(); f.tick();
+    assert.equal(f.sourceCalls, initial);
+    assert.equal(f.runtime.getPreparationDeferredFrames(), 1);
+    f.runtime.getClassification();
+    assert.equal(f.sourceCalls, initial + 1);
+    f.runtime.markDirty(); f.tick();
+    preparing = false;
+    f.runtime.finishPreparationClassification();
+    assert.equal(f.sourceCalls, initial + 2);
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false);
+    f.runtime.markDirty(); f.tick();
+    assert.equal(f.sourceCalls, initial + 3, '离开准备阶段后恢复原时序');
+  } finally { f.dispose(); }
+});
+
+test('已有GI状态不受准备期分类延后影响', async () => {
+  const f = fixture({ canDeferPreparationClassification: () => true });
+  try {
+    f.runtime.sync(f.document); await f.runtime.applySnapshot(f.snapshot());
+    const initial = f.sourceCalls;
+    f.runtime.markDirty(); f.tick();
+    assert.ok(f.sourceCalls > initial);
+    assert.equal(f.runtime.getPreparationDeferredFrames(), 0);
+  } finally { f.dispose(); }
+});
+
+test('分类预览保持即时刷新，不被准备蒙版候选门遮蔽', () => {
+  const f = fixture({ canDeferPreparationClassification: () => true });
+  try {
+    f.runtime.sync(f.document); f.runtime.setPreview(true, false);
+    const initial = f.sourceCalls;
+    f.runtime.markDirty(); f.tick();
+    assert.ok(f.sourceCalls > initial);
+    assert.equal(f.runtime.getPreparationDeferredFrames(), 0);
+  } finally { f.dispose(); }
+});
 
 test('atomic application uses independent root proxies and restores original material, layer and ambient state', async () => {
   const f = fixture();
@@ -1388,5 +1436,183 @@ test('net-zero native lifecycle still detects raw position/index edits that emit
       assert.equal(f.runtime.state, null, kind);
       assert.match(f.runtime.getError(), /几何/, kind);
     } finally { f.dispose(); }
+  }
+});
+
+test('D1/N1: 没有分类消费者时帧内不收集，消费者出现后完整补收集', () => {
+  const f = fixture();
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = false;
+    f.runtime.sync(f.document);
+    const calls = f.sourceCalls;
+    for (let index = 0; index < 5; index++) { f.runtime.notifyChange('classification', 'test'); f.tick(); }
+    assert.equal(f.sourceCalls, calls, '无阴影、无GI、无调试时帧内不应收集');
+    assert.equal(f.runtime.peekClassificationForEntities(['fixed-entity']).stale, true, 'dirty 必须保留');
+    f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 1, '显式查询必须立即完整收集');
+    f.runtime.notifyChange('classification', 'test');
+    f.runtime.setPreview(true, false);
+    f.tick();
+    assert.ok(f.sourceCalls >= calls + 2, '调试预览属于消费者，应继续收集');
+  } finally { f.dispose(); }
+});
+
+test('D1/N1: 阴影开启后即成为消费者并在帧内收集', () => {
+  const f = fixture();
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    f.runtime.sync(f.document);
+    const calls = f.sourceCalls;
+    f.runtime.notifyChange('classification', 'test');
+    f.tick();
+    assert.equal(f.sourceCalls, calls + 1);
+  } finally { f.dispose(); }
+});
+
+test('D1/N2: 同一合并窗口内的连续失效只收集一次，窗口过后补收集', () => {
+  let clock = 0;
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    f.runtime.sync(f.document);
+    clock += 1000; f.runtime.notifyChange('classification', 'test'); f.tick();
+    const calls = f.sourceCalls;
+    for (let index = 0; index < 6; index++) { clock += 10; f.runtime.notifyChange('classification', 'test'); f.tick(); }
+    assert.equal(f.sourceCalls, calls, '窗口内不收集');
+    assert.equal(f.runtime.peekClassificationForEntities(['fixed-entity']).stale, true);
+    clock += 300; f.tick();
+    assert.equal(f.sourceCalls, calls + 1, '窗口结束后一次性补收集');
+    f.tick();
+    assert.equal(f.sourceCalls, calls + 1, '已消费，不重复收集');
+  } finally { f.dispose(); }
+});
+
+test('D1/N2: 合并窗口随上次收集耗时放大，显式查询不受窗口限制', () => {
+  let clock = 0;
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    f.runtime.sync(f.document);
+    f.setSourceCallback(sources => { clock += 400; return sources; });
+    clock += 1000; f.runtime.notifyChange('classification', 'test'); f.tick();
+    const calls = f.sourceCalls;
+    f.runtime.notifyChange('classification', 'test');
+    clock += 900; f.tick();
+    assert.equal(f.sourceCalls, calls, '窗口应为 3×400=1200ms');
+    clock += 400; f.tick();
+    assert.equal(f.sourceCalls, calls + 1);
+    f.runtime.notifyChange('classification', 'test');
+    f.runtime.getClassification();
+    assert.equal(f.sourceCalls, calls + 2, '显式查询立即收集');
+  } finally { f.dispose(); }
+});
+
+test('D1/N2: 已应用 GI 时不合并，保持绑定与代理的即时校验', async () => {
+  let clock = 0;
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  try {
+    const snapshot = f.snapshot();
+    f.document.sceneSettings.lighting.result = snapshot;
+    await f.runtime.applySnapshot(snapshot);
+    const calls = f.sourceCalls;
+    clock += 1; f.runtime.notifyChange('classification', 'test'); f.tick();
+    assert.equal(f.sourceCalls, calls + 1, '有 GI 状态时帧内立即收集');
+  } finally { f.dispose(); }
+});
+
+test('D1/N2: 250ms 窗口内结构变更立即更新阴影角色并消费待办', () => {
+  let clock = 0;
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    f.runtime.sync(f.document);
+    const calls = f.sourceCalls;
+    clock = 1;
+    f.runtime.notifyChange('classification', 'within-window'); f.tick();
+    assert.equal(f.sourceCalls, calls, '先证明当前确实处于合并窗口');
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    f.sources[1].entry = { ...f.sources[1].entry, receiveShadows: false };
+    f.runtime.notifyChange('structure', 'replace-source-role'); f.tick();
+    assert.equal(f.sourceCalls, calls + 1, '结构变化不能等到时间窗结束');
+    assert.equal(f.roles.get(f.moving).receiveShadows, false, '同帧发布新的业务角色');
+    assert.deepEqual(f.runtime.getInvalidationDiagnostics().pending, { classification: false, bindings: false, structure: false });
+    assert.equal(f.runtime.getError(), null);
+  } finally { f.dispose(); }
+});
+
+test('D1/N1/N2: 250ms 窗口内关闭阴影立即恢复冲突实例原件与拾取', () => {
+  let clock = 0;
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  try {
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.document.sceneSettings.lighting.shadows.enabled = true;
+    const instance = f.moving.createInstance('window-shadow-override');
+    const originalMask = instance.layerMask, originalPickability = instance.isPickable;
+    f.sources.push({ mesh: instance, entry: { ...f.sources[1].entry, key: 'window-override/$mesh', entityId: 'window-override',
+      receiveShadows: false }, getWorldMatrix: () => instance.computeWorldMatrix(true) });
+    f.runtime.sync(f.document);
+    const [proxy] = f.runtime.getSelectionMeshes('window-override');
+    assert.equal(proxy.metadata.lightingShadowOnly, true);
+    assert.equal(instance.layerMask, 0, '先建立真实的阴影代理接管');
+    const calls = f.sourceCalls;
+    clock = 1;
+    f.runtime.notifyChange('classification', 'before-shadow-off'); f.tick();
+    assert.equal(f.sourceCalls, calls, '窗口仍生效且代理仍由当前分类维护');
+    assert.equal(proxy.isDisposed(), false);
+    f.document.sceneSettings.lighting.shadows.enabled = false;
+    f.runtime.sync(f.document);
+    assert.equal(proxy.isDisposed(), true);
+    assert.equal(instance.layerMask, originalMask);
+    assert.equal(instance.isPickable, originalPickability);
+    assert.deepEqual(f.runtime.getSelectionMeshes('window-override', [instance]), [instance]);
+    assert.equal(f.proxies().length, 0);
+    assert.equal(f.roles.has(proxy), false);
+    assert.equal(f.roles.get(instance).receiveShadows, false);
+    const afterDisable = f.sourceCalls;
+    f.runtime.notifyChange('classification', 'after-shadow-off'); f.tick();
+    assert.equal(f.sourceCalls, afterDisable, '最后一个消费者移除后恢复无消费者旁路');
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    assert.equal(instance.layerMask, originalMask);
+    assert.equal(f.runtime.getError(), null);
+  } finally { f.dispose(); }
+});
+
+test('D1/N2: 250ms 窗口内 GI 加载继续收集，激活验证保留变更至事务完成', async () => {
+  let clock = 0, releaseValidation, enterValidation;
+  const validation = new Promise(resolve => { releaseValidation = resolve; });
+  const entered = new Promise(resolve => { enterValidation = resolve; });
+  const f = fixture({ now: () => clock, classificationCoalesceMinMs: 250 });
+  let applying;
+  try {
+    f.setMode('pause');
+    applying = f.runtime.applySnapshot(f.snapshot(), undefined, () => { enterValidation(); return validation; });
+    const calls = f.sourceCalls;
+    clock = 1;
+    f.runtime.notifyChange('classification', 'during-resource-loading'); f.tick();
+    assert.equal(f.sourceCalls, calls + 1, '资源加载期间不能被分类窗口延后');
+    assert.equal(f.proxies().length, 0, '资源未完成时仍保留原件');
+    f.release(); await entered;
+    const [proxy] = f.runtime.getSelectionMeshes('fixed-entity');
+    assert.ok(proxy && proxy.metadata.lightingDerived, '已进入真实候选代理验证阶段');
+    const duringValidation = f.sourceCalls;
+    f.runtime.notifyChange('classification', 'during-candidate-validation'); f.tick();
+    assert.equal(f.sourceCalls, duringValidation, '待激活事务由自身消费来源，帧不能抢占');
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, true);
+    assert.deepEqual(f.runtime.getSelectionMeshes('fixed-entity'), [proxy]);
+    releaseValidation(); await applying;
+    f.tick();
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.classification, false);
+    assert.equal(f.runtime.getInvalidationDiagnostics().pending.bindings, false);
+    assert.deepEqual(f.runtime.getSelectionMeshes('fixed-entity'), [proxy]);
+    assert.equal(f.runtime.getError(), null);
+  } finally {
+    f.release(); releaseValidation();
+    if (applying) await applying.catch(() => {});
+    f.dispose();
   }
 });

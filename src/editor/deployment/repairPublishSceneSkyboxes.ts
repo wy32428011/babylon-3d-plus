@@ -1,3 +1,4 @@
+import { skyboxEnvironmentMatchesSource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { DigitalTwinModelRecoveryResult } from '../../../electron/types';
 import type { SceneDocument } from '../model/SceneDocument';
 
@@ -21,6 +22,8 @@ export function repairPublishSceneSkyboxes(scene: SceneDocument, recovery: Digit
       if (Object.hasOwn(replacement.skybox, key)) updates[key] = structuredClone(replacement.skybox[key]);
     }
     Object.assign(skybox, updates);
+    delete skybox.sourceAvailable;
+    if (skybox.environment && !skyboxEnvironmentMatchesSource(skybox, skybox.environment)) delete skybox.environment;
     // 本地发布副本不再依赖旧中台索引，主进程省略 ID 表示解除原关联。
     if (!Object.hasOwn(replacement.skybox, 'dataPlatformResourceId')) delete skybox.dataPlatformResourceId;
     restoredCount += 1;

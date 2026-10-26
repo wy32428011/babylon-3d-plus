@@ -39,8 +39,23 @@ test('正式发布或资源恢复活动期间，场景和工程切换入口均�
   for (const [file, channels] of [[0, ['scene:load', 'scene:loadFile', 'scene:confirmOpen', 'project:openRecent', 'project:selectDirectory']],
     [1, ['data-platform:saveConfig', 'data-platform:selectWorkspace', 'data-platform:resetWorkspace', 'data-platform:openProject']]] as const) {
     const context: Record<string, unknown> = { isDigitalTwinPublishActive: () => true };
+    const effects: string[] = [];
+    const forbidden = (effect: string) => () => { effects.push(effect); throw new Error('发布保护前不应执行副作用：' + effect); };
+    Object.assign(context, { fs: { readFile: forbidden('file-read'), writeFile: forbidden('file-write') },
+      readDataPlatformConfig: forbidden('config-read'), requestCurrentDataPlatformProject: forbidden('network'),
+      openDataPlatformProject: forbidden('materialize'), authorizeAssetFile: forbidden('asset-authorize'), authorizeSceneFile: forbidden('scene-authorize') });
+    if (file === 1) {
+      // 当前handler在try之前建立纯诊断包络；此旧caller无trace，不能用缺依赖错误替代发布拒绝。
+      context.performance = { now: () => 0 };
+      context.projectClosing = false;
+      context.readProjectOpenTraceContext = (value: unknown) => { assert.equal(value, undefined); return null; };
+      for (const name of ['projectTraceClock', 'readRequestedProjectTrace', 'observeProjectOpenTrace', 'projectTraceParent', 'projectTraceFailure']) {
+        context[name] = fn(1, name, context);
+      }
+    }
     context.assertSceneSwitchAllowed = fn(file, 'assertSceneSwitchAllowed', context);
     for (const channel of channels) await assert.rejects(handler(file, channel, context)({}, {}), /发布|恢复/, channel);
+    assert.deepEqual(effects, [], '所有入口必须在文件、网络、授权或物化之前拒绝');
   }
 });
 

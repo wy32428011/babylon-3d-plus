@@ -1,24 +1,38 @@
 import { MaterialDefines } from '@babylonjs/core/Materials/materialDefines.js';
 import { MaterialPluginBase } from '@babylonjs/core/Materials/materialPluginBase.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
-import type { AbstractEngine, AbstractMesh, BaseTexture, Mesh, Scene, StandardMaterial, SubMesh, UniformBuffer } from '@babylonjs/core';
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import type { AbstractEngine, AbstractMesh, BaseTexture, Material, Mesh, Scene, SubMesh, UniformBuffer } from '@babylonjs/core';
+import { getLightingLightmapBaseEncoding, type LightingLightmapAssetEncoding } from '../../../electron/shared/sceneLightingTextureCodec.ts';
+const pluginsByMaterial = new WeakMap<Material, BakedLightingMaterialPlugin>();
+const noOwnedTextures = new Set<BaseTexture>();
 
-export type BakedLightingBinding = { texture?: BaseTexture; rgbmRange?: number; probes?: readonly number[]; enabled: boolean };
+export type BakedLightingBinding = { texture?: BaseTexture; rgbmRange?: number; encoding?: LightingLightmapAssetEncoding; mipLevelCount?: number; probes?: readonly number[]; enabled: boolean };
 export const LIGHTING_UV_ATTRIBUTE = 'lightingBakeUV';
 
 /** 只替换环境漫反射分量；直接光仍由原生光照/阴影处理，镜面反射与自发光保持原路径。 */
 export class BakedLightingMaterialPlugin extends MaterialPluginBase {
   private readonly binding: (mesh: AbstractMesh) => BakedLightingBinding;
 
-  constructor(material: PBRMaterial | StandardMaterial, binding: (mesh: AbstractMesh) => BakedLightingBinding) {
-    super(material, 'BakedIndirectLighting', 180, { BAKED_INDIRECT: true, BAKED_INDIRECT_MAP: false }, true, false);
+  constructor(material: PBRMaterial | StandardMaterial, binding: (mesh: AbstractMesh) => BakedLightingBinding,
+    private readonly ownedTextures: ReadonlySet<BaseTexture> = noOwnedTextures) {
+    super(material, 'BakedIndirectLighting', 180, { BAKED_INDIRECT: true, BAKED_INDIRECT_MAP: false, BAKED_INDIRECT_GAMMA: false, BAKED_INDIRECT_MIPS: false }, true, false);
     this.binding = binding;
+    pluginsByMaterial.set(material, this);
     this.registerForExtraEvents = true; this.doNotSerialize = true; this._enable(true);
   }
   override getClassName(): string { return 'BakedLightingMaterialPlugin'; }
+  /** 临时入口副本不走序列化，显式保留同一按mesh解析的GI绑定与资源所有权。 */
+  cloneTo(material: PBRMaterial | StandardMaterial): BakedLightingMaterialPlugin {
+    return new BakedLightingMaterialPlugin(material, this.binding, this.ownedTextures);
+  }
+  getOwnedTextures(): ReadonlySet<BaseTexture> { return this.ownedTextures; }
   override prepareDefines(defines: MaterialDefines, _scene: Scene, mesh: AbstractMesh): void {
     defines.BAKED_INDIRECT = true;
-    defines.BAKED_INDIRECT_MAP = Boolean(this.binding(mesh).texture && mesh.isVerticesDataPresent(LIGHTING_UV_ATTRIBUTE));
+    const binding = this.binding(mesh);
+    defines.BAKED_INDIRECT_MAP = Boolean(binding.texture && mesh.isVerticesDataPresent(LIGHTING_UV_ATTRIBUTE));
+    defines.BAKED_INDIRECT_GAMMA = defines.BAKED_INDIRECT_MAP && getLightingLightmapBaseEncoding(binding.encoding) === 'rgbm-gamma';
+    defines.BAKED_INDIRECT_MIPS = defines.BAKED_INDIRECT_MAP && (binding.mipLevelCount ?? 1) > 1;
   }
   override getAttributes(attributes: string[], _scene: Scene, mesh: Mesh): void {
     if (mesh.isVerticesDataPresent(LIGHTING_UV_ATTRIBUTE)) attributes.push(LIGHTING_UV_ATTRIBUTE);
@@ -43,7 +57,7 @@ export class BakedLightingMaterialPlugin extends MaterialPluginBase {
   }
   override getCustomCode(shaderType: string): Record<string, string> | null {
     if (shaderType === 'vertex') return {
-      CUSTOM_VERTEX_DEFINITIONS: '#ifdef BAKED_INDIRECT_MAP\nattribute vec2 lightingBakeUV;\nvarying vec2 vLightingBakeUV;\n#endif',
+      CUSTOM_VERTEX_DEFINITIONS: '#ifdef BAKED_INDIRECT_MAP\nattribute vec2 lightingBakeUV;\n#ifdef BAKED_INDIRECT_MIPS\nvarying highp vec2 vLightingBakeUV;\n#else\nvarying vec2 vLightingBakeUV;\n#endif\n#endif',
       CUSTOM_VERTEX_MAIN_BEGIN: '#ifdef BAKED_INDIRECT_MAP\nvLightingBakeUV = lightingBakeUV;\n#endif',
     };
     if (shaderType !== 'fragment') return null;
@@ -53,12 +67,21 @@ uniform float lightingBakeRange;
 uniform vec3 lightingProbePX, lightingProbeNX, lightingProbePY, lightingProbeNY, lightingProbePZ, lightingProbeNZ;
 #ifdef BAKED_INDIRECT_MAP
 uniform sampler2D lightingBakeSampler;
+#ifdef BAKED_INDIRECT_MIPS
+varying highp vec2 vLightingBakeUV;
+#else
 varying vec2 vLightingBakeUV;
+#endif
 #endif
 vec3 readBakedIrradiance(vec3 normalDirection) {
 #ifdef BAKED_INDIRECT_MAP
   vec4 sampleValue = texture2D(lightingBakeSampler, vLightingBakeUV);
+#ifdef BAKED_INDIRECT_GAMMA
+  vec3 normalizedValue = sampleValue.rgb * sampleValue.a;
+  return normalizedValue * normalizedValue * lightingBakeRange;
+#else
   return sampleValue.rgb * sampleValue.a * lightingBakeRange;
+#endif
 #else
   vec3 n = normalize(normalDirection);
   return n.x*n.x*(n.x>=0.0 ? lightingProbePX : lightingProbeNX)
@@ -115,6 +138,7 @@ if (lightingBakeActive > 0.5) {
   finalDiffuse += bakedDiffuse;
 #endif
 }
+
 #endif`,
     };
     return {
@@ -129,4 +153,12 @@ if (lightingBakeActive > 0.5) {
 }`,
     };
   }
+}
+
+export function copyBakedLightingMaterialPlugin(source: Material | null, target: Material): void {
+  const plugin = source ? pluginsByMaterial.get(source) : undefined;
+  if (plugin && (target instanceof PBRMaterial || target instanceof StandardMaterial)) plugin.cloneTo(target);
+}
+export function getBakedLightingOwnedTextures(material: Material | null): ReadonlySet<BaseTexture> {
+  return material ? pluginsByMaterial.get(material)?.getOwnedTextures() ?? noOwnedTextures : noOwnedTextures;
 }

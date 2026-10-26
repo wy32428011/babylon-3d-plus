@@ -1,3 +1,4 @@
+import { inspectSkyboxEnvironmentBytes, normalizeSkyboxEnvironmentResource, type SkyboxEnvironmentFaceSize, type SkyboxEnvironmentResource } from '../shared/sceneSkyboxContract.ts';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -45,6 +46,31 @@ export async function validateBuiltinSkyboxPackage(packagePath: string): Promise
   }
 }
 
+/** 内置源包继续保持单文件；预过滤产物在独立登记目录中按 manifest 校验。 */
+export async function getBuiltinSkyboxEnvironment(faceSize: SkyboxEnvironmentFaceSize): Promise<SkyboxEnvironmentResource> {
+  const root = path.join(path.dirname(builtinSkyboxRoot()), 'builtin-skybox-environments');
+  const manifestPath = path.join(root, 'manifest.json');
+  for (const candidate of [root, manifestPath]) {
+    const stat = await fs.lstat(candidate);
+    if (stat.isSymbolicLink() || path.resolve(await fs.realpath(candidate)).toLowerCase() !== path.resolve(candidate).toLowerCase()) throw new Error('内置 ENV 路径不能通过链接重定向。');
+    if (candidate === manifestPath && (!stat.isFile() || stat.size > 64 * 1024)) throw new Error('内置 ENV 清单无效。');
+  }
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as { version?: unknown; sourceSha256?: unknown; resources?: Array<Record<string, unknown>> };
+  const matches = manifest.resources?.filter(resource => resource?.faceSize === faceSize) ?? [];
+  if (manifest.version !== 1 || manifest.sourceSha256 !== BUILTIN_SKYBOX_SHA256 || matches.length !== 1 || matches[0].file !== `${faceSize}.env`) throw new Error('内置 ENV 清单未登记所需规格。');
+  const file = path.join(root, `${faceSize}.env`);
+  const resource = normalizeSkyboxEnvironmentResource({ ...matches[0], sourcePath: file, packagePath: root, sourceUrl: encodeAssetUrl(file) });
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== resource.byteLength
+    || path.resolve(await fs.realpath(file)).toLowerCase() !== path.resolve(file).toLowerCase()
+    || resource.sourceSha256 !== BUILTIN_SKYBOX_SHA256) throw new Error('内置 ENV 产物身份无效。');
+  const bytes = await fs.readFile(file);
+  if (createHash('sha256').update(bytes).digest('hex') !== resource.sha256) throw new Error('内置 ENV SHA-256 不一致。');
+  inspectSkyboxEnvironmentBytes(bytes, faceSize);
+  authorizeAssetFile(file);
+  return resource;
+}
+
 export async function listBuiltinSkyboxAssets(): Promise<ProjectSkyboxAssetEntry[]> {
   const packagePath = path.join(builtinSkyboxRoot(), 'partly-cloudy-light');
   await validateBuiltinSkyboxPackage(packagePath);
@@ -53,5 +79,5 @@ export async function listBuiltinSkyboxAssets(): Promise<ProjectSkyboxAssetEntry
   return [{ id: 'builtin-skybox:partly-cloudy-light', name: BUILTIN_SKYBOX_FILE_NAME, displayName: '多云天空（轻量）',
     path: filePath, sourceUrl: encodeAssetUrl(filePath), assetRevision: BUILTIN_SKYBOX_SHA256, packagePath,
     kind: 'skybox', libraryKind: 'skybox', format: 'hdr', fileSizeBytes: BUILTIN_SKYBOX_FILE_SIZE,
-    source: 'builtin', availability: 'active' }];
+    source: 'builtin', availability: 'active', environment: await getBuiltinSkyboxEnvironment(512) }];
 }

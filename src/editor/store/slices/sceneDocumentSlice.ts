@@ -1,3 +1,4 @@
+import { prepareSceneSkyboxEnvironments } from '../../assets/skyboxPreparationService.ts';
 import { updateSceneModelEntranceCommand } from '../../commands/sceneModelEntranceCommands';
 import { normalizeSceneModelEntranceSettings } from '../../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig } from '../../model/sceneOpeningAnimation';
@@ -15,7 +16,7 @@ import { getEntityArrayIdentifierError, getCompositionArrayInfo, getEntityArrayP
 import { createChartMarkerEntity, normalizeChartMarker } from '../../model/chartMarker';
 import { createDataPlatformScreenComponent } from '../../model/dataPlatformScreen';
 import { normalizeChartMarkerScreenSource } from '../../assets/dataPlatformScreenDrag';
-import { createEmptySceneDocument, createAutoPatrolEntity, createClickEventBindingEntity, createFolderEntity, createLightEntity, createLocatorEntity, createManualRoamSpawnEntity, createMeshEntity, createModelGeneratorEntity, createDeviceSpawnerEntity, createPoiEffectEntity, normalizeSkyboxSphereScale, type SceneDocument } from '../../model/SceneDocument';
+import { createEmptySceneDocument, createAutoPatrolEntity, createClickEventBindingEntity, createFolderEntity, createLightEntity, createLocatorEntity, createManualRoamSpawnEntity, createMeshEntity, createModelGeneratorEntity, createDeviceSpawnerEntity, createPoiEffectEntity, type SceneDocument } from '../../model/SceneDocument';
 import { findManualRoamSpawnEntity } from '../../model/manualRoamSpawn';
 import { cloneAutoPatrolComponent, sanitizeAutoPatrolComponent, updateAutoPatrolWaypointView } from '../../model/autoPatrolInspection';
 import { getBuiltInSlotBindingConfig, getLayerChangePlatformBindingConfig, patchBuiltInSlotDimensions, patchLayerChangePlatformDimensions } from '../../model/builtInSlotBinding';
@@ -25,7 +26,7 @@ import { sanitizeDeviceSpawnerComponent } from '../../model/deviceSpawner';
 import { cloneClickEventBindingComponent, sanitizeClickEventBindingComponent } from '../../model/clickEventBinding';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../../model/telemetryBinding';
 import { sanitizePoiEffectComponent } from '../../model/poiEffect';
-import { deserializeScene, serializeScene } from '../../project/SceneSerializer';
+import { deserializeScene, hasSceneDocumentChanges, serializeScene } from '../../project/SceneSerializer';
 import { sanitizeCadReferenceDisplayPatch } from '../../cad/cadReferenceCore';
 import { sanitizeSceneName, sanitizeVector3, cloneTransform, normalizeTransformForEntity, areTransformsEqual, sanitizeNonNegativeNumber, sanitizeEntityName, isColorLike, cloneMeshRenderer, cloneLocator, sanitizeLocatorAssetId, sanitizeLocatorDimension, sanitizeLocatorInt, sanitizeLocatorGap, sanitizeLocatorFetchDrivePatch, sanitizeLocatorBuiltInBindingPatch, areLocatorsEqual, cloneCadReference, areCadReferencesEqual, sanitizeModelAssetCode, RADIANS_TO_DEGREES, sanitizeSelectedModelParameterValue, getSelectedModelParameterValues, patchModelParameterValue, isFiniteTransform, normalizeGroupRotationTransforms } from './entityValueOperations';
 import { isRuntimePreviewState, guardRuntimePreviewMutation, prependLog } from './editorMutationGuard';
@@ -37,6 +38,10 @@ import { setEntitiesVisibleInScene, collectVisibilityShowTargetIds, setEntitiesL
 import { ENTITY_ARRAY_DIRECTION_VECTORS, prepareResolvedEntityArray, createResolvedEntityArrayCommand } from './sceneEntityArrayOperations';
 import type { EntityArrayCommitResult } from './editorStoreTypes';
 import { syncDataPlatformEnvironmentsAfterWorkspaceOpen, syncDataPlatformImagesAfterLocalSceneLoad } from './sceneWorkspaceSync';
+import { setSyncedImageAssets } from '../../../assets/syncedImageAssets';
+import { beginProjectOpenSceneCommit, beginProjectOpenTask, endProjectOpenTask, bindProjectOpenScene,
+  completeProjectOpenResources, finishProjectOpenTrace } from '../../loading/projectOpenTrace';
+import type { ProjectOpenSpanToken } from '../../../../electron/shared/projectOpenTrace';
 import type { EditorSlice } from './editorStoreTypes';
 
 const initialEditorScene = createEmptySceneDocument();
@@ -655,7 +660,7 @@ export const createSceneDocumentSlice: EditorSlice<
           .some((entityId) => Boolean(state.scene.entities[entityId]?.components.skybox))
       ));
       if (containsSkybox) {
-        return { logs: prependLog(state.logs, '球形天空盒是场景唯一对象，不能复制或随文件夹复制。') };
+        return { logs: prependLog(state.logs, '天空背景是场景唯一对象，不能复制或随文件夹复制。') };
       }
       const containsManualRoamSpawn = getTopLevelHierarchyEntityIds(state.scene.entities, selectedIds).some((rootId) => (
         collectEntitySubtreeIds(state.scene.entities, rootId)
@@ -685,7 +690,7 @@ export const createSceneDocumentSlice: EditorSlice<
       const clipboard = state.entityClipboard;
       if (!clipboard || clipboard.entries.length === 0) return state;
       if (clipboard.entries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.skybox)))) {
-        return { logs: prependLog(state.logs, '剪贴板包含球形天空盒，已拒绝创建重复天空盒。') };
+        return { logs: prependLog(state.logs, '剪贴板包含天空背景，已拒绝创建重复天空盒。') };
       }
       if (clipboard.entries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.manualRoamSpawn)))) {
         return { logs: prependLog(state.logs, '剪贴板包含手动漫游初始位置，已拒绝创建重复出生点。') };
@@ -988,11 +993,8 @@ export const createSceneDocumentSlice: EditorSlice<
 
       const before = normalizeTransformForEntity(entity, entity.components.transform);
       const candidate = cloneTransform(before);
-      if (entity.components.skybox && field === 'scale') {
-        candidate.scale = normalizeSkyboxSphereScale({ x: value, y: value, z: value });
-      } else {
-        candidate[field][axis] = value;
-      }
+      if (entity.components.skybox && (field !== 'rotation' || axis !== 'y')) return state;
+      candidate[field][axis] = value;
       const after = normalizeTransformForEntity(entity, candidate);
       if (areTransformsEqual(before, after)) return state;
 
@@ -1739,7 +1741,7 @@ export const createSceneDocumentSlice: EditorSlice<
   },
   hasUnsavedChanges: () => {
     const state = get();
-    return serializeScene(state.scene) !== state.persistedSceneContent;
+    return hasSceneDocumentChanges(state.scene, state.persistedSceneContent);
   },
   markScenePersisted: (content) => {
     const persistedSceneContent = content ?? serializeScene(get().scene);
@@ -1756,9 +1758,15 @@ export const createSceneDocumentSlice: EditorSlice<
     }
 
     const sceneSnapshot = get().scene;
+    const sceneSessionId = get().sceneSessionId;
+    const controller = new AbortController();
 
     try {
-      const content = serializeScene(sceneSnapshot);
+      const prepared = await prepareSceneSkyboxEnvironments(sceneSnapshot, controller.signal, () => {
+        if (get().sceneSessionId !== sceneSessionId) controller.abort();
+      }, sceneSessionId);
+      if (get().sceneSessionId !== sceneSessionId) throw new Error('场景已切换，已停止保存旧场景。');
+      const content = serializeScene(prepared);
       const result = await window.editorApi.saveScene({
         suggestedName: `${sceneSnapshot.name}.scene.json`,
         content,
@@ -1769,7 +1777,9 @@ export const createSceneDocumentSlice: EditorSlice<
         return false;
       }
 
+      if (get().sceneSessionId !== sceneSessionId) return true;
       set((state) => ({
+        ...(state.scene === sceneSnapshot ? { scene: prepared } : {}),
         persistedSceneContent: content,
         logs: prependLog(state.logs, `场景已保存：${result.filePath ?? '未知路径'}`),
       }));
@@ -1797,12 +1807,16 @@ export const createSceneDocumentSlice: EditorSlice<
       }
 
       const scene = deserializeScene(result.content);
+      // 先完成只读缓存恢复，再提交新场景，避免脚本先于图片登记启动。
+      const cachedImages = await window.editorApi.listSyncedImages?.() ?? [];
+      if (get().sceneSessionId !== openingSceneSessionId) return false;
       const sceneOpenToken = result.sceneOpenToken;
       if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
         || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
       if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })
         || get().sceneSessionId !== openingSceneSessionId) return false;
 
+      setSyncedImageAssets(cachedImages);
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
         return { ...loaded, sceneResourcePolicy: 'local-refresh',
@@ -1819,33 +1833,54 @@ export const createSceneDocumentSlice: EditorSlice<
       return false;
     }
   },
-  loadSceneFromFile: async (filePath, isCurrent = () => true, deferEnvironmentUntilSync = false) => {
-    if (!isCurrent()) return false;
+  loadSceneFromFile: async (filePath, isCurrent = () => true, deferEnvironmentUntilSync = false, openTrace) => {
+    if (!isCurrent()) { if (openTrace) finishProjectOpenTrace(openTrace, 'stale'); return false; }
     if (get().runtimeMode === 'preview') {
       set((state) => guardRuntimePreviewMutation(state, '加载最近场景'));
+      if (openTrace) finishProjectOpenTrace(openTrace, 'failed');
       return false;
     }
 
     const openingSceneSessionId = get().sceneSessionId;
+    if (openTrace) beginProjectOpenSceneCommit(openTrace);
+    let pendingTraceTask: ProjectOpenSpanToken | undefined;
+    const stopTrace = (outcome: 'error' | 'stale' | 'cancelled') => {
+      if (!openTrace) return;
+      endProjectOpenTask(openTrace, pendingTraceTask, outcome); pendingTraceTask = undefined;
+      completeProjectOpenResources(openTrace, outcome);
+      finishProjectOpenTrace(openTrace, outcome === 'error' ? 'failed' : outcome);
+    };
     try {
       if (!window.editorApi?.loadSceneFile) {
         throw new Error('按路径加载场景需要 Electron 桌面环境。');
       }
 
+      if (openTrace) pendingTraceTask = beginProjectOpenTask(openTrace, 'sceneRead');
       const result = await window.editorApi.loadSceneFile({ filePath });
-      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
+      if (openTrace) endProjectOpenTask(openTrace, pendingTraceTask, 'ok'); pendingTraceTask = undefined;
+      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) { stopTrace('stale'); return false; }
 
       if (result.canceled || result.content === null) {
         set((state) => ({ logs: prependLog(state.logs, '已取消加载场景。') }));
+        stopTrace('cancelled');
         return false;
       }
 
+      if (openTrace) pendingTraceTask = beginProjectOpenTask(openTrace, 'sceneDeserialize');
       const scene = deserializeScene(result.content);
+      if (openTrace) endProjectOpenTask(openTrace, pendingTraceTask, 'ok'); pendingTraceTask = undefined;
+      if (openTrace) pendingTraceTask = beginProjectOpenTask(openTrace, 'imageCacheRestore');
+      const cachedImages = await window.editorApi.listSyncedImages?.() ?? [];
+      if (openTrace) endProjectOpenTask(openTrace, pendingTraceTask, 'ok'); pendingTraceTask = undefined;
+      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) { stopTrace('stale'); return false; }
       const sceneOpenToken = result.sceneOpenToken;
       if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
         || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
-      if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })
-        || !isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
+      if (openTrace) pendingTraceTask = beginProjectOpenTask(openTrace, 'sceneConfirm');
+      const confirmed = await window.editorApi.confirmSceneOpen({ sceneOpenToken });
+      if (openTrace) endProjectOpenTask(openTrace, pendingTraceTask, 'ok'); pendingTraceTask = undefined;
+      if (!confirmed || !isCurrent() || get().sceneSessionId !== openingSceneSessionId) { stopTrace('stale'); return false; }
+      setSyncedImageAssets(cachedImages);
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
         return { ...loaded,
@@ -1854,9 +1889,15 @@ export const createSceneDocumentSlice: EditorSlice<
           sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
+      if (openTrace) {
+        const committed = get();
+        if (committed.scene !== scene || committed.sceneSessionId === openingSceneSessionId || !isCurrent()
+          || !bindProjectOpenScene(openTrace, committed.sceneSessionId)) stopTrace('stale');
+      }
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
+      stopTrace(!isCurrent() || get().sceneSessionId !== openingSceneSessionId ? 'stale' : 'error');
       const message = error instanceof Error ? error.message : String(error);
       if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) return false;
       set((state) => ({ logs: prependLog(state.logs, `加载最近场景失败：${message}`) }));

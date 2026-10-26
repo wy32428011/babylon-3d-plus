@@ -32,16 +32,21 @@ function storeFixture() {
   let state: any = { sceneSessionId: '', runtimeMode: 'edit', logs: [], history: {}, sceneResourceIssues: [] };
   let session = 0;
   const observed: any[] = [];
+  const imageRegistrations: unknown[][] = [];
+  const editorApi = {
+    loadSceneFile: async () => ({ content: '{"sceneSettings":{}}', filePath: 'startup.scene.json', sceneOpenToken: 1 }),
+    loadScene: async () => ({ content: '{"sceneSettings":{}}', filePath: 'dialog.scene.json', sceneOpenToken: 1 }),
+    listSyncedImages: async (): Promise<unknown[]> => [],
+    confirmSceneOpen: async () => true,
+  };
   const code = `({${requiredActions.map(name => actionSources.get(name)).join(',')}})`;
   const actions = runInNewContext(stripTypeScriptTypes(code), {
     set: (update: any) => { const next = typeof update === 'function' ? update(state) : update; state = { ...state, ...next }; observed.push(state); },
     get: () => state, isRuntimePreviewState: () => false,
     createLoadedSceneState: (_state: any, scene: any) => ({ scene, sceneSessionId: `session-${++session}` }),
-    window: { editorApi: {
-      loadSceneFile: async () => ({ content: '{"sceneSettings":{}}', filePath: 'startup.scene.json', sceneOpenToken: 1 }),
-      loadScene: async () => ({ content: '{"sceneSettings":{}}', filePath: 'dialog.scene.json', sceneOpenToken: 1 }),
-      confirmSceneOpen: async () => true,
-    } },
+    window: { editorApi },
+    // 两个打开入口都先恢复本地图片登记；本夹具验证资源门控，缓存授权另有专项。
+    setSyncedImageAssets: (images: unknown[]) => imageRegistrations.push(images),
     deserializeScene: JSON.parse, syncDataPlatformImagesAfterLocalSceneLoad() {},
     updateSceneDocumentCommand: (_name: string, update: () => unknown) => update,
     executeCommand: (_before: unknown, history: unknown, update: () => unknown) => ({ scene: update(), history }),
@@ -49,7 +54,7 @@ function storeFixture() {
     restoreFailedSceneResources: () => { throw new Error('本地恢复不能回滚失效的旧路径'); },
   });
   state = { ...state, ...actions };
-  return { getState: () => state, setState: (next: any) => { state = { ...state, ...next }; }, observed,
+  return { getState: () => state, setState: (next: any) => { state = { ...state, ...next }; }, observed, editorApi, imageRegistrations,
     open: async (remote: boolean) => { await state.loadSceneFromFile('startup.scene.json', () => true, remote); return state; } };
 }
 
@@ -60,6 +65,7 @@ test('中台 SOURCE 和本地文件写入文档时都原子关闭运行时启动
   const local = await f.open(false);
   assert.equal(local.sceneStartupResourceSessionId, local.sceneSessionId);
   assert.equal(local.sceneSourceFilePath, 'startup.scene.json');
+  assert.equal(f.imageRegistrations.length, 2, '本地与SOURCE打开均经过图片登记，再提交本轮资源门控');
 });
 
 test('文件选择器入口也保存源文件位置并在写入文档的同一提交门控', async () => {
@@ -68,6 +74,19 @@ test('文件选择器入口也保存源文件位置并在写入文档的同一�
   assert.equal(f.getState().sceneSourceFilePath, 'dialog.scene.json');
   assert.equal(f.observed[0].sceneStartupResourceSessionId, f.getState().sceneSessionId);
   assert.equal(f.getState().sceneResourcePolicy, 'local-refresh');
+  assert.equal(f.imageRegistrations.length, 1);
+});
+
+test('文件选择器图片缓存恢复失败时保持原文档与登记表，不能发布新的启动门控', async () => {
+  const f = storeFixture(), original = { id: 'existing', sceneSettings: {} };
+  f.setState({ scene: original });
+  f.editorApi.listSyncedImages = async () => { throw new Error('cached-image-read-failed'); };
+  assert.equal(await f.getState().loadScene(), false);
+  assert.equal(f.getState().scene, original);
+  assert.equal(f.getState().sceneSessionId, '');
+  assert.equal(f.imageRegistrations.length, 0);
+  assert.equal(f.getState().sceneStartupResourceSessionId, undefined);
+  assert.ok(f.getState().logs.some((message: string) => message.includes('cached-image-read-failed')));
 });
 
 test('本地恢复按会话和文档身份提交，保持历史，首帧完成前不清除问题', async () => {
@@ -173,8 +192,12 @@ test('97 个旧 SOURCE 模型不会在资源确认前触发 runtime.sync，释�
         beginSceneSession() {}, getModelStatistics: () => null } },
       gizmoRef: { current: { cancelActiveGroupDrag() {} } }, isRuntimePreview: false, runtimeModeRef: { current: 'edit' },
       sceneStartupResourceSessionId: deferred ? 'A' : null, sceneSessionId: 'A', sceneRuntimeStartupDeferred: deferred,
-      modelParameterSyncEntityId: null, editRuntimeSceneDocument: document,
+      // ref 是前序 effect 发布的最新快照；闭包旧值不能替代已确认的最终文档。
+      modelParameterSyncEntityId: null, editRuntimeSceneDocument: { stale: true },
+      editRuntimeSceneDocumentRef: { current: document },
       statisticsSceneSessionRef: { current: null },
+      // 此旧调用没有Home trace；保持业务同步门控，诊断注入为空。
+      getSceneProjectOpenRecorder: () => undefined,
       useEditorStore: { getState: () => ({ hierarchySelectionIds: [], setSceneModelStatistics() {} }) },
       attachCurrentSelectionGizmo() {}, publishSelectedInspectorSpatialInfo() {}, selectedEntityIdRef: { current: null },
     });
@@ -196,6 +219,7 @@ test('天空盒仍在加载时即使 98 个模型均就绪也不能完成，失�
         recordSceneResourceIssues: () => events.push('issue'), finishLatestSceneResources: () => events.push('finish-error'),
       },
       environmentPreparationStore: { fail: () => events.push('problem') },
+      completeOpenTrace: () => undefined,
       settleSceneRuntimeWithWarning: () => events.push('failed'), stopReadinessPolling: () => events.push('stop'),
       resetRenderWait: () => events.push('reset'), events,
     });
@@ -205,15 +229,16 @@ test('天空盒仍在加载时即使 98 个模型均就绪也不能完成，失�
   }
   const condition = panel.match(/const readyNow = ([\s\S]*?);/)?.[1];
   assert.ok(condition);
-  for (const phase of ['loading', 'ready', 'idle']) {
+  for (const phase of ['loading', 'ready', 'idle']) for (const pendingCount of [0, 1]) {
     const ready = runInNewContext(condition, { settledModels: 98, totalSceneModels: 98,
-      batchedEntities: 12, expectedBatchedEntities: 12, skyboxReadiness: { phase } });
-    assert.equal(ready, phase !== 'loading');
+      batchedEntities: 12, expectedBatchedEntities: 12, skyboxReadiness: { phase },
+      runtimeMetrics: { loading: { cargoPreload: { pendingCount } } } });
+    assert.equal(ready, phase !== 'loading' && pendingCount === 0, '天空盒与生成货物预载必须都已收敛');
   }
 });
 
 test('确认资源前天空盒与环境都不启动，释放门控后在同一设置同步中各启动一次', () => {
-  const effect = extractEffect("  useEffect(() => {\n    const viewport = viewportRef.current;\n    const runtime = runtimeRef.current;\n    if (!viewport || !runtime) return;\n\n    viewport.setViewDistance");
+  const effect = extractEffect('  useEffect(() => {\n    const viewport = viewportRef.current;\n    const runtime = runtimeRef.current;\n    // 场景设置单独同步');
   for (const deferred of [true, false]) {
     const events: string[] = [];
     runInNewContext(effect, {
@@ -221,6 +246,7 @@ test('确认资源前天空盒与环境都不启动，释放门控后在同一�
       viewportRef: { current: { setViewDistance() {}, setSensitivity() {} } },
       runtimeRef: { current: { syncDefaultCargoGenerator() {}, syncAppearance() {}, syncLighting() {}, syncSkybox: () => events.push('skybox'), syncEnvironment: () => events.push('environment') } },
       sceneDocument: { sceneSettings: { camera: {} } }, sceneRuntimeStartupDeferred: deferred,
+      sceneDocumentRef: { current: { sceneSettings: { camera: {} } } },
       environmentApplyRequest: null, environmentAdjustmentActive: false, environmentRuntimeOverride: null,
       environmentStartupRelinkSessionId: null, sceneSessionId: 'A', resolveEnvironmentRuntimeSettings: () => null,
     });

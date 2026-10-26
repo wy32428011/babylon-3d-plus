@@ -16,6 +16,10 @@ export type DataPlatformProjectLocationInput = {
   preferredProjectRoot?: string | null;
 };
 
+const EMPTY_PROJECT_DIRECTORIES = new Set([
+  '.babylon-editor', 'Assets', 'Assets/Models', 'Assets/Environments', 'Assets/Skyboxes', 'Assets/Images', 'Scenes',
+]);
+
 /** 仅读取目录身份，不创建目录或绑定；新工程按中台来源隔离，同源历史工程继续复用。 */
 export async function resolveDataPlatformProjectLocation(
   input: DataPlatformProjectLocationInput,
@@ -52,7 +56,7 @@ export async function resolveDataPlatformProjectLocation(
     assertDataPlatformBindingTarget(isolatedBinding, projectId, baseUrl);
     return { projectRoot: isolatedRoot, legacy: false };
   }
-  if (await hasEntries(isolatedRoot)) throw new Error(`目标来源目录已有未绑定内容，请检查工程归属：${isolatedRoot}`);
+  if (await hasUnboundProjectContent(isolatedRoot)) throw new Error(`目标来源目录已有未绑定内容，请检查工程归属：${isolatedRoot}`);
 
   await assertNoLinks(legacyRoot);
   await assertNoLinks(path.join(legacyRoot, '.babylon-editor', 'data-platform-binding.json'), true);
@@ -64,9 +68,17 @@ export async function resolveDataPlatformProjectLocation(
   return { projectRoot: isolatedRoot, legacy: false };
 }
 
-async function hasEntries(directory: string): Promise<boolean> {
-  try { return (await fs.readdir(directory)).length > 0; }
+/** 首次下载/物化失败只留下初始化空目录时允许重试；任何文件、未知目录或链接仍视为用户内容。 */
+async function hasUnboundProjectContent(directory: string, relative = ''): Promise<boolean> {
+  let entries;
+  try { entries = await fs.readdir(directory, { withFileTypes: true }); }
   catch (error) { if (isMissing(error)) return false; throw error; }
+  for (const entry of entries) {
+    const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !EMPTY_PROJECT_DIRECTORIES.has(childRelative)) return true;
+    if (await hasUnboundProjectContent(path.join(directory, entry.name), childRelative)) return true;
+  }
+  return false;
 }
 
 /** 检查每一级现有路径，包含 workspace 自身，拒绝 junction/符号链接穿透。 */

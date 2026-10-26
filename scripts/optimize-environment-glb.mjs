@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { assertModelSemanticsUnchanged, optimizeModelBufferViews, readModelGlb } from './lib/phase2AssetSemantics.mjs';
 
 const CLI_VERSION = '4.4.2';
 const require = createRequire(import.meta.url);
@@ -22,8 +23,8 @@ export function parseOptions(args) {
     else if (argument.startsWith('-')) throw new Error(`未知参数：${argument}`);
     else positional.push(argument);
   }
-  assert.ok(['dedup', 'ktx2'].includes(mode), '--mode 必须为 dedup 或 ktx2。');
-  assert.equal(positional.length, 2, '用法：node scripts/optimize-environment-glb.mjs <input.glb> <output.glb> [--mode dedup|ktx2]');
+  assert.ok(['dedup', 'ktx2', 'model-lossless', 'model-meshopt-lossless'].includes(mode), '--mode 必须为 dedup、ktx2、model-lossless 或 model-meshopt-lossless。');
+  assert.equal(positional.length, 2, '用法：node scripts/optimize-environment-glb.mjs <input.glb> <output.glb> [--mode dedup|ktx2|model-lossless|model-meshopt-lossless]');
   const [input, output] = positional.map((item) => path.resolve(item));
   assert.ok(/\.glb$/i.test(input) && /\.glb$/i.test(output), '输入和输出必须为 .glb 文件。');
   assert.notEqual(input.toLowerCase(), output.toLowerCase(), '输入输出不能是同一路径。');
@@ -271,6 +272,8 @@ async function runCommand(command, args, capture = false) {
 
 export async function optimizeEnvironment(options, environment = process.env) {
   await validatePaths(options);
+  if (options.mode === 'model-lossless') return optimizeLosslessModel(options);
+  if (options.mode === 'model-meshopt-lossless') return optimizeMeshoptLosslessModel(options, environment);
   const startedAt = performance.now();
   const toolchain = await resolveToolchain(environment);
   if (options.mode === 'ktx2') {
@@ -344,6 +347,95 @@ export async function optimizeEnvironment(options, environment = process.env) {
     assert.ok(relative.startsWith('.environment-optimize-') && !relative.includes(path.sep), '暂存目录超出清理范围。');
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+/** 普通模型的保守子集不经过 CLI 重写：逻辑索引、名称和引用全部保留，只优化 BIN 存储。 */
+async function optimizeLosslessModel(options) {
+  const startedAt = performance.now(), beforeBytes = await readFile(options.input);
+  const optimized = optimizeModelBufferViews(beforeBytes);
+  assertModelSemanticsUnchanged(beforeBytes, optimized.bytes);
+  assert.equal(digest(await readFile(options.input)), digest(beforeBytes), '转换期间输入改变，保留原资产。');
+  const statistics = bytes => {
+    const { json } = readModelGlb(bytes);
+    return { bytes: bytes.length, sha256: digest(bytes), imageCount: json.images?.length ?? 0,
+      accessorCount: json.accessors?.length ?? 0, bufferViewCount: json.bufferViews?.length ?? 0 };
+  };
+  const report = { status: optimized.improved ? 'PASS' : 'NO_CHANGE', generatedAt: new Date().toISOString(),
+    mode: options.mode, tool: 'builtin-glb-view-packer@1', input: options.input, output: options.output,
+    before: statistics(beforeBytes), after: statistics(optimized.bytes), sourceUnchanged: true,
+    durationMs: performance.now() - startedAt,
+    semanticValidation: 'raw-json-logical-indices-and-all-view-image-sha256-plus-independent-decoded-accessor-sha256',
+    imagePolicy: 'exact-image-bytes-and-logical-texture-image-indices-preserved',
+    storage: { sharedBufferViews: optimized.sharedViews, beforeBinaryBytes: optimized.beforeBinaryBytes,
+      candidateBinaryBytes: optimized.candidateBinaryBytes, retainedLogicalIndices: true },
+    limitations: ['retains all logical definitions; only unreferenced BIN bytes are removed',
+      'unknown extras/extensions and compressed accessor layouts are refused', 'no meshopt encoder or quantization is used'],
+  };
+  await mkdir(path.dirname(options.output), { recursive: true });
+  const staging = await mkdtemp(path.join(path.dirname(options.output), '.environment-optimize-'));
+  try {
+    const candidate = path.join(staging, 'model.glb');
+    await writeFile(candidate, optimized.bytes);
+    // 磁盘回读也经过独立 oracle；大于原文件的候选会保留原字节副本并报告 NO_CHANGE。
+    assertModelSemanticsUnchanged(beforeBytes, await readFile(candidate));
+    await copyFile(candidate, options.output, constants.COPYFILE_EXCL);
+    await writeFile(options.reportPath, JSON.stringify(report, null, 2), { encoding: 'utf8', flag: 'wx' }).catch(error => {
+      throw new Error(`优化副本已创建，但报告创建失败；不会覆盖已有报告：${options.reportPath}；${error.message}`);
+    });
+  } finally {
+    const relative = path.relative(path.dirname(options.output), staging);
+    assert.ok(relative.startsWith('.environment-optimize-') && !relative.includes(path.sep), '暂存目录超出清理范围。');
+    await rm(staging, { recursive: true, force: true });
+  }
+  console.log(JSON.stringify({ status: report.status, mode: report.mode, before: report.before, after: report.after, reportPath: options.reportPath }));
+  return report;
+}
+
+/** 显式可选meshopt存储；仅此模式加载隔离固定工具链，旧四条入口保持原合同。 */
+async function optimizeMeshoptLosslessModel(options, environment) {
+  const root = environment.ZENDING_MESHOPT_TOOLCHAIN;
+  assert.ok(typeof root === 'string' && path.isAbsolute(root), 'model-meshopt-lossless 必须显式设置绝对路径 ZENDING_MESHOPT_TOOLCHAIN；不搜索/安装项目或全局依赖。');
+  const startedAt = performance.now(), beforeBytes = await readFile(options.input);
+  const [{ loadPhase2MeshoptToolchain }, { optimizePhase2MeshoptLossless }, { assertPhase2MeshoptLossless }] = await Promise.all([
+    import('./lib/phase2MeshoptToolchain.mjs'), import('./lib/phase2MeshoptLossless.mjs'), import('./lib/phase2MeshoptOracle.mjs'),
+  ]);
+  const productDecoder = fileURLToPath(new URL('../public/babylon-decoders/meshopt/meshopt_decoder.js', import.meta.url));
+  const toolchain = await loadPhase2MeshoptToolchain(root, productDecoder);
+  const optimized = optimizePhase2MeshoptLossless(beforeBytes, toolchain), { json } = readModelGlb(beforeBytes);
+  const counts = { imageCount: json.images?.length ?? 0, accessorCount: json.accessors?.length ?? 0, bufferViewCount: json.bufferViews?.length ?? 0 };
+  const report = { status: optimized.improved ? 'PASS' : 'NO_CHANGE', generatedAt: new Date().toISOString(), mode: options.mode,
+    tool: 'meshoptimizer@0.23.0', toolchainRoot: path.resolve(root), toolchainFiles: toolchain.files,
+    input: options.input, output: options.output,
+    before: { bytes: beforeBytes.length, sha256: digest(beforeBytes), ...counts },
+    after: { bytes: optimized.bytes.length, sha256: digest(optimized.bytes), ...counts }, sourceUnchanged: true,
+    durationMs: performance.now() - startedAt,
+    semanticValidation: 'dual-real-decoders-0.23-and-product-0.20-plus-independent-full-view-image-accessor-and-json-structure-sha256',
+    imagePolicy: 'exact-image-bytes-and-logical-texture-image-indices-preserved',
+    storage: { reason: optimized.reason, compressedViews: optimized.compressedViews, retainedLogicalIndices: true,
+      quantization: false, reordering: false, filters: false, triangleCodec: false, rows: optimized.rows },
+    decoderProofs: optimized.proofs,
+    limitations: ['requires EXT_meshopt_compression when candidate is smaller; missing decoder must fail clearly',
+      'unknown extras/extensions and precompressed input are refused; no geometry/material/precision reduction',
+      'CPU byte oracle does not establish GPU visual parity or faster total loader time'],
+  };
+  await mkdir(path.dirname(options.output), { recursive: true });
+  const staging = await mkdtemp(path.join(path.dirname(options.output), '.environment-optimize-'));
+  try {
+    const candidate = path.join(staging, 'model.glb'); await writeFile(candidate, optimized.bytes);
+    if (optimized.improved) assertPhase2MeshoptLossless(beforeBytes, await readFile(candidate), toolchain.decoders);
+    else assertModelSemanticsUnchanged(beforeBytes, await readFile(candidate));
+    assert.equal(digest(await readFile(options.input)), digest(beforeBytes), '转换期间输入改变，保留原资产。');
+    await copyFile(candidate, options.output, constants.COPYFILE_EXCL);
+    await writeFile(options.reportPath, JSON.stringify(report, null, 2), { encoding: 'utf8', flag: 'wx' }).catch(error => {
+      throw new Error(`优化副本已创建，但报告创建失败；不会覆盖已有报告：${options.reportPath}；${error.message}`);
+    });
+  } finally {
+    const relative = path.relative(path.dirname(options.output), staging);
+    assert.ok(relative.startsWith('.environment-optimize-') && !relative.includes(path.sep), '暂存目录超出清理范围。');
+    await rm(staging, { recursive: true, force: true });
+  }
+  console.log(JSON.stringify({ status: report.status, mode: report.mode, before: report.before, after: report.after, reportPath: options.reportPath }));
+  return report;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

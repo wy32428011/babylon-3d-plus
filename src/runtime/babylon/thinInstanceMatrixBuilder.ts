@@ -6,6 +6,7 @@ import { RenderingGroup } from '@babylonjs/core/Rendering/renderingGroup.js';
 import type { InstancedMesh } from '@babylonjs/core';
 import type { TransformComponent } from '../../editor/model/components';
 import type { Vector3Data } from '../../editor/model/math';
+import { uploadMatrixRanges, recordMatrixAllocation, type MatrixUploadRange } from './thinInstanceSparseUpdates';
 import { ENTITY_ARRAY_MATRIX_DETERMINANT_EPSILON, ENTITY_ARRAY_ROTATION_SCALE_EPSILON, INSTANCE_SELECTION_ID_BUFFER, FRONT_TO_BACK_RENDERING_GROUPS_BY_SCENE, FORMAL_BATCH_MIN_INSTANCES_PER_PARTITION, FORMAL_BATCH_MAX_INSTANCES_PER_PARTITION, FORMAL_BATCH_TARGET_VERTEX_INVOCATIONS_PER_PARTITION, FORMAL_BATCH_MIN_PARTITION_SPAN_METERS, type EntityArrayMatrixOrientation, type EntityArrayMatrixBatch, type EntityArrayMatrixSource, type CapturedEntityArrayMatrix } from './thinInstanceBatchTypes';
 
 
@@ -272,15 +273,18 @@ export function commitMatrixBuffer(
   matrixBuffer: Float32Array,
   instanceCount: number,
   refreshBoundingInfo: boolean,
+  ranges?: readonly MatrixUploadRange[],
 ): void {
+  const previousCount = batch.mesh.thinInstanceCount;
   if (matrixBuffer !== batch.matrixBuffer) {
     batch.mesh.thinInstanceSetBuffer('matrix', matrixBuffer, 16, false);
     batch.matrixBuffer = matrixBuffer;
     batch.mesh.thinInstanceCount = instanceCount;
+    recordMatrixAllocation(batch.mesh, matrixBuffer.byteLength);
   } else {
     // Babylon 按调用时的 thinInstanceCount 决定上传矩阵行数，扩容时必须先更新数量。
     batch.mesh.thinInstanceCount = instanceCount;
-    batch.mesh.thinInstanceBufferUpdated('matrix');
+    uploadMatrixRanges(batch.mesh, previousCount === instanceCount ? ranges : undefined, instanceCount);
   }
   syncBatchSourcePresentation(batch);
   if (refreshBoundingInfo) batch.mesh.thinInstanceRefreshBoundingInfo(true);

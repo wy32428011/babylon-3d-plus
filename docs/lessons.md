@@ -1,5 +1,54 @@
 # 实现经验
 
+## Babylon共享几何与局部缓冲更新须明确所有权（2026-10-26）
+
+- 触发：从完整独占容器改为共享Geometry，以及将thinInstance全量上传改为局部上传。
+- 原因：AssetContainer会直接dispose其geometries清单；9.12的Buffer.updateDirectly可能丢弃恢复镜像，thinInstance世界矩阵还可能保留旧缓存。只比较JS对象或数组不足以证明正确。
+- 修复：共享源lease持有到最后实例释放，共享Geometry不进入工作容器销毁清单；局部上传同步权威数据/缓存，并由受控恢复监听重传，监听随Mesh释放。
+- 预防：分别核对取消/淘汰/释放、实际GPU字节、全量与局部像素及context restore，不把少上传的字节当作FPS收益。
+
+## 加载期派生缓存写回须维护资源事务快照（2026-10-26）
+
+- 触发：编辑器天空 ENV 已 ready、实际首帧通过，进度到 100% 但加载遮罩仍保留。
+- 原因：派生 ENV 写回创建新的场景对象，却未同步推进 transaction/recovery 的 `after`；事务收尾被文档身份 CAS 拒绝，准备状态仍完成并停止轮询。
+- 修复：缓存写回与匹配当前文档的事务快照在同一次 Store 更新中推进，实体天空和旧场景级天空共用；不改历史、原始快照，也不认领已失配的旧事务。
+- 预防：审查加载期非业务编辑的文档替换时，同步检查资源事务引用；完成条件不能只看百分比或天空 ready，还要确认事务已结算、遮罩已退出，不能通过放宽 CAS 或强行隐藏遮罩规避。
+
+## 天空准备的取消、缓存与开发懒加载边界（2026-10-26）
+
+- 触发：快速切换可能把已取消任务留在队列；提交阶段取消未传到主进程；首次加载转换 Worker 又触发 Vite 预构建重载。
+- 原因：只取消消费者而未结算等待项，进度回调之后漏查取消，去重键未隔离场景会话；Worker 入口不在开发依赖扫描中。
+- 修复：未启动任务立即出队，持有令牌期间即时传播取消，提交回调后再检查；同源任务按场景会话隔离；启动扫描显式包含转换器和 Worker。
+- 预防：定向覆盖取消队列容量、commit回调及提交中取消、跨会话请求；旧URL先解析且按源SHA给HTTP缓存分版；派生写入拒绝祖先Junction，缓存回收只删除无会话租约的历史产物。
+
+## 基线对照 worktree 不得用 junction 共享 node_modules 后再强制删除（2026-10-25）
+
+- 触发：为区分“既有失败”与“本次改动失败”，在 HEAD 建临时 `git worktree` 并用 junction 指向主仓库 `node_modules`；对照完成后执行 `git worktree remove --force`，主仓库 `node_modules` 被清空。
+- 原因：强制删除 worktree 会递归清理目录，junction 目标内容被一并删除；与单独 `rmdir` junction 不同，且删除前未确认 junction 已解除。
+- 修复：按 `package-lock.json` 执行 `npm ci` 还原（Electron 运行时在首次 `require('electron')` 时重新下载），核对包数量、版本及无 postinstall 补丁，`package.json`/`package-lock.json` 保持不变。
+- 预防：基线对照改用独立目录安装依赖或只复制必要的 `dist-electron`/配置；若必须使用 junction，必须先单独移除并校验目标仍存在，再删除 worktree；破坏性清理前先列出目标内容。
+
+## 原生天空盒的 ENV 编译、验证入口与测试服务陷阱（2026-10-25）
+
+- 触发：把天空盒改为编辑器编译 Babylon `.env`、运行时只加载 ENV 后，出现四类“看似功能错误、实为验证环境错误”的问题：离屏编译的 ENV 重新载入永不结束；正交相机下天空消失却被弱断言放过；Playwright `_electron.launch` 超时；使用 `configFile: false` 的 Vite 测试服务模块加载超时。
+- 原因：Babylon 9.12 的 `_OnImageReadyAsync` 在 `engine.scenes` 为空时直接返回，仅有离屏 Engine 而无 Scene 时 CubeTexture 永远不 ready；天空网格在正交投影下需要单独的背景投影，只靠“网格存在/像素非空”断言无法发现，必须看截图并断言角落像素不等于清屏色；本机当前 Electron/Playwright 组合在显式指定 `executablePath` 时未注入主进程 loader，改用包默认入口后可启动；`configFile: false` 的测试服务不继承 `vite.config.ts` 对 `output/` 的监听忽略，仓库 `output/` 有 7 万文件，监视器扫描使单次模块加载超过 60 秒。
+- 修复：编译器内创建并在 finally 释放宿主 `Scene`；运行时补正交背景投影并加角落像素断言；UI 测试不传 `executablePath`，自带独占端口的 Vite 服务（`tests/helpers/skyboxViteServer.mjs`）并关闭 watcher，只关闭自己创建的服务；使用 Vite SSR 的测试统一 `server.watch: null`。
+- 预防：真实 GPU/Electron 验证必须保留截图和像素断言；新增 Vite 测试服务默认关闭监视；升级场景文件版本时同步更新各测试中的“未来不支持版本”常量，并让假 Viewer 模板携带真实能力清单。
+
+## 中台工程首次失败须同时覆盖占用恢复与空目录重试（2026-10-25）
+
+- 触发：工程包 `extracted/Assets → materialize/staged/Assets` 在 Windows 抛出 `EPERM`；直接重试又可能因初始化空目录被误判为未绑定用户内容而失败。
+- 原因：工程物化、推广和回滚漏用了资源同步已有的 Windows 有限退避；初始化先于下载且正式绑定后写，失败清理后会保留空目录。
+- 修复：所有事务 rename 对 `EPERM/EACCES/EBUSY` 有限重试；打开等待可取消、恢复操作不受已取消 signal 阻断。仅确定来源目录中的白名单空骨架允许重试，不放行文件、未知目录、junction 或待恢复事务目录。
+- 预防：通过真实 Electron 打开入口验证暂时/持续占用、原错误保留、取消回滚和恢复目录保留，并验证首次下载失败后可再次请求；不能以删除用户目录、预写成功绑定或回退空场景来规避问题。构建与故障注入回归不代表真实桌面已加载修复。
+
+## Electron 开发启动须经过包的运行时准备入口（2026-10-24）
+
+- 触发：安装依赖后 `dev:electron` 完成 TypeScript 重建，却没有窗口且 Vite 继续运行。
+- 原因：Electron 42.4.0 包通过首次 `require('electron')` 按需下载运行时；硬编码 `node_modules/electron/dist/electron.exe` 绕过准备，启动器又静默吞掉 spawn error。`缺少 N/M 个 Electron 产物` 仅指编译输出，不能据此判断 Electron 二进制已安装。
+- 修复：启动服务前使用官方包导出的路径；准备或启动失败必须显示原因、非零退出并回收本次资源。
+- 预防：保留首次准备、包安装失败及不存在可执行文件三类隔离回归，并实际运行完整 npm 入口验证窗口；编译产物、Electron 运行时和页面就绪分别核对。
+
 ## 本机工具路径保存需要精确检测候选文件
 
 - 触发：将 Blender 路径从手工 JSON 配置移入编辑器界面，旧的引擎发现器会在手动路径失败后继续查找其他安装。
@@ -337,3 +386,67 @@
 - 原因：中台工作区本身包含平台与工程长标识，任务目录再拼完整 jobId；正式资产目录还额外拼 UUID。
 - 修复：任务目录使用定长摘要与随机后缀，正式资产使用短随机名称；完整业务标识保留在任务记录，兼容旧命名的归属检查。
 - 预防：业务标识与磁盘目录名分离；排查路径长度时同时覆盖暂存、日志、候选产物和正式资产，不能只修第一个 mkdir/mkdtemp。
+## Windows 目录重命名 EPERM：先查文件监听（2026-10-25）
+
+- 触发：开发模式下中台工程物化、同步的 `fs.rename` 持续 EPERM，重试无效。
+- 原因：运行期数据目录（Platforms、SharedResources、.babylon-editor）位于仓库内，被 Vite 开发服务器的 chokidar 逐目录 fs.watch；Windows 下被监听目录无法重命名。
+- 修复/预防：运行期写入目录必须加入 vite.config.ts 的 watch.ignored；占用重试只能处理短暂锁，持续占用要有安全回退（仅对暂存区、目标不存在的移动用复制替代）。排查 EPERM 时先用“监听/不监听”对照复现，再判断是杀毒/索引还是自身进程。
+
+## Node 22 源码测试的 ESM 初始化顺序（2026-10-25）
+
+- 触发：静态导入同一模块图中的 index/contract，同时在 index 顶层同步 require 并解构 contract 的常量，出现 `Cannot access 'MAX_SKYBOX_FILE_BYTES' before initialization`。
+- 根因/修复：同步 require 提前读取尚未初始化的 ESM 导出，并非 Node 版本不受支持。使用静态 `.ts` 依赖交由 ESM 排序；先核项目已启用 `rewriteRelativeImportExtensions`，确保构建后为 `.js`。
+- 预防：用独立子进程覆盖两种静态导入顺序，再构建并核产物；不能仅通过推迟常量校验、升级 Node 或跳过文件掩盖初始化问题。旧测试夹具与真实产品合同漂移须另行归因。
+
+## Electron spawn EACCES 可能是强制提权（2026-10-25）
+
+- 触发：Node启动Electron报EACCES，但PE/架构/版本、75个运行时文件和缓存校验全一致，ACL也允许执行。
+- 根因：原生CreateProcess错误740；精确HKCU AppCompatFlags/Layers路径含RUNASADMIN，普通子进程不能满足强制提权要求。
+- 修复/预防：先记录真实Win32错误，只备份并移除已确认的当前用户精确路径兼容性值；验证普通spawn版本及真实集成。不要仅凭Node错误盲目重装、改ACL或换版本，也不要假定所有EACCES都是同一原因。
+
+## 脚本初始化诊断保留原调用与异常合同（2026-10-25）
+
+- 条件：constructor/onStart同步分段不能把读取/编译/排队的异步墙钟当CPU，也不能在已吞异常的callLifecycle外层将失败记为成功。
+- 做法：在原异常边界内记录同步attempt与failed，保留可选调用表达式、getter单次读取和receiver；原本不await的Promise继续不等待。诊断sink失败独立记录，不能覆盖原脚本错误。
+- 排名：按完整资源身份在私有内存汇总，公开只保留文件名和运行期ID；达到内存上限须标记排名不完整。单次真实读回仅证明可观测性，不证明性能提升。
+
+## 新光照编码必须先建立拒绝边界（2026-10-25）
+
+- 触发：旧入口遇新增lightmap.encoding会成功返回但把result归一化成null，随后保存可能丢结果；未知扩展marker还会让旧shader按旧公式解码。
+- 预防：只有显式新功能使用获批lighting v3，旧版本在迁移/保存/打包前明确拒绝；新版本也严格拒未知codec和非空坏snapshot。冻结真实旧客户端模块作合同回归，旧v2同输入字节直接比较，不仅检查字段存在。
+
+## 图集mip不能依赖编码通道平均或方形边距假设（2026-10-25）
+
+- 实测：Blender5.2.2的8192个PNG通道匹配float32乘255、加0.5后floor，np.rint及float64式有差异；PNG与Blender像素行向相反。EXTEND margin3在三角角点仍黑，不能证明完整矩形gutter。
+- 预防：先用真实PNG解码oracle固定量化/行向，再在线性irradiance中生成mip；真实UV chart逐级认证足印，采用有证明的同chart padding、有限LOD与完整预算。未知覆盖拒绝，不自动降LOD/repack追成功。
+
+## 资产候选需要独立来源和实际工程上下文（2026-10-25）
+
+- 触发：把有Assets依赖的场景搬到孤立temp文件会丢失工程授权；用缩小后的GLB继续声明中台原大小，会被恢复校验正确拒绝。
+- 修复：仅在owned副本建立精确工程上下文，再走真实Home打开；候选登记为独立本地修订并写准确大小，保留原中台版本和原件。验收工具遇加载失败应及时记录，不拿空白画布作像素一致性。
+
+## Renderer ready不等于GI持续有效（2026-10-25）
+
+- 触发：小业务Gamma脚本先给PASS，但截图有GI失效警告；同包无取景诊断确认入场临时材质恢复472→116，几何/矩阵/显隐未变。最终runtime ready仍可为true而GI maps已清空。
+- 预防：验收分别检查资源就绪、lighting runtimeError、HUD错误、GI实际代理/插件及动画结束后的稳定窗口。保留原始PASS并单独写严格复核结果，不覆盖证据或清失效latch追绿。临时显示覆盖须与物理源区分，并保留两侧真实业务修改检测。
+
+## Blender嵌入解释器不一定遵循Python环境变量（2026-10-25）
+
+- 实测Blender5.2.2 `sys.flags.ignore_environment=1`，即使env含PYTHONDONTWRITEBYTECODE=1，startup dont_write_bytecode仍false；普通Python子进程通过不能替代实际嵌入解释器。
+- 修复：仅受控helper导入期间显式置sys.dont_write_bytecode并finally恢复，实际Blender成功/抛错/真实PNG微回归，保持任务目录严格拒绝未知目录与脚本，不把__pycache__加白名单。
+
+## 图形对象身份断言不要输出整个Scene（2026-10-25）
+
+- 触发：Node对两个不同Babylon Material对象生成递归assert diff，尚未打印失败就持续分配，owned runner工作集升至约39.6GB。
+- 预防：身份期望用布尔比较并只附name/uniqueId等有界诊断，纹理/几何比较用独立字节载荷；为新fixture设置合理进程上限。超预算先核PID/父进程/命令与创建时间，再精确停止，终止本身不当语义RED证据。
+
+## Electron原生ESM测试入口不要顶层等待app ready（2026-10-25）
+
+- 两个独立工具实测：bootstrap顶层`await app.whenReady()`会使入口模块未结束、ready无法推进，Playwright launch超时且尚未创建renderer；这不是GI或产品启动失败。
+- 使用`app.whenReady().then(async () => { ... })`注册式初始化，并等待明确host/window就绪receipt；或复用已通过的主入口bootstrap。新工具保持独立userData、核实owned PID退出、删除精确临时bootstrap，失败目录保留。
+- 若bootstrap还要导入产品main，必须在ready前完成该模块求值，使`protocol.registerSchemesAsPrivileged`来得及注册；只把需要ready的查询放进回调。POST-only无窗口入口可以在ready回调运行，两条路径分别测试，不能把主入口也移入ready回调。
+
+## 真实准备门按当前实体合同，采集不能跳过GPU独占缓冲（2026-10-25）
+
+- 当前383工厂的旧`sceneSettings.skybox=null`与实体`components.skybox`同时存在；把前者当成“没有天空盒”造成验收工具误拒。应按实际实体选择链核原HDR SHA、可见祖先和ready/sourceURL，而非把ready随意放宽。
+- 完整场景的薄实例world0可能只有GPU原缓冲，公开CPU镜像为null。小场景/native-instance夹具通过不覆盖该实际薄carrier；遇到无法读取必须保留失败，不能丢属性或拿估算矩阵补数据。功能采集所需同步GPU读回只允许在性能窗口外，保留同帧、预算和GL绑定恢复约束。

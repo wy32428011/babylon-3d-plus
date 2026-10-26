@@ -4,7 +4,8 @@ import { constants, createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { validateSceneLightingBakeSnapshot, type LightingBakeAsset } from '../shared/sceneLightingBakeContract.js';
 import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
-import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { getSceneLightingConfig, migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
+import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 
 type JsonObject = Record<string, unknown>;
 type ResourceOptions = { projectRoot?: string | null; isAuthorizedFile?: (file: string) => boolean; signal?: AbortSignal };
@@ -15,6 +16,8 @@ const inside = (root: string, file: string) => { const relative = path.relative(
 
 function assetReferences(scene: unknown): LightingBakeAsset[] {
   const result = object(object(object(scene)?.sceneSettings)?.lighting)?.result;
+  // 独立资源收集入口也必须执行配置版本门，不能绕过 v2/v3 codec 归属。
+  getSceneLightingConfig(scene);
   if (result === undefined || result === null) return [];
   if (!validateSceneLightingBakeSnapshot(result)) throw new Error('光照烘焙结果格式无效，不能保存或发布独立资产。');
   return (result as { assets: LightingBakeAsset[] }).assets;
@@ -33,8 +36,9 @@ function decodeLightingReference(asset: LightingBakeAsset, projectRoot?: string 
   const match = /(?:^|\/)(Assets\/LightingBakes\/[^/]+\/.+)$/i.exec(normalized);
   if (!match) throw new Error('光照烘焙资产必须位于 Assets/LightingBakes/<任务>/ 目录。');
   const extension = path.extname(source).toLowerCase();
-  if (asset.encoding !== undefined && (asset.kind !== 'geometry' || asset.encoding !== 'json' && asset.encoding !== 'binary-v1')) throw new Error('光照烘焙资产编码无效。');
-  if (extension !== (asset.kind === 'lightmap' ? '.png' : asset.kind === 'geometry' && asset.encoding === 'binary-v1' ? '.bin' : '.json')) throw new Error('光照烘焙资产的类型与扩展名不一致。');
+  if (asset.encoding !== undefined && !(asset.kind === 'geometry' && (asset.encoding === 'json' || asset.encoding === 'binary-v1')
+    || asset.kind === 'lightmap' && (asset.encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(asset.encoding)))) throw new Error('光照烘焙资产编码无效。');
+  if (extension !== (asset.kind === 'lightmap' ? isLightingLightmapMipEncoding(asset.encoding) ? '.bin' : '.png' : asset.kind === 'geometry' && asset.encoding === 'binary-v1' ? '.bin' : '.json')) throw new Error('光照烘焙资产的类型与扩展名不一致。');
   if (!path.isAbsolute(source) && !projectRoot) throw new Error('便携光照资产缺少工程目录。');
   const sourcePath = path.isAbsolute(source) ? path.resolve(source) : path.resolve(projectRoot!, ...normalized.split('/'));
   const relativePath = match[1];

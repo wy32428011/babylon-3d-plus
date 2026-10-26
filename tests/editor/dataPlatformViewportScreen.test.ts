@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { CURRENT_SCENE_FILE_VERSION } from '../../electron/shared/sceneFileVersion.ts';
 import test, { after } from 'node:test';
 import { createP4SsrTestModules } from '../helpers/p4SsrTestModules.mjs';
 
@@ -42,7 +43,7 @@ test('视窗大屏只保存公开地址和嵌入引用', () => {
   });
 });
 
-test('完整大屏以 v6 场景配置序列化，并兼容旧 v4 文件', () => {
+test('完整大屏以当前场景配置序列化，并兼容旧 v4 文件', () => {
   const scene = createEmptySceneDocument('视窗大屏');
   scene.sceneSettings.viewportScreen = createDataPlatformViewportScreen({
     projectId: 'project-1',
@@ -51,7 +52,7 @@ test('完整大屏以 v6 场景配置序列化，并兼容旧 v4 文件', () => 
   });
 
   const serialized = JSON.parse(serializeScene(scene)) as { version: number; scene: typeof scene };
-  assert.equal(serialized.version, 6);
+  assert.equal(serialized.version, CURRENT_SCENE_FILE_VERSION);
   assert.deepEqual(serialized.scene.sceneSettings.viewportScreen, scene.sceneSettings.viewportScreen);
   assert.deepEqual(deserializeScene(JSON.stringify(serialized)).sceneSettings.viewportScreen, scene.sceneSettings.viewportScreen);
 

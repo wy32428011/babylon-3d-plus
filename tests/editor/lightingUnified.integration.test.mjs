@@ -25,12 +25,13 @@ await writeFile(entry, [
   "export { createCommandHistory } from '../../src/editor/commands/CommandHistory.ts';",
   "export { serializeScene, deserializeScene } from '../../src/editor/project/SceneSerializer.ts';",
   "export { getSceneLightingBakeSignature } from '../../electron/shared/sceneLightingBakeContract.ts';",
+  "export { CURRENT_SCENE_FILE_VERSION } from '../../electron/shared/sceneFileVersion.ts';",
 ].join('\n'));
 await build({ configFile: false, publicDir: false, logLevel: 'silent',
   ssr: { noExternal: ['@linkiez/dxf-renew', /^lodash\//] },
   build: { ssr: entry, outDir: path.join(root, 'ssr'), rolldownOptions: { output: { entryFileNames: 'modules.mjs' } } },
 });
-const { useEditorStore, createEmptySceneDocument, createCommandHistory, serializeScene, deserializeScene, getSceneLightingBakeSignature }
+const { useEditorStore, createEmptySceneDocument, createCommandHistory, serializeScene, deserializeScene, getSceneLightingBakeSignature, CURRENT_SCENE_FILE_VERSION }
   = await import(pathToFileURL(path.join(root, 'ssr/modules.mjs')).href);
 store = useEditorStore;
 initial = store.getState();
@@ -54,7 +55,7 @@ test('新场景只使用版本化lighting与appearance，保存不再写旧五�
   assert.equal(scene.sceneSettings.lighting.environmentIntensity, 1);
   assert.equal(scene.sceneSettings.lighting.bake.enabled, true);
   const saved = JSON.parse(serializeScene(scene));
-  assert.equal(saved.version, 6, '旧编辑器必须明确拒绝新格式，不能按旧阴影默认值误读');
+  assert.equal(saved.version, CURRENT_SCENE_FILE_VERSION, '旧编辑器必须明确拒绝新格式，不能按旧阴影默认值误读');
   for (const key of legacyKeys) assert.equal(Object.hasOwn(saved.scene.sceneSettings, key), false, key);
   assert.deepEqual(deserializeScene(JSON.stringify(saved)).sceneSettings.lighting, scene.sceneSettings.lighting);
 });

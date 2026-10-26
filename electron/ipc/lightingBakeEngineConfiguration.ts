@@ -41,11 +41,24 @@ async function readConfigurationFile(configPath: string): Promise<ConfigurationF
 
 async function installationCandidates(): Promise<string[]> {
   if (process.platform !== 'win32') return ['/usr/bin/blender', '/usr/local/bin/blender', '/Applications/Blender.app/Contents/MacOS/Blender'];
-  const base = path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Blender Foundation');
-  try {
-    const names = (await fs.readdir(base)).filter(name => /^Blender \d/.test(name)).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-    return names.map(name => path.join(base, name, 'blender.exe'));
-  } catch { return []; /* 未安装时由状态接口说明。 */ }
+  const bases = [path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Blender Foundation')];
+  const local = process.env.LOCALAPPDATA;
+  // 保留系统安装的优先级；每用户安装也可能使用官方便携包的 blender-x.y.z-windows-x64 目录名。
+  if (local && path.isAbsolute(local)) bases.push(path.join(local, 'Programs', 'Blender Foundation'));
+  const result: string[] = [];
+  for (const [index, base] of bases.entries()) {
+    try {
+      const names = (await fs.readdir(base, { withFileTypes: true }))
+        .filter(entry => (index === 0 && /^Blender \d/.test(entry.name))
+          || (entry.isDirectory() && !entry.isSymbolicLink()
+            && (/^Blender \d/i.test(entry.name) || /^blender-\d+\.\d+(?:\.\d+)?-windows-x64$/i.test(entry.name))))
+        .map(entry => entry.name)
+        .sort((a, b) => (b.match(/\d+(?:\.\d+)*/)?.[0] ?? '').localeCompare(a.match(/\d+(?:\.\d+)*/)?.[0] ?? '', undefined, { numeric: true })
+          || b.localeCompare(a, undefined, { numeric: true }));
+      result.push(...names.map(name => path.join(base, name, 'blender.exe')));
+    } catch { /* 单个安装根缺失或不可读时继续其它已知根；最终仍由原路径/版本检测判定可用性。 */ }
+  }
+  return result;
 }
 
 /** 配置写入与完整烘焙生命周期共用预约，防止检测、落盘和新任务交错。 */

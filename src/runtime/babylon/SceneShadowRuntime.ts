@@ -153,6 +153,7 @@ function isShadowSurface(mesh: AbstractMesh): boolean {
 
   const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
   return metadata?.editorSkyboxSphere !== true
+    && metadata?.runtimeSkybox !== true
     && metadata?.editorChartMarker !== true
     && metadata?.editorAutoPatrolMarker !== true
     && metadata?.editorShadowCatcher !== true;

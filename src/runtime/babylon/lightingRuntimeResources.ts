@@ -7,6 +7,10 @@ import { LightingProbeSampler } from './lightingProbes.ts';
 import { LightingResourceError } from './lightingRuntimeDiagnostic.ts';
 import { decodeLightingGeometryResource } from '../../../electron/shared/sceneLightingBakeGeometryBinary.ts';
 import { getLightingAtlasDimensions, validateLightingPng } from '../../../electron/shared/sceneLightingBakeArtifacts.ts';
+import { getLightingLightmapBaseEncoding } from '../../../electron/shared/sceneLightingTextureCodec.ts';
+import { isLightingLightmapMipEncoding, validateLightingLightmapMipAsset } from '../../../electron/shared/sceneLightingLightmapMips.ts';
+import { validateSceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeData.ts';
+import type { createLightingLightmapMipTexture } from './lightingLightmapMipTexture.ts';
 export { validateLightingGeometry } from '../../../electron/shared/sceneLightingBakeArtifacts.ts';
 
 export type LoadedLightingResources = {
@@ -80,7 +84,10 @@ async function loadTexture(scene: Scene, bytes: ArrayBuffer, signal: AbortSignal
 }
 
 /** 内部对照入口：生产默认四项并发，设为 1 可重复串行基线。 */
-export type LightingResourceLoadOptions = { concurrency?: 1 | 4; textureDecoder?: 'bitmap' | 'image' };
+export type LightingResourceLoadOptions = { concurrency?: 1 | 4; textureDecoder?: 'bitmap' | 'image';
+  maxTextureBytes?: number; onRestoreError?: (error: Error) => void;
+  /** 内部事务单元注入；生产使用真实WebGL2适配，不能据mock宣称GPU上传已通过。 */
+  mipTextureFactory?: typeof createLightingLightmapMipTexture };
 
 /** 全部资源验证、解码完成后才返回候选集合，调用方在一次同步事务内切换可见几何。 */
 export async function loadLightingResources(snapshot: SceneLightingBakeSnapshot, scene: Scene, signal?: AbortSignal,
@@ -94,20 +101,35 @@ export async function loadLightingResources(snapshot: SceneLightingBakeSnapshot,
   try {
     controller.signal.throwIfAborted();
     const atlasDimensions = getLightingAtlasDimensions(snapshot);
+    const hasMips = snapshot.assets.some(asset => asset.kind === 'lightmap' && isLightingLightmapMipEncoding(asset.encoding));
+    if (hasMips && !validateSceneLightingBakeSnapshot(snapshot)) throw new Error('光照mip资源清单或recipe无效。');
+    const textureBudget = options.maxTextureBytes ?? snapshot.statistics.textureBytes;
+    if (hasMips && (!Number.isSafeInteger(textureBudget) || textureBudget <= 0 || snapshot.statistics.textureBytes > textureBudget)) throw new Error('光照mip全部RGBA级超过当前纹理预算。');
     const loadAsset = async (asset: LightingBakeAsset) => {
       try {
         const bytes = await readAsset(asset, controller.signal);
-        if (asset.kind !== 'geometry' && asset.encoding !== undefined) throw new Error('只有光照几何可以声明资源编码。');
         if (asset.kind === 'lightmap') {
-          validateLightingPng(new Uint8Array(bytes), atlasDimensions.width * atlasDimensions.height, atlasDimensions);
-          textures.set(asset.id, await loadTexture(scene, bytes, controller.signal, options.textureDecoder));
+          const encoding = getLightingLightmapBaseEncoding(asset.encoding);
+          if (encoding === 'rgbm-gamma' && (typeof asset.rgbmRange !== 'number' || asset.rgbmRange < 1 || !Number.isFinite(asset.rgbmRange))) throw new Error('Gamma RGBM 范围无效。');
+          if (isLightingLightmapMipEncoding(asset.encoding)) {
+            const decoded = validateLightingLightmapMipAsset(asset, new Uint8Array(bytes), Math.min(asset.textureBytes!, textureBudget, 0xffffffff));
+            const create = options.mipTextureFactory ?? (await import('./lightingLightmapMipTexture.ts')).createLightingLightmapMipTexture;
+            textures.set(asset.id, create(scene, decoded, { maxTextureBytes: decoded.totalTextureBytes, signal: controller.signal, onRestoreError: options.onRestoreError }));
+          } else {
+            validateLightingPng(new Uint8Array(bytes), atlasDimensions.width * atlasDimensions.height, atlasDimensions);
+            textures.set(asset.id, await loadTexture(scene, bytes, controller.signal, options.textureDecoder));
+          }
         } else {
           if (asset.kind === 'geometry') {
+            if (asset.encoding !== undefined && asset.encoding !== 'json' && asset.encoding !== 'binary-v1') throw new Error('光照几何编码无效。');
             const geometry = decodeLightingGeometryResource(new Uint8Array(bytes), asset.encoding);
             if (asset.geometryVersion !== undefined && asset.geometryVersion !== geometry.version) throw new Error('光照几何与结果清单版本不一致。');
             geometries.set(asset.id, geometry);
           }
-          else if (asset.id === snapshot.probeAssetId) probes = new LightingProbeSampler(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as LightingProbeData);
+          else {
+            if (asset.encoding !== undefined) throw new Error('光照探针不能声明资源编码。');
+            if (asset.id === snapshot.probeAssetId) probes = new LightingProbeSampler(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as LightingProbeData);
+          }
         }
       } catch (error) {
         // 取消沿用原始 reason；首个资源失败在中止同批任务前记录清单身份。

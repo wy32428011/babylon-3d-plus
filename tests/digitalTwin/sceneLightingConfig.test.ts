@@ -40,8 +40,19 @@ test('新配置默认完整、互不共享可变状态，未知明确版本拒�
   lighting.main.intensity = 8; lighting.disabledLightIds.push('test');
   assert.equal(normalizeSceneLightingConfig(null).main.intensity, 1.05);
   assert.deepEqual(normalizeSceneLightingConfig(null).disabledLightIds, []);
-  assert.throws(() => normalizeSceneLightingConfig({ version: 3 }), /版本/);
+  // 用户批准可选lighting v3；旧客户端拒3由冻结旧模块合同保留，当前未知版本门前移到4。
+  assert.throws(() => normalizeSceneLightingConfig({ version: 4 }), /版本/);
   assert.throws(() => normalizeSceneAppearanceConfig({ version: 2 }), /版本/);
+});
+
+test('获批可选v3支持显式Gamma但旧无编码仍v2，未知codec与非空坏结果明确拒绝', () => {
+  const gamma = normalizeSceneLightingConfig({ version: 3, bake: { lightmapEncoding: 'rgbm-gamma' } });
+  assert.equal(gamma.version, 3); assert.equal(gamma.bake.lightmapEncoding, 'rgbm-gamma');
+  const legacy = normalizeSceneLightingConfig({ version: 2 });
+  assert.equal(legacy.version, 2); assert.equal(Object.hasOwn(legacy.bake, 'lightmapEncoding'), false);
+  assert.throws(() => normalizeSceneLightingConfig({ version: 2, bake: { lightmapEncoding: 'rgbm-gamma' } }), /版本 3/);
+  assert.throws(() => normalizeSceneLightingConfig({ version: 3, bake: { lightmapEncoding: 'unknown' } }), /编码不受支持/);
+  assert.throws(() => normalizeSceneLightingConfig({ version: 3, result: { unknownCodec: true } }), /烘焙结果格式/);
 });
 
 test('规范化有限值和颜色，不丢失false、零、未知扩展与实体ID顺序', () => {

@@ -1,4 +1,5 @@
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
+import { resolveLightingMaterialOverride, getLightingMaterialSourceOwner } from './lightingMaterialOverrides.ts';
 import { Material } from '@babylonjs/core/Materials/material.js';
 import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
@@ -195,8 +196,11 @@ function materialAlphaInput(material: PBRMaterial | StandardMaterial, mesh?: Abs
   };
 }
 
-export async function exportLightingMaterial(material: Material | null, capture?: LightingTextureCapture,
+export async function exportLightingMaterial(rawMaterial: Material | null, capture?: LightingTextureCapture,
   mesh?: AbstractMesh): Promise<LightingBakeMaterialInput> {
+  const physical = resolveLightingMaterialOverride(rawMaterial, mesh ? getLightingMaterialSourceOwner(mesh) : undefined);
+  if (!physical.stable) throw new Error('显示材质存在真实业务修改，不能将临时入口材质当作有效烘焙输入。');
+  const material = physical.material;
   if (!material) return { baseColor: [0.8, 0.8, 0.8], alpha: 1, alphaMode: 'opaque', useTextureAlpha: false,
     useVertexAlpha: false, meshVisibility: 1, metallic: 0, roughness: 0.8, emissive: [0, 0, 0], doubleSided: false };
   if (!(material instanceof PBRMaterial) && !(material instanceof StandardMaterial)) {

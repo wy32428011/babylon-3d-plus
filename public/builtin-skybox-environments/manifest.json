@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "sourceSha256": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+  "resources": [
+    {
+      "version": 1,
+      "format": "env",
+      "sourceSha256": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "sourceRevision": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "recipeKey": "babylon-9.12.0-panorama-bilinear-v2-ggx4096-rgbd-png-v1",
+      "sha256": "5cef23d1ccc3370d06f93470eeb2cab3df76594602dad4c91f17cd85638e457d",
+      "byteLength": 728031,
+      "faceSize": 256,
+      "file": "256.env"
+    },
+    {
+      "version": 1,
+      "format": "env",
+      "sourceSha256": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "sourceRevision": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "recipeKey": "babylon-9.12.0-panorama-bilinear-v2-ggx4096-rgbd-png-v1",
+      "sha256": "176bc73271e44dfe7a2bab382fc2b3e169f489f5e857ed1b74ba138339c45cc8",
+      "byteLength": 2280803,
+      "faceSize": 512,
+      "file": "512.env"
+    },
+    {
+      "version": 1,
+      "format": "env",
+      "sourceSha256": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "sourceRevision": "b35653ca75a00d75392649d29cd27001e5af79dcc6412aa557241bb3ecda1420",
+      "recipeKey": "babylon-9.12.0-panorama-bilinear-v2-ggx4096-rgbd-png-v1",
+      "sha256": "6d928314e62da287c918eb9cd4f3b1b241420512b27781fe6bd22b1318cf9de9",
+      "byteLength": 6840120,
+      "faceSize": 1024,
+      "file": "1024.env"
+    }
+  ]
+}

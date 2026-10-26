@@ -1,14 +1,10 @@
 import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { ProjectSkyboxAssetEntry, SkyboxAssetFormat } from '../types.js';
 
-const require = createRequire(import.meta.url);
-type AssetRegistryModule = typeof import('./assetRegistry.js');
-const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
-const { encodeAssetUrl } = require(`./assetRegistry${runtimeExtension}`) as AssetRegistryModule;
+import { encodeAssetUrl } from './assetRegistry.ts';
 
 export const MAX_SKYBOX_FILE_BYTES = 512 * 1024 * 1024;
 const HDR_HEADER_MAX_BYTES = 4096;

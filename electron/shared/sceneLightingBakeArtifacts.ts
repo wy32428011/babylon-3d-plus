@@ -1,4 +1,6 @@
 import type { LightingBakeGeometry, LightingProbeData, SceneLightingBakeSnapshot } from './sceneLightingBakeContract.ts';
+import { isLightingLightmapMipEncoding } from './sceneLightingLightmapMips.ts';
+import { getLightingLightmapTextureBytes } from './sceneLightingTextureCodec.ts';
 function finiteNumbers(values: Iterable<unknown>): boolean { for (const value of values) if (typeof value !== 'number' || !Number.isFinite(value)) return false; return true; }
 /** 只接受完整有限的三角网格；错误结果不得覆盖当前可用的原几何。 */
 export function validateLightingGeometry(value: unknown): LightingBakeGeometry {
@@ -43,6 +45,23 @@ export function getLightingAtlasDimensions(snapshot: Pick<SceneLightingBakeSnaps
   const { atlasCount, textureBytes } = snapshot.statistics;
   if (count === 0 || !Number.isSafeInteger(atlasCount) || atlasCount !== count || !Number.isSafeInteger(textureBytes) || textureBytes <= 0) {
     throw new Error('光照图集数量或纹理字节统计与实际资源不一致。');
+  }
+  const maps = snapshot.assets.filter(asset => asset.kind === 'lightmap'), mips = maps.filter(asset => isLightingLightmapMipEncoding(asset.encoding));
+  if (mips.length) {
+    let mipBytes = 0; let dimensions: { width: number; height: number } | undefined;
+    for (const asset of mips) {
+      if (!Number.isSafeInteger(asset.width) || !Number.isSafeInteger(asset.height) || !Number.isSafeInteger(asset.levelCount)
+        || asset.width! < 2 || asset.height! < 2 || asset.levelCount! < 2 || asset.levelCount! > 5
+        || asset.textureBytes !== getLightingLightmapTextureBytes(asset.width!, asset.height!, asset.levelCount! - 1)) throw new Error('光照mip图集元数据与RGBA统计不一致。');
+      if (dimensions && (dimensions.width !== asset.width || dimensions.height !== asset.height)) throw new Error('光照图集必须使用一致的基础尺寸。');
+      dimensions = { width: asset.width!, height: asset.height! }; mipBytes += asset.textureBytes!;
+    }
+    const pngCount = count - mips.length, pngBytes = textureBytes - mipBytes;
+    if (pngCount) {
+      const size = Math.sqrt(pngBytes / (pngCount * 4));
+      if (!Number.isSafeInteger(size) || size <= 0 || size !== dimensions!.width || size !== dimensions!.height) throw new Error('混合光照PNG与mip图集尺寸/统计不一致。');
+    } else if (pngBytes !== 0) throw new Error('光照mip全部RGBA级总量与统计不一致。');
+    return dimensions!;
   }
   const pixels = textureBytes / (count * 4), size = Math.sqrt(pixels);
   if (!Number.isSafeInteger(pixels) || !Number.isSafeInteger(size) || size <= 0 || size * size * count * 4 !== textureBytes) {

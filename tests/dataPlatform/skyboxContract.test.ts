@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import {
   assertUniqueSkyboxRecords,
@@ -12,6 +13,31 @@ import {
 const LONG_ID = '2052912068767571969';
 const LONG_REVISION = '2052912068767571970';
 const VALID_SHA = 'a'.repeat(64);
+
+test('天空盒索引与契约以任意静态导入顺序加载，保持规范路径和大小校验', () => {
+  const indexUrl = new URL('../../electron/ipc/dataPlatformSkyboxIndex.ts', import.meta.url).href;
+  const contractUrl = new URL('../../electron/ipc/dataPlatformSkyboxContract.ts', import.meta.url).href;
+  const imports = [
+    `import * as index from ${JSON.stringify(indexUrl)};`,
+    `import * as contract from ${JSON.stringify(contractUrl)};`,
+  ];
+  for (const order of [imports, [...imports].reverse()]) {
+    // 独立进程保留真实 ESM 初始化顺序，避免当前测试的模块缓存掩盖同步 require 提前读取。
+    const script = `${order.join('\n')}
+      import assert from 'node:assert/strict';
+      assert.equal(contract.MAX_SKYBOX_FILE_BYTES, 512 * 1024 * 1024);
+      assert.equal(index.getDataPlatformSkyboxRelativePath('42', 'hdr'), 'Assets/Skyboxes/DataPlatform/Skybox-42/skybox.hdr');
+      assert.throws(() => index.getDataPlatformSkyboxRelativePath('042', 'hdr'), /正十进制/);
+      const entry = { resourceId: '42', displayName: '测试天空盒', relativePath: 'Assets/Skyboxes/DataPlatform/Skybox-42/skybox.hdr',
+        format: 'hdr', fileSizeBytes: contract.MAX_SKYBOX_FILE_BYTES + 1, sha256: 'a'.repeat(64), revision: '1', status: 'active', syncedAt: '2026-10-25T00:00:00Z' };
+      assert.throws(() => index.buildDataPlatformSkyboxPlan([], {version: 1, entries: [entry]}, new Set()), /fileSizeBytes/);
+    `;
+    const child = spawnSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', script], {
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(child.status, 0, child.stderr || String(child.error));
+  }
+});
 
 function createRawRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {

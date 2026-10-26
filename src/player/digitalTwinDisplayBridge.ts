@@ -16,6 +16,8 @@ type DigitalTwinViewerRenderSizeTarget = {
     setHardwareScalingLevel: (value: number) => void;
   };
   resize: () => void;
+  /** 共享视口协调基础DPR与临时画质策略；旧目标继续使用原engine路径。 */
+  setBaseHardwareScalingLevel?: (value: number) => void;
 };
 
 type DigitalTwinViewerRenderResolution = {
@@ -75,7 +77,8 @@ export function syncDigitalTwinViewerRenderSize(
   resolution: DigitalTwinViewerRenderResolution,
 ): void {
   const hardwareScalingLevel = getDigitalTwinViewerHardwareScalingLevel(resolution);
-  if (Math.abs(target.engine.getHardwareScalingLevel() - hardwareScalingLevel) > HARDWARE_SCALING_LEVEL_EPSILON) {
+  if (target.setBaseHardwareScalingLevel) target.setBaseHardwareScalingLevel(hardwareScalingLevel);
+  else if (Math.abs(target.engine.getHardwareScalingLevel() - hardwareScalingLevel) > HARDWARE_SCALING_LEVEL_EPSILON) {
     target.engine.setHardwareScalingLevel(hardwareScalingLevel);
   }
   target.resize();

@@ -140,7 +140,26 @@ export async function disposeDataPlatformImageSync(): Promise<void> {
 /** 读取本地同步图片索引；索引缺失或损坏时返回空列表，不影响同步重建。 */
 export async function listSyncedImages(editorRoot: string): Promise<SyncedImageAssetEntry[]> {
   const index = await readImageIndex(editorRoot);
-  return index.images;
+  const images: SyncedImageAssetEntry[] = [];
+  const root = path.resolve(editorRoot), imageRoot = getProjectImagesRoot(root);
+  for (const image of index.images) {
+    // 缓存清单不能扩大文件授权：只恢复 Assets/Images 下精确登记的普通图片。
+    if (path.basename(image.fileName) !== image.fileName || !IMAGE_EXTENSION_PATTERN.test(image.fileName)) continue;
+    const filePath = path.resolve(imageRoot, image.fileName);
+    if (path.relative(path.resolve(image.filePath), filePath) !== '') continue;
+    try {
+      const [actualRoot, actualFile, stat] = await Promise.all([fs.realpath(root), fs.realpath(filePath), fs.lstat(filePath)]);
+      const relative = path.relative(actualRoot, actualFile);
+      if (relative.startsWith('..') || path.isAbsolute(relative) || stat.isSymbolicLink() || !stat.isFile()
+        || stat.size <= 0 || stat.size > MAX_IMAGE_FILE_BYTES) continue;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    authorizeAssetFile(filePath);
+    images.push({ ...image, filePath, sourceUrl: encodeAssetUrl(filePath) });
+  }
+  return images;
 }
 
 /** 按稳定引用在候选根目录中查找已同步图片，用于发布打包与运行时引用解析。 */
@@ -403,8 +422,11 @@ function buildMergedIndex(
 
 async function queryAllIcons(baseUrl: string, signal: AbortSignal): Promise<IconRecord[]> {
   const records: IconRecord[] = [];
+  const seenIds = new Set<string>(), seenIconKeys = new Set<string>();
+  let total: number | undefined, effectivePageSize: number | undefined, received = 0;
 
   for (let pageNum = 1; pageNum <= MAX_IMAGE_QUERY_PAGES; pageNum += 1) {
+    signal.throwIfAborted();
     const payload = await requestDataPlatformJson({
       baseUrl,
       endpointPath: IMAGE_QUERY_PATH,
@@ -417,21 +439,49 @@ async function queryAllIcons(baseUrl: string, signal: AbortSignal): Promise<Icon
       timeoutMs: QUERY_TIMEOUT_MS,
       context: '查询数据中台图标库',
     });
+    signal.throwIfAborted();
     const page = normalizePagedResponse(payload);
-    records.push(...page.records);
-
-    if (records.length > MAX_IMAGE_RECORDS) {
+    if (page.pageNum !== undefined && page.pageNum !== pageNum) throw new Error(`数据中台图标分页页号不符：请求 ${pageNum}，返回 ${page.pageNum}。`);
+    if (total === undefined) total = page.total;
+    else if (page.total !== total) throw new Error(`数据中台图标分页 total 漂移：原 ${total}，第 ${pageNum} 页为 ${page.total}。`);
+    if (total > MAX_IMAGE_RECORDS) {
       throw new Error(`数据中台图标数量超过 ${MAX_IMAGE_RECORDS} 项限制。`);
     }
-    if (page.records.length === 0 || page.records.length < IMAGE_QUERY_PAGE_SIZE || records.length >= page.total) {
-      return records;
+    if (page.pageSize !== undefined) {
+      // 当前服务将200截为100；仍兼容旧服务实际返回200，未知容量不猜测。
+      if (page.pageSize !== 100 && page.pageSize !== IMAGE_QUERY_PAGE_SIZE) throw new Error(`数据中台图标分页容量不受支持：${page.pageSize}。`);
+      if (effectivePageSize !== undefined && effectivePageSize !== page.pageSize) throw new Error('数据中台图标分页 pageSize 漂移。');
+      effectivePageSize = page.pageSize;
     }
+    const count = page.ids.length;
+    if (count === 0 && received < total) throw new Error(`数据中台图标第 ${pageNum} 页为空，尚缺 ${total - received} 项，未更新本地索引。`);
+    if (effectivePageSize === undefined && received + count < total) {
+      // 有total但缺page字段的旧shape，以首个未完原始页确定容量；不能用过滤后的图片数。
+      if (count !== 100 && count !== IMAGE_QUERY_PAGE_SIZE) throw new Error(`数据中台图标旧响应无法确认分页容量：第 ${pageNum} 页 ${count} 项。`);
+      effectivePageSize = count;
+    }
+    if (effectivePageSize !== undefined) {
+      if (Math.ceil(total / effectivePageSize) > MAX_IMAGE_QUERY_PAGES) throw new Error(`数据中台图标按每页 ${effectivePageSize} 项超过 ${MAX_IMAGE_QUERY_PAGES} 页限制。`);
+      const expected = Math.min(effectivePageSize, total - received);
+      if (count !== expected) throw new Error(`数据中台图标第 ${pageNum} 页原始记录数不符：应为 ${expected}，实际 ${count}。`);
+    }
+    received += count;
+    if (received > MAX_IMAGE_RECORDS || received > total) throw new Error('数据中台图标分页原始记录总量与 total 不符或超过限制。');
+    for (const id of page.ids) {
+      if (seenIds.has(id)) throw new Error(`数据中台图标分页重复 ID：${id}。`);
+      seenIds.add(id);
+    }
+    for (const record of page.records) {
+      if (seenIconKeys.has(record.iconKey)) throw new Error(`数据中台图标分页重复 iconKey：${record.iconKey}。`);
+      seenIconKeys.add(record.iconKey); records.push(record);
+    }
+    if (received === total) return records;
   }
 
   throw new Error(`数据中台图标分页超过 ${MAX_IMAGE_QUERY_PAGES} 页限制。`);
 }
 
-function normalizePagedResponse(value: unknown): { records: IconRecord[]; total: number } {
+function normalizePagedResponse(value: unknown): { records: IconRecord[]; ids: string[]; total: number; pageNum?: number; pageSize?: number } {
   if (!isPlainObject(value)) throw new Error('数据中台图标库响应结构不正确。');
   if (value.success !== true) {
     const message = normalizeOptionalString(value.message) ?? '数据中台图标库查询失败。';
@@ -440,15 +490,28 @@ function normalizePagedResponse(value: unknown): { records: IconRecord[]; total:
   if (!isPlainObject(value.data) || !Array.isArray(value.data.records)) {
     throw new Error('数据中台图标库响应缺少 data.records。');
   }
+  if (value.data.records.length > IMAGE_QUERY_PAGE_SIZE) throw new Error('数据中台图标分页 records 超过请求容量。');
   const records: IconRecord[] = [];
-  value.data.records.forEach((raw, index) => {
+  const ids: string[] = [];
+  for (let index = 0; index < value.data.records.length; index += 1) {
+    const raw: unknown = value.data.records[index];
+    if (!isPlainObject(raw)) throw new Error(`数据中台图标第 ${index + 1} 项不是对象。`);
+    ids.push(normalizeRequiredId(raw.id, index));
     const record = normalizeIconRecord(raw, index);
     if (record) records.push(record);
-  });
+  }
   return {
-    records,
-    total: normalizeNonNegativeInteger(value.data.total, records.length),
+    records, ids,
+    total: normalizeIconPageInteger(value.data.total, 'total', 0),
+    ...(value.data.pageNum === undefined ? {} : { pageNum: normalizeIconPageInteger(value.data.pageNum, 'pageNum', 1) }),
+    ...(value.data.pageSize === undefined ? {} : { pageSize: normalizeIconPageInteger(value.data.pageSize, 'pageSize', 1) }),
   };
+}
+
+function normalizeIconPageInteger(value: unknown, field: string, minimum: number): number {
+  const number = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(number) || number < minimum) throw new Error(`数据中台图标分页 ${field} 缺失或不是有效整数。`);
+  return number;
 }
 
 /** 收窄图标记录：仅接受 CUSTOM 来源、IMAGE/SVG 类型、ACTIVE 状态且带 iconUrl 的合法图标。 */

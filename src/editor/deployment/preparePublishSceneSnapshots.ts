@@ -1,3 +1,4 @@
+import { prepareSceneSkyboxEnvironments } from '../assets/skyboxPreparationService.ts';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Engine } from '@babylonjs/core/Engines/engine.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
@@ -16,7 +17,7 @@ import { preparePublishResources } from './preparePublishResources';
 
 /** SOURCE 的非入口场景只在隔离副本中更新，不切换编辑器 Store，也不覆盖磁盘场景。 */
 export async function preparePublishSceneSnapshot(sceneContent: string, assertCurrent: () => void, pushLog: (message: string) => void,
-  prepareSkyboxes?: (scene: SceneDocument) => Promise<SceneDocument>): Promise<string> {
+  prepareSkyboxes?: (scene: SceneDocument) => Promise<SceneDocument>, preparationSignal?: AbortSignal): Promise<string> {
   assertCurrent();
   const scene = deserializeScene(sceneContent);
   const resources = await preparePublishResources(sceneContent, assertCurrent);
@@ -40,7 +41,12 @@ export async function preparePublishSceneSnapshot(sceneContent: string, assertCu
   }
   issues.push(...updated.issues.map(issue => issue.message));
   if (issues.length) throw new Error(issues.join('\n'));
-  const preparedScene = prepareSkyboxes ? await prepareSkyboxes(updated.scene) : updated.scene;
+  const restoredScene = prepareSkyboxes ? await prepareSkyboxes(updated.scene) : updated.scene;
+  assertCurrent();
+  const preparation = new AbortController();
+  const preparedScene = await prepareSceneSkyboxEnvironments(restoredScene,
+    preparationSignal ? AbortSignal.any([preparation.signal, preparationSignal]) : preparation.signal,
+    () => { try { assertCurrent(); } catch (error) { preparation.abort(error); } }, crypto.randomUUID());
   assertCurrent();
   const readyScene = await renderPublishSceneSnapshot(preparedScene, assertCurrent, pushLog);
   return serializeScene(readyScene);

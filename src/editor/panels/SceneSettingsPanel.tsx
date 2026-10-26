@@ -1,3 +1,4 @@
+import { skyboxRuntimeStatus } from '../loading/skyboxRuntimeStatus';
 import { SceneModelEntrancePanel } from './SceneModelEntrancePanel';
 import { SceneModelStatisticsPanel } from './SceneModelStatisticsPanel';
 import { SceneOpeningAnimationPanel } from './SceneOpeningAnimationPanel';
@@ -8,6 +9,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   type DragEvent,
   type FocusEvent,
   type KeyboardEvent,
@@ -41,7 +43,6 @@ import {
   SCENE_SKYBOX_RESOLUTIONS,
   SCENE_SKYBOX_ROTATION_MAX,
   SCENE_SKYBOX_ROTATION_MIN,
-  SCENE_SKYBOX_VIEW_DISTANCE_MIN,
   SCENE_VIEW_DISTANCE_MAX,
   SCENE_VIEW_DISTANCE_MIN,
   type SceneEnvironmentTransform,
@@ -151,6 +152,9 @@ type SceneSettingsPanelProps = {
 
 export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const scene = useEditorStore((state) => state.scene);
+  const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  const skyboxRuntimeSnapshot = useSyncExternalStore(skyboxRuntimeStatus.subscribe, skyboxRuntimeStatus.getSnapshot, skyboxRuntimeStatus.getSnapshot);
+  const currentSkyboxStatus = skyboxRuntimeSnapshot.sceneSessionId === sceneSessionId ? skyboxRuntimeSnapshot : null;
   const renameScene = useEditorStore((state) => state.renameScene);
   const resetSceneToBlank = useEditorStore((state) => state.resetSceneToBlank);
   const importCadReference = useEditorStore((state) => state.importCadReference);
@@ -191,7 +195,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
   const defaultCargoGeneratorMissing = Boolean(
     defaultCargoGeneratorId && !cargoGeneratorOptions.some((option) => option.id === defaultCargoGeneratorId),
   );
-  const minimumViewDistance = skybox ? SCENE_SKYBOX_VIEW_DISTANCE_MIN : SCENE_VIEW_DISTANCE_MIN;
+  const minimumViewDistance = SCENE_VIEW_DISTANCE_MIN;
   const presetVariant = environment?.variants[0] ?? null;
   const customVariants = environment?.variants.slice(1) ?? [];
   const environmentItems = useMemo(() => createModelLibraryItems(environmentAssets), [environmentAssets]);
@@ -561,9 +565,6 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             onChange={(event) => handleViewDistanceChange(event.target.value)}
           />
         </label>
-        {skybox ? (
-          <p className="muted">10 km 天空盒要求可视距离至少为 {SCENE_SKYBOX_VIEW_DISTANCE_MIN} m。</p>
-        ) : null}
       </CollapsibleFieldset>
 
       <RegionViewsPanel readOnly={props.readOnly} />
@@ -603,7 +604,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
 
       <LightingBakeSettingsPanel readOnly={props.readOnly} />
 
-      <CollapsibleFieldset title="球形天空盒">
+      <CollapsibleFieldset title="无限远天空背景">
         <label
           className={skyboxDropActive ? 'environment-preview-row environment-preview-row-drop-active' : 'environment-preview-row'}
           onDragEnter={handleSkyboxDragOver}
@@ -618,7 +619,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
               : 'environment-preview-button skybox-preview-button'}
             onClick={() => setSkyboxDialogOpen(true)}
             disabled={props.readOnly}
-            title="选择或拖入 HDR/EXR 球形天空盒"
+            title="选择或拖入 HDR/EXR 无限远天空背景"
             type="button"
           >
             {skybox ? (
@@ -633,7 +634,18 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
         </label>
         {skybox ? (
           <>
-            <p className="muted">{getSkyboxDisplayName(skybox.sourcePath)} · {skybox.format.toUpperCase()}</p>
+            <p className="muted">{getSkyboxDisplayName(skybox.sourcePath)} · 原图 {skybox.format.toUpperCase()} · 运行资源 ENV</p>
+            <p className="muted">天空始终位于无限远，不可移动或缩放。旧场景的位置、尺寸和倾斜仅保留为兼容数据，不再改变背景。</p>
+            <p role={currentSkyboxStatus?.phase === 'error' ? 'alert' : 'status'} aria-label="天空 ENV 状态">
+              {currentSkyboxStatus?.phase === 'error' ? currentSkyboxStatus.message
+                : currentSkyboxStatus?.phase === 'loading' ? '正在准备并加载天空 ENV…'
+                  : currentSkyboxStatus?.phase === 'ready'
+                    ? currentSkyboxStatus.sourceUrl === skybox.environment?.sourceUrl || currentSkyboxStatus.sourceUrl === skybox.sourceUrl
+                      ? `ENV 已加载 · ${skybox.resolution} × ${skybox.resolution}` : '当前照明已就绪；天空按需加载。'
+                    : '天空资源将在需要显示或照明时准备。'}
+            </p>
+            {currentSkyboxStatus?.phase === 'error' ? <button type="button" disabled={props.readOnly}
+              onClick={() => skyboxRuntimeStatus.retry(sceneSessionId)}>重试天空 ENV</button> : null}
             <button
               className="environment-clear-button"
               type="button"
@@ -683,7 +695,7 @@ export function SceneSettingsPanel(props: SceneSettingsPanelProps) {
             </label>
           </>
         ) : (
-          <p className="muted">未放置球形天空盒，场景保持原有背景和环境反射。</p>
+          <p className="muted">未放置无限远天空背景，场景保持原有背景和环境反射。</p>
         )}
       </CollapsibleFieldset>
 

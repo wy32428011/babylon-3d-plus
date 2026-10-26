@@ -1,7 +1,14 @@
+import { verifyModelTemplateCapabilities } from './modelRuntimeCapabilities.ts';
+import { normalizeModelRuntimeCapabilities, type ModelRuntimeCapabilities } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import type { AssetContainer, InstantiatedEntries } from '@babylonjs/core';
 import type { ModelAssetComponent } from '../../editor/model/components';
 import { cloneModelAssetContainer, estimateModelAssetContainerBytes, prepareModelAssetTemplate } from './cloneModelAssetContainer.ts';
 import { refreshDetachedSourceMeshes } from './refreshDetachedInstanceSourceMaterials.ts';
+import { beginSceneAssetTrace, type SceneAssetTrace } from './SceneLoadDiagnostics.ts';
+import type { ProjectOpenSpanRef } from '../../../electron/shared/projectOpenTrace.ts';
+
+export type AssetCloneTiming = { startedAtMs: number; endedAtMs: number };
+type CloneObserver = (durationMs: number, failed: boolean, timing?: AssetCloneTiming) => void;
 
 /** 共享模型实例句柄；释放实例后会同步归还共享源资源引用。 */
 export type SharedModelInstantiation = {
@@ -14,6 +21,12 @@ export type SharedModelTemplateLease = {
   dispose: () => void;
 };
 
+export type SharedGeometryModelContainer = {
+  container: AssetContainer;
+  runtimeCapabilities?: ModelRuntimeCapabilities;
+  dispose: () => void;
+};
+
 type SharedModelSourceEntry = {
   promise: Promise<AssetContainer>;
   container: AssetContainer | null;
@@ -23,6 +36,7 @@ type SharedModelSourceEntry = {
   idleOrder: number;
   controller: AbortController;
   needsSourceDrawRefresh: boolean;
+  sourceRef: ProjectOpenSpanRef | null;
 };
 
 /**
@@ -40,6 +54,8 @@ export class SharedModelAssetCache {
   private instantiationMs = 0;
   private ownedCloneCount = 0;
   private ownedCloneMs = 0;
+  private sharedGeometryCloneCount = 0;
+  private capabilityFallbackCount = 0;
   private idleOrder = 0;
 
   constructor(options: { maxIdleEntries?: number; maxIdleBytes?: number } = {}) {
@@ -55,6 +71,7 @@ export class SharedModelAssetCache {
     return { hits: this.hits, misses: this.misses, entries: this.entries.size,
       instantiationCount: this.instantiationCount, instantiationMs: this.instantiationMs,
       ownedCloneCount: this.ownedCloneCount, ownedCloneMs: this.ownedCloneMs,
+      sharedGeometryCloneCount: this.sharedGeometryCloneCount, capabilityFallbackCount: this.capabilityFallbackCount,
       idleEntries: idleEntries.length, idleBytes: idleEntries.reduce((bytes, entry) => bytes + entry.estimatedBytes, 0) };
   }
 
@@ -64,11 +81,12 @@ export class SharedModelAssetCache {
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     signal?: AbortSignal,
     onReady?: (source: AssetContainer) => void,
+    trace?: SceneAssetTrace,
   ): Promise<SharedModelTemplateLease> {
     this.assertAvailable(signal);
-    const entry = this.acquireEntry(key, loader);
+    const entry = this.acquireEntry(key, loader, trace);
     try {
-      const source = await this.waitForSource(entry, signal);
+      const source = await this.waitForSource(entry, signal, trace);
       this.assertAvailable(signal);
       if (entry.disposed || this.entries.get(key) !== entry) {
         throw new Error('模型解析模板在预取完成前已失效。');
@@ -93,14 +111,16 @@ export class SharedModelAssetCache {
     key: string,
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     signal?: AbortSignal,
-    onClone?: (durationMs: number, failed: boolean) => void,
+    onClone?: CloneObserver,
+    trace?: SceneAssetTrace,
   ): Promise<AssetContainer> {
     this.assertAvailable(signal);
-    const entry = this.acquireEntry(key, loader);
+    const entry = this.acquireEntry(key, loader, trace);
     try {
-      const source = await this.waitForSource(entry, signal);
+      const source = await this.waitForSource(entry, signal, trace);
       this.assertAvailable(signal);
       if (entry.disposed) throw new Error('模型解析模板已失效。');
+      const cloneToken = beginSceneAssetTrace(trace, 'modelClone');
       const startedAt = performance.now();
       let failed = true;
       try {
@@ -110,11 +130,52 @@ export class SharedModelAssetCache {
         failed = false;
         return container;
       } finally {
-        this.observeClone(onClone, performance.now() - startedAt, failed);
+        const endedAtMs = performance.now();
+        cloneToken?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined);
+        this.observeClone(onClone, endedAtMs - startedAt, failed, { startedAtMs: startedAt, endedAtMs });
       }
     } finally {
       this.releaseEntry(key, entry);
     }
+  }
+
+  /** 新声明路径保持独立节点/材质，只读几何持有源到最后一个实例释放；验证不符则完整克隆。 */
+  async acquireCapabilityContainer(
+    key: string, loader: (signal: AbortSignal) => Promise<AssetContainer>, asset: ModelAssetComponent,
+    signal?: AbortSignal, onClone?: CloneObserver, trace?: SceneAssetTrace,
+  ): Promise<SharedGeometryModelContainer> {
+    this.assertAvailable(signal);
+    const entry = this.acquireEntry(key, loader, trace);
+    let retained = false;
+    try {
+      const source = await this.waitForSource(entry, signal, trace);
+      const capability = await verifyModelTemplateCapabilities(source, asset);
+      this.assertAvailable(signal);
+      if (entry.disposed) throw new Error('共享模型解析模板已失效。');
+      const shared = capability?.geometry === 'shared-readonly';
+      const token = beginSceneAssetTrace(trace, 'modelClone');
+      const startedAt = performance.now();
+      let failed = true;
+      try {
+        const container = cloneModelAssetContainer(source, shared);
+        this.ownedCloneCount++;
+        if (shared) this.sharedGeometryCloneCount++; else this.capabilityFallbackCount++;
+        retained = shared;
+        let disposed = false;
+        failed = false;
+        return { container, ...(shared ? { runtimeCapabilities: capability } : {}), dispose: () => {
+          if (disposed) return;
+          disposed = true;
+          try { container.dispose(); }
+          finally { if (shared) this.releaseEntry(key, entry); }
+        } };
+      } finally {
+        const endedAtMs = performance.now();
+        this.ownedCloneMs += endedAtMs - startedAt;
+        token?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined);
+        this.observeClone(onClone, endedAtMs - startedAt, failed, { startedAtMs: startedAt, endedAtMs });
+      }
+    } finally { if (!retained) this.releaseEntry(key, entry); }
   }
 
   /** 获取共享源容器并创建一个独立实体实例。 */
@@ -123,13 +184,14 @@ export class SharedModelAssetCache {
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     nameFunction: (sourceName: string) => string,
     signal?: AbortSignal,
-    onClone?: (durationMs: number, failed: boolean) => void,
+    onClone?: CloneObserver,
+    trace?: SceneAssetTrace,
   ): Promise<SharedModelInstantiation> {
     this.assertAvailable(signal);
 
-    const entry = this.acquireEntry(key, loader);
+    const entry = this.acquireEntry(key, loader, trace);
     try {
-      const container = await this.waitForSource(entry, signal);
+      const container = await this.waitForSource(entry, signal, trace);
       this.assertAvailable(signal);
       if (this.disposed || entry.disposed || this.entries.get(key) !== entry) {
         throw new Error('共享模型源资源在实例创建前已失效。');
@@ -140,6 +202,7 @@ export class SharedModelAssetCache {
         entry.needsSourceDrawRefresh = false;
       }
 
+      const cloneToken = beginSceneAssetTrace(trace, 'modelClone');
       const startedAt = performance.now();
       let failed = true;
       try {
@@ -177,7 +240,9 @@ export class SharedModelAssetCache {
           },
         };
       } finally {
-        this.observeClone(onClone, performance.now() - startedAt, failed);
+        const endedAtMs = performance.now();
+        cloneToken?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined);
+        this.observeClone(onClone, endedAtMs - startedAt, failed, { startedAtMs: startedAt, endedAtMs });
       }
     } catch (error) {
       this.releaseEntry(key, entry);
@@ -199,7 +264,7 @@ export class SharedModelAssetCache {
   }
 
   /** 获取或创建指定资源键的共享源条目，并增加一次活动引用。 */
-  private acquireEntry(key: string, loader: (signal: AbortSignal) => Promise<AssetContainer>): SharedModelSourceEntry {
+  private acquireEntry(key: string, loader: (signal: AbortSignal) => Promise<AssetContainer>, trace?: SceneAssetTrace): SharedModelSourceEntry {
     const cached = this.entries.get(key);
     if (cached && !cached.disposed) {
       this.hits += 1;
@@ -208,6 +273,7 @@ export class SharedModelAssetCache {
     }
 
     this.misses += 1;
+    const sourceToken = beginSceneAssetTrace(trace, 'modelAcquire');
     const entry: SharedModelSourceEntry = {
       promise: Promise.resolve(null as unknown as AssetContainer),
       container: null,
@@ -217,6 +283,7 @@ export class SharedModelAssetCache {
       idleOrder: 0,
       controller: new AbortController(),
       needsSourceDrawRefresh: true,
+      sourceRef: sourceToken?.ref ?? null,
     };
     // 延后调用避免同步抛错/重入发生在 Map 注册前；同资源的并发调用共享同一任务。
     entry.promise = Promise.resolve().then(() => loader(entry.controller.signal))
@@ -229,9 +296,12 @@ export class SharedModelAssetCache {
         prepareModelAssetTemplate(container);
         entry.estimatedBytes = estimateModelAssetContainerBytes(container);
         if (entry.referenceCount === 0) this.trimIdleEntries();
+        sourceToken?.end();
         return container;
       })
       .catch((error) => {
+        sourceToken?.end(error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error',
+          error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'operation-failed');
         if (this.entries.get(key) === entry) {
           this.entries.delete(key);
         }
@@ -258,8 +328,8 @@ export class SharedModelAssetCache {
     }
   }
 
-  private observeClone(callback: ((durationMs: number, failed: boolean) => void) | undefined, durationMs: number, failed: boolean): void {
-    try { callback?.(durationMs, failed); }
+  private observeClone(callback: CloneObserver | undefined, durationMs: number, failed: boolean, timing: AssetCloneTiming): void {
+    try { callback?.(durationMs, failed, timing); }
     catch (error) { console.warn('[Scene load] 模型克隆计时观察器失败。', error); }
   }
 
@@ -283,15 +353,22 @@ export class SharedModelAssetCache {
   }
 
   /** 取消仅结束当前等待者；其它同源请求仍共享一次解析。 */
-  private waitForSource(entry: SharedModelSourceEntry, signal?: AbortSignal): Promise<AssetContainer> {
-    if (!signal) return entry.promise;
-    return new Promise((resolve, reject) => {
+  private async waitForSource(entry: SharedModelSourceEntry, signal?: AbortSignal, trace?: SceneAssetTrace): Promise<AssetContainer> {
+    const waitToken = beginSceneAssetTrace(trace, 'templateWait', entry.sourceRef ? { links: [entry.sourceRef] } : undefined);
+    try {
+      const result = !signal ? await entry.promise : await new Promise<AssetContainer>((resolve, reject) => {
       const abort = () => { cleanup(); reject(new DOMException('模型实例加载已取消。', 'AbortError')); };
       const cleanup = () => signal.removeEventListener('abort', abort);
       signal.addEventListener('abort', abort, { once: true });
       entry.promise.then(container => { cleanup(); resolve(container); }, error => { cleanup(); reject(error); });
       if (signal.aborted) abort();
-    });
+      });
+      waitToken?.end(); return result;
+    } catch (error) {
+      waitToken?.end(error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error',
+        error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'operation-failed');
+      throw error;
+    }
   }
 
   /** 幂等释放单个共享源条目。 */
@@ -314,7 +391,7 @@ export function createModelAssetTemplateKey(modelAsset: ModelAssetComponent): st
 }
 
 /** 模型共享实例的最终准入模式；shared-instance 复用源容器，owned-container 独占容器和脚本生命周期。 */
-export type ModelAssetSharedInstancingMode = 'shared-instance' | 'owned-container';
+export type ModelAssetSharedInstancingMode = 'shared-instance' | 'owned-container' | 'shared-geometry-clone';
 
 /** 模型共享策略判定原因，用于 smoke 和后续接入方精确解释准入边界。 */
 export type ModelAssetSharedInstancingReason =
@@ -322,7 +399,9 @@ export type ModelAssetSharedInstancingReason =
   | 'script-assets'
   | 'parameter-config'
   | 'parameter-script-metadata'
-  | 'animation-script-metadata';
+  | 'animation-script-metadata'
+  | 'declared-readonly-geometry'
+  | 'declared-owned-geometry';
 
 /** 模型共享策略快照结果，只表达准入结论，不触碰运行时场景或外部资源。 */
 export type ModelAssetSharedInstancingPolicy = {
@@ -338,6 +417,12 @@ export type ModelAssetSharedInstancingPolicy = {
 export function resolveModelAssetSharedInstancingPolicy(
   modelAsset: ModelAssetComponent,
 ): ModelAssetSharedInstancingPolicy {
+  const capability = normalizeModelRuntimeCapabilities(modelAsset.runtimeCapabilities);
+  if (capability?.geometry === 'owned') return { mode: 'owned-container', reason: 'declared-owned-geometry' };
+  if ((modelAsset.sourceSnapshot?.contentSha256 || modelAsset.assetRevision)
+    && capability?.geometry === 'shared-readonly') {
+    return { mode: 'shared-geometry-clone', reason: 'declared-readonly-geometry' };
+  }
   const blockingReason = findOwnedContainerReason(modelAsset);
   if (blockingReason) {
     return { mode: 'owned-container', reason: blockingReason };

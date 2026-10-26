@@ -1,5 +1,11 @@
+import { collectSceneSkyboxReferences } from '../shared/sceneResourceTraversal.ts';
+import { SKYBOX_ENVIRONMENT_RECIPE } from '../shared/sceneSkyboxContract.ts';
+import { CURRENT_SCENE_FILE_VERSION } from '../shared/sceneFileVersion.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
+import { normalizeSceneLightingConfig } from '../shared/sceneLightingConfig.ts';
+import { getRequestedLightingLightmapEncoding, getRequestedLightingLightmapMipLevels, getLightingLightmapBaseEncoding, LIGHTING_LIGHTMAP_MIP_RECIPE } from '../shared/sceneLightingTextureCodec.ts';
+import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 
 export const VIEWER_TEMPLATE_CAPABILITIES_PATH = 'viewer-capabilities.json';
 const OPENING_TEMPLATE = 'reference-huishan';
@@ -19,9 +25,12 @@ type BuildFile = { path: string; content: string | Uint8Array };
 type OpeningBuildAsset = BuildFile & { id: string };
 type ViewerTemplateCapabilities = {
   version: 1;
+  sceneFileVersions?: number[];
+  skybox?: { resourceVersions: number[]; runtimeFormats: string[]; presentation: 'infinite'; recipes: string[] };
   entryFiles: FileIntegrity[];
   openingAnimation: { template: string; assets: (FileIntegrity & { id: string })[] };
   openingPackages?: { runtimeApiVersion: number; renderers: string[]; isolatedPlayback?: boolean };
+  lightingCodecs?: { configVersions: number[]; lightmapEncodings: string[]; mipRecipes?: string[] };
 };
 
 function invalidManifest(): Error {
@@ -63,6 +72,16 @@ function parseCapabilities(value: unknown): ViewerTemplateCapabilities {
     || new Set([...value.entryFiles, ...assets].map(file => file.path)).size !== value.entryFiles.length + 10) {
     throw invalidManifest();
   }
+  if (value.lightingCodecs !== undefined && (!isRecord(value.lightingCodecs)
+    || !Array.isArray(value.lightingCodecs.configVersions) || !value.lightingCodecs.configVersions.every(version => Number.isSafeInteger(version) && version >= 2)
+    || !Array.isArray(value.lightingCodecs.lightmapEncodings) || !value.lightingCodecs.lightmapEncodings.every(encoding => typeof encoding === 'string' && /^[a-z0-9-]{1,64}$/.test(encoding))
+    || value.lightingCodecs.mipRecipes !== undefined && (!Array.isArray(value.lightingCodecs.mipRecipes) || !value.lightingCodecs.mipRecipes.every(recipe => typeof recipe === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(recipe))))) throw invalidManifest();
+  if (value.sceneFileVersions !== undefined && (!Array.isArray(value.sceneFileVersions)
+    || !value.sceneFileVersions.every(version => Number.isSafeInteger(version) && version > 0))) throw invalidManifest();
+  if (value.skybox !== undefined && (!isRecord(value.skybox) || value.skybox.presentation !== 'infinite'
+    || !Array.isArray(value.skybox.resourceVersions) || !value.skybox.resourceVersions.every(version => Number.isSafeInteger(version) && version > 0)
+    || !Array.isArray(value.skybox.runtimeFormats) || !value.skybox.runtimeFormats.every(format => typeof format === 'string')
+    || !Array.isArray(value.skybox.recipes) || !value.skybox.recipes.every(recipe => typeof recipe === 'string'))) throw invalidManifest();
   return value as ViewerTemplateCapabilities;
 }
 
@@ -78,16 +97,19 @@ export function createViewerTemplateCapabilities(
   });
   return parseCapabilities({
     version: 1,
+    sceneFileVersions: [1, 2, 3, 4, 5, 6, CURRENT_SCENE_FILE_VERSION],
+    skybox: { resourceVersions: [1], runtimeFormats: ['env'], presentation: 'infinite', recipes: [SKYBOX_ENVIRONMENT_RECIPE] },
     entryFiles: entryFiles.map(integrity),
     openingAnimation: {
       template: OPENING_TEMPLATE,
       assets: openingAssets.map(asset => ({ id: asset.id, ...integrity(asset) })),
     },
     openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline', 'prismatic-genesis'], isolatedPlayback: true },
+    lightingCodecs: { configVersions: [2, 3], lightmapEncodings: ['rgbm', 'rgbm-gamma', 'rgbm-linear-mips-v1', 'rgbm-gamma-mips-v1'], mipRecipes: [LIGHTING_LIGHTMAP_MIP_RECIPE] },
   });
 }
 
-/** 只对启用开场的场景要求新能力；普通旧场景仍可沿用旧模板。 */
+/** 新光照格式与开场分别要求真实模板能力；旧 v2 普通场景仍兼容旧模板。 */
 async function checkTemplate(
   sceneContent: string | null,
   templateFiles: readonly TemplateFile[],
@@ -104,14 +126,20 @@ async function checkTemplate(
   const scene = isRecord(sceneFile) && isRecord(sceneFile.scene) ? sceneFile.scene : null;
   const settings = scene && isRecord(scene.sceneSettings) ? scene.sceneSettings : null;
   const opening = settings && isRecord(settings.openingAnimation) ? settings.openingAnimation : null;
-  if (!coreOnly && (!opening || opening.enabled !== true)) return;
-  if (!coreOnly && opening && opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
+  const openingEnabled = opening?.enabled === true;
+  const lighting = settings && isRecord(settings.lighting) ? normalizeSceneLightingConfig(settings.lighting) : null;
+  const needsLightingCodecs = lighting?.version === 3;
+  const needsSkybox = collectSceneSkyboxReferences(scene).length > 0;
+  const sceneVersion = isRecord(sceneFile) && typeof sceneFile.version === 'number' ? sceneFile.version : 0;
+  const needsSceneVersion = sceneVersion >= 7;
+  if (!coreOnly && !openingEnabled && !needsLightingCodecs && !needsSkybox && !needsSceneVersion) return;
+  if (!coreOnly && openingEnabled && opening && opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
     throw new Error(`Viewer 模板不支持场景配置的开场动画。${REBUILD_HINT}`);
   }
   const filesByPath = new Map(templateFiles.map(file => [file.destinationRelativePath, file]));
   const manifestFile = filesByPath.get(VIEWER_TEMPLATE_CAPABILITIES_PATH);
   if (!manifestFile && coreOnly) return;
-  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前开场动画。${REBUILD_HINT}`);
+  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前${needsSkybox || needsSceneVersion ? '场景版本或天空环境' : needsLightingCodecs ? '光照配置或贴图编码' : '开场动画'}。${REBUILD_HINT}`);
   if (manifestFile.size <= 0 || manifestFile.size > MAX_MANIFEST_BYTES) throw invalidManifest();
   let manifest: ViewerTemplateCapabilities;
   try {
@@ -125,7 +153,24 @@ async function checkTemplate(
     assertNotAborted(signal);
     throw invalidManifest();
   }
-  if (!coreOnly && opening?.template === 'package') {
+  if (needsSceneVersion && !manifest.sceneFileVersions?.includes(sceneVersion)) {
+    throw new Error(`Viewer 模板不支持场景文件 v${sceneVersion}。${REBUILD_HINT}`);
+  }
+  if (needsSkybox && (!manifest.skybox?.resourceVersions.includes(1) || !manifest.skybox.runtimeFormats.includes('env')
+    || manifest.skybox.presentation !== 'infinite' || !manifest.skybox.recipes.includes(SKYBOX_ENVIRONMENT_RECIPE))) {
+    throw new Error(`Viewer 模板不支持原生无限远天空或当前 ENV 生成配方。${REBUILD_HINT}`);
+  }
+  if (needsLightingCodecs && lighting) {
+    const base = getRequestedLightingLightmapEncoding(lighting.bake.lightmapEncoding), mipLevels = getRequestedLightingLightmapMipLevels(lighting.bake.lightmapMipLevels);
+    const required = [mipLevels ? base === 'rgbm-gamma' ? 'rgbm-gamma-mips-v1' : 'rgbm-linear-mips-v1' : base,
+      ...(lighting.result?.assets.filter(asset => asset.kind === 'lightmap').map(asset => isLightingLightmapMipEncoding(asset.encoding) ? asset.encoding : getLightingLightmapBaseEncoding(asset.encoding)) ?? [])];
+    if (!manifest.lightingCodecs?.configVersions.includes(lighting.version)
+      || required.some(encoding => !manifest.lightingCodecs?.lightmapEncodings.includes(encoding))) {
+      throw new Error(`Viewer 模板不支持当前光照配置或贴图编码。${REBUILD_HINT}`);
+    }
+    if ((mipLevels || lighting.result?.assets.some(asset => isLightingLightmapMipEncoding(asset.encoding))) && !manifest.lightingCodecs.mipRecipes?.includes(LIGHTING_LIGHTMAP_MIP_RECIPE)) throw new Error(`Viewer 模板不支持当前光照mip生产recipe。${REBUILD_HINT}`);
+  }
+  if (!coreOnly && openingEnabled && opening?.template === 'package') {
     const binding = isRecord(opening.package) ? opening.package : null;
     const definition = binding && isRecord(binding.definition) ? binding.definition : null;
     const requested = definition && isRecord(definition.manifest) ? definition.manifest : null;
@@ -136,7 +181,7 @@ async function checkTemplate(
     }
     if (support.isolatedPlayback !== true) throw new Error(`Viewer 模板不具备开场业务隔离能力，本次不启用开场。${REBUILD_HINT}`);
   }
-  for (const expected of [...manifest.entryFiles, ...(!coreOnly && opening?.template !== 'package' ? manifest.openingAnimation.assets : [])]) {
+  for (const expected of [...manifest.entryFiles, ...(!coreOnly && openingEnabled && opening?.template !== 'package' ? manifest.openingAnimation.assets : [])]) {
     assertNotAborted(signal);
     const file = filesByPath.get(expected.path);
     if (!file) throw new Error(`Viewer 模板缺少开场动画资源：${expected.path}。${REBUILD_HINT}`);
@@ -172,7 +217,8 @@ export function assertViewerTemplateSupportsScene(scene: string, files: readonly
 /** DIST 仅使用已绑定包内素材；模板能力清单与旧内置参考图片是构建期资源。 */
 export async function selectRuntimeTemplateFiles<T extends TemplateFile>(files: readonly T[], signal: AbortSignal): Promise<T[]> {
   // 内置天空盒随编辑器分发，发布包只复制场景实际引用的那份资源。
-  const runtimeFiles = files.filter(file => !file.destinationRelativePath.startsWith('builtin-skyboxes/'));
+  const runtimeFiles = files.filter(file => !file.destinationRelativePath.startsWith('builtin-skyboxes/')
+    && !file.destinationRelativePath.startsWith('builtin-skybox-environments/'));
   const source = runtimeFiles.find(file => file.destinationRelativePath === VIEWER_TEMPLATE_CAPABILITIES_PATH);
   if (!source) return runtimeFiles;
   assertNotAborted(signal);

@@ -4,7 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 
-const source = await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8');
+const source = (await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const start = source.indexOf("  useEffect(() => {\n    if (sceneResourcePolicy === 'preserve-snapshot') return;");
 const end = source.indexOf('\n\n  useEffect(', start + 1);
 assert.ok(start >= 0 && end > start);
