@@ -16,12 +16,14 @@ import { createLightingBakeEngineConfigurationService, validateLightingBakeEngin
 import { getRequestedLightingLightmapEncoding, getRequestedLightingLightmapMipLevels, getLightingLightmapBaseEncoding,
   getLightingLightmapTextureBytes, LIGHTING_LIGHTMAP_MIP_RECIPE, LIGHTING_LIGHTMAP_MIP_WORKING_BYTES_LIMIT } from '../shared/sceneLightingTextureCodec.ts';
 import { isLightingLightmapMipEncoding, validateLightingLightmapMipAsset } from '../shared/sceneLightingLightmapMips.ts';
+import type { LightingBakePreparedInput } from '../shared/sceneLightingBakeStream.ts';
+import { freemem } from 'node:os';
+import { assertLightingWorkingBytes, lightingBakeResourceBudget } from '../shared/sceneLightingBakeResources.ts';
 
 const SOURCE_TEXTURE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga', '.hdr', '.exr']);
 const engineDeviceCache = new Map<string, Promise<LightingBakeDevice[]>>();
 const engineVersionCache = new Map<string, Promise<LightingBakeEngineStatus>>();
-export type LightingBakeServiceOptions = {
-  input: LightingBakeInput;
+type LightingBakeServiceBase = {
   projectRoot: string;
   enginePath: string;
   signal: AbortSignal;
@@ -39,6 +41,10 @@ export type LightingBakeServiceOptions = {
   onMemory?: (bytes: number | null) => void;
   logName?: 'cycles.log' | 'cycles-cpu.log';
 };
+export type LightingBakeServiceOptions = LightingBakeServiceBase & (
+  | { input: LightingBakeInput; prepared?: undefined }
+  | { input: LightingBakePreparedInput; prepared: { task: Awaited<ReturnType<typeof createLightingBakeTask>>; preflight: LightingBakePreflight } }
+);
 
 type EngineDetectionOptions = {
   refresh?: boolean;
@@ -161,7 +167,7 @@ async function ensureProjectDirectory(project: string, segments: string[]): Prom
   return current;
 }
 
-async function prepareInput(options: LightingBakeServiceOptions, directory: string): Promise<void> {
+async function prepareInput(options: LightingBakeServiceBase & { input: LightingBakeInput }, directory: string): Promise<void> {
   const encoded = options.binaryGeometry ? { input: { ...options.input, meshes: options.input.meshes.map(mesh => {
     const metadata: Partial<typeof mesh> = { ...mesh }; for (const field of ['positions','normals','indices','uvs','uvs2','colors','tangents'] as const) delete metadata[field]; return metadata;
   }) }, geometry: options.binaryGeometry } : encodeLightingBakeTransport(options.input);
@@ -236,6 +242,7 @@ export function mapLightingBakeEngineProgress(value: { phase: string; completed:
 /** 只启动受控脚本；取消只作用于该任务直接创建的子进程。 */
 export async function runLightingBakeProcess(options: LightingBakeServiceOptions, directory: string, script: string): Promise<void> {
   assertActive(options);
+  const backendLimit = options.prepared?.preflight.resourceBudget?.backendBytes ?? lightingBakeResourceBudget(freemem()).backendBytes;
   await new Promise<void>((resolve, reject) => {
     const log = createWriteStream(path.join(directory, options.logName ?? 'cycles.log'), { flags: 'wx' });
     let errorMessage = '', gpuFallback = false, previousProgress = 0, settled = false, terminationError: Error | null = null;
@@ -253,7 +260,10 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
     options.signal.addEventListener('abort', cancel, { once: true });
     if (options.signal.aborted) cancel();
     const timeout = setTimeout(() => terminate(new Error('光照烘焙超时，已停止该任务；原烘焙结果保持可用。')), options.timeoutMs ?? 6 * 60 * 60 * 1000);
-    const projectCheck = setInterval(() => { if (!options.isProjectCurrent()) terminate(new Error('项目已切换，光照烘焙停止。')); }, 1000);
+    const projectCheck = setInterval(() => {
+      if (!options.isProjectCurrent()) terminate(new Error('项目已切换，光照烘焙停止。'));
+      else if (freemem() < 512 * 1048576) terminate(new Error('系统可用内存低于512 MiB安全余量，已停止本任务；原结果保持可用。'));
+    }, 1000);
     const finish = (error?: Error) => {
       if (settled) return; settled = true;
       clearTimeout(timeout); clearInterval(projectCheck); if (forceTimer) clearTimeout(forceTimer);
@@ -278,6 +288,7 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
         }
         if (line.startsWith('LIGHTING_BAKE_MEMORY ')) {
           const bytes = Number(line.slice('LIGHTING_BAKE_MEMORY '.length)); options.onMemory?.(Number.isFinite(bytes) && bytes > 0 ? bytes : null);
+          if (Number.isFinite(bytes) && bytes > backendLimit) terminate(new Error('Blender峰值工作集超过本任务资源预算，已停止；原结果保持可用。'));
         }
         if (line.startsWith('LIGHTING_BAKE_ERROR ')) errorMessage = line.slice(20);
         if (!line.startsWith('LIGHTING_BAKE_PROGRESS ')) continue;
@@ -330,6 +341,8 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
     const source = safeLightingBakeChildPath(staging, name);
     const info = await fs.lstat(source);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('烘焙产物不是有效文件。');
+    const working = lightingBakeResourceBudget(freemem()).workingBytes;
+    assertLightingWorkingBytes(info.size * (kind === 'geometry' && encoding !== 'binary-v1' || kind === 'probes' ? 8 : 3), working, `校验产物「${name}」`);
     const bytes = await fs.readFile(source, { signal: options.signal });
     let geometryVersion: 1 | 2 | undefined;
     if (kind === 'lightmap') {
@@ -391,17 +404,22 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
 
 export async function runLightingBakeJob(options: LightingBakeServiceOptions): Promise<SceneLightingBakeSnapshot> {
   assertActive(options);
-  const preflight = await inspectLightingBakeRequest(options.input, options);
+  const preflight = options.prepared ? options.prepared.preflight : await inspectLightingBakeRequest(options.input, options);
   assertLightingBakePreflight(preflight);
   assertActive(options);
   const project = await fs.realpath(options.projectRoot);
   const assets = await ensureProjectDirectory(project, ['Assets', 'LightingBakes']);
-  const task = await createLightingBakeTask(project, options.input, options.engineVersion ?? '', preflight);
+  const task = options.prepared?.task ?? await createLightingBakeTask(project, options.input, options.engineVersion ?? '', preflight);
   const staging = task.directory, script = path.join(staging, 'cycles_bake.py');
-  let lastPersist = 0, lastPhase = '';
+  let lastPersist = 0, lastPhase = '', lastMemoryPersist = 0;
   const tracked: LightingBakeServiceOptions = { ...options,
     onDevice: device => { void task.update({ device }); options.onDevice?.(device); },
-    onMemory: bytes => { const metrics = task.record.phaseMetrics; const current = metrics?.[metrics.length - 1]; if (current && bytes !== null) current.cyclesPeakRssBytes = Math.max(current.cyclesPeakRssBytes ?? 0, bytes); options.onMemory?.(bytes); },
+    onMemory: bytes => {
+      const metrics = task.record.phaseMetrics, current = metrics?.[metrics.length - 1];
+      if (current && bytes !== null) current.cyclesPeakRssBytes = Math.max(current.cyclesPeakRssBytes ?? 0, bytes);
+      if (Date.now() - lastMemoryPersist > 5000) { lastMemoryPersist = Date.now(); void task.update({}); }
+      options.onMemory?.(bytes);
+    },
     onEngineSpawn: pid => { void task.update({ enginePid: pid }); options.onEngineSpawn?.(pid); },
     onProgress: progress => {
       if (progress.phase !== lastPhase || Date.now() - lastPersist >= 250) {
@@ -416,7 +434,8 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
     await fs.copyFile(fileURLToPath(new URL('../lighting-bake/cycles_bake.py', import.meta.url)), script);
     await fs.copyFile(fileURLToPath(new URL('../lighting-bake/rgbm_gamma_codec.py', import.meta.url)), path.join(staging, 'rgbm_gamma_codec.py'));
     if (getRequestedLightingLightmapMipLevels(options.input.settings.lightmapMipLevels)) await fs.copyFile(fileURLToPath(new URL('../lighting-bake/lightmap_mips.py', import.meta.url)), path.join(staging, 'lightmap_mips.py'));
-    await prepareInput(tracked, staging); await task.flush();
+    if (!options.prepared) await prepareInput(options, staging);
+    await task.flush();
     let inputBytes = 0;
     for (const name of await fs.readdir(staging)) if (name === 'input.json' || name.startsWith('geometry-input-') || name.startsWith('source-texture-')) inputBytes += (await fs.stat(path.join(staging, name))).size;
     await task.update({ inputBytes });
@@ -424,6 +443,8 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
     catch (error) {
       if (!(error instanceof Error) || error.name !== 'LightingBakeGpuFallbackError') throw error;
       assertActive(options);
+      const budget = lightingBakeResourceBudget(freemem());
+      if ((preflight.backendEstimateBytes ?? preflight.geometryBytes * 4) > budget.backendBytes) throw new Error('GPU失败后系统内存不足，未启动CPU重试；原结果保持可用。', { cause: error });
       const prepared = JSON.parse(await fs.readFile(path.join(staging, 'input.json'), 'utf8')) as LightingBakeInput;
       prepared.settings.device = 'cpu'; await fs.writeFile(path.join(staging, 'input.json'), JSON.stringify(prepared));
       const reason = 'GPU 显存或设备失败，已重新启动独立 CPU 任务：' + error.message;

@@ -147,7 +147,7 @@ export function encodeLightingBakeTransport(input: LightingBakeInput, options: {
   const metadata = { ...input, meshes };
   return { version: 2, ...(options.deduplicateTextureUrls ? deduplicateTextureUrls(metadata) : { input: metadata }), geometry };
 }
-export function decodeLightingBakeTransport(value: unknown): LightingBakeInput {
+export function decodeLightingBakeTransport(value: unknown, _options: { views?: boolean } = {}): LightingBakeInput {
   const data = value as LightingBakeBinaryInput;
   if (!data || data.version !== 2 || !data.input || !Array.isArray(data.input.meshes) || !Array.isArray(data.geometry) || data.geometry.length !== data.input.meshes.length) throw new Error('烘焙二进制请求版本或映射无效。');
   const input = restoreTextureUrls(data);

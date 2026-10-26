@@ -21,6 +21,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [领域专题：参数化模型 / MQTT / POI](docs/domain-guides.md)
 - [提升机与换层提升机运动箭头](docs/lift-motion-arrows.md)
 - [材质与光照烘焙、动静混合阴影](docs/hybrid-lighting.md)
+- [烘焙性能与大场景稳定性评估及处理方案](docs/数字孪生编辑器烘焙性能与大场景稳定性评估.md)
 - [最近完成与变更记录](docs/changelog.md)
 - [极致性能实施说明](docs/extreme-performance-implementation.md)
 - [性能指南检测与无损优化](docs/babylon-perf-guide-audit.md)
@@ -144,7 +145,7 @@ Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑
 
 新版本统一采用材质/间接光烘焙与动静混合阴影，不再提供旧 baked/realtime 模式选择、旧太阳阴影烘焙或主题自动接管灯光。编辑端使用本机 Blender/Cycles 计算静态间接光和环境漫反射，原生实时直接光、高光、反射及动态阴影继续保留。关闭“启用阴影”不会关闭主光、补光或环境反射；修改曝光、对比度和雾等显示效果不会使 GI 过期。总览展示当前已应用配置的真实 Scene 快照。
 
-结果作为独立 PNG、几何 JSON 和探针 JSON 保存在工程 Assets/LightingBakes 中，随保存、SOURCE/DIST 和工程迁移携带；Viewer 读取成品，不依赖 Blender。旧场景只在内存中转换，不因打开文件而写盘或启动 Blender；首次覆盖旧文件前保存原始字节备份。旧 v1 GI 保留资源和原签名并标为过期，需明确重新烘焙；旧太阳阴影贴图不能充当新 GI。“允许昼夜循环控制光照”由 allowDayNightCycle 显式记录，旧主题场景保留原禁用状态；实际日夜控制器活动时须先暂停，再烘焙。总览新增预算预检、临时草稿预览、区域探针与CPU/自动/GPU选择；任务页显示每光源阴影成本、阶段内存、设备回退、日志和安全临时清理。输入几何采用版本化二进制附件，正式派生资产仍保持原发布格式。具体操作与迁移边界见[混合光照指南](docs/hybrid-lighting.md)。
+结果作为独立光照图集、几何 JSON/bin 和探针 JSON 保存在工程 Assets/LightingBakes 中，随保存、SOURCE/DIST 和工程迁移携带；Viewer 读取成品，不依赖 Blender。旧场景只在内存中转换，不因打开文件而写盘或启动 Blender；首次覆盖旧文件前保存原始字节备份。旧 v1 GI 保留资源和原签名并标为过期，需明确重新烘焙；旧太阳阴影贴图不能充当新 GI。“允许昼夜循环控制光照”由 allowDayNightCycle 显式记录，旧主题场景保留原禁用状态；实际日夜控制器活动时须先暂停，再烘焙。总览提供不读回像素的轻量预算预检、临时草稿预览、区域探针与CPU/自动/GPU选择；任务从捕获前开始记录，逐项捕获并以确认后的有界数据块暂存，超预算明确停止。相同输入重试可复用校验通过的完整阶段；结果按解码字节及新旧GI共同驻留预算加载。任务页显示每光源阴影成本、阶段内存、设备回退、日志和安全临时清理。具体操作、限制与迁移边界见[混合光照指南](docs/hybrid-lighting.md)。
 
 `npm run test:lighting-unified` 覆盖统一配置、Store、原生光照与环境材质、备份及保存发布；`npm run test:lighting-manager` 与 `npm run test:lighting-bake` 继续覆盖管理器和烘焙，均已采用新结构且不需要 Blender/GPU。新增 `npm run test:lighting-optimization` 覆盖预检、产物、二进制、任务、临时预览与区域；`npm run smoke:lighting-optimization` 和 `npm run test:lighting-optimization:cycles` 分别执行真实界面闭环及引擎增强验收。真实统一光照闭环使用 `npm run smoke:lighting-unified`；已有当前流程保存的真实 v2 烘焙工程后，可用 `node scripts/smoke-lighting-bake-state.mjs --unified` 检查过期、清除和撤销恢复。真实 Cycles 与浏览器/Electron 检查独立执行，不加入默认 core 组。具体通过状态和截图以[统一光照任务记录](docs/tasks/2026-10-21-unified-lighting.md)为准，单测和文件链检查不等同于真实 Viewer 画面通过。
 

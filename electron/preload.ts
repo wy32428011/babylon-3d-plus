@@ -102,6 +102,8 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
 
 contextBridge.exposeInMainWorld('editorApi', {
   startLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakeContract.js').SceneLightingBakeSnapshot> => ipcRenderer.invoke('lighting-bake:start', input),
+  lightingBakeResourceBudget: (): Promise<import('./shared/sceneLightingBakeResources.ts').LightingBakeResourceBudget> => ipcRenderer.invoke('lighting-bake:resourceBudget'),
+  lightingBakeStream: (command: import('./shared/sceneLightingBakeStream.ts').LightingBakeStreamCommand): Promise<import('./shared/sceneLightingBakeStream.ts').LightingBakeStreamReply> => ipcRenderer.invoke('lighting-bake:stream', command),
   preflightLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakePreflight.js').LightingBakePreflight> => ipcRenderer.invoke('lighting-bake:preflight', input),
   readLightingBakeTaskLog: (taskId: string): Promise<string> => ipcRenderer.invoke('lighting-bake:log', taskId),
   getLightingBakeHistory: (): Promise<import('./shared/sceneLightingBakeTasks.js').LightingBakeTaskHistory> => ipcRenderer.invoke('lighting-bake:history'),

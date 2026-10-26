@@ -4,6 +4,10 @@ import { getRequestedLightingLightmapMipLevels, getLightingLightmapTextureBytes,
 export const LIGHTING_BAKE_PROBE_LIMIT = 4096;
 export type LightingBakePreflightIssue = { code: string; severity: 'error' | 'warning'; message: string };
 export type LightingBakePreflight = {
+  /** 元数据准入不读回GPU、不遍历全部顶点；未知面积不得显示为零。 */
+  metadataOnly?: boolean; sourceTextureDecodedBytes?: number; largestCaptureBytes?: number;
+  uniqueGeometryCount?: number; backendEstimateBytes?: number;
+  resourceBudget?: import('./sceneLightingBakeResources.ts').LightingBakeResourceBudget;
   signature: string; meshCount: number; receiverCount: number; triangleCount: number; vertexCount: number;
   receiverArea: number; geometryBytes: number; binaryGeometryBytes: number; estimatedInputBytes: number; inputEstimate: true; sourceTextureCount: number;
   /** 裁切前接收面展开后的 number 数字量估算（每数值8字节）；不含JSON字符、引擎及额外分片，也不是预算上界。 */

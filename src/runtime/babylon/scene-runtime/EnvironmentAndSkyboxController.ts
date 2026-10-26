@@ -1,11 +1,12 @@
 import { captureLightingInputWithMetrics } from '../lightingCaptureMetrics';
-import { encodeLightingBakeTransport } from '../../../../electron/shared/sceneLightingBakeBinary';
+import { createLightingCaptureStream } from '../lightingBakeStream';
+import { captureLightingEnvironment } from '../lightingRuntimeCapture';
 import type { LightingDraftPreview } from '../../../editor/store/lightingManagementState';
-import type { LightingBakePreflight } from '../../../../electron/shared/sceneLightingBakePreflight';
+import { assertLightingBakePreflight, type LightingBakePreflight } from '../../../../electron/shared/sceneLightingBakePreflight';
 import { awaitLightingTaskStep } from '../lightingBakeTask';
 import { SceneLightingRuntime } from '../SceneLightingRuntime';
 import { appendGeneratedLightingSources, collectLightingRuntimeSources, type LightingBatchOwner, type LightingSourceOwner } from '../lightingClassificationRuntime';
-import { getSceneLightingBakeSignature, type SceneLightingBakeSnapshot, type LightingClassificationEntry } from '../../../../electron/shared/sceneLightingBakeContract';
+import { getSceneLightingBakeSignature, lightingContentHash, type SceneLightingBakeSnapshot, type LightingClassificationEntry } from '../../../../electron/shared/sceneLightingBakeContract';
 import { SceneAppearanceRuntime } from '../SceneAppearanceRuntime';
 import { SceneLightRigRuntime } from '../SceneLightRigRuntime';
 import { getSceneLightingConfig, getSceneAppearanceConfig } from '../../../../electron/shared/sceneLightingConfig.ts';
@@ -242,13 +243,14 @@ export class EnvironmentAndSkyboxController {
     if (this.dependencies.readiness.activeModelLoadProgress.size || this.environmentRuntime.getSnapshot().phase === 'loading'
       || [...this.dependencies.assets.models.values()].some(model => model.externalScriptStarting || model.cancelLoad)) throw new Error('请等待全部模型与参数几何生成完成后再检查预算。');
     const api = typeof window !== 'undefined' ? window.editorApi : undefined;
-    if (!api?.preflightLightingBake) throw new Error('烘焙前检查需要桌面编辑器。');
-    await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
-    // 环境提交可能晚于最后一个 mesh 事件；显式检查必须读取当前完整源目录。
-    this.lightingRuntime.markDirty('bake-preflight');
-    const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(crypto.randomUUID(), signal), signal);
-    signal?.throwIfAborted();
-    return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input, { deduplicateTextureUrls: true })), signal);
+    if (!api?.lightingBakeResourceBudget) throw new Error('轻量烘焙检查需要更新后的桌面编辑器。');
+    this.lightingBakeRunning = true;
+    try {
+      await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
+      this.lightingRuntime.markDirty('bake-preflight');
+      const budget = await awaitLightingTaskStep(api.lightingBakeResourceBudget(), signal);
+      return await this.lightingRuntime.inspectBakeAdmission(budget, signal);
+    } finally { this.lightingBakeRunning = false; }
   }
 
   /** 后台任务只读取稳定快照；结果仍匹配当前场景后才应用，文档提交由编辑器事务负责。 */
@@ -261,7 +263,7 @@ export class EnvironmentAndSkyboxController {
       throw new Error('请等待全部模型与参数几何生成完成后再烘焙。');
     }
     const api = typeof window !== 'undefined' ? window.editorApi : undefined;
-    if (!api?.startLightingBake) throw new Error('材质烘焙需要在桌面编辑器中调用本机 Blender；Viewer 仅使用已生成资源。');
+    if (!api?.lightingBakeStream || !api.lightingBakeResourceBudget) throw new Error('有界烘焙需要更新后的桌面编辑器；Viewer 仅使用已生成资源。');
     const jobId = crypto.randomUUID();
     const signature = getSceneLightingBakeSignature(document);
     const check = () => {
@@ -272,7 +274,7 @@ export class EnvironmentAndSkyboxController {
     const unsubscribe = api.onLightingBakeProgress(event => { if (event.jobId === jobId) progress?.(event.message, event.progress, event.phase); });
     signal?.addEventListener('abort', cancel, { once: true });
     this.lightingBakeRunning = true;
-    let applied = false;
+    let applied = false, uploadStarted = false, uploadFinished = false;
     try {
       check();
       await awaitLightingTaskStep(this.environmentRuntime.syncLighting(getSceneLightingConfig(document).shadows), signal);
@@ -280,12 +282,26 @@ export class EnvironmentAndSkyboxController {
       await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
       this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
       this.lightingRuntime.markDirty('bake-capture');
+      const budget = await api.lightingBakeResourceBudget(); check();
+      const admission = await this.lightingRuntime.inspectBakeAdmission(budget, signal);
+      assertLightingBakePreflight(admission); check();
+      const header = { version: 1 as const, jobId, signature, sceneName: document.name,
+        settings: getSceneLightingConfig(document).bake, ...captureLightingEnvironment(this.context.scene, document) };
+      const begun = await api.lightingBakeStream({ kind: 'begin', header, preflight: admission });
+      uploadStarted = true; check();
+      if (!begun.budget) throw new Error('烘焙任务没有返回资源预算。');
+      const stream = createLightingCaptureStream(header, begun.budget, command => api.lightingBakeStream(command), signal);
       const captured = await captureLightingInputWithMetrics(sample => this.lightingRuntime.captureBakeInput(jobId, signal, message => {
         sample(); progress?.(message, 0, 'preparing');
-      }), signal);
+      }, stream), signal);
       const input = { ...captured.value, captureMetrics: captured.metrics };
       check();
-      const result = await awaitLightingTaskStep(api.startLightingBake(encodeLightingBakeTransport(input, { deduplicateTextureUrls: true })), signal);
+      if (lightingContentHash([header.lights, header.environment]) !== lightingContentHash([input.lights, input.environment])) throw new Error('捕获期间实际光照已变化，候选未提交。');
+      const reply = await awaitLightingTaskStep(api.lightingBakeStream({ kind: 'finish', jobId, signature,
+        geometrySignature: input.geometrySignature!, captureMetrics: captured.metrics }), signal);
+      uploadFinished = true;
+      const result = reply.result;
+      if (!result) throw new Error('烘焙任务没有返回有效结果。');
       check();
       progress?.('光照已生成，正在应用材质并等待画面就绪…', 0.98, 'applying');
       await this.lightingRuntime.applySnapshot(result, signal, async () => {
@@ -296,6 +312,12 @@ export class EnvironmentAndSkyboxController {
       });
       applied = true;
       return result;
+    } catch (error) {
+      if (uploadStarted && !uploadFinished) {
+        try { await api.lightingBakeStream({ kind: 'abort', jobId, ...(signal?.aborted ? {} : { error: error instanceof Error ? error.message : String(error) }) }); }
+        catch (cleanupError) { Reflect.apply(this.context.pushLog, this.context.callbackReceiver, ['烘焙捕获清理失败：' + String(cleanupError)]); }
+      }
+      throw error;
     } finally {
       signal?.removeEventListener('abort', cancel); unsubscribe(); this.lightingBakeRunning = false;
       if (!applied) this.lightingRuntime.sync(this.dependencies.document.shadowDocument ?? document);

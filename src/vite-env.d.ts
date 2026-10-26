@@ -615,6 +615,8 @@ type DeploymentExportRevealRequest = {
 interface Window {
   editorApi: {
     startLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput | import('../electron/shared/sceneLightingBakeBinary').LightingBakeBinaryInput) => Promise<import('../electron/shared/sceneLightingBakeContract').SceneLightingBakeSnapshot>;
+    lightingBakeResourceBudget: () => Promise<import('../electron/shared/sceneLightingBakeResources').LightingBakeResourceBudget>;
+    lightingBakeStream: (command: import('../electron/shared/sceneLightingBakeStream').LightingBakeStreamCommand) => Promise<import('../electron/shared/sceneLightingBakeStream').LightingBakeStreamReply>;
     preflightLightingBake: (input: import('../electron/shared/sceneLightingBakeContract').LightingBakeInput | import('../electron/shared/sceneLightingBakeBinary').LightingBakeBinaryInput) => Promise<import('../electron/shared/sceneLightingBakePreflight').LightingBakePreflight>;
     readLightingBakeTaskLog: (taskId: string) => Promise<string>;
     getLightingBakeHistory: () => Promise<import('../electron/shared/sceneLightingBakeTasks').LightingBakeTaskHistory>;

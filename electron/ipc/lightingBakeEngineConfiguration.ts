@@ -131,11 +131,16 @@ export function createLightingBakeEngineConfigurationService(options: Configurat
     } finally { saving = false; }
   }
 
-  async function withBakeJob<T>(run: () => Promise<T>): Promise<T> {
+  function acquireBakeLease(): () => void {
     if (saving) throw new Error('正在保存本机引擎配置，请保存完成后重试烘焙。');
     activeJobs++;
-    try { return await run(); } finally { activeJobs--; }
+    let released = false;
+    return () => { if (!released) { released = true; activeJobs--; } };
+  }
+  async function withBakeJob<T>(run: () => Promise<T>): Promise<T> {
+    const release = acquireBakeLease();
+    try { return await run(); } finally { release(); }
   }
 
-  return { getConfiguration, saveConfiguration, withBakeJob, detectPath: (candidate: unknown) => options.detectEnginePath(validateLightingBakeEnginePath(candidate), true) };
+  return { getConfiguration, saveConfiguration, withBakeJob, acquireBakeLease, detectPath: (candidate: unknown) => options.detectEnginePath(validateLightingBakeEnginePath(candidate), true) };
 }

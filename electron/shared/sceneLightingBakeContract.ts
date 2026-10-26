@@ -98,6 +98,7 @@ export type LightingBakeMaterialInput = {
   invertNormalMapY?: boolean;
   textures?: Partial<Record<'baseColor' | 'normal' | 'metallicRoughness' | 'emissive' | 'occlusion', LightingBakeTextureInput>>;
 };
+export type LightingBakeNumericArray = number[] | Float32Array | Float64Array | Uint32Array | Uint16Array | Int32Array;
 export type LightingBakeMeshInput = {
   key: string;
   entityId: string;

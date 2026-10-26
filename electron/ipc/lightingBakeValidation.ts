@@ -30,8 +30,8 @@ function assetUrl(value: unknown): void {
 }
 
 /** IPC 是信任边界：只接收有限几何与固定材质字段，任何不支持的输入在启动引擎前失败。 */
-export function validateLightingBakeInput(value: unknown): LightingBakeInput {
-  if (value && typeof value === 'object' && 'version' in value && value.version === 2) return validateLightingBakeInput(decodeLightingBakeTransport(value));
+export function validateLightingBakeInput(value: unknown, options: { typedGeometry?: boolean; headerOnly?: boolean; allowNonreceiver?: boolean } = {}): LightingBakeInput {
+  if (value && typeof value === 'object' && 'version' in value && value.version === 2) return validateLightingBakeInput(decodeLightingBakeTransport(value, { views: options.typedGeometry }), options);
   const input = object(value, '烘焙请求');
   if (input.version !== 1) throw new Error('不支持的烘焙请求版本。');
   if (typeof input.jobId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.jobId)) throw new Error('烘焙任务标识格式不正确。');
@@ -53,15 +53,23 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
   finite(settings.texelsPerMeter, '贴图密度', 0.1, 4096);
   finite(settings.probeSpacing, '探针间距', 0.1, 10000);
   finite(settings.maxTextureMiB, '纹理预算', 1, 4096);
-  if (!Array.isArray(input.meshes) || !input.meshes.length) throw new Error('没有可烘焙的静态表面。');
+  if (!Array.isArray(input.meshes) || (!input.meshes.length && !options.headerOnly)) throw new Error('没有可烘焙的静态表面。');
+  const geometryNumbers = (value: unknown, label: string, size?: number) => {
+    if (options.typedGeometry && (value instanceof Float64Array || value instanceof Float32Array || value instanceof Uint32Array || value instanceof Uint16Array || value instanceof Int32Array)) {
+      if (size !== undefined && value.length !== size) throw new Error(`${label}长度不正确。`);
+      for (const number of value) finite(number, label);
+      return value;
+    }
+    return numbers(value, label, size);
+  };
   const keys = new Set<string>();
   for (const entry of input.meshes) {
     const mesh = object(entry, '几何'); const key = text(mesh.key, '几何标识');
     if (keys.has(key)) throw new Error('烘焙几何标识重复。'); keys.add(key);
     text(mesh.entityId, '实体标识'); text(mesh.nodeKey, '节点标识'); text(mesh.name, '几何名称');
-    const positions = numbers(mesh.positions, '顶点'), normals = numbers(mesh.normals, '法线');
+    const positions = geometryNumbers(mesh.positions, '顶点'), normals = geometryNumbers(mesh.normals, '法线');
     if (!positions.length || positions.length % 3 || normals.length !== positions.length) throw new Error('几何顶点或法线长度不正确。');
-    const indices = numbers(mesh.indices, '索引');
+    const indices = geometryNumbers(mesh.indices, '索引');
     let indicesValid = indices.length > 0 && indices.length % 3 === 0;
     if (indicesValid) for (let i = 0; i < indices.length; i++) {
       const index = indices[i];
@@ -69,10 +77,10 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
     }
     if (!indicesValid) throw new Error('几何索引越界或不是三角面。');
     numbers(mesh.worldMatrix, '世界矩阵', 16);
-    if (mesh.uvs !== undefined) numbers(mesh.uvs, 'UV', positions.length / 3 * 2);
-    if (mesh.uvs2 !== undefined) numbers(mesh.uvs2, 'UV2', positions.length / 3 * 2);
-    if (mesh.colors !== undefined) numbers(mesh.colors, '顶点颜色', positions.length / 3 * 4);
-    if (mesh.tangents !== undefined) numbers(mesh.tangents, '顶点切线', positions.length / 3 * 4);
+    if (mesh.uvs !== undefined) geometryNumbers(mesh.uvs, 'UV', positions.length / 3 * 2);
+    if (mesh.uvs2 !== undefined) geometryNumbers(mesh.uvs2, 'UV2', positions.length / 3 * 2);
+    if (mesh.colors !== undefined) geometryNumbers(mesh.colors, '顶点颜色', positions.length / 3 * 4);
+    if (mesh.tangents !== undefined) geometryNumbers(mesh.tangents, '顶点切线', positions.length / 3 * 4);
     const material = object(mesh.material, '材质');
     numbers(material.baseColor, '基础色', 3); numbers(material.emissive, '自发光', 3);
     finite(material.alpha, '透明度', 0, 1); finite(material.metallic, '金属度', 0, 1); finite(material.roughness, '粗糙度', 0, 1);
@@ -107,7 +115,7 @@ export function validateLightingBakeInput(value: unknown): LightingBakeInput {
       if ((texture.wrapU ?? 1) !== (texture.wrapV ?? 1)) throw new Error('Cycles 暂不支持 U/V 不同的纹理寻址方式，请统一后再烘焙。');
     }
   }
-  if (!input.meshes.some(mesh => object(mesh, '几何').receiver !== false)) throw new Error('没有接收光照烘焙的静态表面。');
+  if (!options.headerOnly && !options.allowNonreceiver && !input.meshes.some(mesh => object(mesh, '几何').receiver !== false)) throw new Error('没有接收光照烘焙的静态表面。');
   if (!Array.isArray(input.lights)) throw new Error('灯光列表格式不正确。');
   for (const value of input.lights) {
     const light = object(value, '灯光');
@@ -137,7 +145,7 @@ export function safeLightingBakeChildPath(root: string, name: string): string {
 type SurfaceMapping = { key: string; entityId: string; nodeKey: string };
 type SurfacePartition = { leaf: boolean; zero?: SurfacePartition; one?: SurfacePartition };
 /** 分片键描述完整二叉空间切分树；资源提交前拒绝缺片、重叠和错误的原表面关联。 */
-export function matchLightingBakeSurfaceSources(inputs: readonly LightingBakeMeshInput[], outputs: readonly SurfaceMapping[]): LightingBakeMeshInput[] {
+export function matchLightingBakeSurfaceSources<T extends Pick<LightingBakeMeshInput, 'key' | 'entityId' | 'nodeKey' | 'receiver'>>(inputs: readonly T[], outputs: readonly SurfaceMapping[]): T[] {
   const receivers = new Map(inputs.filter(mesh => mesh.receiver !== false).map(mesh => [mesh.key, mesh]));
   const partitions = new Map<string, SurfacePartition>(), seen = new Set<string>();
   const fail = (): never => { throw new Error('烘焙表面分片覆盖不完整、重复或源映射不正确。'); };

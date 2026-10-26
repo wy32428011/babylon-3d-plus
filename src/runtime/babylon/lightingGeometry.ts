@@ -13,6 +13,7 @@ import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import { Node } from '@babylonjs/core/node.js';
+import { assertLightingRendererHeadroom, assertLightingWorkingBytes } from '../../../electron/shared/sceneLightingBakeResources.ts';
 import type {
   LightingBakeMaterialInput, LightingBakeMeshInput, LightingBakeTextureInput,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
@@ -86,7 +87,7 @@ function pngChunk(type: string, bytes: Uint8Array): Uint8Array {
 
 /** Canvas 会预乘透明像素并丢失其 RGB；直接编码 RGBA，保留 opaque 忽略 alpha 时仍需使用的原色。 */
 async function encodeLightingRgbaPng(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number,
-  signal?: AbortSignal): Promise<string> {
+  signal?: AbortSignal, writePng?: (bytes: Uint8Array) => Promise<string>): Promise<string> {
   const stride = width * 4, scanlines = new Uint8Array((stride + 1) * height);
   for (let y = 0; y < height; y++) scanlines.set(rgba.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
   if (typeof CompressionStream === 'undefined') throw new Error('当前运行环境不支持保留透明像素原色的 PNG 编码。');
@@ -101,6 +102,7 @@ async function encodeLightingRgbaPng(rgba: Uint8Array | Uint8ClampedArray, width
   const png = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
   let offset = 0;
   for (const chunk of chunks) { png.set(chunk, offset); offset += chunk.length; }
+  if (writePng) return writePng(png);
   const binary: string[] = [];
   for (let start = 0; start < png.length; start += 0x8000) {
     binary.push(String.fromCharCode(...png.subarray(start, start + 0x8000)));
@@ -109,7 +111,7 @@ async function encodeLightingRgbaPng(rgba: Uint8Array | Uint8ClampedArray, width
 }
 
 /** 捕获 GPU 中实际使用的像素，兼容 GLB 内嵌纹理及压缩纹理，不把 blob URL 交给后台进程。 */
-export function createLightingTextureCapture(signal?: AbortSignal): LightingTextureCapture {
+export function createLightingTextureCapture(signal?: AbortSignal, options?: { workingBytes: number; writePng: (bytes: Uint8Array) => Promise<string> }): LightingTextureCapture {
   const cache = new Map<BaseTexture, Promise<string>>();
   return texture => {
     let pending = cache.get(texture);
@@ -118,6 +120,10 @@ export function createLightingTextureCapture(signal?: AbortSignal): LightingText
         signal?.throwIfAborted();
         const { width, height } = texture.getSize();
         if (!width || !height || texture.isCube) throw new Error(`纹理「${texture.name}」不是可捕获的二维材质贴图。`);
+        if (options) {
+          assertLightingWorkingBytes(width * height * 4 * 12, options.workingBytes, `纹理「${texture.name}」`);
+          assertLightingRendererHeadroom(width * height * 4 * 12);
+        }
         const pixels = await texture.readPixels();
         signal?.throwIfAborted();
         if (!pixels || pixels.byteLength === 0) throw new Error(`无法读取材质纹理「${texture.name}」。`);
@@ -137,7 +143,7 @@ export function createLightingTextureCapture(signal?: AbortSignal): LightingText
           if (source.length !== rgba.length) throw new Error(`纹理「${texture.name}」像素格式不支持无损导出。`);
           rgba.set(source);
         }
-        return encodeLightingRgbaPng(rgba, width, height, signal);
+        return encodeLightingRgbaPng(rgba, width, height, signal, options?.writePng);
       })();
       cache.set(texture, pending);
     }
@@ -242,7 +248,7 @@ export type LightingMeshIdentity = {
 };
 /** 保留每个 subMesh 的材质关系；UV 展开产生的新拓扑仅保存到派生几何中。 */
 export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingMeshIdentity,
-  capture?: LightingTextureCapture): Promise<LightingBakeMeshInput[]> {
+  capture?: LightingTextureCapture, stream?: { workingBytes: number; emit: (input: LightingBakeMeshInput) => Promise<void> }): Promise<LightingBakeMeshInput[]> {
   const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh;
   if (!(source instanceof Mesh)) throw new Error(`对象「${mesh.name}」不是支持烘焙的三角网格。`);
   if (source.skeleton || source.morphTargetManager?.numTargets) throw new Error(`对象「${mesh.name}」包含骨骼或形变，应设置为动态。`);
@@ -252,6 +258,11 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
     throw new Error(`对象「${mesh.name}」缺少有效三角网格。`);
   }
   const vertexCount = positions.length / 3;
+  if (stream) {
+    // 索引分组/缺省法线发生在每项编码之前，也必须先准入。
+    const indexCount = unindexed ? vertexCount : indices!.length;
+    assertLightingWorkingBytes(indexCount * 8 + (source.isVerticesDataPresent(VertexBuffer.NormalKind) ? 0 : vertexCount * 3 * 8), stream.workingBytes, `对象「${mesh.name}」分组`);
+  }
   const groups = source.subMeshes?.length ? source.subMeshes : [{ materialIndex: 0, indexStart: 0,
     indexCount: indices?.length ?? 0, verticesStart: 0, verticesCount: vertexCount }];
   const primitives: Array<{ index: number; indices: Uint32Array; material: Material | null }> = [];
@@ -297,14 +308,38 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
   const result: LightingBakeMeshInput[] = [];
   // 同一源网格的 primitive 共享顶点属性引用；传输编码按引用去重，只编码并上送一份。
   for (const primitive of primitives) {
-    result.push({
+    const channels = 6 + (uvs ? 2 : 0) + (uvs2 ? 2 : 0) + (colors ? 4 : 0) + (tangents ? 4 : 0);
+    const corners = Math.min(vertexCount, primitive.indices.length);
+    const size = corners * (channels * 8 * 3 + 64) + primitive.indices.length * 16 + 64;
+    if (stream) { assertLightingWorkingBytes(size, stream.workingBytes, `对象「${mesh.name}」`); assertLightingRendererHeadroom(size); }
+    // 流式路径借用源属性到本次同步编码；每项写入完成即释放，捕获终点仍复核内容签名。
+    const item: LightingBakeMeshInput = {
       key: `${identity.key}/primitive:${primitive.index}`, entityId: identity.entityId, nodeKey: identity.nodeKey,
       name: mesh.name, positions, normals, indices: primitive.indices,
       ...(uvs ? { uvs } : {}), ...(uvs2 ? { uvs2 } : {}),
       ...(colors ? { colors } : {}), worldMatrix: Array.from(matrix.asArray()),
       ...(tangents ? { tangents } : {}),
       material: await exportLightingMaterial(primitive.material, capture, mesh), receiver: identity.receiver,
-    });
+    };
+    if (stream) {
+      // 只重映射本primitive真正引用的顶点；所有通道逐值复制，保持三角形顺序和Float64精度。
+      const remap = new Map<number, number>(), used: number[] = [];
+      const compactIndices = new Uint32Array(item.indices.length);
+      for (let index = 0; index < item.indices.length; index++) {
+        const sourceIndex = item.indices[index]; let target = remap.get(sourceIndex);
+        if (target === undefined) { target = used.length; remap.set(sourceIndex, target); used.push(sourceIndex); }
+        compactIndices[index] = target;
+      }
+      for (const [field, width] of [['positions', 3], ['normals', 3], ['uvs', 2], ['uvs2', 2], ['colors', 4], ['tangents', 4]] as const) {
+        const original = item[field]; if (!original) continue;
+        const compact = new Float64Array(used.length * width);
+        for (let index = 0; index < used.length; index++) for (let channel = 0; channel < width; channel++) compact[index * width + channel] = original[used[index] * width + channel];
+        item[field] = compact;
+      }
+      item.indices = compactIndices;
+      await stream.emit(item); await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
+    else result.push(item);
   }
   return result;
 }

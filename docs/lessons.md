@@ -455,6 +455,7 @@
 - 两个独立工具实测：bootstrap顶层`await app.whenReady()`会使入口模块未结束、ready无法推进，Playwright launch超时且尚未创建renderer；这不是GI或产品启动失败。
 - 使用`app.whenReady().then(async () => { ... })`注册式初始化，并等待明确host/window就绪receipt；或复用已通过的主入口bootstrap。新工具保持独立userData、核实owned PID退出、删除精确临时bootstrap，失败目录保留。
 - 若bootstrap还要导入产品main，必须在ready前完成该模块求值，使`protocol.registerSchemesAsPrivileged`来得及注册；只把需要ready的查询放进回调。POST-only无窗口入口可以在ready回调运行，两条路径分别测试，不能把主入口也移入ready回调。
+- 2026-10-26：实际主窗口加载 `preload.cts` 生成的 `preload.cjs`；只更新同名 `preload.ts` 不会接通桌面API。类型检查与直接调用服务通过不能代替实际窗口到IPC的连通检查。复用旧UI脚本时须按当前惰性分类入口触发，不能等待已不再自动刷新的Store列表。
 
 ## 真实准备门按当前实体合同，采集不能跳过GPU独占缓冲（2026-10-25）
 
