@@ -183,7 +183,8 @@ function applyDigitalTwinRuntimeConfig(
 ): PlayerRuntimeConfig {
   if (!runtimeConfig) return config;
   if (!runtimeConfig.runtimeEnabled) throw new Error('该数字孪生项目当前已在数据中台停用。');
-  const address = runtimeConfig.mqttBrokerUrl ?? "";
+  // 中台未配置地址时沿用已校验的发布包地址，避免空值覆盖导致 MQTT 被禁用。
+  const address = runtimeConfig.mqttBrokerUrl ?? config.mqtt.address;
   return {
     ...config,
     mqtt: {

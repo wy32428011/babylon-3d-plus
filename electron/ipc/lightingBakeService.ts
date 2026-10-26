@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -308,7 +308,8 @@ async function validateAndPromote(options: LightingBakeServiceOptions, staging: 
   const sourceMeshes = matchLightingBakeSurfaceSources(options.input.meshes, result.meshes);
   const textureBytes = result.atlases.length * options.input.settings.atlasSize ** 2 * 4;
   if (textureBytes > options.input.settings.maxTextureMiB * 1048576) throw new Error('光照图集超过当前纹理预算，候选结果未提交。');
-  const folderName = `${options.input.jobId}-${randomUUID()}`;
+  // 正式资产与候选目录也使用短随机名称，避免烘焙完成后保存产物再次触发 Windows 长路径限制。
+  const folderName = randomBytes(12).toString('hex');
   const pending = path.join(assetsRoot, `.pending-${folderName}`), destination = path.join(assetsRoot, folderName);
   await fs.mkdir(pending);
   const assets: LightingBakeAsset[] = [];

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { LightingBakeInput } from '../shared/sceneLightingBakeContract.ts';
@@ -18,6 +19,10 @@ function sampleProcessMemory(): { rss: number | null; heapUsed: number | null } 
 function maximumObservedMemory(previous: number | null, current: number | null): number | null {
   if (current === null) return previous;
   return previous === null ? current : Math.max(previous, current);
+}
+/** 目录仅使用固定长度摘要；完整任务标识保留在记录中，避免中台深层工程路径叠加超长名称。 */
+function taskDirectoryPrefix(jobId: string): string {
+  return createHash('sha256').update(jobId).digest('hex').slice(0, 12) + '-';
 }
 async function tasksRoot(projectRoot: string, create = false): Promise<string> {
   const project = await fs.realpath(projectRoot);
@@ -42,7 +47,7 @@ async function readRecord(directory: string): Promise<LightingBakeTaskRecord> {
   const record = JSON.parse(await fs.readFile(file, 'utf8')) as LightingBakeTaskRecord;
   if (!record || typeof record !== 'object') throw new Error('烘焙任务记录归属无效。');
   if (record.version !== 1 || record.format !== 'babylon-lighting-bake-task' || record.taskId !== path.basename(directory)
-    || !taskIdPattern.test(record.jobId) || !record.taskId.startsWith(record.jobId + '-') || !['preparing','baking','applying',...terminal].includes(record.status)
+    || typeof record.jobId !== 'string' || !taskIdPattern.test(record.jobId) || !(record.taskId.startsWith(record.jobId + '-') || record.taskId.startsWith(taskDirectoryPrefix(record.jobId))) || !['preparing','baking','applying',...terminal].includes(record.status)
     || !Number.isFinite(Date.parse(record.startedAt)) || !Number.isFinite(Date.parse(record.updatedAt)) || typeof record.sceneName !== 'string'
     || record.error !== undefined && typeof record.error !== 'string'
     || record.device !== undefined && (!record.device || typeof record.device !== 'object' || !['cpu','auto','gpu'].includes(record.device.requested) || !['CPU','GPU'].includes(record.device.actual) || typeof record.device.name !== 'string' || typeof record.device.backend !== 'string' || record.device.fallbackReason !== undefined && typeof record.device.fallbackReason !== 'string')
@@ -78,7 +83,7 @@ function engineAlive(pid: number | undefined): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return !(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH'); }
 }
 export async function createLightingBakeTask(projectRoot: string, input: LightingBakeInput, engineVersion: string, preflight: LightingBakePreflight) {
-  const root = await tasksRoot(projectRoot, true), directory = await fs.mkdtemp(path.join(root, input.jobId + '-'));
+  const root = await tasksRoot(projectRoot, true), directory = await fs.mkdtemp(path.join(root, taskDirectoryPrefix(input.jobId)));
   const now = new Date().toISOString();
   const record: LightingBakeTaskRecord = { version: 1, format: 'babylon-lighting-bake-task', taskId: path.basename(directory), jobId: input.jobId, sceneName: input.sceneName, signature: input.signature,
     status: 'preparing', phase: 'preparing', progress: 0, message: '正在准备烘焙任务', startedAt: now, updatedAt: now, durationMs: 0, engineVersion,

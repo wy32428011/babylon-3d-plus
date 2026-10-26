@@ -143,6 +143,8 @@ Toolbar 的太阳形按钮“光照与烘焙管理器”是统一入口，不依
 
 新派生几何在全部存在的浮点通道都能精确往返 Float32、索引能保持 Uint32 且小头有效时，保存为 `.bin`，资源清单声明 `kind: 'geometry', encoding: 'binary-v1', geometryVersion: 2`。容器使用小型 UTF-8 JSON 头和连续的 little-endian Float32/Uint32 数据；运行时先核对真实字节数与 SHA，再校验布局、范围和所有数值，正常对齐输入直接使用 TypedArray 视图。任一属性不精确、溢出或无法满足容器条件时，整块继续保存原精度 JSON，不量化 CPU 包围盒和拾取输入。旧省略 encoding 按 JSON 读取，一个结果可以同时含 JSON 与 binary。输入/输出二进制化不表示整个 Editor/Cycles 链路内存有界，也不代表显存峰值或 FPS 已经降低。
 
+烘焙任务保存在工程的 `.babylon-editor/lighting-bake-jobs/` 下，新任务目录使用固定长度的任务 ID 摘要加随机后缀，完整任务 ID 仍保存在 `task.json`。正式光照资产使用短随机目录名，避免中台多层工程路径叠加任务 ID 导致 Windows `ENAMETOOLONG`。旧任务历史、日志与清理仍兼容原目录命名，已有光照资产继续按记录的路径读取，无需迁移。
+
 ## 取消、过期与清除
 
 - 准备、烘焙和应用阶段都可取消。只有仍属于当前 request、输入未变化且产物校验通过的结果才能提交。

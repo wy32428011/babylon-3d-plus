@@ -329,3 +329,11 @@
 - 修复：入口即计、return/throw只补状态，aggregate和event复用同一资格；保留旧失败后，真实sink142例复验。base-observed不认证outer callee，first-winner不等于all-causes，未读visibility不能写成“未变化”。
 - 预防：检查所有Scene的bucket和真实计数包络；1278个入口由3个Scene各426构成，不能当主帧数。完整aggregate与first5000事件前缀分开；shadow只见部分consumer，不证明私有写未被其他API观察。
 - 严格边界：shadow-null跳三写的纯VM反例保留2次公共reset和最终null，却将setter日志6次减成3次；同值写入不是自动可删冗余，不能为优化收益放宽脚本合同。
+
+
+## Windows 深层工程目录中的烘焙任务命名（2026-10-26）
+
+- 触发：数字孪生发布准备烘焙时，mkdtemp 报 ENAMETOOLONG。
+- 原因：中台工作区本身包含平台与工程长标识，任务目录再拼完整 jobId；正式资产目录还额外拼 UUID。
+- 修复：任务目录使用定长摘要与随机后缀，正式资产使用短随机名称；完整业务标识保留在任务记录，兼容旧命名的归属检查。
+- 预防：业务标识与磁盘目录名分离；排查路径长度时同时覆盖暂存、日志、候选产物和正式资产，不能只修第一个 mkdir/mkdtemp。

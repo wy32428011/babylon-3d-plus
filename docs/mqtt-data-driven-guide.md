@@ -170,6 +170,13 @@ stacker 的 `dataDriven` 则声明 `motion.travel/lift/fork` 的节点、速度�
 - conflict：两个专用模型若同时绑定同一 `sourceId + deviceType + assetCode`，运行时会同时停止它们并标记冲突。
 - 缺字段：专用驱动读取字段缺失时跳过对应动作，不写入默认 0 来掩盖数据缺失。
 
+## 发布后的 MQTT 地址优先级
+
+- 数字孪生 Viewer 启动时读取中台项目运行配置；中台配置了有效的 `mqttBrokerUrl` 时，优先使用该地址。
+- 中台地址未配置（字段缺失、`null` 或空字符串）时，沿用发布包 `runtime-config.json` 中的 `mqtt.address`，不会用空值覆盖。
+- MQTT 仍需发布包中的 `mqtt.enabled` 为 `true`、最终地址非空且存在有效订阅；项目停用和地址安全校验继续生效。
+- 此规则随 Viewer 代码交付，已有发布包需使用更新后的 Viewer 重新构建并发布才能生效。
+
 ## Electron wss 安全建议
 
 - 生产现场优先使用 `wss://`，避免在受控网络外暴露明文 `ws://`。
