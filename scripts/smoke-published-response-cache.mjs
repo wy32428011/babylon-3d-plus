@@ -1,15 +1,23 @@
+/* global window, location, caches */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { gzipSync } from 'node:zlib';
+import { precompressDeploymentFiles } from '../dist-electron/ipc/deploymentPrecompression.js';
 import path from 'node:path';
 import ts from 'typescript';
 import { chromium } from 'playwright';
 
-const output = path.resolve('output/playwright/published-response-cache');
+const output = path.resolve(process.env.RESPONSE_CACHE_OUTPUT ?? 'output/playwright/published-response-cache');
 await mkdir(output, { recursive: true });
 const helper = ts.transpileModule(await readFile('src/player/publishedResponseCache.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+// 直接运行产品缓存实现；测试服务器仅将这几个本地TS模块转为浏览器可执行JS。
+const modules = new Map();
+for (const file of ['src/runtime/assets/publishedAssetCache.ts', 'src/runtime/assets/publishedCacheStore.ts',
+  'src/runtime/assets/publishedRawStore.ts', 'src/runtime/assets/publishedBlobHash.ts',
+  'src/runtime/babylon/skyboxContentHash.ts', 'src/runtime/babylon/SceneLoadDiagnostics.ts', 'electron/shared/sha256.ts']) {
+  modules.set('/' + file, ts.transpileModule(await readFile(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText);
+}
 const source = await readFile('public/published-cache-worker.js', 'utf8');
 // 仅测试服务器注入浏览器 Cache API 故障，生产 worker 不包含故障开关。
 const worker = source + `\nlet fixtureQuota = false;
@@ -19,7 +27,12 @@ Cache.prototype.put = function(request,response) {
   return fixturePut.call(this,request,response);
 };
 self.addEventListener('message',event=> { if(event.data.fixtureQuota !== undefined) { fixtureQuota = event.data.fixtureQuota; event.ports[0].postMessage(true); } });`;
+// 使用公开B7合同独立构造有效binary；运输测试不依赖先前任务输出。
+const fixtureSource = ts.transpileModule(await readFile('tests/lightingBake/lightingGeometryBinaryFixture.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { binaryFixture, geometryFixture } = await import('data:text/javascript;base64,' + Buffer.from(fixtureSource).toString('base64'));
+const binaryGeometry = Buffer.from(binaryFixture({ ...geometryFixture, indices: Array.from({ length: 4096 }, () => [0, 1, 2]).flat() }));
 const packages = new Map();
+const fixtureRoot=path.join(output,'releases',String(Date.now()));
 for (const version of ['101', '102']) {
   const base = '/digital-twin/releases/7/' + version + '/';
   const html = `<!doctype html><html><body><p id="status">缓存回归 ${version}</p><script type="module">
@@ -35,23 +48,59 @@ try {
  let cursor=0; const results=[];
  await Promise.all(Array.from({length:3},async()=>{while(cursor<responses.length){const file=responses[cursor++];results.push(await session.ensure(file));}}));
  const content=await (await fetch('./app.js')).text();
- window.result={available:session.available,reason:session.reason,ready:results.every(Boolean),content,revision:config.cacheRevision};
+ const transport=[];
+ for(const file of manifest.files.filter(file=>file.path.startsWith('transport/'))) {
+   const response=await fetch('./'+file.path); const bytes=await response.arrayBuffer();
+   const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
+   transport.push({path:file.path,size:bytes.byteLength,sha256,contentType:response.headers.get('content-type')});
+ }
+ const {PublishedAssetCache}=await import('/src/runtime/assets/publishedAssetCache.ts');
+ const {PublishedRawStore}=await import('/src/runtime/assets/publishedRawStore.ts');
+ const rawFiles=manifest.files.filter(file=>file.path.startsWith('project/assets/transport'));
+ const resources=new Map(rawFiles.map(file=>[new URL(file.path,base).href,{size:file.size,sha256:file.sha256}]));
+ const cache=new PublishedAssetCache({baseUrl:base,revision:config.cacheRevision,assetBase:'./project/assets/',documentUrls:[],
+   resources,rawStore:new PublishedRawStore('precompression-raw-'+config.cacheRevision)});
+ const decoded=[];
+ for(const file of rawFiles) {
+   const response=await cache.fetch(new URL(file.path,base).href); const bytes=await response.arrayBuffer();
+   const value=await cache.decode('json-v1',bytes,async()=>JSON.parse(new TextDecoder().decode(bytes)),
+     value=>Array.isArray(value?.positions),value=>value.positions.length*8);
+   const sha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
+   decoded.push({path:file.path,size:bytes.byteLength,sha256,contentType:response.headers.get('content-type'),positions:value.positions.length,first:value.positions[0]});
+ }
+ const metrics={...cache.metrics}; cache.dispose();
+ window.result={available:session.available,reason:session.reason,ready:results.every(Boolean),content,revision:config.cacheRevision,transport,decoded,metrics};
  document.querySelector('#status').textContent=JSON.stringify(window.result);
 }catch(error){window.result={error:String(error)};}
 </script></body></html>`;
   const files = new Map([
     ['index.html', Buffer.from(html)], ['helper.js', Buffer.from(helper)],
     ['app.js', Buffer.from('/* visible release ' + version + ' */')], ['quota.js', Buffer.from('/* quota fallback */')],
+    ['transport/main.js', Buffer.from('export const message="压缩传输字节";\n'.repeat(4096))],
+    ['transport/main.css', Buffer.from('.fixture { color: #123456; }\n'.repeat(4096))],
+    ['transport/geometry.bin', binaryGeometry],
+    ['transport/decoder.wasm', Buffer.concat([Buffer.from([0,97,115,109,1,0,0,0]), Buffer.alloc(65536, 65)])],
+    ['project/assets/transport-gi.json', Buffer.from(JSON.stringify({ positions:Array(16384).fill(0.125) }))],
     ['slow.bin', Buffer.alloc(128 * 1024, 71)],
     ['oversized.bin', Buffer.from('expected response')],
     ['assets/%E6%A8%A1%E5%9E%8B%20%231%25.bin', Buffer.from('encoded path resource')],
     ['project/assets/raw.bin', Buffer.from('IDB owned, no SW write')],
   ]);
-  const manifest = { version: 1, cacheRevision: 'revision-' + version, totalBytes: 0, files: [...files].map(([name, body]) => ({ path: name, size: body.length, sha256: createHash('sha256').update(body).digest('hex'), contentType: name.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/javascript; charset=utf-8', storage: name.startsWith('project/') ? 'asset' : 'response' })) };
+  const manifest = { version: 1, cacheRevision: 'revision-' + version, totalBytes: 0, files: [...files].map(([name, body]) => ({ path: name, size: body.length, sha256: createHash('sha256').update(body).digest('hex'), contentType: ({'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.wasm':'application/wasm'})[path.extname(name)]??'application/octet-stream', storage: name.startsWith('project/') ? 'asset' : 'response' })) };
   manifest.totalBytes = manifest.files.reduce((sum, file) => sum + file.size, 0);
-  packages.set(base, { files, manifest });
+  const root=path.join(fixtureRoot,version);
+  for(const [name,body] of files) { const file=path.join(root,...name.split('/').map(decodeURIComponent)); await mkdir(path.dirname(file),{recursive:true}); await writeFile(file,body); }
+  await writeFile(path.join(root,'runtime-config.json'),JSON.stringify({cacheRevision:manifest.cacheRevision}));
+  await writeFile(path.join(root,'release-cache-manifest.json'),JSON.stringify(manifest));
+  await writeFile(path.join(root,'published-cache-worker.js'),worker);
+  const precompression=await precompressDeploymentFiles(root,manifest,new AbortController().signal);
+  const sidecars=new Map();
+  for(const file of precompression.files) { const key=file.sourcePath.split('/').map(encodeURIComponent).join('/'); sidecars.set(key+':'+file.encoding,await readFile(path.join(root,file.path))); }
+  assert.ok(precompression.files.length>=10,'实际生成JS/CSS/WASM/GI JSON/binary传输侧车');
+  packages.set(base, { files, manifest, root, sidecars, precompression, encoding:version==='101'?'gzip':'br' });
 }
 const counts = new Map();
+const transfers = [];
 let slowDelay = false;
 let slowCancelled = 0;
 let oversizedMode = false;
@@ -61,6 +110,7 @@ const server = createServer((request, response) => {
   const url = new URL(request.url, 'http://fixture');
   counts.set(url.pathname, (counts.get(url.pathname) ?? 0) + 1);
   response.setHeader('Cache-Control', 'no-store');
+  if(modules.has(url.pathname)) { response.setHeader('Content-Type','text/javascript'); response.end(modules.get(url.pathname)); return; }
   const entry = [...packages].find(([base]) => url.pathname.startsWith(base));
   if (!entry) { response.writeHead(404).end(); return; }
   const [base, pkg] = entry;
@@ -79,38 +129,67 @@ const server = createServer((request, response) => {
       response.write(pkg.files.get(file).subarray(0, 32));
       const timer = setTimeout(() => response.end(pkg.files.get(file).subarray(32)), 400);
       response.on('close', () => { clearTimeout(timer); if (!response.writableFinished) slowCancelled++; });
-    } else if (file.endsWith('.js')) {
-      const compressed = gzipSync(pkg.files.get(file));
-      response.setHeader('Content-Encoding', 'gzip'); response.setHeader('Content-Length', compressed.length); response.end(compressed);
-    } else response.end(pkg.files.get(file));
+    } else {
+      const encoded=pkg.sidecars.get(file+':'+pkg.encoding);
+      const accepted=String(request.headers['accept-encoding']??'').split(',').some(value=>value.trim().split(';')[0]===pkg.encoding);
+      const body=encoded&&accepted?encoded:pkg.files.get(file);
+      if(encoded&&accepted) response.setHeader('Content-Encoding',pkg.encoding);
+      response.setHeader('Vary','Accept-Encoding'); response.setHeader('Content-Length',body.length);
+      if(file.startsWith('transport/')||file.startsWith('project/assets/transport')) transfers.push({path:base+file,encoding:encoded&&accepted?pkg.encoding:'identity',bytes:body.length,decodedBytes:pkg.files.get(file).length,probe:request.headers['x-fixture-probe']==='1'});
+      response.end(body);
+    }
   }
   else { response.setHeader('Content-Type', 'text/plain'); response.end('uncached dynamic path'); }
 });
 let browser;
+const httpNegotiation=[];
 try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = 'http://127.0.0.1:' + server.address().port;
+  // 同一原URL直接检查无编码回退和压缩表示的MIME/协商头/解压后SHA，不经过应用缓存。
+  for(const [base,pkg] of packages) for(const file of pkg.manifest.files.filter(file=>file.path.startsWith('transport/')||file.path.startsWith('project/assets/transport'))) {
+    for(const encoding of ['identity',pkg.encoding]) {
+      const response=await fetch(origin+base+file.path,{headers:{'Accept-Encoding':encoding,'X-Fixture-Probe':'1'}});
+      const bytes=Buffer.from(await response.arrayBuffer()),sha256=createHash('sha256').update(bytes).digest('hex');
+      assert.equal(response.status,200); assert.equal(bytes.length,file.size); assert.equal(sha256,file.sha256);
+      assert.equal(response.headers.get('content-encoding'),encoding==='identity'?null:encoding);
+      assert.equal(response.headers.get('content-type'),file.contentType); assert.match(response.headers.get('vary'),/Accept-Encoding/i);
+      const encodedBytes=Number(response.headers.get('content-length'));
+      assert.equal(encodedBytes,encoding==='identity'?file.size:pkg.sidecars.get(file.path+':'+encoding).length);
+      httpNegotiation.push({path:base+file.path,encoding,encodedBytes,decodedBytes:bytes.length,sha256,contentType:file.contentType});
+    }
+  }
   browser = await chromium.launch({ executablePath: process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   const samples = [];
-  for (const [name, version] of [['cold', '101'], ['warm', '101'], ['new-release', '102'], ['old-release', '101']]) {
+  for (const [name, version] of [['cold', '101'], ['warm', '101'], ['new-release', '102'], ['warm-br', '102'], ['old-release', '101']]) {
     const base = '/digital-twin/releases/7/' + version + '/';
     const before = Object.fromEntries(counts);
+    const firstTransfer=transfers.length;
     await page.goto(origin + base);
     await page.waitForFunction(() => window.result, { timeout: 30000 });
     const result = await page.evaluate(() => window.result);
     assert.equal(result.error, undefined, result.error);
     assert.equal(result.available, true, result.reason); assert.equal(result.ready, true, JSON.stringify(result));
     assert.equal(result.revision, 'revision-' + version);
-    if (name === 'warm' || name === 'old-release') {
+    const warm=name==='warm'||name==='warm-br'||name==='old-release';
+    for(const file of [...result.transport,...result.decoded]) { const expected=packages.get(base).manifest.files.find(row=>row.path===file.path); assert.equal(file.size,expected.size); assert.equal(file.sha256,expected.sha256); assert.equal(file.contentType,expected.contentType); }
+    assert.equal(result.decoded[0].positions,16384); assert.equal(result.decoded[0].first,0.125);
+    assert.equal(result.metrics.storageFailures,0);
+    if(warm) { assert.equal(result.metrics.downloads,0); assert.equal(result.metrics.decodes,0); assert.equal(result.metrics.resourceHits,1); assert.equal(result.metrics.decodeHits,1); }
+    else { assert.equal(result.metrics.downloads,1); assert.equal(result.metrics.decodes,1); assert.equal(result.metrics.decodeHits,0); }
+    if (warm) {
       for (const file of packages.get(base).manifest.files.filter(file => file.storage === 'response')) {
         assert.equal(counts.get(base + file.path) ?? 0, before[base + file.path] ?? 0, name + ': no repeated static bytes: ' + file.path);
       }
       assert.equal(counts.get(base) ?? 0, before[base] ?? 0, 'root index alias must be cached');
     }
-    samples.push({ name, ...result });
+    const wire=transfers.slice(firstTransfer);
+    if(warm) assert.equal(wire.length,0,'冷热缓存命中后无重复传输侧车/原文');
+    else { assert.equal(wire.length,5); assert.ok(wire.every(row=>row.encoding===packages.get(base).encoding&&row.bytes<row.decodedBytes)); }
+    samples.push({ name, ...result, transfer:{encoding:packages.get(base).encoding,requests:wire.length,encodedBytes:wire.reduce((n,row)=>n+row.bytes,0),decodedBytes:wire.reduce((n,row)=>n+row.decodedBytes,0)} });
   }
   const base = '/digital-twin/releases/7/101/';
   const beforeRestart = Object.fromEntries(counts);
@@ -192,7 +271,7 @@ try {
   assert.equal(oversizedCancelled, 2);
   assert.deepEqual(errors, []);
   await page.screenshot({ path: path.join(output, 'ready.png') });
-  const report = { status: 'PASS', samples, workerRestart: true, bypass, repair, quota, range, cancellation, oversized: { ...oversized, chunks: oversizedChunks, cancelled: oversizedCancelled }, requests: Object.fromEntries(counts), errors };
+  const report = { status: 'PASS', samples, workerRestart: true, bypass, repair, quota, range, cancellation, oversized: { ...oversized, chunks: oversizedChunks, cancelled: oversizedCancelled }, requests: Object.fromEntries(counts), httpNegotiation, transfers, precompression:[...packages].map(([base,pkg])=>({base,...pkg.precompression})), errors };
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report));
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

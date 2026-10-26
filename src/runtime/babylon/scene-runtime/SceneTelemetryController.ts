@@ -81,6 +81,7 @@ export class SceneTelemetryController {
   /** 诊断开关不入文档，用于同一正式运行时的受控 A/B；需显式启用。 */
   setMotionStaticBatchingEnabled(enabled: boolean): void {
     this.motionStaticBatchingEnabled = enabled;
+    this.motionStaticBatchRuntime.setEnabled(enabled);
     this.motionStaticBatchRuntime.sync();
   }
 
@@ -122,6 +123,7 @@ export class SceneTelemetryController {
   }
 
   public areMotionObserversControlled(): boolean {
+    for (const observer of this.motionStaticBatchRuntime.getControlledSceneObservers()) this.controlledMotionObservers.add(observer);
     for (const batch of new Set(this.dependencies.arrays.modelArrayBatchByMeshUniqueId.values())) {
       for (const observer of batch.getControlledSceneObservers()) this.controlledMotionObservers.add(observer);
     }
@@ -512,7 +514,7 @@ export class SceneTelemetryController {
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeMotionStaticBatchRuntime(): void {
     this.motionStaticBatchRuntime = new MotionStaticBatchRuntime(this.context.scene, {
-      getDocument: () => this.motionStaticBatchingEnabled ? this.dependencies.document.shadowDocument : null,
+      getDocument: () => this.dependencies.document.shadowDocument,
       getModels: () => this.dependencies.assets.models,
       getMotionTargets: model => this.specializedTelemetryRuntime.getLightingMotionNodes(model),
       isEntityVisible: id => this.dependencies.document.isEntityVisible(id),
@@ -537,12 +539,12 @@ export class SceneTelemetryController {
         if (this.dependencies.document.disposed) return;
         this.dependencies.environment.shadowRuntime.setRenderSuppressedMeshes(this.motionStaticBatchRuntime.getSuppressedMeshes());
         this.dependencies.readiness.invalidateModelStatistics();
-        this.dependencies.environment.lightingRuntime?.markDirty();
+        this.dependencies.environment.lightingRuntime?.markDirty('motion-batch-layout');
         // 回退先恢复完整布局；角色和静态深度必须在本帧绘制前同步，不能留一帧旧遮挡。
         if (!this.dependencies.document.disposed && this.dependencies.document.shadowDocument) this.dependencies.environment.lightingRuntime?.sync(this.dependencies.document.shadowDocument);
         this.dependencies.selection.rebuildModelSelectionOutline();
       },
-    });
+    }, this.motionStaticBatchingEnabled);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */

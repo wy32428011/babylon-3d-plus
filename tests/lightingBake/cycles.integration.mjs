@@ -41,6 +41,22 @@ const uvReport = JSON.parse(await fs.readFile(path.join(uvDirectory, 'report.jso
 assert.equal(uvReport.success, true);
 assert.equal(uvReport.originalTriangleCount, uvReport.exportedTriangleCount);
 assert.equal(uvReport.positiveSliver.sourceTriangles, uvReport.positiveSliver.outputTriangles);
+// Q0 使用实际交付脚本验证像素编码与大探针批次，避免只测源码而遗漏交付副本。
+for (const [name, passMarker] of [
+  ['cycles_pixel_processing_checks.py', 'CYCLES_PIXEL_PROCESSING_CHECKS_PASS'],
+  ['cycles_probe_batch_checks.py', 'CYCLES_PROBE_BATCH_CHECKS_PASS'],
+  ['cycles_probe_gpu_checks.py', 'CYCLES_PROBE_GPU_CHECKS_PASS'],
+  ['cycles_geometry_weld_checks.py', 'CYCLES_GEOMETRY_WELD_CHECKS_PASS'],
+]) {
+  const output = path.join(root, name.replace('.py', ''));
+  const args = ['--background', '--factory-startup', '--disable-autoexec', '--python-exit-code', '1',
+    '--python', path.resolve('tests/lightingBake', name), '--', '--output', output,
+    '--bake-script', path.resolve('dist-electron/lighting-bake/cycles_bake.py')];
+  const result = await promisify(execFile)(engine.path, args, { windowsHide: true, timeout: 180000,
+    maxBuffer: 4 * 1048576, env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } });
+  await fs.writeFile(path.join(root, name + '.log'), result.stdout + result.stderr);
+  assert.ok(result.stdout.includes(passMarker), name + ' 未输出成功标记');
+}
 const authorized = new Set();
 const options = { input, projectRoot: root, enginePath: engine.path, signal: new AbortController().signal,
   isProjectCurrent: () => true, isAuthorizedAssetFile: file => authorized.has(file),
@@ -60,7 +76,8 @@ for (const asset of result.assets) {
   assert.match(asset.sha256, /^[0-9a-f]{64}$/);
 }
 const geometryAsset = result.assets.find(asset => asset.id === result.surfaces[0].geometryAssetId);
-const geometry = JSON.parse(await fs.readFile(options.decodeAssetUrl(geometryAsset.url), 'utf8'));
+const { decodeLightingGeometryResource } = await import('../../dist-electron/shared/sceneLightingBakeGeometryBinary.js');
+const geometry = decodeLightingGeometryResource(new Uint8Array(await fs.readFile(options.decodeAssetUrl(geometryAsset.url))), geometryAsset.encoding);
 assert.equal(geometry.bakeUvs.length, geometry.positions.length / 3 * 2);
 assert.equal(geometry.colors.length, geometry.positions.length / 3 * 4);
 assert.deepEqual(new Set(geometry.positions), new Set(input.meshes[0].positions));

@@ -82,7 +82,11 @@ async function fixture(t, conflict = true, enableBatching = true) {
   assert.ok([...runtime.assets.models.values()].every(model => model.measurementReady), logs.join('\n'));
   runtime.registerHostSceneObservers();
   // 既有功能回归明确启用实验合批，避免默认关闭后绕过被测路径。
-  if (enableBatching) runtime.setMotionStaticBatchingEnabled(true);
+  if (enableBatching) {
+    runtime.setMotionStaticBatchingEnabled(true);
+    // 原生异步freeze先结算当前调用栈，下一render前在微任务安全边界完成接管。
+    await Promise.resolve();
+  }
 
   const motion = runtime.telemetry.motionStaticBatchRuntime;
   assert.equal(motion.getDiagnostics().groups, enableBatching ? partNames.length : 0, JSON.stringify(motion.getDiagnostics()));
@@ -139,6 +143,8 @@ test('真实 Runtime 默认保留原绘制，显式开启合批生效，再关�
   };
   assertOriginals();
   f.runtime.setMotionStaticBatchingEnabled(true);
+  // 不延迟动画帧或遥测更新，等待native freeze安全边界后在下一render前核对carrier。
+  await Promise.resolve();
   assert.equal(f.motion.getDiagnostics().groups, 3);
   const carriers = f.motion.getBatchesForEntity(entityIds[0]).flatMap(batch => batch.meshes);
   assert.equal(carriers.length, 3);

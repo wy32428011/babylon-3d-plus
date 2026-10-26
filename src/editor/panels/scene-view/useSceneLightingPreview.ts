@@ -28,6 +28,7 @@ export function useSceneLightingPreview({
   const preflightRequest = useEditorStore(state => state.lightingBakePreflightRequest);
   const draftPreview = useEditorStore(state => state.lightingDraftPreview);
   const managerTab = useEditorStore(state => state.lightingManagerTab);
+  const inspectorSelection = useEditorStore(state => state.lightingInspectorEntityIds.join('\0'));
   const previewOwner = useRef<SceneRuntime | null>(null);
   const previousSession = useRef(sceneSessionId);
 
@@ -183,16 +184,30 @@ export function useSceneLightingPreview({
 
   useEffect(() => {
     let previous: ReturnType<SceneRuntime['getLightingClassification']> | null = null;
-    const timer = window.setInterval(() => {
+    const poll = () => {
       const runtime = runtimeRef.current;
       if (!runtime) return;
-      const entries = runtime.getLightingClassification();
-      if (entries !== previous) { previous = entries; useEditorStore.getState().setLightingClassification(entries); }
       const state = useEditorStore.getState();
+      // 完整分类仅由打开的管理器消费；Inspector只读取选中实体的缓存。
+      if (lightingManagerOpen) {
+        // 准备完成/上下文换代可替换或清空profile；只读同步沿用现有poll，不启动probe或额外分类。
+        const profile = runtime.getGpuCapabilityProfile();
+        if (profile !== state.lightingGpuCapabilityProfile) state.setLightingGpuCapabilityProfile(profile);
+        const entries = runtime.getLightingClassification();
+        if (entries !== previous) { previous = entries; state.setLightingClassification(entries); }
+      }
+      if (state.lightingInspectorEntityIds.length) {
+        const cached = runtime.peekLightingClassificationForEntities(state.lightingInspectorEntityIds);
+        if (cached.entries !== state.lightingInspectorClassification || cached.stale !== state.lightingInspectorClassificationStale) {
+          useEditorStore.setState({ lightingInspectorClassification: cached.entries, lightingInspectorClassificationStale: cached.stale });
+        }
+      }
       state.setLightingBakeRuntimeError(runtime.getLightingBakeRuntimeError());
       state.setLightingRuntimeDiagnostic(runtime.getLightingRuntimeDiagnostic());
       if (state.lightingManagerOpen && (state.lightingManagerTab === 'overview' || state.lightingManagerTab === 'resources')) state.setLightingShadowCosts(runtime.getHybridLightingMetrics());
-    }, 400);
+    };
+    poll();
+    const timer = window.setInterval(poll, 400);
     return () => window.clearInterval(timer);
-  }, [sceneSessionId, runtimeRef]);
+  }, [sceneSessionId, lightingManagerOpen, inspectorSelection, runtimeRef]);
 }

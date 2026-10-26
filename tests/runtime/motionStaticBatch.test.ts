@@ -58,7 +58,7 @@ const { collectLightingRuntimeSources } = await import('../../src/runtime/babylo
 const { SceneLightingRuntime } = await import('../../src/runtime/babylon/SceneLightingRuntime.ts');
 loader.deregister();
 
-function fixture(parts = ['rail'], beforeRuntime?: (scene: Scene) => void) {
+function fixture(parts = ['rail'], beforeRuntime?: (scene: Scene) => void, enabled = true) {
   const engine = new NullEngine(), scene = new Scene(engine);
   engine.getCaps().instancedArrays = true;
   const models = new Map<string, ModelRuntimeEntry>();
@@ -68,6 +68,7 @@ function fixture(parts = ['rail'], beforeRuntime?: (scene: Scene) => void) {
   const mapping = new Map<number, unknown>();
   let changed = 0, batchAdds = 0, safe = true;
   let changedCallback: (() => void) | null = null;
+  let batchAddedCallback: ((batch: NonNullable<ReturnType<typeof EntityArrayThinInstanceBatch.create>>) => void) | null = null;
   const controlledTargets = new Set<BaseTexture>();
   const document = { sceneSettings: { lighting: { version: 2, bake: { enabled: true }, result: null } } } as unknown as SceneDocument;
   for (const [index, id] of ['a', 'b'].entries()) {
@@ -94,16 +95,17 @@ function fixture(parts = ['rail'], beforeRuntime?: (scene: Scene) => void) {
     isEntityVisible: id => visible.get(id) !== false, isEntityPickable: id => pickable.get(id) !== false,
     isSceneSafe: () => safe,
     isRenderTargetControlled: texture => controlledTargets.has(texture),
-    onBatchAdded: batch => { batchAdds++; for (const mesh of batch.meshes) mapping.set(mesh.uniqueId, batch); },
+    onBatchAdded: batch => { batchAdds++; for (const mesh of batch.meshes) mapping.set(mesh.uniqueId, batch); batchAddedCallback?.(batch); },
     onBatchRemoved: batch => { for (const [id, value] of mapping) if (value === batch) mapping.delete(id); },
     onChanged: () => { changed += 1; changedCallback?.(); },
-  });
+  }, enabled);
   const frame = () => scene.onBeforeActiveMeshesEvaluationObservable.notifyObservers(scene);
   return { engine, scene, runtime, models, fixed, moving, document, visible, pickable, mapping, frame, sourceProvider, sourceFreeze, sourceUnfreeze,
     get changed() { return changed; }, unsafe() { safe = false; },
     get batchAdds() { return batchAdds; },
     controlTarget(texture: BaseTexture) { controlledTargets.add(texture); },
     onChanged(callback: (() => void) | null) { changedCallback = callback; },
+    onBatchAdded(callback: typeof batchAddedCallback) { batchAddedCallback = callback; },
     dispose() { runtime.dispose(); scene.dispose(); engine.dispose(); } };
 }
 function candidateMeshes(scene: Scene) { const result = scene.getActiveMeshCandidates(); return result.data.slice(0, result.length); }
@@ -1478,4 +1480,245 @@ test('外部替换freeze或unfreeze入口时保守退出，dispose不抢回API�
       f.runtime.dispose(); assert.equal(f.scene[method], external);
     } finally { f.dispose(); }
   }
+});
+
+const activeObserverCounts = (scene: Scene) => [scene.onBeforeActiveMeshesEvaluationObservable,
+  scene.onBeforeAnimationsObservable, scene.onBeforeRenderTargetsRenderObservable]
+  .map(observable => observable.observers.filter(observer => !observer._willBeUnregistered).length);
+
+test('完全旁路OFF不安装观察器或替换API，重复sync查询不扫描材质和候选数组', t => {
+  let counts: number[] = [], calls = 0, copies = 0, textures = 0;
+  let original: ReturnType<Scene['getActiveMeshCandidates']>;
+  const f = fixture(['rail'], scene => {
+    counts = activeObserverCounts(scene);
+    const data = [...scene.meshes];
+    Object.defineProperty(data, 'slice', { value(...args: number[]) { copies++; return Array.prototype.slice.apply(this, args); } });
+    original = { data, length: data.length };
+    scene.getActiveMeshCandidates = function () { assert.equal(this, scene); calls++; return original; };
+    for (const mesh of scene.meshes) if (mesh.material) t.mock.method(mesh.material, 'getActiveTextures', () => { textures++; return []; });
+  }, false);
+  try {
+    assert.deepEqual(activeObserverCounts(f.scene), counts);
+    assert.equal(f.scene.getActiveMeshCandidates, f.sourceProvider);
+    assert.equal(f.scene.freezeActiveMeshes, f.sourceFreeze);
+    assert.equal(f.scene.unfreezeActiveMeshes, f.sourceUnfreeze);
+    for (let frame = 0; frame < 4; frame++) {
+      f.runtime.sync(); f.runtime.getDiagnostics(); f.runtime.getBatchesForEntity('a');
+      f.runtime.markModelDirty(f.models.get('a')!);
+      f.runtime.beginModelMutation(f.models.get('a')!); f.runtime.endModelMutation(f.models.get('a')!);
+      f.frame(); f.scene.onBeforeAnimationsObservable.notifyObservers(f.scene);
+      f.scene.onBeforeRenderTargetsRenderObservable.notifyObservers(f.scene);
+      assert.equal(f.scene.getActiveMeshCandidates(), original!);
+    }
+    assert.equal(calls, 4); assert.equal(copies, 0); assert.equal(textures, 0);
+    assert.equal(f.runtime.getDiagnostics().groups, 0);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路OFF到ON在下一微任务恢复接管，关闭通知重入不得建carrier，重开与dispose保持原入口', async () => {
+  const f = fixture(['rail'], undefined, false);
+  try {
+    const counts = activeObserverCounts(f.scene);
+    f.runtime.setEnabled(true); f.runtime.sync();
+    assert.equal(f.runtime.getDiagnostics().groups, 0, '同步调用栈内不能误接管正在native freeze求值的源');
+    await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+    const carriers = [...f.runtime.getBatchesForEntity('a')[0].meshes];
+    f.onChanged(() => { f.runtime.sync(); assert.equal(f.runtime.getDiagnostics().groups, 0); });
+    f.runtime.setEnabled(false);
+    assert.equal(f.runtime.getDiagnostics().groups, 0);
+    assert.ok(carriers.every(mesh => mesh.isDisposed()));
+    assert.equal(f.mapping.size, 0); assert.deepEqual(f.runtime.getSuppressedMeshes(), []);
+    assert.deepEqual(activeObserverCounts(f.scene), counts);
+    assert.equal(f.scene.getActiveMeshCandidates, f.sourceProvider);
+    assert.equal(f.scene.freezeActiveMeshes, f.sourceFreeze);
+    assert.equal(f.scene.unfreezeActiveMeshes, f.sourceUnfreeze);
+    f.onChanged(null); f.runtime.setEnabled(true); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+    f.runtime.dispose(); assert.deepEqual(activeObserverCounts(f.scene), counts);
+    assert.equal(f.scene.getActiveMeshCandidates, f.sourceProvider);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路取消待启用微任务，不在OFF或dispose后重新安装；连续toggle以最后请求为准', async () => {
+  const f = fixture(['rail'], undefined, false);
+  try {
+    const counts = activeObserverCounts(f.scene);
+    f.runtime.setEnabled(true); f.runtime.setEnabled(false); await Promise.resolve();
+    assert.deepEqual(activeObserverCounts(f.scene), counts); assert.equal(f.runtime.getDiagnostics().groups, 0);
+    f.runtime.setEnabled(true); f.runtime.setEnabled(false); f.runtime.setEnabled(true); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+    f.runtime.setEnabled(false); f.runtime.setEnabled(true); f.runtime.dispose(); await Promise.resolve();
+    assert.deepEqual(activeObserverCounts(f.scene), counts); assert.equal(f.scene.getActiveMeshCandidates, f.sourceProvider);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路已保存的旧wrapper在OFF仅委托原函数，保留this返回及调用次数', () => {
+  let calls = 0, freezes = 0, unfreezes = 0;
+  let original: ReturnType<Scene['getActiveMeshCandidates']>;
+  const f = fixture(['rail'], scene => {
+    original = { data: scene.meshes, length: scene.meshes.length };
+    scene.getActiveMeshCandidates = function () { calls++; assert.equal(this, scene); return original; };
+    scene.freezeActiveMeshes = function () { freezes++; return this; };
+    scene.unfreezeActiveMeshes = function () { unfreezes++; return this; };
+  });
+  try {
+    const provider = f.scene.getActiveMeshCandidates, freeze = f.scene.freezeActiveMeshes, unfreeze = f.scene.unfreezeActiveMeshes;
+    f.runtime.setEnabled(false);
+    assert.equal(provider.call(f.scene), original!); assert.equal(calls, 1);
+    assert.equal(freeze.call(f.scene), f.scene); assert.equal(freezes, 1); assert.equal(f.runtime.getDiagnostics().pendingFreezes, 0);
+    assert.equal(unfreeze.call(f.scene), f.scene); assert.equal(unfreezes, 1);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路第三方在OFF替换任一API，启用关闭和释放都不抢所有权', async () => {
+  for (const method of ['getActiveMeshCandidates', 'freezeActiveMeshes', 'unfreezeActiveMeshes'] as const) {
+    const f = fixture(['rail'], undefined, false);
+    try {
+      const counts = activeObserverCounts(f.scene);
+      const external = method === 'getActiveMeshCandidates' ? () => ({ data: f.scene.meshes, length: f.scene.meshes.length }) : function (this: Scene) { return this; };
+      Reflect.set(f.scene, method, external);
+      f.runtime.setEnabled(true); await Promise.resolve(); f.runtime.sync();
+      assert.equal(f.runtime.getDiagnostics().groups, 0); assert.equal(f.scene[method], external);
+      assert.deepEqual(activeObserverCounts(f.scene), counts);
+      f.runtime.setEnabled(false); f.runtime.dispose(); assert.equal(f.scene[method], external);
+    } finally { f.dispose(); }
+  }
+});
+
+test('完全旁路ON期等待的native freeze跨OFF再ON保留pending并冻结原件', { timeout: 15000 }, async t => {
+  const f = fixture();
+  try {
+    await prepareRender(f);
+    let ready: (() => void) | undefined;
+    t.mock.method(f.scene, 'executeWhenReady', (callback: () => void) => { ready = callback; });
+    f.scene.freezeActiveMeshes(false, undefined, undefined, false);
+    assert.equal(f.runtime.getDiagnostics().pendingFreezes, 1);
+    f.runtime.setEnabled(false); f.runtime.setEnabled(true); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 0); assert.equal(f.runtime.getDiagnostics().pendingFreezes, 1);
+    ready!(); assert.equal(f.scene._activeMeshesFrozen, true);
+    assert.equal(f.runtime.getDiagnostics().pendingFreezes, 0);
+    const active = f.scene.getActiveMeshes();
+    assert.ok([...f.fixed.values()].flat().every(mesh => active.data.slice(0, active.length).includes(mesh)));
+    f.scene.unfreezeActiveMeshes(); f.runtime.sync(); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路OFF期真实native ready队列阻止提前激活，提前unfreeze不取消迟到freeze', { timeout: 15000 }, async t => {
+  const f = fixture(['rail'], undefined, false);
+  try {
+    f.scene.activeCamera = new FreeCamera('camera', new Vector3(2.5, 4, -16), f.scene);
+    f.scene.activeCamera.setTarget(new Vector3(2.5, 0, 0));
+    const counts = activeObserverCounts(f.scene);
+    let ready = false;
+    t.mock.method(f.scene, 'isReady', () => ready);
+    const frozen = new Promise<void>(resolve => f.scene.freezeActiveMeshes(false, resolve, undefined, false));
+    assert.equal(f.scene.onReadyObservable.hasObservers(), true);
+    f.scene.unfreezeActiveMeshes(); f.runtime.setEnabled(true); f.runtime.sync(); await Promise.resolve();
+    assert.deepEqual(activeObserverCounts(f.scene), counts); assert.equal(f.runtime.getDiagnostics().groups, 0);
+    ready = true; await frozen;
+    assert.equal(f.scene._activeMeshesFrozen, true); f.runtime.sync(); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 0);
+    f.scene.unfreezeActiveMeshes(); f.runtime.sync(); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路native freeze候选求值栈内重入启用，只能在冻结完成后的安全边界检查', async t => {
+  let enable: (() => void) | undefined;
+  const f = fixture(['rail'], scene => {
+    scene.getActiveMeshCandidates = function () { enable?.(); return { data: scene.meshes, length: scene.meshes.length }; };
+  }, false);
+  try {
+    f.scene.activeCamera = new FreeCamera('camera', new Vector3(2.5, 4, -16), f.scene);
+    f.scene.activeCamera.setTarget(new Vector3(2.5, 0, 0));
+    t.mock.method(f.scene, 'isReady', () => true);
+    enable = () => { f.runtime.setEnabled(true); f.runtime.sync(); assert.equal(f.runtime.getDiagnostics().groups, 0); };
+    f.scene.freezeActiveMeshes(false, undefined, undefined, false);
+    await Promise.resolve();
+    assert.equal(f.scene._activeMeshesFrozen, true); assert.equal(f.runtime.getDiagnostics().groups, 0);
+    enable = undefined; f.scene.unfreezeActiveMeshes(); f.runtime.sync(); await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 1);
+  } finally { f.dispose(); }
+});
+
+function assertFullyPassive(f: ReturnType<typeof fixture>) {
+  assert.equal(f.runtime.getDiagnostics().groups, 0);
+  assert.equal(f.runtime.getDiagnostics().batchMeshes, 0);
+  assert.deepEqual(f.runtime.getSuppressedMeshes(), []);
+  assert.equal(f.mapping.size, 0);
+  assert.ok(f.scene.meshes.every(mesh => !mesh.name.startsWith('__motionStatic')), '当栈归还全部源，不能遗留未登记carrier');
+  assert.equal(f.scene.getActiveMeshCandidates, f.sourceProvider);
+  assert.equal(f.scene.freezeActiveMeshes, f.sourceFreeze);
+  assert.equal(f.scene.unfreezeActiveMeshes, f.sourceUnfreeze);
+}
+
+test('完全旁路重入首个onBatchAdded同步关闭，两个候选组也不残留carrier订阅或抑制源', () => {
+  const f = fixture(['rail', 'base']);
+  try {
+    const callbacks = [...f.fixed.values()].flat().map(mesh => mesh.geometry!.onGeometryUpdated);
+    f.onBatchAdded(() => f.runtime.setEnabled(false));
+    f.runtime.sync();
+    assertFullyPassive(f); assert.equal(f.batchAdds, 1, '关闭后不得继续创建第二候选组');
+    assert.deepEqual([...f.fixed.values()].flat().map(mesh => mesh.geometry!.onGeometryUpdated), callbacks);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路重入create返回前同步关闭，尚未登记的真实batch当栈释放', t => {
+  const f = fixture(['rail', 'base']);
+  const create = EntityArrayThinInstanceBatch.create;
+  let creates = 0;
+  try {
+    t.mock.method(EntityArrayThinInstanceBatch, 'create', function (...args: Parameters<typeof create>) {
+      const batch = create.apply(this, args); creates++; f.runtime.setEnabled(false); return batch;
+    });
+    f.runtime.sync();
+    assertFullyPassive(f); assert.equal(creates, 1); assert.equal(f.batchAdds, 0);
+  } finally { f.dispose(); }
+});
+
+test('完全旁路重入onBatchAdded同栈关闭再开启，旧generation立即停止且新代仅微任务创建两组', async () => {
+  const f = fixture(['rail', 'base']);
+  let first = true;
+  try {
+    f.onBatchAdded(() => {
+      if (!first) return;
+      first = false; f.runtime.setEnabled(false); f.runtime.setEnabled(true); f.runtime.sync();
+    });
+    f.runtime.sync();
+    assertFullyPassive(f); assert.equal(f.batchAdds, 1);
+    await Promise.resolve();
+    assert.equal(f.runtime.getDiagnostics().groups, 2); assert.equal(f.batchAdds, 3);
+    assert.equal(f.scene.meshes.filter(mesh => mesh.name.startsWith('__motionStatic')).length, 2);
+  } finally { f.dispose(); }
+});
+
+for (const previouslyOwned of [false, true]) {
+  test('完全旁路重入updateEntityTransforms同步关闭' + (previouslyOwned ? '已登记的组' : '未登记的组') + '均当栈释放', t => {
+    const f = fixture(['rail', 'base']);
+    const update = EntityArrayThinInstanceBatch.prototype.updateEntityTransforms;
+    try {
+      if (previouslyOwned) {
+        f.runtime.sync(); assert.equal(f.runtime.getDiagnostics().groups, 2);
+        f.models.get('b')!.root.position.x += 1;
+      }
+      t.mock.method(EntityArrayThinInstanceBatch.prototype, 'updateEntityTransforms', function (...args: Parameters<typeof update>) {
+        const result = update.apply(this, args); f.runtime.setEnabled(false); return result;
+      });
+      f.runtime.sync(); assertFullyPassive(f);
+    } finally { f.dispose(); }
+  });
+}
+
+test('完全旁路重入onBatchAdded抛错仍按原失败路径归还原件并清除载体映射', () => {
+  const f = fixture(['rail', 'base']);
+  try {
+    f.onBatchAdded(() => { throw new Error('intentional batch registration failure'); });
+    assert.doesNotThrow(() => f.runtime.sync());
+    assert.equal(f.runtime.getDiagnostics().groups, 0); assert.equal(f.mapping.size, 0);
+    assert.deepEqual(f.runtime.getSuppressedMeshes(), []);
+    assert.ok(f.scene.meshes.every(mesh => !mesh.name.startsWith('__motionStatic')));
+    assert.match(f.runtime.getDiagnostics().fallbackReason, /intentional batch registration failure/);
+  } finally { f.dispose(); }
 });

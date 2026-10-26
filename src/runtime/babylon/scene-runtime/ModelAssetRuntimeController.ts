@@ -12,6 +12,7 @@ import { isMeasurableModelMesh } from '../modelMeasurement';
 import { getMeshesWorldBottomCenter } from '../runtimeNodeGeometry';
 import { resolveRuntimeAssetUrl } from '../../assets/editorAssetUrl';
 import { AssetLoadScheduler } from '../AssetLoadScheduler';
+import { SceneShaderWarmup } from '../SceneShaderWarmup';
 import { resolveModelAssetSharedInstancingPolicy, SharedModelAssetCache, createModelAssetTemplateKey, type SharedModelTemplateLease } from '../SharedModelAssetCache';
 import { repairInstancedMeshBufferContainers } from '../instancedSelectionBuffers';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset, resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
@@ -29,6 +30,20 @@ import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
 import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
 import type { EnvironmentAndSkyboxController } from './EnvironmentAndSkyboxController';
 import { EDITOR_ENTITY_ID_METADATA_KEY, type LoadedModelRuntimeAssets, type ModelRuntimeEntry, type GeneratedOutputOwnerRuntimeEntry, readRuntimeTimestampMs } from './sceneRuntimeTypes';
+
+/** 只读取组件快照的own-data描述符；不为准备阶段求值新的脚本/参数元数据getter。 */
+function canPrepareSharedTemplate(asset: ModelAssetComponent): boolean {
+  const prototype=Object.getPrototypeOf(asset); if(prototype!==Object.prototype&&prototype!==null)return false;
+  for(const name of ['scriptAssets','parameterConfig','parameterScriptMetadata','animationScriptMetadata']) {
+    const descriptor=Object.getOwnPropertyDescriptor(asset,name); if(descriptor&&!('value'in descriptor))return false;
+    const value=descriptor?.value;
+    if(name==='parameterConfig'){if(value!=null)return false;continue;}
+    if(value==null)continue;if(!Array.isArray(value))return false;
+    const length=Object.getOwnPropertyDescriptor(value,'length');
+    if(!length||!('value'in length)||length.value!==0)return false;
+  }
+  return true;
+}
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
@@ -49,7 +64,13 @@ type Dependencies = {
 
 /** ModelAssetRuntimeController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class ModelAssetRuntimeController {
-  constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
+  constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {
+    this.shaderWarmup = new SceneShaderWarmup(context.scene);
+    // 单项净收益尚未验收；内部A/B先保留原准备路径，验证后才启用。
+    this.shaderWarmup.setEnabled(false);
+  }
+
+  public readonly shaderWarmup: SceneShaderWarmup;
 
   public readonly models = new Map<string, ModelRuntimeEntry>();
   public readonly assetLoadScheduler = new AssetLoadScheduler();
@@ -230,6 +251,8 @@ export class ModelAssetRuntimeController {
           this.dependencies.readiness.updateModelLoadProgressUnit(sequence, event);
         }),
         signal,
+        this.shaderWarmup.getMetrics().enabled && canPrepareSharedTemplate(modelAsset)
+          ? source => this.shaderWarmup.registerContainer(source) : undefined,
       );
     } finally {
       this.dependencies.readiness.settleModelLoadProgressUnit(sequence);
@@ -468,7 +491,7 @@ export class ModelAssetRuntimeController {
       mesh.metadata = { ...(mesh.metadata ?? {}), ...metadata };
     }
     this.dependencies.readiness.invalidateModelStatistics();
-    this.dependencies.environment.lightingRuntime?.markDirty();
+    this.dependencies.environment.lightingRuntime?.markDirty('model-meshes-refresh-unknown');
   }
 
   /** 同步模型资产脚本生命周期，普通模型和生成模型共享同一份受控实现。 */

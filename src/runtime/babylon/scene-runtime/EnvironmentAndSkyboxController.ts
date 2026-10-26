@@ -66,6 +66,8 @@ export class EnvironmentAndSkyboxController {
   public allowDayNightCycle: boolean | null = null;
   public shadowRuntime!: SceneShadowRuntime;
   public lightingRuntime!: SceneLightingRuntime;
+  /** 内部完整分类A/B诊断；不写入场景，不改变失效或业务输入。 */
+  public lightingContextAssemblyMode: 'direct' | 'legacy' = 'direct';
   public lightingBakeRunning = false;
   public skyboxRuntime!: SceneSkyboxRuntime;
   public environmentRuntime!: SceneEnvironmentRuntime;
@@ -176,6 +178,8 @@ export class EnvironmentAndSkyboxController {
     return this.environmentRuntime.syncLighting(lighting.shadows);
   }
 
+  peekLightingClassificationForEntities(entityIds: readonly string[]) { return this.lightingRuntime.peekClassificationForEntities(entityIds); }
+
   getLightingClassification(): LightingClassificationEntry[] { return this.lightingRuntime.getClassification(); }
   setLightingPreview(debugVisible: boolean, beforeBake: boolean): void { this.lightingRuntime.setPreview(debugVisible, beforeBake); }
   focusLightingNode(entityId: string, nodeKey: string): void { this.lightingRuntime.focusNode(entityId, nodeKey); }
@@ -229,7 +233,7 @@ export class EnvironmentAndSkyboxController {
     if (!api?.preflightLightingBake) throw new Error('烘焙前检查需要桌面编辑器。');
     await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
     // 环境提交可能晚于最后一个 mesh 事件；显式检查必须读取当前完整源目录。
-    this.lightingRuntime.markDirty();
+    this.lightingRuntime.markDirty('bake-preflight');
     const input = await awaitLightingTaskStep(this.lightingRuntime.captureBakeInput(crypto.randomUUID(), signal), signal);
     signal?.throwIfAborted();
     return await awaitLightingTaskStep(api.preflightLightingBake(encodeLightingBakeTransport(input)), signal);
@@ -262,7 +266,7 @@ export class EnvironmentAndSkyboxController {
       this.lightingRuntime.sync(document);
       await awaitLightingTaskStep(this.lightingRuntime.whenReady(), signal);
       this.dependencies.telemetry.motionStaticBatchRuntime.setSuspended(true);
-      this.lightingRuntime.markDirty();
+      this.lightingRuntime.markDirty('bake-capture');
       const captured = await captureLightingInputWithMetrics(sample => this.lightingRuntime.captureBakeInput(jobId, signal, message => {
         sample(); progress?.(message, 0, 'preparing');
       }), signal);
@@ -399,7 +403,7 @@ export class EnvironmentAndSkyboxController {
       onSnapshot: snapshot => {
         this.context.notifyEnvironmentSnapshot(snapshot);
         this.dependencies.readiness.invalidateModelStatistics();
-        this.lightingRuntime?.markDirty();
+        this.lightingRuntime?.markDirty('environment-snapshot');
       },
       pushLog: this.context.pushLog,
     });
@@ -426,7 +430,7 @@ export class EnvironmentAndSkyboxController {
           isModelMeshRenderSuppressed: mesh => this.dependencies.telemetry.motionStaticBatchRuntime.isSuspended(mesh),
           getMotionTargets: model => this.dependencies.telemetry.specializedTelemetryRuntime.getLightingMotionNodes(model),
           readEntityId: mesh => this.dependencies.selection.readEntityIdFromMesh(mesh),
-        });
+        }, { contextAssembly: this.lightingContextAssemblyMode });
       },
       setShadowRoles: (roles, settings) => this.shadowRuntime.setHybridMeshRoles(roles, settings),
       onBindingsChanged: () => this.dependencies.selection.rebuildModelSelectionOutline(),

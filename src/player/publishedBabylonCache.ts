@@ -1,3 +1,4 @@
+import { configureLocalBabylonDecoders } from '../runtime/babylon/localDecoderConfiguration';
 import { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine';
 import type { Scene } from '@babylonjs/core/scene';
 import type { IOfflineProvider } from '@babylonjs/core/Offline/IOfflineProvider';
@@ -98,6 +99,8 @@ export async function installPublishedViewerCache(config: PlayerRuntimeConfig, b
   onState?: (state: PublishedReleaseCacheState) => void): Promise<{
   cache: PublishedAssetCache; assetManifest?: unknown; verifyDocuments(): Promise<void>; prefetch(): void; attach(scene: Scene): void; dispose(): void;
 } | null> {
+  // Viewer先装缓存、后建Engine；解码执行器先就位，缓存必须始终包在最外层。
+  configureLocalBabylonDecoders();
   const version = await loadPublishedCacheVersion(config, baseUrl, signal);
   if (!version) return null;
   signal.throwIfAborted();

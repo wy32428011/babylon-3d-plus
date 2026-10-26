@@ -11,6 +11,8 @@ import { resolveModelGeneratorTargetFromSnapshot } from '../modelGeneratorRuntim
 import { getExternalModelScriptLoadDiagnostics } from '../ExternalModelScriptRuntime';
 import { waitForSceneRenderReady } from '../sceneRenderReadiness';
 import { SceneLoadDiagnostics } from '../SceneLoadDiagnostics';
+import { prepareGpuCapabilityProfile } from '../gpuCapabilityProfile';
+import type { Engine } from '@babylonjs/core/Engines/engine.js';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { SceneDocumentController } from './SceneDocumentController';
@@ -33,7 +35,7 @@ type Dependencies = {
   readonly document: Pick<SceneDocumentController, 'disposed' | 'syncedEntities' | 'shadowDocument' | 'fullSyncCount' | 'lastFullSyncDurationMs' | 'maxFullSyncDurationMs' | 'sync'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'isModelBoundsMesh'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'meshes'>;
-  readonly assets: Pick<ModelAssetRuntimeController, 'models' | 'sharedModelAssetCache' | 'disposeModel' | 'modelPresentationRefreshPending'>;
+  readonly assets: Pick<ModelAssetRuntimeController, 'models' | 'sharedModelAssetCache' | 'shaderWarmup' | 'disposeModel' | 'modelPresentationRefreshPending'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants' | 'modelArrayParameterVariantByEntityId' | 'disposeModelArrayParameterVariant'>;
   readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayInstanceEntities' | 'createModelArrayRenderSignature' | 'modelArrayIdentityMode'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'generatorAssetPreloader' | 'spawnedDeviceModels' | 'generatedOutputOwners' | 'disposeModelGeneratorOutput' | 'syncModelGeneratorResolvedTarget'>;
@@ -81,6 +83,11 @@ export class SceneTriangleAndReadinessController {
   async waitForInitialRenderReady(signal?: AbortSignal): Promise<void> {
     do {
       await this.dependencies.outputs.generatorAssetPreloader.waitForReady(signal);
+      if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
+      await this.loadDiagnostics.measureAsync('gpuCapabilityProbe', () => prepareGpuCapabilityProfile(this.context.scene.getEngine() as Engine, signal));
+      if (this.dependencies.assets.shaderWarmup.getMetrics().enabled) {
+        await this.loadDiagnostics.measureAsync('shaderWarmup', () => this.dependencies.assets.shaderWarmup.prepare(signal));
+      }
       if (this.dependencies.document.disposed) throw new DOMException('场景准备已取消。', 'AbortError');
       await this.loadDiagnostics.measureAsync('firstFrameValidation', () => waitForSceneRenderReady(this.context.scene, signal));
       // 等首帧期间配置仍可变化；新目标也必须完成预取才能结算当前准备。
@@ -508,14 +515,29 @@ export class SceneTriangleAndReadinessController {
       filePercent: currentFilePercent,
     };
   }
+  /** 保持mesh广播的同步时序；只由光照运行时决定已pending请求能否合并。 */
+  private notifyMeshLightingChange(reason: string): void {
+    const lighting = this.dependencies.environment.lightingRuntime;
+    const notify = lighting?.notifyMeshLifecycleChange ?? lighting?.markDirty;
+    if (notify) Reflect.apply(notify, lighting, [reason]);
+  }
+
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshAddedObserver(): void {
-    this.modelStatisticsMeshAddedObserver = this.context.scene.onNewMeshAddedObservable.add(mesh => { if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return; this.invalidateModelStatistics(); if (!mesh.metadata?.lightingDerived) this.dependencies.environment.lightingRuntime?.markDirty(); });
+    this.modelStatisticsMeshAddedObserver = this.context.scene.onNewMeshAddedObservable.add(mesh => {
+      if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
+      this.invalidateModelStatistics();
+      if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-added');
+    });
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelStatisticsMeshRemovedObserver(): void {
-    this.modelStatisticsMeshRemovedObserver = this.context.scene.onMeshRemovedObservable.add(mesh => { if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return; this.invalidateModelStatistics(); if (!mesh.metadata?.lightingDerived) this.dependencies.environment.lightingRuntime?.markDirty(); });
+    this.modelStatisticsMeshRemovedObserver = this.context.scene.onMeshRemovedObservable.add(mesh => {
+      if (this.dependencies.telemetry.motionStaticBatchRuntime?.isTemporaryMeshEvent(mesh)) return;
+      this.invalidateModelStatistics();
+      if (!mesh.metadata?.lightingDerived) this.notifyMeshLightingChange('scene-mesh-removed');
+    });
   }
 
 }

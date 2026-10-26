@@ -10,6 +10,8 @@ import type { EditorSlice } from './editorStoreTypes';
 /** 光照管理草稿、分类与烘焙会话。 */
 export const createLightingManagerSlice: EditorSlice<
   "lightingBakeRequest" |
+  "lightingGpuCapabilityProfile" |
+  "setLightingGpuCapabilityProfile" |
   "lightingManagerOpen" |
   "lightingManagerTab" |
   "lightingManagerFocus" |
@@ -24,6 +26,10 @@ export const createLightingManagerSlice: EditorSlice<
   "lightingBakeStatus" |
   "setLightingBakeRuntimeError" |
   "lightingClassification" |
+  "lightingInspectorEntityIds" |
+  "lightingInspectorClassification" |
+  "lightingInspectorClassificationStale" |
+  "setLightingInspectorEntityIds" |
   "lightingDebugVisible" |
   "lightingComparisonEnabled" |
   "lightingNodeFocusRequest" |
@@ -41,6 +47,8 @@ export const createLightingManagerSlice: EditorSlice<
   "updateLightingNodeOverride"
 > = (set, get) => ({
   lightingBakeRequest: null,
+  lightingGpuCapabilityProfile: null,
+  setLightingGpuCapabilityProfile: profile => set({ lightingGpuCapabilityProfile: profile }),
   lightingManagerOpen: false,
   lightingManagerTab: 'overview',
   lightingManagerFocus: null,
@@ -99,6 +107,11 @@ export const createLightingManagerSlice: EditorSlice<
       ? { lightingBakeStatus: { phase: 'idle', message: null } } : state;
   }),
   lightingClassification: [],
+  lightingInspectorEntityIds: [],
+  lightingInspectorClassification: [],
+  lightingInspectorClassificationStale: true,
+  setLightingInspectorEntityIds: entityIds => set({ lightingInspectorEntityIds: entityIds,
+    lightingInspectorClassification: [], lightingInspectorClassificationStale: true }),
   lightingDebugVisible: false,
   lightingComparisonEnabled: false,
   lightingNodeFocusRequest: null,

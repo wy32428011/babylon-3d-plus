@@ -63,15 +63,17 @@ export class SharedModelAssetCache {
     key: string,
     loader: (signal: AbortSignal) => Promise<AssetContainer>,
     signal?: AbortSignal,
+    onReady?: (source: AssetContainer) => void,
   ): Promise<SharedModelTemplateLease> {
     this.assertAvailable(signal);
     const entry = this.acquireEntry(key, loader);
     try {
-      await this.waitForSource(entry, signal);
+      const source = await this.waitForSource(entry, signal);
       this.assertAvailable(signal);
       if (entry.disposed || this.entries.get(key) !== entry) {
         throw new Error('模型解析模板在预取完成前已失效。');
       }
+      onReady?.(source);
       let released = false;
       return {
         dispose: () => {

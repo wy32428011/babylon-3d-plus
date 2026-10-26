@@ -411,7 +411,7 @@
     },
     {
       "name": "test:lighting-bake",
-      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingBakeContract.test.ts tests/editor/lightingMobility.test.ts tests/editor/lightingBake.integration.test.mjs tests/runtime/lightingClassificationRuntime.test.ts tests/runtime/lightingClassificationReview.test.ts tests/runtime/lightingGeometry.test.ts tests/runtime/lightingMaterialExport.test.ts tests/runtime/lightingNativeInstances.test.ts tests/runtime/lightingProbes.test.ts tests/runtime/lightingBakeTask.test.ts tests/runtime/hybridShadows.test.ts tests/runtime/localLightShadows.test.ts tests/lightingBake/playerLightingRuntimeStatus.test.ts tests/lightingBake/lightingArrayInstances.test.mjs tests/lightingBake/sceneLightingRuntime.test.mjs tests/lightingBake/lightingBakeBackend.test.ts tests/lightingBake/lightingMaterialValidation.test.ts tests/lightingBake/lightingBakeResources.test.ts tests/lightingBake/lightingBakeRecovery.test.ts tests/lightingBake/lightingBakeRelocation.test.ts tests/lightingBake/lightingBakeRequirements.test.ts tests/lightingBake/lightingBakeSourcePackage.test.ts tests/lightingBake/lightingBakeDeployment.test.ts",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingBakeContract.test.ts tests/editor/lightingMobility.test.ts tests/editor/lightingBake.integration.test.mjs tests/runtime/lightingClassificationRuntime.test.ts tests/lightingBake/lightingPolicyContextAssembly.test.mjs tests/runtime/lightingClassificationReview.test.ts tests/runtime/lightingClassificationScriptSemantics.test.ts tests/runtime/lightingGeometry.test.ts tests/runtime/lightingNodeKeyEncoding.test.ts tests/runtime/lightingMaterialExport.test.ts tests/runtime/lightingNativeInstances.test.ts tests/runtime/lightingProbes.test.ts tests/runtime/lightingBakeTask.test.ts tests/runtime/hybridShadows.test.ts tests/runtime/localLightShadows.test.ts tests/lightingBake/playerLightingRuntimeStatus.test.ts tests/lightingBake/lightingArrayInstances.test.mjs tests/lightingBake/sceneLightingRuntime.test.mjs tests/lightingBake/lightingBakeBackend.test.ts tests/lightingBake/lightingMaterialValidation.test.ts tests/lightingBake/lightingBakeResources.test.ts tests/lightingBake/lightingBakeRecovery.test.ts tests/lightingBake/lightingBakeRelocation.test.ts tests/lightingBake/lightingBakeRequirements.test.ts tests/lightingBake/lightingBakeSourcePackage.test.ts tests/lightingBake/lightingBakeDeployment.test.ts tests/runtime/lightingInvalidation.test.ts tests/runtime/sceneMeshLightingInvalidation.test.ts tests/lightingBake/lightingGeometryVersions.test.ts tests/lightingBake/lightingGeometryResourceVersion.test.ts tests/lightingBake/lightingGeometryPromotionVersion.test.ts tests/lightingBake/lightingGeometryRuntimeVersion.test.mjs tests/lightingBake/lightingGeometryBinary.test.ts tests/lightingBake/lightingGeometryBinaryFiles.test.ts tests/lightingBake/lightingGeometryBinaryPromotion.test.ts tests/lightingBake/lightingGeometryBinaryResource.test.ts tests/lightingBake/lightingGeometryBinaryRuntime.test.mjs tests/runtime/lightingStartupSnapshotRace.test.mjs",
       "category": "legacy",
       "reason": "独立混合光照聚焦回归；Node/NullEngine/临时文件与Store构建，不需要Blender、真实浏览器或GPU，不加入默认core组。"
     },
@@ -441,7 +441,7 @@
     },
     {
       "name": "test:lighting-manager",
-      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingPolicy.test.ts tests/editor/lightingManager.integration.test.mjs tests/editor/lightingBakeManagerModel.test.mjs tests/runtime/lightingPolicyRuntime.test.ts tests/lightingBake/lightingPolicyPersistence.test.ts",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/sceneLightingPolicy.test.ts tests/digitalTwin/sceneLightingPolicyTemplate.test.ts tests/editor/lightingManager.integration.test.mjs tests/editor/lightingBakeManagerModel.test.mjs tests/runtime/lightingPolicyRuntime.test.ts tests/lightingBake/lightingPolicyPersistence.test.ts tests/editor/lightingClassificationPolling.test.mjs tests/editor/lightingBakeNewSceneDevice.test.mjs",
       "category": "legacy",
       "reason": "独立集中光照管理回归；覆盖共享规则、草稿事务、UI数据、实际运行时来源和SOURCE/DIST临时文件，不需要Blender、浏览器或GPU，不加入默认core组。"
     },
@@ -471,7 +471,7 @@
     },
     {
       "name": "test:optimization-p2",
-      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/modelScriptPersistentCache.test.ts tests/runtime/modelInitializationFrameScheduler.test.ts tests/dataPlatform/boundedAssetPipeline.test.ts tests/dataPlatform/modelIncrementalPipeline.test.ts tests/runtime/motionStaticBatch.test.ts tests/runtime/controlledEnvironmentTransforms.test.ts tests/runtime/transformGizmoPreviewIsolation.test.mjs tests/editor/transformPreviewStore.test.ts tests/runtime/lightingSourceCaching.test.ts tests/runtime/dataPlatformScreenOverlayPerformance.test.mjs tests/runtime/hybridShadows.test.ts tests/runtime/motionSelectionProxy.test.mjs",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/modelScriptPersistentCache.test.ts tests/runtime/modelInitializationFrameScheduler.test.ts tests/dataPlatform/boundedAssetPipeline.test.ts tests/dataPlatform/modelIncrementalPipeline.test.ts tests/runtime/motionStaticBatch.test.ts tests/runtime/controlledEnvironmentTransforms.test.ts tests/runtime/transformGizmoPreviewIsolation.test.mjs tests/editor/transformPreviewStore.test.ts tests/runtime/lightingSourceCaching.test.ts tests/runtime/dataPlatformScreenOverlayPerformance.test.mjs tests/runtime/hybridShadows.test.ts tests/runtime/motionSelectionProxy.test.mjs tests/runtime/hybridShadowSignatures.test.ts",
       "category": "build-required",
       "reason": "P2 持久转译缓存、初始化帧调度、包依赖事务流水线、动静混合实例、受控冻结及隔离拖拽预览回归。"
     },
@@ -576,6 +576,66 @@
       "command": "npm run build && node scripts/smoke-lighting-engine-configuration.mjs",
       "category": "manual",
       "reason": "隔离用户目录的真实Electron配置保存/重启、Blender检测/烘焙、正式本地DIST发布和独立Viewer验收。"
+    },
+    {
+      "name": "test:lighting-resources:webgl",
+      "command": "node tests/runtime/lightingResources.webgl.mjs",
+      "category": "build-required",
+      "reason": "真实硬件WebGL光照图像素、context restore与并发加载对照；按影响面独立执行。"
+    },
+    {
+      "name": "test:local-decoders",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/localDecoderConfiguration.test.mjs tests/runtime/ktx2DecodeWorkerPool.test.ts tests/runtime/ktx2WorkerDecoder.test.mjs",
+      "category": "legacy",
+      "reason": "本地KTX2执行器地址与worker队列失败收束回归；实际硬件/离线解码另验。"
+    },
+    {
+      "name": "test:deployment-precompression",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/digitalTwin/deploymentPrecompression.test.mjs",
+      "category": "legacy",
+      "reason": "DIST预压缩、取消/失败原子收束、预算与原文SHA兼容的定向回归。"
+    },
+    {
+      "name": "test:lighting-bake:geometry-v2",
+      "command": "npm run build:electron && node --experimental-transform-types tests/lightingBake/lightingGeometryV2.integration.mjs",
+      "category": "manual",
+      "reason": "需要本机Blender；真实v2几何烘焙、保存、SOURCE/DIST安全运输验收。"
+    },
+    {
+      "name": "test:lighting-new-scene-device:ui",
+      "command": "node tests/editor/lightingBakeNewSceneDevice.ui.mjs",
+      "category": "manual",
+      "reason": "真实管理器DOM、新建默认设备、旧场景保留与序列化操作；需要本机Chrome，非独显烘焙性能。"
+    },
+    {
+      "name": "test:local-decoders:webgl",
+      "command": "node tests/runtime/localKtx2Workers.webgl.mjs",
+      "category": "manual",
+      "reason": "需显式提供 --fixtures 三类KTX2目录；实际硬件WebGL、并发Worker/缓存/像素，--perf必须独立静默窗口，不加入默认core。"
+    },
+    {
+      "name": "test:generated-cargo-pool",
+      "command": "node --test --test-concurrency=1 tests/runtime/generatedCargoPool.test.mjs tests/runtime/generatedCargoPool.integration.test.mjs",
+      "category": "legacy",
+      "reason": "真实Native Babylon/SceneRuntime共享实例、池资格/交接/取消/资源身份定向回归。"
+    },
+    {
+      "name": "test:gpu-capability-profile",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/gpuCapabilityProfile.test.ts tests/runtime/gpuCapabilityProfileDiagnostics.test.mjs tests/editor/gpuCapabilityProfileUi.test.mjs",
+      "category": "legacy",
+      "reason": "能力诊断缓存/取消/生命周期/只读manager和诊断JSON，不做真实显卡性能声明。"
+    },
+    {
+      "name": "test:gpu-capability-profile:webgl",
+      "command": "node tests/runtime/gpuCapabilityProfile.webgl.mjs",
+      "category": "manual",
+      "reason": "实际硬件WebGL诊断/冷热cache/manager操作；本机T0验证，T1/T2需独立硬件，不加入默认core。"
+    },
+    {
+      "name": "test:shader-warmup",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/sceneShaderWarmup.test.mjs",
+      "category": "legacy",
+      "reason": "默认关闭的有界模板shader准备候选：原生API guard、取消/释放/换代定向回归；实际变体覆盖及性能另验，单元通过不代表候选可启用。"
     }
   ]
 }

@@ -33,7 +33,8 @@ function decodeLightingReference(asset: LightingBakeAsset, projectRoot?: string 
   const match = /(?:^|\/)(Assets\/LightingBakes\/[^/]+\/.+)$/i.exec(normalized);
   if (!match) throw new Error('光照烘焙资产必须位于 Assets/LightingBakes/<任务>/ 目录。');
   const extension = path.extname(source).toLowerCase();
-  if (extension !== (asset.kind === 'lightmap' ? '.png' : '.json')) throw new Error('光照烘焙资产的类型与扩展名不一致。');
+  if (asset.encoding !== undefined && (asset.kind !== 'geometry' || asset.encoding !== 'json' && asset.encoding !== 'binary-v1')) throw new Error('光照烘焙资产编码无效。');
+  if (extension !== (asset.kind === 'lightmap' ? '.png' : asset.kind === 'geometry' && asset.encoding === 'binary-v1' ? '.bin' : '.json')) throw new Error('光照烘焙资产的类型与扩展名不一致。');
   if (!path.isAbsolute(source) && !projectRoot) throw new Error('便携光照资产缺少工程目录。');
   const sourcePath = path.isAbsolute(source) ? path.resolve(source) : path.resolve(projectRoot!, ...normalized.split('/'));
   const relativePath = match[1];
@@ -60,7 +61,7 @@ async function assertRegularResource(root: string, file: string): Promise<number
 export async function assertLightingBakeResourceFile(filePath: string): Promise<void> {
   const reference = decodeLightingReference({
     id: 'protocol-resource', kind: path.extname(filePath).toLowerCase() === '.png' ? 'lightmap' : 'geometry',
-    url: filePath, byteLength: 0,
+    url: filePath, byteLength: 0, ...(path.extname(filePath).toLowerCase() === '.bin' ? { encoding: 'binary-v1' as const } : {}),
   });
   await assertRegularResource(reference.ownerRoot, reference.sourcePath);
 }
@@ -73,7 +74,7 @@ async function hashFile(file: string, signal?: AbortSignal): Promise<string> {
   return hash.digest('hex');
 }
 
-/** 显式收集 lightmap PNG、geometry JSON、probes JSON，校验内容后才允许复制。 */
+/** 显式收集 lightmap PNG、geometry JSON/bin、probes JSON，校验内容后才允许复制。 */
 export async function resolveSceneLightingBakeAssets(scene: unknown, options: ResourceOptions = {}): Promise<ResolvedLightingBakeAsset[]> {
   const output: ResolvedLightingBakeAsset[] = [];
   for (const asset of assetReferences(scene)) {

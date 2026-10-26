@@ -53,13 +53,20 @@ test('实际loader在创建纹理前拒绝同像素异形图集并保留资源�
   } });
   try {
     const { loadLightingResources } = await import('../../src/runtime/babylon/lightingRuntimeResources.ts');
-    let reads = 0; t.mock.method(globalThis, 'fetch', async () => { reads++; return new Response(pngHeader(32, 8).buffer as ArrayBuffer); });
-    const normalized = validateSceneLightingBakeSnapshot(snapshot()); assert.ok(normalized);
-    await assert.rejects(loadLightingResources(normalized, {} as never), error => {
-      const resource = error as Error & { diagnostic?: { assetId: string } };
-      assert.match(resource.message, /实际尺寸/); assert.equal(resource.diagnostic?.assetId, 'map-0'); return true;
-    });
-    assert.equal(reads, 1, '非法图集不得继续加载后续资源或创建纹理');
+    let reads = 0, textureUrls = 0;
+    t.mock.method(globalThis, 'fetch', async () => { reads++; return new Response(pngHeader(32, 8).buffer as ArrayBuffer); });
+    t.mock.method(URL, 'createObjectURL', () => { textureUrls++; throw new Error('非法图集不应进入纹理解码'); });
+    const normalized = validateSceneLightingBakeSnapshot(snapshot(8, 8 * 1024)); assert.ok(normalized);
+    for (const concurrency of [1, 4] as const) {
+      reads = 0;
+      await assert.rejects(loadLightingResources(normalized, {} as never, undefined, { concurrency }), error => {
+        const resource = error as Error & { diagnostic?: { assetId: string } };
+        assert.match(resource.message, /实际尺寸/); assert.equal(resource.diagnostic?.assetId, 'map-0'); return true;
+      });
+      // 并发允许同批已派发读取；发现非法图集后不能派发下一批或创建纹理。
+      assert.equal(reads, concurrency, '失败后不得继续派发后续资源');
+      assert.equal(textureUrls, 0, '非法图集不得创建纹理');
+    }
   } finally { hooks.deregister(); }
 });
 

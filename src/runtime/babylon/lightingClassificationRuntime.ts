@@ -17,7 +17,7 @@ import type { ModelAssetComponent } from '../../editor/model/components';
 import { classifyEntityMobility } from '../../editor/model/lightingMobility.ts';
 import type { EntityArrayThinInstanceBatch } from './EntityArrayThinInstanceBatch';
 import type { GeneratedOutputOwnerRuntimeEntry, ModelRuntimeEntry } from './SceneRuntime';
-import { createLightingNodeKey } from './lightingGeometry.ts';
+import { createLightingNodeKey, createLightingNodeKeyPass } from './lightingGeometry.ts';
 import { isShadowCaster } from './SceneShadowRuntime.ts';
 import { getNativeLightingInstances, type LightingInstanceBatch } from './lightingNativeInstances.ts';
 import { subscribeLightingGeometryUpdates } from './lightingGeometryUpdates.ts';
@@ -195,12 +195,12 @@ function createModelIdentityState(model: ModelRuntimeEntry): ModelIdentityState 
   return state;
 }
 
-function modelIdentity(model: ModelRuntimeEntry): string {
+function modelIdentity(model: ModelRuntimeEntry, createNodeKey: typeof createLightingNodeKey): string {
   const meshes = resourceMeshes(model);
   let state = modelIdentities.get(model);
   if (state && state.root !== model.contentRoot) { state.release(); state = undefined; }
   state ??= createModelIdentityState(model);
-  const parts = meshes.map(mesh => ({ mesh, geometry: mesh.geometry, key: createLightingNodeKey(mesh, model.contentRoot) }));
+  const parts = meshes.map(mesh => ({ mesh, geometry: mesh.geometry, key: createNodeKey(mesh, model.contentRoot) }));
   let unchanged = !!state.identity && state.revision === model.assetRevision && state.parameters === model.parameterSignature
     && parts.length === state.parts.length && parts.every((part, i) => part.mesh === state.parts[i].mesh
       && part.geometry === state.parts[i].geometry && part.key === state.parts[i].key);
@@ -226,7 +226,7 @@ function modelIdentity(model: ModelRuntimeEntry): string {
   if (unchanged) return state.identity;
   // 身份来自实际几何及修订，工程迁移、SOURCE 下载和发布增加快照字段不改变节点覆盖。
   const identity = lightingContentHash([model.assetRevision, meshes.map(mesh => ({
-    node: createLightingNodeKey(mesh, model.contentRoot),
+    node: createNodeKey(mesh, model.contentRoot),
     positions: mesh.getVerticesData(VertexBuffer.PositionKind) ?? [],
     indices: mesh.getIndices() ?? [],
   }))]);
@@ -422,7 +422,9 @@ function deviceType(model: ModelRuntimeEntry | undefined, entity: Entity | undef
 }
 
 /** 使用真实驱动解析目标；分类只生成读取模型的视图，不改动作、父子链或业务变换。 */
-export function collectLightingRuntimeSources(context: LightingClassificationContext): LightingRuntimeSource[] {
+export function collectLightingRuntimeSources(context: LightingClassificationContext,
+  options?: { contextAssembly?: 'legacy' | 'direct' }): LightingRuntimeSource[] {
+  const legacyContextAssembly = options?.contextAssembly === 'legacy';
   const { document, scene } = context;
   if (!context.environment.length) environmentIdentities.get(scene)?.release();
   const output: LightingRuntimeSource[] = [];
@@ -433,6 +435,7 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
   const nodeKeysCache = new Map<ModelRuntimeEntry, string[]>();
   const parentDynamicCache = new Map<string, boolean>();
   const models = [...context.models];
+  const createNodeKey = createLightingNodeKeyPass();
   const modelsByEntity = new Map(models);
   const policy = normalizeSceneLightingPolicy(getSceneLightingConfig(document).policy) ?? { version: 1 as const, defaults: {}, rules: [] };
   const policyScopes = new Map<string, (context: LightingPolicyContext) => ResolvedLightingPolicy>();
@@ -490,7 +493,7 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     let automatic = entity ? classifyEntityMobility(automaticEntity(entity)) : { mobility: 'dynamic' as const, reason: '运行时生成对象。' };
     let motionRole: LightingMotionRole = 'unknown';
     let identity = model ? identityCache.get(model) : undefined;
-    if (model && !identity) { identity = modelIdentity(model); identityCache.set(model, identity); }
+    if (model && !identity) { identity = modelIdentity(model, createNodeKey); identityCache.set(model, identity); }
     if (model) {
       let motion = motionCache.get(model);
       if (!motion) { motion = context.getMotionTargets(model); motionCache.set(model, motion); }
@@ -531,7 +534,7 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     if (parentDynamic) motionRole = 'moving';
     let availableNodeKeys = model ? nodeKeysCache.get(model) : undefined;
     if (model && !availableNodeKeys) {
-      availableNodeKeys = resourceMeshes(model).map(candidate => createLightingNodeKey(candidate, model.contentRoot));
+      availableNodeKeys = resourceMeshes(model).map(candidate => createNodeKey(candidate, model.contentRoot));
       nodeKeysCache.set(model, availableNodeKeys);
     }
     // 内置几何显式使用空资源引用，避免 resolver 把设备宿主的模型当成生成物来源。
@@ -542,8 +545,21 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     const ownerLighting = entity ? entity.components.lighting : model?.entitySnapshot?.components.lighting;
     const entityLighting = ownerLighting ? { ...ownerLighting,
       nodeOverrides: ownerLighting.nodeOverrides?.[nodeKey] ? { [nodeKey]: ownerLighting.nodeOverrides[nodeKey] } : {} } : undefined;
-    const policyContext: LightingPolicyContext = {
+    const policyContext: LightingPolicyContext = legacyContextAssembly ? {
       entityId, ...(ownership?.ownerEntityId ? { ownerEntityId: ownership.ownerEntityId } : {}),
+      ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
+      deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
+      nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,
+      entityLighting,
+    } : ownership?.ownerEntityId ? {
+      // 真值仍读取第二次owner值；不缓存getter结果，不改变后续祖先和deviceType读取时点。
+      entityId, ownerEntityId: ownership.ownerEntityId,
+      ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
+      deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
+      nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,
+      entityLighting,
+    } : {
+      entityId,
       ancestorIds: ancestorIds(document, entity), modelAsset: actualAsset,
       deviceType: ownership?.deviceType ?? (entityId === '$environment' ? 'environment' : deviceType(model, ownership ? undefined : entity, asset, mesh)),
       nodeKey, partKey, resourceIdentity: identity, motionRole, automatic, parentDynamic,
@@ -573,7 +589,7 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
       const resolvedSource = context.resolveBatchSource?.(batch, item.entityId, item.sourceMesh) ?? item.sourceMesh;
       used.add(resolvedSource);
       const owner = modelsByMesh.get(resolvedSource);
-      const path = owner ? createLightingNodeKey(resolvedSource, owner.model.contentRoot) : encodeURIComponent(resolvedSource.name);
+      const path = owner ? createNodeKey(resolvedSource, owner.model.contentRoot) : encodeURIComponent(resolvedSource.name);
       const entityId = batchOwner ? batchOwner.entityPrefix + encodeURIComponent(item.entityId) : item.entityId;
       const identity = `${entityId}/${path}`, ordinal = occurrence.get(identity) ?? 0;
       occurrence.set(identity, ordinal + 1);
@@ -587,7 +603,7 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     if (model.modelArrayBatch || model.telemetryProxySource) continue;
     for (const mesh of new Set([...model.meshes, ...model.contentRoot.getChildMeshes(false)])) {
       if (used.has(mesh) || context.isModelMeshRenderSuppressed?.(mesh) || !scene.meshes.includes(mesh)) continue;
-      create(mesh, entityId, createLightingNodeKey(mesh, model.contentRoot), model);
+      create(mesh, entityId, createNodeKey(mesh, model.contentRoot), model);
     }
   }
   for (const [entityId, mesh] of context.primitiveMeshes) if (!used.has(mesh)) create(mesh, entityId, '$mesh');

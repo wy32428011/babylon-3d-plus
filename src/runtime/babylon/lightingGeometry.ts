@@ -16,12 +16,38 @@ import type {
   LightingBakeMaterialInput, LightingBakeMeshInput, LightingBakeTextureInput,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
 
+const nativeNodeKeyEncoder = encodeURIComponent, NativeNodeKeyMap = Map;
+const readNodeKeyEncoding: (map: Map<string, string>, key: string) => string | undefined = Function.prototype.call.bind(Map.prototype.get);
+const writeNodeKeyEncoding: (map: Map<string, string>, key: string, value: string) => Map<string, string> = Function.prototype.call.bind(Map.prototype.set);
+type LightingNodeKeyReader = (node: Node, root: Node) => string;
+type LightingNodeNameEncoder = (encoder: typeof encodeURIComponent, name: string) => string;
+
+/** 一轮分类只复用原生URI编码的纯字符串结果；不缓存节点路径、属性读取或兄弟序号。 */
+export function createLightingNodeKeyPass(): LightingNodeKeyReader {
+  const values = new NativeNodeKeyMap<string, string>();
+  const encodeName: LightingNodeNameEncoder = (encoder, name) => {
+    if (encoder !== nativeNodeKeyEncoder || typeof name !== 'string') return encoder(name);
+    const previous = readNodeKeyEncoding(values, name);
+    if (previous !== undefined) return previous;
+    const encoded = encoder(name);
+    writeNodeKeyEncoding(values, name, encoded);
+    return encoded;
+  };
+  return (node, root) => readLightingNodeKey(node, root, encodeName);
+}
+
 /** 节点路径只由资源内层级和同名兄弟序号构成，不依赖本次运行的 Babylon uniqueId。 */
 export function createLightingNodeKey(node: Node, root: Node): string {
+  return readLightingNodeKey(node, root);
+}
+
+function readLightingNodeKey(node: Node, root: Node, encodeName?: LightingNodeNameEncoder): string {
   const parts: string[] = [];
   for (let current: Node | null = node; current && current !== root; current = current.parent) {
     const peers = current.parent?.getChildren(undefined, true).filter(item => item.name === current!.name) ?? [current];
-    parts.push(`${encodeURIComponent(current.name || current.getClassName())}[${Math.max(0, peers.indexOf(current))}]`);
+    // 保留push/callee/label/indexOf的求值顺序；getter在本层更换encoder只影响下一层。
+    parts.push(`${encodeName ? encodeName(encodeURIComponent, current.name || current.getClassName())
+      : encodeURIComponent(current.name || current.getClassName())}[${Math.max(0, peers.indexOf(current))}]`);
   }
   return parts.reverse().join('/') || '$root';
 }

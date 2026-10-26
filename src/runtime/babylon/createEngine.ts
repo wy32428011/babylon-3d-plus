@@ -8,6 +8,7 @@ import { TmpVectors, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import { EDITOR_FILL_LIGHT_INTENSITY, EDITOR_FILL_LIGHT_NAME } from './SceneShadowRuntime';
 import { warmupLocalBabylonDecoders } from './localDecoderConfiguration';
+import { registerKtx2WorkerEngine } from './ktx2WorkerDecoder';
 import { ScenePreparationFrameBudget } from './scenePreparationFrameBudget';
 import {
   createEditorGroundGrid,
@@ -421,6 +422,7 @@ export function createBabylonViewport(
       : '';
     throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance, { cause: error });
   }
+  registerKtx2WorkerEngine(engine);
   const backgroundFrameRequester = options.keepRenderingInBackground
     ? createBackgroundFrameRequester()
     : null;
@@ -521,6 +523,7 @@ export function createBabylonViewport(
       return;
     }
 
+    registerKtx2WorkerEngine(engine);
     contextLost = false;
     renderFailed = false;
     onRuntimeStatus?.({

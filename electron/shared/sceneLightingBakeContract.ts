@@ -142,16 +142,17 @@ export type LightingBakeInput = {
   environment: { color: [number, number, number]; intensity: number; textureUrl?: string; rotation?: number };
 };
 export type LightingBakeGeometry = {
-  version: 1;
-  positions: number[];
-  normals: number[];
-  indices: number[];
-  uvs: number[];
-  uvs2?: number[];
-  colors?: number[];
-  tangents?: number[];
+  /** v1 旧角点展开；v2 完整属性精确焊接，均保留原三角顺序。 */
+  version: 1 | 2;
+  positions: number[] | Float32Array;
+  normals: number[] | Float32Array;
+  indices: number[] | Uint32Array;
+  uvs: number[] | Float32Array;
+  uvs2?: number[] | Float32Array;
+  colors?: number[] | Float32Array;
+  tangents?: number[] | Float32Array;
   /** 与原纹理 UV 分离；运行时通过自定义属性采样，不占用已有 UV2/UV3。 */
-  bakeUvs: number[];
+  bakeUvs: number[] | Float32Array;
 };
 export type LightingProbeData = {
   version: 1;

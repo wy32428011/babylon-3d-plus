@@ -170,7 +170,12 @@ test('新光照配置随场景持久化，旧场景转换到唯一新方案', ()
   file.scene.sceneSettings.shadows={mode:'baked',enabled:true};
   const restored=deserializeScene(JSON.stringify(file));
   assert.equal(restored.sceneSettings.lighting.version,2);
-  assert.deepEqual(restored.sceneSettings.lighting.bake,scene.sceneSettings.lighting.bake);
+  // 用户确认B3仅新建auto；旧缺失设备保持原CPU缺省，其余默认设置必须逐字段相同。
+  const { device, ...existingDefaults }=scene.sceneSettings.lighting.bake;
+  assert.equal(device,'auto');
+  assert.equal(Object.hasOwn(restored.sceneSettings.lighting.bake,'device'),false);
+  assert.equal(restored.sceneSettings.lighting.bake.device??'cpu','cpu');
+  assert.deepEqual(restored.sceneSettings.lighting.bake,existingDefaults);
   assert.equal(Object.hasOwn(restored.sceneSettings,'shadows'),false);
   assert.equal(JSON.parse(serializeScene(restored)).scene.sceneSettings.lighting.version,2);
 });

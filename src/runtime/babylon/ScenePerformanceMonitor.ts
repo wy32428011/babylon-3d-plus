@@ -6,6 +6,7 @@ import type { AbstractMesh, Engine, Material, Scene, Observer } from '@babylonjs
 import { EngineInstrumentation } from '@babylonjs/core/Instrumentation/engineInstrumentation';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
 import type { SceneRuntimePerformanceMetrics } from './SceneRuntime';
+import { getGpuCapabilityProfile } from './gpuCapabilityProfile';
 import { FrameTimingWindow, type FrameTimingReport, type FrameTimingWallClockReport } from './FrameTimingWindow';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
@@ -610,6 +611,7 @@ export class ScenePerformanceMonitor {
     return JSON.stringify({
       generatedAt: new Date().toISOString(),
       renderer: this.glInfo,
+      gpuCapabilityProfile: getGpuCapabilityProfile(this.engine),
       summary: summarizeScenePerformance(this.history),
       frameTiming: this.getFrameTimingReport(),
       wallClockFrameTiming: this.getWallClockFrameTimingReport(),

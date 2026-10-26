@@ -3,6 +3,8 @@ import { DracoCompression } from '@babylonjs/core/Meshes/Compression/dracoCompre
 import { MeshoptCompression } from '@babylonjs/core/Meshes/Compression/meshoptCompression.js';
 import { KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2.js';
 import * as KTX2DecoderModule from '@babylonjs/ktx2decoder';
+import { configureKtx2DecoderModule } from './ktx2DecoderConfiguration';
+import { installLocalKtx2WorkerDecoder } from './ktx2WorkerDecoder';
 
 let configured = false;
 
@@ -33,7 +35,7 @@ export function configureLocalBabylonDecoders(): void {
   BasisToolsOptions.JSModuleURL = resolveDecoderUrl('basis/basis_transcoder.js');
   BasisToolsOptions.WasmModuleURL = resolveDecoderUrl('basis/basis_transcoder.wasm');
   KhronosTextureContainer2.DefaultNumWorkers = 0;
-  KhronosTextureContainer2.URLConfig = {
+  const ktx2Urls = {
     jsDecoderModule: '',
     wasmUASTCToASTC: resolveDecoderUrl('ktx2/uastc_astc.wasm'),
     wasmUASTCToBC7: resolveDecoderUrl('ktx2/uastc_bc7.wasm'),
@@ -45,6 +47,9 @@ export function configureLocalBabylonDecoders(): void {
     wasmMSCTranscoder: resolveDecoderUrl('ktx2/msc_basis_transcoder.wasm'),
     wasmZSTDDecoder: resolveDecoderUrl('ktx2/zstddec.wasm'),
   };
+  KhronosTextureContainer2.URLConfig = ktx2Urls;
+  configureKtx2DecoderModule(KTX2DecoderModule, ktx2Urls);
+  installLocalKtx2WorkerDecoder(ktx2Urls);
   (globalThis as typeof globalThis & { KTX2DECODER?: typeof KTX2DecoderModule }).KTX2DECODER = KTX2DecoderModule;
 }
 

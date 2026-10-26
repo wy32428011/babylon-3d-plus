@@ -32,6 +32,7 @@ import { loadLightingResources, type LoadedLightingResources } from './lightingR
 import { lightingMaterialValueSignature, restoreLightingMaterialValues } from './lightingRuntimeMaterial.ts';
 import { copyLightingMaterialExportBaseline } from './lightingGeometry.ts';
 import { LightingShadowInstanceRuntime } from './LightingShadowInstanceRuntime.ts';
+import { LightingInvalidationDiagnostics, type LightingChangeKind, type LightingInvalidationEntry, type LightingInvalidationDiagnosticsSnapshot } from './lightingInvalidation.ts';
 import { LightingProbeOcclusionQuery } from './lightingProbeOcclusion.ts';
 import { getLightingRuntimeDiagnostic, type LightingRuntimeDiagnostic } from './lightingRuntimeDiagnostic.ts';
 
@@ -114,6 +115,8 @@ export class SceneLightingRuntime {
   private document: SceneDocument | null = null;
   private sources: LightingRuntimeSource[] = [];
   private classification: LightingClassificationEntry[] = [];
+  private classificationByEntity = new Map<string, { entry: LightingClassificationEntry; order: number }[]>();
+  private selectedClassificationCache: { ids: string; entries: LightingClassificationEntry[] } | null = null;
   private dirty = true;
   private bindingsDirty = true;
   private state: LightingState | null = null;
@@ -141,6 +144,12 @@ export class SceneLightingRuntime {
   private pendingInvalidation: string | null = null;
   private invalidatedSnapshotKey: string | null = null;
   private sourceRevision = 0;
+  private bindingsRevision = 0;
+  private structureRevision = 0;
+  private consumedStructureRevision = 0;
+  // 同步消费和完整异步事务期间不合并标记，避免吞掉回调产生的新代失效。
+  private dirtyConsumptionDepth = 0;
+  private readonly invalidationDiagnostics = new LightingInvalidationDiagnostics();
   private documentSignature: string | null = null;
   private readonly changedDynamicGeometry = new Set<Mesh>();
   private capturedInput: { signature: string; geometrySignature: string; materials: string; lighting: string } | null = null;
@@ -153,42 +162,94 @@ export class SceneLightingRuntime {
   }
 
   sync(document: SceneDocument): void {
-    if (this.disposed) return;
-    const documentSignature = getSceneLightingBakeSignature(document);
-    if (documentSignature !== this.documentSignature) this.invalidatedSnapshotKey = null;
-    this.documentSignature = documentSignature;
-    this.document = document;
-    this.dirty = true; this.bindingsDirty = true;
-    const settings = getSceneLightingConfig(document).bake;
-    if (!settings.enabled) {
-      this.cancelPending(); this.desiredSnapshotKey = null; this.clearState(); this.setError(null);
-      this.refreshSources(); this.updateShadowRoles(); this.rebuildDebug(); return;
-    }
-    const raw = getSceneLightingConfig(document).result;
-    const snapshot = raw ? validateSceneLightingBakeSnapshot(raw) : null;
-    if (!snapshot || snapshot.signature !== getSceneLightingBakeSignature(document)) {
-      this.cancelPending(); this.desiredSnapshotKey = null; this.clearState();
-      this.setError(raw ? '静态对象、材质或灯光已变化，光照结果已过期，请重新烘焙。' : null);
-      this.refreshSources(); this.updateShadowRoles(); this.rebuildDebug(); return;
-    }
-    const key = this.snapshotKey(snapshot);
-    if (this.invalidatedSnapshotKey === key) { this.refreshSources(); this.updateShadowRoles(); this.rebuildDebug(); return; }
-    if (this.state && this.snapshotKey(this.state.snapshot) === key) {
+    this.dirtyConsumptionDepth++;
+    try {
+      if (this.disposed) return;
+      const documentSignature = getSceneLightingBakeSignature(document);
+      if (documentSignature !== this.documentSignature) this.invalidatedSnapshotKey = null;
+      this.documentSignature = documentSignature;
+      this.document = document;
+      this.requestChange('classification', 'document-sync');
+      const settings = getSceneLightingConfig(document).bake;
+      if (!settings.enabled) {
+        this.cancelPending(); this.desiredSnapshotKey = null; this.clearState(); this.setError(null);
+        this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return;
+      }
+      const raw = getSceneLightingConfig(document).result;
+      const snapshot = raw ? validateSceneLightingBakeSnapshot(raw) : null;
+      if (!snapshot || snapshot.signature !== getSceneLightingBakeSignature(document)) {
+        this.cancelPending(); this.desiredSnapshotKey = null; this.clearState();
+        this.setError(raw ? '静态对象、材质或灯光已变化，光照结果已过期，请重新烘焙。' : null);
+        this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return;
+      }
+      const key = this.snapshotKey(snapshot);
+      if (this.invalidatedSnapshotKey === key) { this.refreshSources('sync'); this.updateShadowRoles(); this.rebuildDebug(); return; }
+      if (this.state && this.snapshotKey(this.state.snapshot) === key) {
+        this.desiredSnapshotKey = key;
+        if (!this.pendingActivation) this.refreshBindingsForSources('sync');
+        return;
+      }
+      if (this.desiredSnapshotKey === key && this.controller) return;
       this.desiredSnapshotKey = key;
-      if (!this.pendingActivation) this.refreshBindingsForSources();
-      return;
-    }
-    if (this.desiredSnapshotKey === key && this.controller) return;
-    this.desiredSnapshotKey = key;
-    this.ready = this.applySnapshot(snapshot).catch(error => {
-      if (!this.disposed && this.desiredSnapshotKey === key) this.reportError(error);
-    });
+      const pending = this.applySnapshot(snapshot);
+      // applySnapshot 的同步阶段会取消旧任务并递增代次，必须在调用后记录。
+      const operation = this.operation;
+      this.ready = pending.catch(error => {
+        if (!this.disposed && this.operation === operation && this.desiredSnapshotKey === key) this.reportError(error);
+      });
+    } finally { this.dirtyConsumptionDepth--; }
   }
 
-  markDirty(): void {
-    if (!this.disposed && !this.creatingDerived) { this.dirty = true; this.bindingsDirty = true; this.sourceRevision++; }
+  /** 旧入口仍按未知变更执行完整分类与绑定校验。 */
+  markDirty(reason = 'unknown'): void { this.notifyChange('unknown', reason); }
+  notifyChange(kind: LightingChangeKind, reason: string = kind): void {
+    if (this.disposed) { this.invalidationDiagnostics.skip('disposed'); return; }
+    if (this.creatingDerived) { this.invalidationDiagnostics.skip('derived'); return; }
+    this.requestChange(kind, reason);
   }
-  getClassification(): LightingClassificationEntry[] { this.refreshSources(); return this.classification; }
+  /** 仅供受控原生mesh增删事件：已有双路pending且没有消费事务时，只合并重复标记。 */
+  notifyMeshLifecycleChange(reason: string): 'coalesced' | 'full' {
+    const coalesced = !this.disposed && !this.creatingDerived && this.dirty && this.bindingsDirty
+      && this.dirtyConsumptionDepth === 0 && !this.controller && !this.pendingActivation;
+    this.invalidationDiagnostics.meshLifecycle(reason, coalesced);
+    if (coalesced) return 'coalesced';
+    this.notifyChange('unknown', reason);
+    return 'full';
+  }
+  private requestChange(kind: LightingChangeKind, reason: string): void {
+    this.invalidationDiagnostics.mark(kind, reason);
+    if (kind === 'pose') return;
+    this.bindingsDirty = true; this.bindingsRevision++;
+    if (kind !== 'bindings') {
+      this.dirty = true; this.sourceRevision++;
+      if (kind === 'structure') this.structureRevision++;
+    }
+  }
+  /** 仅记录生产端判断，不把“未变化”伪造为位姿失效。 */
+  recordInvalidationDecision(reason: string, skipped: boolean): void { this.invalidationDiagnostics.decision(reason, skipped); }
+  setInvalidationDiagnosticsEnabled(enabled: boolean): void { this.invalidationDiagnostics.setEnabled(enabled); }
+  resetInvalidationDiagnostics(): void { this.invalidationDiagnostics.reset(); }
+  getInvalidationDiagnostics(): LightingInvalidationDiagnosticsSnapshot & Readonly<{
+    revisions: Readonly<{ classification: number; bindings: number; structure: number }>;
+    pending: Readonly<{ classification: boolean; bindings: boolean; structure: boolean }>;
+  }> {
+    return { ...this.invalidationDiagnostics.snapshot(),
+      revisions: { classification: this.sourceRevision, bindings: this.bindingsRevision, structure: this.structureRevision },
+      pending: { classification: this.dirty, bindings: this.bindingsDirty, structure: this.structureRevision !== this.consumedStructureRevision },
+    };
+  }
+  getClassification(): LightingClassificationEntry[] { this.refreshSources('query'); return this.classification; }
+  /** 不消费dirty、不遍历来源；用于Inspector展示缓存及“待刷新”状态。 */
+  peekClassificationForEntities(entityIds: readonly string[]): { entries: LightingClassificationEntry[]; stale: boolean } {
+    const ids = JSON.stringify(entityIds);
+    if (this.selectedClassificationCache?.ids !== ids) {
+      const selected = new Set(entityIds), rows: { entry: LightingClassificationEntry; order: number }[] = [];
+      for (const id of selected) rows.push(...(this.classificationByEntity.get(id) ?? []));
+      rows.sort((a, b) => a.order - b.order);
+      this.selectedClassificationCache = { ids, entries: rows.map(row => row.entry) };
+    }
+    return { entries: this.selectedClassificationCache.entries, stale: this.dirty || this.disposed };
+  }
   getError(): string | null { return this.error; }
   getDiagnostic(): LightingRuntimeDiagnostic | null { return this.diagnostic ? { ...this.diagnostic } : null; }
   whenReady(): Promise<void> { return this.ready; }
@@ -217,7 +278,7 @@ export class SceneLightingRuntime {
     this.debugVisible = debugVisible; this.beforeBake = beforeBake;
     if (this.state) for (const record of this.state.records) record.binding.enabled = !beforeBake && !this.suppressPreviewIndirect;
     this.updateProxyLightPolicies();
-    if (changed || this.dirty) { this.refreshSources(); this.rebuildDebug(); }
+    if (changed || this.dirty) { this.refreshSources('preview'); this.rebuildDebug(); }
     if (this.state) this.notifyBindingsChanged();
   }
 
@@ -231,7 +292,7 @@ export class SceneLightingRuntime {
   }
 
   focusNode(entityId: string, nodeKey: string): void {
-    this.refreshSources();
+    this.refreshSources('focus');
     if (!(this.scene.activeCamera instanceof ArcRotateCamera)) return;
     const sources = this.sources.filter(source => source.entry.entityId === entityId && source.entry.nodeKey === nodeKey);
     const minimum = new Vector3(Infinity, Infinity, Infinity), maximum = new Vector3(-Infinity, -Infinity, -Infinity);
@@ -252,96 +313,114 @@ export class SceneLightingRuntime {
   }
 
   async captureBakeInput(jobId: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<LightingBakeInput> {
-    if (!this.document || this.disposed) throw new Error('没有可烘焙的当前场景。');
-    this.refreshSources();
-    if (this.scene.environmentTexture && !this.document.sceneSettings.skybox?.sourceUrl?.match(/(?:hdr|exr)(?:[?#]|$)/i)
-      && this.document.sceneSettings.skybox?.format !== 'hdr') this.options.pushLog('当前环境使用预过滤天空盒，间接光烘焙采用其平均环境辐照度；镜面反射继续使用原天空盒。');
-    const materials = this.staticMaterialSignature(), lighting = lightingContentHash(captureLightingEnvironment(this.scene, this.document));
-    const input = await captureRuntimeLightingInput(this.scene, this.document, this.sources, jobId, signal, progress);
-    this.refreshSources();
-    if (materials !== this.staticMaterialSignature() || lighting !== lightingContentHash(captureLightingEnvironment(this.scene, this.document))) {
-      throw new Error('捕获期间实际静态材质或灯光发生变化，请等待场景稳定后重新烘焙。');
-    }
-    this.capturedInput = { signature: input.signature, geometrySignature: input.geometrySignature!, materials, lighting };
-    return input;
+    this.dirtyConsumptionDepth++;
+    try {
+      if (!this.document || this.disposed) throw new Error('没有可烘焙的当前场景。');
+      this.refreshSources('capture');
+      if (this.scene.environmentTexture && !this.document.sceneSettings.skybox?.sourceUrl?.match(/(?:hdr|exr)(?:[?#]|$)/i)
+        && this.document.sceneSettings.skybox?.format !== 'hdr') this.options.pushLog('当前环境使用预过滤天空盒，间接光烘焙采用其平均环境辐照度；镜面反射继续使用原天空盒。');
+      const materials = this.staticMaterialSignature(), lighting = lightingContentHash(captureLightingEnvironment(this.scene, this.document));
+      const input = await captureRuntimeLightingInput(this.scene, this.document, this.sources, jobId, signal, progress);
+      this.refreshSources('capture');
+      if (materials !== this.staticMaterialSignature() || lighting !== lightingContentHash(captureLightingEnvironment(this.scene, this.document))) {
+        throw new Error('捕获期间实际静态材质或灯光发生变化，请等待场景稳定后重新烘焙。');
+      }
+      this.capturedInput = { signature: input.signature, geometrySignature: input.geometrySignature!, materials, lighting };
+      return input;
+    } finally { this.dirtyConsumptionDepth--; }
   }
 
   async applySnapshot(raw: SceneLightingBakeSnapshot, signal?: AbortSignal, finalValidation?: () => Promise<void>): Promise<void> {
-    if (!this.document || this.disposed) throw new Error('当前场景已经关闭。');
-    const snapshot = validateSceneLightingBakeSnapshot(raw);
-    if (!snapshot) throw new Error('光照资源清单格式无效。');
-    if (snapshot.signature !== getSceneLightingBakeSignature(this.document)) throw new Error('光照结果与当前静态场景不一致。');
-    this.cancelPending();
-    const operation = ++this.operation, sourceRevision = this.sourceRevision, controller = new AbortController();
-    this.controller = controller;
-    const abort = () => controller.abort(signal?.reason);
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    let resources: LoadedLightingResources | null = null, candidate: LightingState | null = null;
-    let activation: PendingLightingActivation | null = null;
-    const check = () => {
-      controller.signal.throwIfAborted();
-      if (this.disposed || operation !== this.operation || !this.document
-        || snapshot.signature !== getSceneLightingBakeSignature(this.document)) throw new Error('场景已经变化，候选光照结果未提交。');
-      if (this.capturedInput?.signature === snapshot.signature && this.capturedInput.geometrySignature === snapshot.geometrySignature
-        && (this.capturedInput.materials !== this.staticMaterialSignature()
-          || this.capturedInput.lighting !== lightingContentHash(captureLightingEnvironment(this.scene, this.document)))) {
-        throw new Error('烘焙期间实际静态材质或灯光发生变化，候选结果未提交。');
-      }
-    };
-    const pending = (async () => {
-      try {
-        check(); this.refreshSources();
-        const geometrySignature = getLightingGeometrySignature(this.sources);
-        if (snapshot.geometrySignature && snapshot.geometrySignature !== geometrySignature) throw new Error('模型几何或实际姿态与烘焙资源不一致，请重新烘焙。');
-        resources = await (this.options.loadResources ?? loadLightingResources)(snapshot, this.scene, controller.signal);
-        check(); this.refreshSources();
-        if (getLightingGeometrySignature(this.sources) !== geometrySignature) throw new Error('加载光照期间静态几何已经变化，候选结果未提交。');
-        candidate = this.prepareState(snapshot, resources);
-        check();
-        const previous = this.commitState(candidate, true, false);
-        activation = { candidate, previous, finished: false };
-        this.pendingActivation = activation;
-        this.notifyBindingsChanged();
-        check();
-        if (finalValidation) await this.validateActivatedState(finalValidation, controller.signal);
-        check(); this.refreshSources();
-        if (this.pendingInvalidation || getLightingGeometrySignature(this.sources) !== geometrySignature) {
-          throw new Error('验证光照期间静态几何已经变化，候选结果未提交。');
+    this.dirtyConsumptionDepth++;
+    let snapshotOwnsConsumption = false;
+    try {
+      if (!this.document || this.disposed) throw new Error('当前场景已经关闭。');
+      const snapshot = validateSceneLightingBakeSnapshot(raw);
+      if (!snapshot) throw new Error('光照资源清单格式无效。');
+      if (snapshot.signature !== getSceneLightingBakeSignature(this.document)) throw new Error('光照结果与当前静态场景不一致。');
+      this.cancelPending();
+      const operation = ++this.operation, sourceRevision = this.sourceRevision, bindingsRevision = this.bindingsRevision, controller = new AbortController();
+      this.controller = controller;
+      const abort = () => controller.abort(signal?.reason);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+      let resources: LoadedLightingResources | null = null, candidate: LightingState | null = null;
+      let activation: PendingLightingActivation | null = null, preparedStructureRevision = this.structureRevision;
+      const check = () => {
+        controller.signal.throwIfAborted();
+        if (this.disposed || operation !== this.operation || !this.document
+          || snapshot.signature !== getSceneLightingBakeSignature(this.document)) throw new Error('场景已经变化，候选光照结果未提交。');
+        if (this.capturedInput?.signature === snapshot.signature && this.capturedInput.geometrySignature === snapshot.geometrySignature
+          && (this.capturedInput.materials !== this.staticMaterialSignature()
+            || this.capturedInput.lighting !== lightingContentHash(captureLightingEnvironment(this.scene, this.document)))) {
+          throw new Error('烘焙期间实际静态材质或灯光发生变化，候选结果未提交。');
         }
-        if (this.pendingActivation !== activation || this.state !== candidate) throw new Error('候选光照已被其他操作替换，未提交。');
-        activation.finished = true; this.pendingActivation = null;
-        if (previous) this.releaseState(previous, previous.resources === candidate.resources, false);
-        candidate = null; resources = null; this.setError(null); this.invalidatedSnapshotKey = null;
-        this.capturedInput = null;
-        this.desiredSnapshotKey = this.snapshotKey(snapshot);
-        this.notifyBindingsChanged();
-      } catch (error) {
-        if (activation) this.rollbackActivation(activation);
-        else if (candidate) this.releaseState(candidate, false, false);
-        else resources?.dispose();
-        if (!controller.signal.aborted && !this.disposed && operation === this.operation) this.reportError(error);
-        throw error;
-      } finally {
-        signal?.removeEventListener('abort', abort);
-        if (this.controller === controller) this.controller = null;
-        if (!this.disposed && operation === this.operation && sourceRevision !== this.sourceRevision) { this.dirty = true; this.bindingsDirty = true; }
-      }
-    })();
-    this.ready = pending;
-    return pending;
+      };
+      snapshotOwnsConsumption = true;
+      const pending = (async () => {
+        try {
+          check(); this.refreshSources('snapshot');
+          const geometrySignature = getLightingGeometrySignature(this.sources);
+          if (snapshot.geometrySignature && snapshot.geometrySignature !== geometrySignature) throw new Error('模型几何或实际姿态与烘焙资源不一致，请重新烘焙。');
+          resources = await (this.options.loadResources ?? loadLightingResources)(snapshot, this.scene, controller.signal);
+          check(); this.refreshSources('snapshot');
+          if (getLightingGeometrySignature(this.sources) !== geometrySignature) throw new Error('加载光照期间静态几何已经变化，候选结果未提交。');
+          preparedStructureRevision = this.structureRevision;
+          candidate = this.prepareState(snapshot, resources);
+          check();
+          const previous = this.commitState(candidate, true, false);
+          activation = { candidate, previous, finished: false };
+          this.pendingActivation = activation;
+          this.notifyBindingsChanged();
+          check();
+          if (finalValidation) await this.validateActivatedState(finalValidation, controller.signal);
+          check(); this.refreshSources('snapshot');
+          if (this.pendingInvalidation || getLightingGeometrySignature(this.sources) !== geometrySignature) {
+            throw new Error('验证光照期间静态几何已经变化，候选结果未提交。');
+          }
+          if (this.pendingActivation !== activation || this.state !== candidate) throw new Error('候选光照已被其他操作替换，未提交。');
+          activation.finished = true; this.pendingActivation = null;
+          if (previous) this.releaseState(previous, previous.resources === candidate.resources, false);
+          this.consumedStructureRevision = Math.max(this.consumedStructureRevision, preparedStructureRevision);
+          candidate = null; resources = null; this.setError(null); this.invalidatedSnapshotKey = null;
+          this.capturedInput = null;
+          this.desiredSnapshotKey = this.snapshotKey(snapshot);
+          this.notifyBindingsChanged();
+        } catch (error) {
+          if (activation) this.rollbackActivation(activation);
+          else if (candidate) this.releaseState(candidate, false, false);
+          else resources?.dispose();
+          if (!controller.signal.aborted && !this.disposed && operation === this.operation) this.reportError(error);
+          throw error;
+        } finally {
+          try {
+            signal?.removeEventListener('abort', abort);
+            if (this.controller === controller) this.controller = null;
+            if (!this.disposed && operation === this.operation) {
+              if (sourceRevision !== this.sourceRevision) this.dirty = true;
+              if (bindingsRevision !== this.bindingsRevision || this.structureRevision !== this.consumedStructureRevision) this.bindingsDirty = true;
+            }
+          } finally { this.dirtyConsumptionDepth--; }
+        }
+      })();
+      this.ready = pending;
+      return pending;
+    } finally {
+      // 内层事务负责覆盖资源/验证await及其finally；前置校验失败由此释放。
+      if (!snapshotOwnsConsumption) this.dirtyConsumptionDepth--;
+    }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.cancelPending();
     this.scene.onBeforeRenderObservable.remove(this.observer);
-    this.clearDebug(); this.clearState(); this.shadowInstances.clear(); this.sources = []; this.classification = [];
+    this.clearDebug(); this.clearState(); this.shadowInstances.clear(); this.sources = []; this.classification = []; this.classificationByEntity.clear(); this.selectedClassificationCache = null;
     this.options.setShadowRoles(new Map(), getSceneLightingConfig(this.document).bake);
   }
 
   private snapshotKey(snapshot: SceneLightingBakeSnapshot): string {
-    return `${snapshot.signature}:${lightingContentHash(snapshot.assets.map(asset => [asset.id, asset.url, asset.sha256]))}`;
+    return `${snapshot.signature}:${lightingContentHash(snapshot.assets.map(asset => [asset.id, asset.url, asset.sha256, ...(asset.kind === 'geometry' && asset.geometryVersion !== undefined ? [asset.geometryVersion] : []), ...(asset.kind === 'geometry' && asset.encoding !== undefined ? [asset.encoding] : [])]))}`;
   }
   private cancelPending(): void {
     this.operation++; this.controller?.abort(); this.controller = null;
@@ -379,7 +458,7 @@ export class SceneLightingRuntime {
           }
           this.activateState(previous);
           for (const [mesh, replacement] of replacedMaterials) mesh.material = replacement;
-          if (replacedMaterials.size) this.bindingsDirty = true;
+          if (replacedMaterials.size) this.requestChange('bindings', 'rollback-material-replaced');
         }
         else { this.updateShadowRoles(); this.rebuildDebug(); }
       }
@@ -401,15 +480,30 @@ export class SceneLightingRuntime {
     this.error = message;
     this.diagnostic = message === null ? null : diagnostic ?? { message, kind: 'runtime' };
   }
-  private refreshSources(): void {
-    if (!this.dirty || this.disposed) return;
-    const next = this.options.getSources();
-    const keys = new Set<string>();
-    for (const source of next) {
-      if (keys.has(source.entry.key)) throw new Error(`光照对象标识重复：${source.entry.key}`);
-      keys.add(source.entry.key);
-    }
-    this.sources = next; this.classification = next.map(source => ({ ...source.entry })); this.dirty = false;
+  private refreshSources(entry: LightingInvalidationEntry): void {
+    this.dirtyConsumptionDepth++;
+    try {
+      if (!this.dirty || this.disposed) { this.invalidationDiagnostics.skip('cleanClassification'); return; }
+      const revision = this.sourceRevision, started = this.invalidationDiagnostics.beginCollection();
+      try {
+        const next = this.options.getSources(), keys = new Set<string>();
+        for (const source of next) {
+          if (keys.has(source.entry.key)) throw new Error(`光照对象标识重复：${source.entry.key}`);
+          keys.add(source.entry.key);
+        }
+        this.sources = next; this.classification = next.map(source => ({ ...source.entry }));
+        this.classificationByEntity = new Map(); this.selectedClassificationCache = null;
+        for (let order = 0; order < this.classification.length; order++) {
+          const entry = this.classification[order], id = entry.policyContext?.ownerEntityId ?? entry.entityId;
+          let rows = this.classificationByEntity.get(id);
+          if (!rows) { rows = []; this.classificationByEntity.set(id, rows); }
+          rows.push({ entry, order });
+        }
+        // 同步getter/回调可在collect内再次失效；旧代结果不能吞掉新一代请求。
+        this.dirty = revision !== this.sourceRevision;
+        if (this.dirty) this.invalidationDiagnostics.reentrant('classification');
+      } finally { this.invalidationDiagnostics.endCollection(entry, started); }
+    } finally { this.dirtyConsumptionDepth--; }
   }
   private sourceMaterial(mesh: AbstractMesh): Material | null {
     return this.state?.originalMaterials.has(mesh) && this.state.materials.has(mesh.material!)
@@ -552,23 +646,26 @@ export class SceneLightingRuntime {
   }
 
   private commitState(candidate: LightingState, preservePrevious = false, notify = true): LightingState | null {
-    const previous = this.state;
-    if (previous) this.detachState(previous);
+    this.dirtyConsumptionDepth++;
     try {
-      this.state = candidate;
-      this.restoreProxyLightPolicies(); this.shadowInstances.clear();
-      this.activateState(candidate);
-      this.bindingsDirty = false;
-    } catch (error) {
-      this.detachState(candidate);
-      this.state = previous;
-      if (previous) this.activateState(previous);
-      else this.updateShadowRoles();
-      throw error;
-    }
-    if (previous && !preservePrevious) this.releaseState(previous, previous.resources === candidate.resources, false);
-    if (notify) this.notifyBindingsChanged();
-    return previous;
+      const previous = this.state, revision = this.bindingsRevision;
+      if (previous) this.detachState(previous);
+      try {
+        this.state = candidate;
+        this.restoreProxyLightPolicies(); this.shadowInstances.clear();
+        this.activateState(candidate);
+        this.bindingsDirty = revision !== this.bindingsRevision;
+      } catch (error) {
+        this.detachState(candidate);
+        this.state = previous;
+        if (previous) this.activateState(previous);
+        else this.updateShadowRoles();
+        throw error;
+      }
+      if (previous && !preservePrevious) this.releaseState(previous, previous.resources === candidate.resources, false);
+      if (notify) this.notifyBindingsChanged();
+      return previous;
+    } finally { this.dirtyConsumptionDepth--; }
   }
 
   private activateState(state: LightingState): void {
@@ -646,17 +743,42 @@ export class SceneLightingRuntime {
     if (changed) this.notifyBindingsChanged();
   }
 
-  private refreshBindingsForSources(): void {
-    this.refreshSources();
-    this.bindingsDirty = false;
-    if (!this.state) { this.updateShadowRoles(); this.rebuildDebug(); return; }
-    if (this.state.snapshot.geometrySignature && getLightingGeometrySignature(this.sources) !== this.state.snapshot.geometrySignature) {
-      this.invalidate('静态对象集合或实际几何发生变化，请重新烘焙。'); return;
-    }
-    if (this.state.sourceLayoutKey !== this.sourceLayoutKey() || this.dynamicMaterialReplaced(this.state)) {
-      try { this.commitState(this.prepareState(this.state.snapshot, this.state.resources)); this.setError(null); }
-      catch (error) { this.reportError(error); this.updateShadowRoles(); }
-    } else { this.updateShadowRoles(); this.rebuildDebug(); }
+  private refreshBindingsForSources(entry: LightingInvalidationEntry): void {
+    this.dirtyConsumptionDepth++;
+    try {
+      const revision = this.bindingsRevision, structure = this.structureRevision;
+      const force = structure !== this.consumedStructureRevision;
+      this.invalidationDiagnostics.bindingRefresh(entry, force);
+      try {
+        this.refreshSources(entry);
+        if (!this.state) {
+          const hadProxies = this.shadowInstances.records.length > 0;
+          if (force) {
+            const creatingDerived = this.creatingDerived; this.creatingDerived = true;
+            try { this.restoreProxyLightPolicies(); this.shadowInstances.clear(); }
+            finally { this.creatingDerived = creatingDerived; }
+          }
+          this.updateShadowRoles(); this.rebuildDebug();
+          if (force && hadProxies && !this.shadowInstances.records.length) this.notifyBindingsChanged();
+          this.consumedStructureRevision = Math.max(this.consumedStructureRevision, structure);
+          return;
+        }
+        if (this.state.snapshot.geometrySignature && getLightingGeometrySignature(this.sources) !== this.state.snapshot.geometrySignature) {
+          this.invalidate('静态对象集合或实际几何发生变化，请重新烘焙。');
+          this.consumedStructureRevision = Math.max(this.consumedStructureRevision, structure); return;
+        }
+        if (force || this.state.sourceLayoutKey !== this.sourceLayoutKey() || this.dynamicMaterialReplaced(this.state)) {
+          try {
+            this.commitState(this.prepareState(this.state.snapshot, this.state.resources)); this.setError(null);
+            this.consumedStructureRevision = Math.max(this.consumedStructureRevision, structure);
+          } catch (error) { this.reportError(error); this.updateShadowRoles(); }
+        } else { this.updateShadowRoles(); this.rebuildDebug(); }
+      } finally {
+        const reentered = revision !== this.bindingsRevision;
+        this.bindingsDirty = reentered || this.structureRevision !== this.consumedStructureRevision;
+        if (reentered) this.invalidationDiagnostics.reentrant('bindings');
+      }
+    } finally { this.dirtyConsumptionDepth--; }
   }
   private sourceLayoutKey(): string {
     return lightingContentHash(this.sources.map(source => [source.entry.key, source.mesh.uniqueId, source.entry.mobility,
@@ -680,11 +802,11 @@ export class SceneLightingRuntime {
   private tick(): void {
     if (this.disposed) return;
     try {
-      if (this.state && this.dynamicMaterialReplaced(this.state)) this.bindingsDirty = true;
+      if (this.state && !this.bindingsDirty && this.dynamicMaterialReplaced(this.state)) this.requestChange('bindings', 'dynamic-material-replaced');
       if ((this.dirty || this.bindingsDirty) && !this.pendingActivation) {
-        this.refreshBindingsForSources();
+        this.refreshBindingsForSources('frame');
         if (!this.state && this.document && getSceneLightingConfig(this.document).result && !this.controller) this.sync(this.document);
-      }
+      } else this.invalidationDiagnostics.skip(this.pendingActivation ? 'pendingActivation' : 'cleanBindings');
       const state = this.state;
       if (state) {
         if (this.pendingInvalidation) { this.invalidate(this.pendingInvalidation); return; }
