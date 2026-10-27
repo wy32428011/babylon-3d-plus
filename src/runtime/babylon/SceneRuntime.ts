@@ -640,6 +640,12 @@ export class SceneRuntime {
 
   getHybridLightingMetrics() { return this.environment.getHybridLightingMetrics(); }
 
+  setLightingOptimizationOptions(options: Partial<import('./lightingOptimizationSettings.ts').LightingOptimizationOptions>): void {
+    this.environment.setLightingOptimizationOptions(options);
+  }
+
+  getLightingOptimizationMetrics() { return this.environment.getLightingOptimizationMetrics(); }
+
   waitForLightingReady(): Promise<void> { return this.environment.waitForLightingReady(); }
 
   bakeLighting(document: SceneDocument, signal?: AbortSignal, progress?: (message: string, fraction?: number, phase?: string) => void): Promise<SceneLightingBakeSnapshot> { return this.environment.bakeLighting(document, signal, progress); }

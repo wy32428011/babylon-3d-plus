@@ -145,9 +145,44 @@ Toolbar 的太阳形按钮“光照与烘焙管理器”是统一入口，不依
 
 本机任务历史位于当前工程的专用临时任务目录，准备失败也保存阶段与原因。记录包含日志、耗时、引擎版本、实际设备、回退原因和空间。视口准备另外记录实际导出耗时与Renderer JS堆最大观察值；它不代表进程RSS或显存，计时不可用时显示“未测”，非关键计量失败不影响真实捕获。后台记录中的主进程RSS/Heap是各阶段最大观察采样值，Cycles内存是该子进程生命周期峰值；未取得数据时显示“未测”。异常退出的遗留运行任务显示“已中断”，需要明确重新发起。
 
-新二进制输入任务保存已完成图集、派生几何和探针的阶段检查点。重试只检查同工程最近 20 个任务；输入、源文件、脚本、Blender 版本和实际设备全部匹配，且阶段产物长度/SHA 与 UV 排版一致时才复用。UV 构建仍会重做；部分完成或损坏的阶段重新计算，不会作为成功结果提交。清理任务临时文件也会删除对应恢复检查点。
+默认路径的新二进制输入任务保存已完成图集、派生几何和探针的阶段检查点。重试只检查同工程最近 20 个任务；输入、源文件、脚本、Blender 版本和实际设备全部匹配，且阶段产物长度/SHA 与 UV 排版一致时才复用。默认仍重做 UV 构建；部分完成或损坏的阶段重新计算，不会作为成功结果提交。清理任务临时文件也会删除对应恢复检查点。独立 UV/布局缓存需按下节显式启用。
 
 “清理临时文件”只删除已确认归属的终态任务staging及其日志、源输入与中间产物，不能恢复这些临时文件。活动任务、仍运行的引擎、链接和含未知文件的目录会被拒绝；正式Assets/LightingBakes资源不会删除。“清除烘焙结果”仍只解除场景关联，两者含义不同。
+
+## 第一阶段优化候选（默认关闭）
+
+以下开关仅供明确启用的运行期候选，不写入 `.scene.json`，不自动改变画质或设备行为。局部夹具通过不代表整个业务场景有 FPS 收益；实施范围与证据见[优先级方案及实施记录](tasks/2026-10-27-shadow-lighting-bake-plan.md)。
+
+### 阴影局部失效与静态环境 GI 合批
+
+Editor/Web Viewer 的 URL 可追加 `?lightingShadowCache=local&lightingGiBatching=1`（已有参数时用 `&`）；只启用其中一项时仅传对应参数。`lightingShadowCache=global`、`lightingGiBatching=0` 显式恢复原策略，URL 优先于本机设置。没有显式开关时仍使用全局失效和独立 GI 代理。
+
+桌面渲染器没有方便的 URL 入口时，可在该应用的开发者工具中设置后刷新：
+
+```javascript
+localStorage.setItem('editor.lightingShadowCache', 'local');
+localStorage.setItem('editor.lightingGiBatching', '1');
+location.reload();
+```
+
+移除这两个本机键并移除 URL 对应参数后刷新，即恢复默认。宿主持有 `SceneRuntime` 实例时也可调用 `setLightingOptimizationOptions({ shadowCache: 'local', environmentBatching: true })`；该调用不持久化，GI 资源应用中会拒绝切换合批。`getLightingOptimizationMetrics()` 返回实际选项、环境代理/批次数和阴影局部命中/回退原因。
+
+- **局部阴影失效**：只在实际投影与旧/新投射范围可证明安全时复用点光/聚光缓存。共享历史有界；方向光/CSM、定制深度、实例或无法可靠跟踪的几何继续全局回退。`localCacheHits` 表示因局部判断避免的额外失效，不等于所有缓存命中。
+- **环境 GI 合批**：仅合并相邻、同变换、同实际材质/图集及兼容光照状态的不可交互 `$environment` 表面，保留逐源监视与成员关系。业务模型、透明/定制材质等继续原代理；拾取资格或灯光过滤变化时整代恢复独立代理。`renderProxies` 是代理数，不应直接当成整场景 Draw Call。
+
+### UV/图集布局独立缓存
+
+在启动 Electron 主进程前设置 `LIGHTING_BAKE_PREPROCESS_CACHE=1`。例如开发环境使用项目已有的 cross-env：
+
+```bash
+npx --no-install cross-env LIGHTING_BAKE_PREPROCESS_CACHE=1 npm run dev:electron
+```
+
+不设置该变量或设为 `0`，使用原完整预处理路径。Viewer 只读取烘焙成品，不运行此缓存。
+
+缓存只复用同工程已验证、完成且无活动引擎的任务。几何、完整变换、来源顺序、展开/布局和 mip 配方必须匹配；只改灯时可以复用 UV，但 GI 仍按完整照明指纹重算。缓存顶层文件随任务临时清理，不进入正式 Assets/SOURCE/DIST。损坏、清理竞态、预算不足或同工程已有缓存任务预留额度时，明确记录原因并沿原路径，不自动删历史腾空间。
+
+任务记录的 `preprocessCache` 提供 `hit/miss/skipped`、原因及各阶段耗时；运行日志同时保留 `LIGHTING_BAKE_PREPROCESS` 行。首次冷路径、恢复校验及实际 Cycles 求解耗时分别统计，不能把 UV 命中解释为路径追踪或 FPS 加速。
 
 ## 临时草稿预览、区域探针与执行设备
 

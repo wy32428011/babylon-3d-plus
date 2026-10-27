@@ -5,6 +5,7 @@ import type { LightingDraftPreview } from '../../../editor/store/lightingManagem
 import { assertLightingBakePreflight, type LightingBakePreflight } from '../../../../electron/shared/sceneLightingBakePreflight';
 import { awaitLightingTaskStep } from '../lightingBakeTask';
 import { SceneLightingRuntime } from '../SceneLightingRuntime';
+import { readLightingOptimizationOptions, type LightingOptimizationOptions } from '../lightingOptimizationSettings.ts';
 import { appendGeneratedLightingSources, collectLightingRuntimeSources, type LightingBatchOwner, type LightingSourceOwner } from '../lightingClassificationRuntime';
 import { getSceneLightingBakeSignature, lightingContentHash, type SceneLightingBakeSnapshot, type LightingClassificationEntry } from '../../../../electron/shared/sceneLightingBakeContract';
 import { SceneAppearanceRuntime } from '../SceneAppearanceRuntime';
@@ -84,6 +85,7 @@ export class EnvironmentAndSkyboxController {
   private updatesStopped = false;
   private environmentDisposed = false;
   private disposed = false;
+  private readonly lightingOptimizationOptions = readLightingOptimizationOptions();
 
   stopUpdates(): void {
     if (this.updatesStopped) return;
@@ -238,6 +240,22 @@ export class EnvironmentAndSkyboxController {
   }
   getLightingRuntimeDiagnostic() { return this.lightingRuntime.getDiagnostic(); }
   getHybridLightingMetrics() { return this.shadowRuntime.getHybridMetrics(); }
+  setLightingOptimizationOptions(options: Partial<LightingOptimizationOptions>): void {
+    if (options.shadowCache !== undefined && options.shadowCache !== 'global' && options.shadowCache !== 'local') throw new Error('无效的阴影缓存策略。');
+    if (options.environmentBatching !== undefined && typeof options.environmentBatching !== 'boolean') throw new Error('无效的环境 GI 合批开关。');
+    if (options.environmentBatching !== undefined) {
+      this.lightingRuntime.setEnvironmentBatchingEnabled(options.environmentBatching);
+      this.lightingOptimizationOptions.environmentBatching = options.environmentBatching;
+    }
+    if (options.shadowCache !== undefined) {
+      this.shadowRuntime.setCacheInvalidationMode(options.shadowCache);
+      this.lightingOptimizationOptions.shadowCache = options.shadowCache;
+    }
+  }
+  getLightingOptimizationMetrics() {
+    return { options: { ...this.lightingOptimizationOptions }, environment: this.lightingRuntime.getEnvironmentBatchMetrics(),
+      shadows: this.shadowRuntime.getHybridMetrics() };
+  }
   waitForLightingReady(): Promise<void> { return this.lightingRuntime.whenReady(); }
 
   private draftPreviewGeneration = 0;
@@ -480,6 +498,7 @@ export class EnvironmentAndSkyboxController {
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeShadowRuntime(): void {
     this.shadowRuntime = new SceneShadowRuntime(this.context.scene);
+    this.shadowRuntime.setCacheInvalidationMode(this.lightingOptimizationOptions.shadowCache);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
@@ -559,6 +578,7 @@ export class EnvironmentAndSkyboxController {
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeLightingRuntime(): void {
     this.lightingRuntime = new SceneLightingRuntime(this.context.scene, {
+      environmentBatching: this.lightingOptimizationOptions.environmentBatching,
       canDeferPreparationClassification: () => this.context.canDeferPreparationClassification?.() === true
         && this.dependencies.readiness.loadDiagnostics.hasPendingAssetWork(),
       getSources: () => {

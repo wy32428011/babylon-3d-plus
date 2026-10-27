@@ -1,5 +1,11 @@
 import { HybridShadowNumericSignature, legacyHybridShadowSignature } from './hybridShadowSignatures.ts';
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
+import {
+  captureHybridShadowBounds, createHybridShadowProjection, getHybridShadowProjectionFallback, getHybridShadowSubMeshFallback,
+  HybridShadowChangeHistory,
+  type HybridShadowBoundsSnapshot, type HybridShadowChange, type HybridShadowFallbackReason,
+  type HybridShadowInvalidationMetrics, type HybridShadowInvalidationMode, type HybridShadowProjection,
+} from './hybridShadowInvalidation.ts';
 import { Constants } from '@babylonjs/core/Engines/constants.js';
 import { CascadedShadowGenerator } from '@babylonjs/core/Lights/Shadows/cascadedShadowGenerator.js';
 import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
@@ -14,7 +20,7 @@ export type HybridShadowMeshRole = {
   receiveShadows: boolean;
 };
 export type HybridShadowOptions = { cacheStaticShadows?: boolean; dynamicShadows?: boolean };
-export type HybridShadowMetrics = {
+export type HybridShadowMetrics = HybridShadowInvalidationMetrics & {
   staticRenders: number;
   dynamicRenders: number;
   cacheInvalidations: number;
@@ -31,6 +37,7 @@ type GeometryWatch = {
   previous: Geometry['onGeometryUpdated'];
   callback: Geometry['onGeometryUpdated'];
   version: number;
+  boundsUncertain: boolean;
 };
 
 /**
@@ -47,6 +54,60 @@ export class HybridShadowMeshState {
   private readonly geometrySignatures = new Map<AbstractMesh, { id: number | undefined; version: number }>();
   private readonly geometries = new Map<Geometry, GeometryWatch>();
   private refreshedFrame = -1;
+  private readonly localConsumers = new Set<object>();
+  private readonly localHistory = new HybridShadowChangeHistory();
+  private readonly localBounds = new Map<AbstractMesh, HybridShadowBoundsSnapshot>();
+  private readonly expectedStaticSubMeshes = new Set<SubMesh>();
+  private readonly submittedStaticSubMeshes = new Set<SubMesh>();
+
+  /** 局部诊断关闭时不维护 bounds/提交集合，默认路径保留原扫描开销。 */
+  setLocalInvalidationConsumer(consumer: object, enabled: boolean): void {
+    const wasTracking = this.localConsumers.size > 0;
+    if (enabled) this.localConsumers.add(consumer);
+    else this.localConsumers.delete(consumer);
+    if (wasTracking === (this.localConsumers.size > 0)) return;
+    this.localBounds.clear();
+    this.expectedStaticSubMeshes.clear();
+    this.submittedStaticSubMeshes.clear();
+    this.localHistory.reset(this.revision);
+    this.markStale();
+  }
+
+  evaluateLocalChanges(sinceRevision: number, projection: HybridShadowProjection) {
+    return this.localHistory.evaluate(sinceRevision, projection);
+  }
+
+  /** 验证实际提交是已签名静态集合；只共用一份临时集合，不按灯/face 复制全场表。 */
+  getLocalSubmissionFallback(groups: Iterable<readonly SmartArray<SubMesh>[]>): HybridShadowFallbackReason | null {
+    const submitted = this.submittedStaticSubMeshes;
+    submitted.clear();
+    try {
+      for (const lists of groups) for (const list of lists) for (let index = 0; index < list.length; index++) {
+        const subMesh = list.data[index];
+        if (!this.expectedStaticSubMeshes.has(subMesh)) return 'submission-mismatch';
+        const snapshot = this.localBounds.get(subMesh.getEffectiveMesh());
+        if (!snapshot?.bounds) return snapshot?.fallbackReason ?? 'unreliable-bounds';
+        const reason = getHybridShadowSubMeshFallback(subMesh);
+        if (reason) return reason;
+        submitted.add(subMesh);
+      }
+      return submitted.size === this.expectedStaticSubMeshes.size ? null : 'submission-mismatch';
+    } finally { submitted.clear(); }
+  }
+
+  private recordLocalChange(mesh: AbstractMesh, oldStatic: boolean, newStatic: boolean,
+    snapshot: HybridShadowBoundsSnapshot | null, reason: HybridShadowChange['reason'], revision: number): void {
+    const previous = this.localBounds.get(mesh);
+    this.localHistory.record(revision, {
+      meshId: mesh.uniqueId, reason, oldStatic, newStatic,
+      oldBounds: oldStatic ? previous?.bounds ?? null : null,
+      newBounds: newStatic ? snapshot?.bounds ?? null : null,
+      fallbackReason: reason === 'rendering-group' ? 'rendering-group-change'
+        : (oldStatic ? previous?.fallbackReason : null) ?? snapshot?.fallbackReason ?? null,
+    });
+    if (snapshot) this.localBounds.set(mesh, snapshot);
+    else this.localBounds.delete(mesh);
+  }
 
   setMeshes(meshes: Iterable<AbstractMesh>, roles: ReadonlyMap<AbstractMesh, HybridShadowMeshRole>): void {
     const candidates = [...meshes].filter(mesh => roles.get(mesh)?.castShadows !== false && !mesh.isDisposed());
@@ -70,6 +131,19 @@ export class HybridShadowMeshState {
     }
     const changed = nextStatic.size !== this.staticMeshes.size
       || [...nextStatic].some(mesh => !this.staticMeshes.has(mesh));
+    if (changed && this.localConsumers.size) {
+      const revision = this.revision + 1;
+      for (const mesh of this.staticMeshes) if (!nextStatic.has(mesh)) {
+        this.recordLocalChange(mesh, true, false, null, 'membership', revision);
+      }
+      for (const mesh of nextStatic) if (!this.staticMeshes.has(mesh)) {
+        const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh instanceof Mesh ? mesh : null;
+        const boundsUncertain = source?.geometry ? this.geometries.get(source.geometry)?.boundsUncertain ?? false : false;
+        const snapshot = captureHybridShadowBounds(mesh, mesh.computeWorldMatrix(true), boundsUncertain);
+        this.recordLocalChange(mesh, false, true, snapshot, 'membership', revision);
+      }
+      this.expectedStaticSubMeshes.clear();
+    }
     this.staticMeshes.clear();
     this.dynamicMeshes.clear();
     for (const mesh of nextStatic) this.staticMeshes.add(mesh);
@@ -101,6 +175,8 @@ export class HybridShadowMeshState {
   /** 每帧只读取静态网格的矩阵、几何版本及透明裁剪条件，不遍历顶点数据。 */
   refresh(): void {
     let changed = false;
+    const trackLocal = this.localConsumers.size > 0;
+    if (trackLocal) this.expectedStaticSubMeshes.clear();
     const currentGeometries = new Set<Geometry>();
     for (const mesh of this.staticMeshes) {
       const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh instanceof Mesh ? mesh : null;
@@ -109,7 +185,7 @@ export class HybridShadowMeshState {
       if (geometry && !this.geometries.has(geometry)) this.watchGeometry(geometry);
       const watch = geometry && this.geometries.get(geometry);
       if (watch && geometry.onGeometryUpdated !== watch.callback) {
-        this.watchGeometry(geometry, watch.version + 1);
+        this.watchGeometry(geometry, watch.version + 1, true);
       }
       const version = geometry ? this.geometries.get(geometry)?.version ?? 0 : 0;
       const previousGeometry = this.geometrySignatures.get(mesh);
@@ -117,13 +193,29 @@ export class HybridShadowMeshState {
       if (geometryChanged) this.geometrySignatures.set(mesh, { id: geometry?.uniqueId, version });
       // 同一 renderId 内编辑变换/顶点时 Babylon 的快速返回会留下旧矩阵或世界包围盒。
       const world = mesh.computeWorldMatrix(geometryChanged || !mesh.isSynchronized());
+      let meshChanged = false;
       if (this.signatureMode === 'legacy') {
         const signature = legacyHybridShadowSignature(mesh, source, geometry, version, world);
-        if (signature !== this.signatures.get(mesh)) { this.signatures.set(mesh, signature); changed = true; }
+        if (signature !== this.signatures.get(mesh)) { this.signatures.set(mesh, signature); meshChanged = true; }
       } else {
         let signature = this.numericSignatures.get(mesh);
         if (!signature) { signature = new HybridShadowNumericSignature(); this.numericSignatures.set(mesh, signature); }
-        if (signature.update(mesh, source, geometry, version, world)) changed = true;
+        meshChanged = signature.update(mesh, source, geometry, version, world);
+      }
+      if (meshChanged) changed = true;
+      if (trackLocal) {
+        if (meshChanged || !this.localBounds.has(mesh)) {
+          const snapshot = captureHybridShadowBounds(mesh, world, geometry ? this.geometries.get(geometry)?.boundsUncertain ?? false : false);
+          if (meshChanged) {
+            const previous = this.localBounds.get(mesh);
+            const reason = previous && previous.renderingGroupId !== mesh.renderingGroupId ? 'rendering-group'
+              : geometryChanged ? 'geometry' : 'signature';
+            this.recordLocalChange(mesh, true, true, snapshot, reason, this.revision + 1);
+          } else this.localBounds.set(mesh, snapshot);
+        }
+        if (!mesh.isDisposed() && mesh.isEnabled() && mesh.isVisible) {
+          for (const subMesh of mesh.subMeshes ?? []) this.expectedStaticSubMeshes.add(subMesh);
+        }
       }
     }
     for (const [geometry, watch] of this.geometries) {
@@ -146,6 +238,11 @@ export class HybridShadowMeshState {
     this.geometrySignatures.clear();
     this.staticMeshes.clear();
     this.dynamicMeshes.clear();
+    this.localConsumers.clear();
+    this.localBounds.clear();
+    this.expectedStaticSubMeshes.clear();
+    this.submittedStaticSubMeshes.clear();
+    this.localHistory.reset(this.revision);
   }
 
   private syncGeometryWatches(): void {
@@ -155,11 +252,16 @@ export class HybridShadowMeshState {
     }
   }
 
-  private watchGeometry(geometry: Geometry, version = 0): void {
+  private watchGeometry(geometry: Geometry, version = 0, boundsUncertain = false): void {
     const previous = geometry.onGeometryUpdated;
     const watch: GeometryWatch = {
-      previous, version,
-      callback: (updated, kind) => { watch.version++; previous?.(updated, kind); },
+      previous, version, boundsUncertain,
+      callback: (updated, kind) => {
+        watch.version++;
+        // UV/normal 更新不越出原几何 bounds；position/未知写入不能假定同步了 bounds。
+        if (!kind || kind === 'position') watch.boundsUncertain = true;
+        previous?.(updated, kind);
+      },
     };
     registerGeometryUpdateDelegate(geometry, watch.callback, previous);
     geometry.onGeometryUpdated = watch.callback;
@@ -177,6 +279,7 @@ type CachedFace = {
   color: WebGLRenderbuffer;
   depth: WebGLRenderbuffer;
   signature: string;
+  meshRevision: number;
   bytes: number;
 };
 type ShadowRender = NonNullable<RenderTargetTexture['customRenderFunction']>;
@@ -191,6 +294,8 @@ type PreparedShadowGroup = { id: number; original: ShadowLists; statics: ShadowL
 export class HybridShadowCache {
   readonly metrics = {
     staticRenders: 0, dynamicRenders: 0, cacheInvalidations: 0, cacheHits: 0,
+    localInvalidations: 0, localCacheHits: 0, globalFallbacks: 0,
+    globalFallbackReasons: {} as Partial<Record<HybridShadowFallbackReason, number>>,
     unsupportedCacheReason: null as string | null,
   };
   private readonly generator: ShadowGenerator;
@@ -212,6 +317,7 @@ export class HybridShadowCache {
   private faceIndex = 0;
   private revision = 0;
   private enabled = true;
+  private invalidationMode: HybridShadowInvalidationMode = 'global';
   private disposed = false;
   private readonly gl: WebGL2RenderingContext | null;
   private readonly engine: ThinEngine;
@@ -246,6 +352,16 @@ export class HybridShadowCache {
     });
   }
 
+  /** 运行期诊断开关；不修改场景默认值、投射列表或画质。 */
+  setInvalidationMode(mode: HybridShadowInvalidationMode): void {
+    if (this.disposed || this.invalidationMode === mode) return;
+    this.invalidationMode = mode;
+    this.state.setLocalInvalidationConsumer(this, mode === 'local');
+    this.invalidate();
+  }
+
+  getInvalidationMode(): HybridShadowInvalidationMode { return this.invalidationMode; }
+
   setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
@@ -261,6 +377,7 @@ export class HybridShadowCache {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.invalidationMode === 'local') this.state.setLocalInvalidationConsumer(this, false);
     if (this.shadowMap.customRenderFunction === this.renderCallback) this.shadowMap.customRenderFunction = this.originalRender;
     this.shadowMap.onBeforeRenderObservable.remove(this.faceObserver);
     this.shadowMap.onBeforeBindObservable.remove(this.bindObserver);
@@ -347,22 +464,46 @@ export class HybridShadowCache {
       : this.generator.getTransformMatrix();
     if (!matrix) throw new Error('混合阴影缺少当前级联的投影矩阵。');
     const light = this.generator.getLight();
+    let fallbackReason = this.invalidationMode === 'local'
+      ? getHybridShadowProjectionFallback(this.generator)
+        ?? this.state.getLocalSubmissionFallback(this.activeGroups.map(group => group.statics)) : null;
+    const projection = this.invalidationMode === 'local' && !fallbackReason
+      ? createHybridShadowProjection(matrix, this.generator, this.engine) : null;
+    if (this.invalidationMode === 'local' && !fallbackReason && !projection) fallbackReason = 'unsupported-projection';
     const signature = [
-      this.revision, this.state.revision, ...matrix.asArray(), this.generator.bias, this.generator.normalBias,
-      this.generator.filter, this.engine.useReverseDepthBuffer, this.scene.useRightHandedSystem,
+      this.revision, this.invalidationMode, projection ? 'local' : 'global', ...matrix.asArray(), this.generator.bias, this.generator.normalBias,
+      this.generator.filter, this.engine.useReverseDepthBuffer, this.engine.isNDCHalfZRange, this.scene.useRightHandedSystem,
       ...this.scene.floatingOriginOffset.asArray(),
       light.getDepthMinZ(this.scene.activeCamera!), light.getDepthMaxZ(this.scene.activeCamera!),
-      this.generator.transparencyShadow, this.generator.forceBackFacesOnly,
+      this.generator.transparencyShadow, this.generator.forceBackFacesOnly, this.generator.depthScale, this.generator.enableSoftTransparentShadow,
       ...[this.scene.clipPlane, this.scene.clipPlane2, this.scene.clipPlane3,
         this.scene.clipPlane4, this.scene.clipPlane5, this.scene.clipPlane6]
         .map(plane => plane ? [...plane.normal.asArray(), plane.d].join(',') : ''),
     ].join(',');
     let face = this.faces.get(this.faceIndex);
-    if (face && face.signature === signature) {
+    const meshRevision = this.state.revision;
+    const sameProjection = face?.signature === signature;
+    let contentChanged = face?.meshRevision !== meshRevision;
+    let locallyInvalidated = false, locallyPreserved = false;
+    if (face && sameProjection && contentChanged && projection) {
+      const decision = this.state.evaluateLocalChanges(face.meshRevision, projection);
+      contentChanged = decision.invalidated;
+      fallbackReason = decision.fallbackReason;
+      locallyInvalidated = decision.invalidated && !fallbackReason;
+      locallyPreserved = !contentChanged;
+    }
+    if (face && sameProjection && !contentChanged) {
       this.copyFace(face, false);
+      face.meshRevision = meshRevision;
       this.metrics.cacheHits++;
+      if (locallyPreserved) this.metrics.localCacheHits++;
     } else {
       if (face?.signature) this.metrics.cacheInvalidations++;
+      if (locallyInvalidated) this.metrics.localInvalidations++;
+      if (fallbackReason) {
+        this.metrics.globalFallbacks++;
+        this.metrics.globalFallbackReasons[fallbackReason] = (this.metrics.globalFallbackReasons[fallbackReason] ?? 0) + 1;
+      }
       // 首组可能只有动态，仍须先汇集所有后续组静态；缓存中永远不含上一组动态旧姿态。
       for (const group of this.activeGroups) this.originalRender(...group.statics);
       this.metrics.staticRenders++;
@@ -372,6 +513,7 @@ export class HybridShadowCache {
           this.faces.set(this.faceIndex, face);
           this.copyFace(face, true);
           face.signature = signature;
+          face.meshRevision = meshRevision;
         }
       }
     }
@@ -430,7 +572,7 @@ export class HybridShadowCache {
       const colorComponents = texture.format === Constants.TEXTUREFORMAT_RED ? 1 : 4;
       const componentBytes = texture.type === Constants.TEXTURETYPE_FLOAT ? 4
         : texture.type === Constants.TEXTURETYPE_HALF_FLOAT ? 2 : 1;
-      return { framebuffer, color, depth, signature: '', bytes: width * height * (colorComponents * componentBytes + 4) };
+      return { framebuffer, color, depth, signature: '', meshRevision: -1, bytes: width * height * (colorComponents * componentBytes + 4) };
     } catch (error) {
       gl.deleteFramebuffer(framebuffer); gl.deleteRenderbuffer(color); gl.deleteRenderbuffer(depth);
       throw error;

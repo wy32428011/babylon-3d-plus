@@ -147,6 +147,8 @@ Toolbar 的“光照与烘焙管理器”是统一照明和烘焙的唯一编辑
 
 结果作为独立光照图集、几何 JSON/bin 和探针 JSON 保存在工程 Assets/LightingBakes 中，随保存、SOURCE/DIST 和工程迁移携带；Viewer 读取成品，不依赖 Blender。旧场景只在内存中转换，不因打开文件而写盘或启动 Blender；首次覆盖旧文件前保存原始字节备份。旧 v1 GI 保留资源和原签名并标为过期，需明确重新烘焙；旧太阳阴影贴图不能充当新 GI。“允许昼夜循环控制光照”由 allowDayNightCycle 显式记录，旧主题场景保留原禁用状态；实际日夜控制器活动时须先暂停，再烘焙。总览提供不读回像素的轻量预算预检、临时草稿预览、区域探针与CPU/自动/GPU选择；任务从捕获前开始记录，逐项捕获并以确认后的有界数据块暂存，超预算明确停止。相同输入重试可复用校验通过的完整阶段；结果按解码字节及新旧GI共同驻留预算加载。任务页显示每光源阴影成本、阶段内存、设备回退、日志和安全临时清理。具体操作、限制与迁移边界见[混合光照指南](docs/hybrid-lighting.md)。
 
+当前提供默认关闭的程序级优化候选：点光/聚光阴影局部失效、不可交互静态环境 GI 分块合批，以及独立 UV/图集布局缓存。它们不写入场景配置，不降低默认画质；启用方式、回退和诊断见[混合光照指南](docs/hybrid-lighting.md#第一阶段优化候选默认关闭)，实施证据与未进入的后续阶段见[优先级实施记录](docs/tasks/2026-10-27-shadow-lighting-bake-plan.md)。
+
 `npm run test:lighting-unified` 覆盖统一配置、Store、原生光照与环境材质、备份及保存发布；`npm run test:lighting-manager` 与 `npm run test:lighting-bake` 继续覆盖管理器和烘焙，均已采用新结构且不需要 Blender/GPU。新增 `npm run test:lighting-optimization` 覆盖预检、产物、二进制、任务、临时预览与区域；`npm run smoke:lighting-optimization` 和 `npm run test:lighting-optimization:cycles` 分别执行真实界面闭环及引擎增强验收。真实统一光照闭环使用 `npm run smoke:lighting-unified`；已有当前流程保存的真实 v2 烘焙工程后，可用 `node scripts/smoke-lighting-bake-state.mjs --unified` 检查过期、清除和撤销恢复。真实 Cycles 与浏览器/Electron 检查独立执行，不加入默认 core 组。具体通过状态和截图以[统一光照任务记录](docs/tasks/2026-10-21-unified-lighting.md)为准，单测和文件链检查不等同于真实 Viewer 画面通过。
 
 ## 场景文件说明

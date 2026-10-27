@@ -1,4 +1,5 @@
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
+import { lightingStaticGiBatchSignature, planLightingStaticGiBatches, type LightingStaticGiBatchWatch, type LightingStaticGiSurface } from './lightingStaticGiBatch.ts';
 import { inspectLightingCaptureAdmission } from './lightingBakeAdmission.ts';
 import type { LightingBakeResourceBudget } from '../../../electron/shared/sceneLightingBakeResources.ts';
 import type { LightingCaptureStream } from './lightingBakeStream.ts';
@@ -60,6 +61,8 @@ type RuntimeOptions = {
   classificationCoalesceMinMs?: number;
   /** 初始非交互准备阶段的候选门；已有GI/代理/调试事务不受此门影响。 */
   canDeferPreparationClassification?: () => boolean;
+  /** 运行期候选开关，不写入场景或改变既有烘焙资产。 */
+  environmentBatching?: boolean;
 };
 /** 合并窗口 = max(最小窗口, 上次收集耗时 × 倍数)，把帧内分类的占空比限制在约 1/(1+倍数)。 */
 const CLASSIFICATION_COALESCE_MIN_MS = 250;
@@ -105,6 +108,8 @@ type LightingState = {
   lightSignature: string;
   sourceLayoutKey: string;
   dynamicGeometryTargets: Map<Mesh, Geometry>;
+  environmentBatchWatches: LightingStaticGiBatchWatch[];
+  environmentBatchCount: number;
   released?: boolean;
 };
 type DebugOverlay = { source: LightingRuntimeSource; mesh: Mesh };
@@ -178,10 +183,35 @@ export class SceneLightingRuntime {
   private lastCollectDurationMs = 0;
   private preparationDeferredFrames = 0;
   private preparationHasDeferred = false;
+  private environmentBatchingEnabled: boolean;
+  private environmentBatchFallbacks = 0;
+  private readonly environmentBatchObserver: Observer<Scene>;
 
   constructor(private readonly scene: Scene, private readonly options: RuntimeOptions) {
+    this.environmentBatchingEnabled = options.environmentBatching ?? false;
     this.shadowInstances = new LightingShadowInstanceRuntime(scene, () => this.restoreProxyLightPolicies());
     this.observer = scene.onBeforeRenderObservable.add(() => this.tick())!;
+    // 其它 beforeRender 回调可能在 tick 后改变过滤或选择资格，须在实际候选收集前归还原代理。
+    this.environmentBatchObserver = scene.onBeforeActiveMeshesEvaluationObservable.add(() => {
+      try { this.restoreIncompatibleEnvironmentBatches(); } catch (error) { this.reportError(error); }
+    });
+  }
+
+  setEnvironmentBatchingEnabled(enabled: boolean): void {
+    if (this.disposed || enabled === this.environmentBatchingEnabled) return;
+    if (this.controller || this.pendingActivation) throw new Error('光照资源正在应用，请完成后再切换环境合批。');
+    const previous = this.environmentBatchingEnabled;
+    this.environmentBatchingEnabled = enabled;
+    try {
+      if (this.state && this.validateStaticState(this.state)) this.commitState(this.prepareState(this.state.snapshot, this.state.resources));
+    } catch (error) { this.environmentBatchingEnabled = previous; throw error; }
+  }
+
+  getEnvironmentBatchMetrics() {
+    return { enabled: this.environmentBatchingEnabled, sourceSurfaces: this.state?.snapshot.surfaces.length ?? 0,
+      renderProxies: new Set(this.state?.records.filter(record => record.binding.texture).map(record => record.mesh)).size,
+      batchedSurfaces: this.state?.environmentBatchWatches.length ?? 0, batches: this.state?.environmentBatchCount ?? 0,
+      fallbackRebuilds: this.environmentBatchFallbacks };
   }
 
   sync(document: SceneDocument): void {
@@ -463,6 +493,7 @@ export class SceneLightingRuntime {
     if (this.disposed) return;
     this.disposed = true; this.cancelPending();
     this.scene.onBeforeRenderObservable.remove(this.observer);
+    this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.environmentBatchObserver);
     this.clearDebug(); this.clearState(); this.shadowInstances.clear(); this.sources = []; this.classification = []; this.classificationByEntity.clear(); this.selectedClassificationCache = null;
     this.options.setShadowRoles(new Map(), getSceneLightingConfig(this.document).bake);
   }
@@ -583,7 +614,7 @@ export class SceneLightingRuntime {
       originalMaterialValues: new Map(),
       sourceLayerMasks: new Map(this.sources.map(source => [source.mesh, this.sourceLayerMask(source.mesh)])),
       sourcePickability: new Map(this.sources.map(source => [source.mesh, this.sourcePickable(source.mesh)])),
-      sourceLayoutKey: this.sourceLayoutKey(), dynamicGeometryTargets: new Map(),
+      sourceLayoutKey: this.sourceLayoutKey(), dynamicGeometryTargets: new Map(), environmentBatchWatches: [], environmentBatchCount: 0,
       lightSignature: lightingContentHash(captureLightingEnvironment(this.scene, this.document!)) };
     const sources = new Map(this.sources.map(source => [source.entry.key, source]));
     const materialCache = new Map<Material, Material>(), dynamicGeometry = state.dynamicGeometryTargets;
@@ -643,6 +674,7 @@ export class SceneLightingRuntime {
     this.creatingDerived = true;
     try {
       const covered = new Set<string>(), coveredSurfaces = new Set<string>();
+      const surfaces: LightingStaticGiSurface[] = [];
       for (const surface of snapshot.surfaces) {
         const identity = sourceParentKey(surface.key), source = sources.get(identity.key);
         if (!source || source.entry.mobility !== 'static' || !source.entry.bakeIndirect || !lightingSourceVisible(source)
@@ -650,8 +682,32 @@ export class SceneLightingRuntime {
         const geometry = resources.geometries.get(surface.geometryAssetId), texture = resources.textures.get(surface.lightmapAssetId);
         const asset = snapshot.assets.find(value => value.id === surface.lightmapAssetId);
         if (!geometry || !texture || !asset) throw new Error(`光照表面「${surface.key}」的资源缺失。`);
-        const proxy = new Mesh(`__LightingDerived_${lightingContentHash(surface.key)}`, this.scene);
-        registerProxy(source, proxy);
+        const original = this.sourceMaterial(source.mesh), sourceGeometry = sourceGeometryMesh(source.mesh);
+        const materialIndex = sourceGeometry.subMeshes[identity.primitive]?.materialIndex ?? 0;
+        const binding = { texture, rgbmRange: asset.rgbmRange ?? 1, ...(asset.encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(asset.encoding) ? { encoding: asset.encoding } : {}),
+          ...(isLightingLightmapMipEncoding(asset.encoding) ? { mipLevelCount: asset.levelCount } : {}), enabled: !this.beforeBake && !this.suppressPreviewIndirect };
+        surfaces.push({ key: surface.key, source, geometry, materialParent: original, primitive: identity.primitive, materialIndex,
+          material: (original instanceof MultiMaterial ? original.subMaterials[materialIndex] : original) ?? null,
+          binding, layerMask: this.sourceLayerMask(source.mesh) });
+        covered.add(source.entry.key);
+        coveredSurfaces.add(`${identity.key}/primitive:${identity.primitive}`);
+      }
+      for (const source of this.sources) if (source.entry.mobility === 'static' && lightingSourceVisible(source) && source.entry.bakeIndirect) {
+        const geometry = sourceGeometryMesh(source.mesh), groups = geometry.subMeshes;
+        const expected = groups.length ? groups.flatMap((group, index) => (geometry.isUnIndexed ? group.verticesCount : group.indexCount)
+          ? [`${source.entry.key}/primitive:${index}`] : []) : [`${source.entry.key}/primitive:0`];
+        if (!expected.length || expected.some(key => !coveredSurfaces.has(key))) throw new Error(`静态表面「${source.entry.name}」没有完整的材质分组光照资源。`);
+      }
+      const batches = planLightingStaticGiBatches(surfaces, this.environmentBatchingEnabled);
+      for (const batch of batches) {
+        const first = batch.surfaces[0], { source, binding } = first, { geometry } = batch;
+        const proxy = new Mesh(`__LightingDerived_${lightingContentHash(first.key)}`, this.scene);
+        for (const member of batch.surfaces) registerProxy(member.source, proxy);
+        if (batch.surfaces.length > 1) {
+          proxy.metadata = { ...proxy.metadata, lightingSourceKeys: batch.surfaces.map(member => member.source.entry.key) };
+          state.environmentBatchCount++;
+          for (const member of batch.surfaces) state.environmentBatchWatches.push({ surface: member, signature: batch.signature! });
+        }
         const data = new VertexData();
         data.positions = geometry.positions; data.normals = geometry.normals; data.indices = geometry.indices;
         data.uvs = geometry.uvs; if (geometry.uvs2) data.uvs2 = geometry.uvs2;
@@ -659,24 +715,14 @@ export class SceneLightingRuntime {
         data.applyToMesh(proxy, false);
         proxy.setVerticesData(LIGHTING_UV_ATTRIBUTE, geometry.bakeUvs, false, 2);
         proxy.useVertexColors = source.mesh.useVertexColors; proxy.hasVertexAlpha = source.mesh.hasVertexAlpha;
-        const original = this.sourceMaterial(source.mesh), sourceGeometry = sourceGeometryMesh(source.mesh);
-        const materialIndex = sourceGeometry.subMeshes[identity.primitive]?.materialIndex ?? 0;
-        proxy.material = material(original instanceof MultiMaterial ? original.subMaterials[materialIndex] : original);
+        proxy.material = material(first.material);
         bindTarget(proxy.material, proxy);
-        const binding = { texture, rgbmRange: asset.rgbmRange ?? 1, ...(asset.encoding === 'rgbm-gamma' || isLightingLightmapMipEncoding(asset.encoding) ? { encoding: asset.encoding } : {}),
-          ...(isLightingLightmapMipEncoding(asset.encoding) ? { mipLevelCount: asset.levelCount } : {}), enabled: !this.beforeBake && !this.suppressPreviewIndirect };
-        state.bindings.set(proxy, binding); state.records.push({ source, mesh: proxy, binding, proxy: true, dynamic: false, lastProbePosition: null, workingMaterial: proxy.material });
-        covered.add(source.entry.key);
-        coveredSurfaces.add(`${identity.key}/primitive:${identity.primitive}`);
+        state.bindings.set(proxy, binding);
+        for (const member of batch.surfaces) state.records.push({ source: member.source, mesh: proxy, binding, proxy: true,
+          dynamic: false, lastProbePosition: null, workingMaterial: proxy.material });
       }
       for (const source of this.sources) {
         if (source.entry.mobility === 'static') {
-          if (lightingSourceVisible(source) && source.entry.bakeIndirect) {
-            const geometry = sourceGeometryMesh(source.mesh), groups = geometry.subMeshes;
-            const expected = groups.length ? groups.flatMap((group, index) => (geometry.isUnIndexed ? group.verticesCount : group.indexCount)
-              ? [`${source.entry.key}/primitive:${index}`] : []) : [`${source.entry.key}/primitive:0`];
-            if (!expected.length || expected.some(key => !coveredSurfaces.has(key))) throw new Error(`静态表面「${source.entry.name}」没有完整的材质分组光照资源。`);
-          }
           const matrix = source.getWorldMatrix();
           if (!matrix) throw new Error(`静态对象「${source.entry.name}」矩阵失效。`);
           state.staticWatch.push({ source, matrix: matrix.clone(), visible: lightingSourceVisible(source), visibility: source.mesh.visibility,
@@ -957,44 +1003,69 @@ export class SceneLightingRuntime {
       } else this.invalidationDiagnostics.skip(this.pendingActivation ? 'pendingActivation' : 'cleanBindings');
       const state = this.state;
       if (state) {
-        if (this.pendingInvalidation) { this.invalidate(this.pendingInvalidation); return; }
-        for (const record of state.records) if (record.proxy && !record.dynamic
-          && (!isLightingMaterialOverrideOf(record.mesh.material, record.workingMaterial ?? null, record.mesh)
-            || !resolveLightingMaterialOverride(record.mesh.material, record.mesh).stable)) {
-          this.invalidate(`静态对象「${record.source.entry.name}」的可见代理材质发生变化，请重新烘焙。`); return;
-        }
-        const sourceState = new Map<AbstractMesh, { visibility: number; material: string; geometry: Geometry | null; carrierMatrix: Matrix }>();
-        const revisions = new Map<LightingInstanceBatch, number | null>();
-        for (const watch of state.staticWatch) {
-          let current = sourceState.get(watch.source.mesh);
-          if (!current) {
-            current = { visibility: watch.source.mesh.visibility, material: lightingMaterialFingerprint(watch.source.mesh),
-              geometry: sourceGeometryMesh(watch.source.mesh).geometry, carrierMatrix: watch.source.mesh.computeWorldMatrix(true) };
-            sourceState.set(watch.source.mesh, current);
-          }
-          let revision: number | null = null;
-          if (watch.source.instance) {
-            const batch = watch.source.instance.batch;
-            if (!revisions.has(batch)) revisions.set(batch, lightingInstanceRevision(watch.source));
-            revision = revisions.get(batch)!;
-          }
-          const unchangedInstance = revision !== null && revision === watch.instanceRevision && watch.carrierMatrix
-            && !matrixChanged(watch.carrierMatrix, current.carrierMatrix);
-          const matrix = unchangedInstance ? watch.matrix : watch.source.getWorldMatrix();
-          if (!matrix || matrixChanged(watch.matrix, matrix) || watch.visible !== lightingSourceVisible(watch.source)
-            || watch.visibility !== current.visibility || watch.geometry !== current.geometry || watch.material !== current.material) {
-            this.invalidate(`静态对象「${watch.source.entry.name}」的姿态、显隐、几何或材质发生变化，请重新烘焙。`); return;
-          }
-          watch.instanceRevision = revision;
-        }
-        if (!this.temporaryLightingPreview && state.lightSignature !== lightingContentHash(captureLightingEnvironment(this.scene, this.document!))) {
-          this.invalidate('参与烘焙的灯光或环境照明发生变化，请重新烘焙。'); return;
-        }
+        if (!this.validateStaticState(state) || this.restoreIncompatibleEnvironmentBatches()) return;
         this.refreshDynamicGeometry(state);
         this.updateDynamicBindings(false);
       } else this.shadowInstances.update();
       this.updateDebugMatrices();
     } catch (error) { this.reportError(error); }
+  }
+
+  private validateStaticState(state: LightingState): boolean {
+    if (this.pendingInvalidation) { this.invalidate(this.pendingInvalidation); return false; }
+    for (const record of state.records) if (record.proxy && !record.dynamic
+      && (!isLightingMaterialOverrideOf(record.mesh.material, record.workingMaterial ?? null, record.mesh)
+        || !resolveLightingMaterialOverride(record.mesh.material, record.mesh).stable)) {
+      this.invalidate(`静态对象「${record.source.entry.name}」的可见代理材质发生变化，请重新烘焙。`); return false;
+    }
+    const sourceState = new Map<AbstractMesh, { visibility: number; material: string; geometry: Geometry | null; carrierMatrix: Matrix }>();
+    const revisions = new Map<LightingInstanceBatch, number | null>();
+    for (const watch of state.staticWatch) {
+      let current = sourceState.get(watch.source.mesh);
+      if (!current) {
+        current = { visibility: watch.source.mesh.visibility, material: lightingMaterialFingerprint(watch.source.mesh),
+          geometry: sourceGeometryMesh(watch.source.mesh).geometry, carrierMatrix: watch.source.mesh.computeWorldMatrix(true) };
+        sourceState.set(watch.source.mesh, current);
+      }
+      let revision: number | null = null;
+      if (watch.source.instance) {
+        const batch = watch.source.instance.batch;
+        if (!revisions.has(batch)) revisions.set(batch, lightingInstanceRevision(watch.source));
+        revision = revisions.get(batch)!;
+      }
+      const unchangedInstance = revision !== null && revision === watch.instanceRevision && watch.carrierMatrix
+        && !matrixChanged(watch.carrierMatrix, current.carrierMatrix);
+      const matrix = unchangedInstance ? watch.matrix : watch.source.getWorldMatrix();
+      if (!matrix || matrixChanged(watch.matrix, matrix) || watch.visible !== lightingSourceVisible(watch.source)
+        || watch.visibility !== current.visibility || watch.geometry !== current.geometry || watch.material !== current.material) {
+        this.invalidate(`静态对象「${watch.source.entry.name}」的姿态、显隐、几何或材质发生变化，请重新烘焙。`); return false;
+      }
+      watch.instanceRevision = revision;
+    }
+    if (!this.temporaryLightingPreview && state.lightSignature !== lightingContentHash(captureLightingEnvironment(this.scene, this.document!))) {
+      this.invalidate('参与烘焙的灯光或环境照明发生变化，请重新烘焙。'); return false;
+    }
+    return true;
+  }
+
+  private restoreIncompatibleEnvironmentBatches(): boolean {
+    const state = this.state;
+    if (!state?.environmentBatchWatches.length || state.environmentBatchWatches.every(watch =>
+      lightingStaticGiBatchSignature(watch.surface) === watch.signature)) return false;
+    if (!this.validateStaticState(state)) return true;
+    if (this.pendingActivation) {
+      this.cancelPending();
+      this.requestChange('bindings', 'environment-batch-cancelled');
+      return true;
+    }
+    // 失去资格时整代退回原表面；不在渲染边界重新寻找更大的合批集合。
+    const enabled = this.environmentBatchingEnabled;
+    this.environmentBatchingEnabled = false;
+    try {
+      this.commitState(this.prepareState(state.snapshot, state.resources));
+      this.environmentBatchFallbacks++;
+    } finally { this.environmentBatchingEnabled = enabled; }
+    return true;
   }
 
   private updateDynamicBindings(force: boolean): void {
