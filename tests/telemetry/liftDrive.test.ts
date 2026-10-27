@@ -483,7 +483,7 @@ test('work_state=10 急停冻结：不移动不交接，恢复后继续', () => 
   }
 });
 
-test('task_num_fin_first_up/second_up 仅标注对应工位 cargo.task：变化才写，字段缺失不清除', () => {
+test('task_num_fin_first_up/second_up 仅标注对应工位 cargo.task：字段缺失或归零不清除身份', () => {
   const h = makeHarness();
   try {
     const { a, b } = adoptTwoCargos(h);
@@ -496,11 +496,44 @@ test('task_num_fin_first_up/second_up 仅标注对应工位 cargo.task：变化�
     assert.equal(a.task, '222', 'second_up 必须标注 step2 货物');
 
     h.applyLift({ ...incoming, task_num_fin_first_up: 0 });
-    assert.equal(b.task, '', 'task 号 0 必须归一化为匿名');
+    assert.equal(b.task, '111', '标注归零不得清除仍在台上的货物身份');
     assert.equal(a.task, '222', '字段缺失不得清除既有标注');
 
     h.applyLift(incoming);
     assert.equal(a.task, '222', '缺字段帧不得改动既有标注');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('现场回归：出料占用延迟交付时标注归零，第二箱腾空后仍按原 task 交付', () => {
+  const h = makeHarness();
+  try {
+    const { a, b } = adoptTwoCargos(h);
+    const incoming = { reference_upper_step: 1, level_upper: 1 };
+    h.applyLift({ ...incoming, task_num_fin_first_up: 18949, task_num_fin_second_up: 18948 });
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
+    runUntil(h, outgoing, () => h.delivered.length === 1);
+    assert.deepEqual(h.delivered, [a], 'step2 的 18948 必须先交付并占用 COUT');
+
+    const shifting = { ...outgoing, task_num_fin_first_up: 0, task_num_fin_second_up: 18949 };
+    h.applyLift(shifting);
+    assert.equal(b.task, '18949', 'first 归零、second 接标的同帧不得匿名化 step1 货物');
+    runUntil(h, shifting, () => {
+      const back = h.liftModel.liftTelemetry.stations[1];
+      return back.cargoKey === JSON.stringify(['LIFT1', 1]) && back.cargoOnBoard;
+    }, 40);
+    assert.equal(h.delivered.length, 1, 'COUT 被第一箱占用时第二箱必须留台等待');
+
+    const drained = { ...outgoing, task_num_fin_first_up: 0, task_num_fin_second_up: 0 };
+    h.applyLift(drained);
+    assert.equal(b.task, '18949', 'PLC 已卸出但孪生仍待交付时，归零不得抹掉货物身份');
+    ejectConveyorCargo(h);
+    runUntil(h, drained, () => h.delivered.length === 2);
+    assert.deepEqual(h.delivered, [a, b]);
+    assert.equal(b.task, '18949', '交付 COUT 的货物必须保留可继续接力的 task');
+    assert.equal(h.models.COUT.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.state.liftCargoMeshes.size, 0);
   } finally {
     h.dispose();
   }

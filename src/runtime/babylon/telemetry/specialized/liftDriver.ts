@@ -148,15 +148,15 @@ export class LiftTelemetryDriver {
     this.applyStationTaskAnnotation(model, snapshot, 1, 'task_num_fin_second_up');
   }
 
-  /** task_num_fin_first_up/second_up 仅标注对应工位货物的 cargo.task（值变化才写），不驱动状态机；字段缺失不清除。非零标注同时登记「PLC 确认货在工位」见证，供归零对账。 */
+  /** 非零值标注对应工位货物并登记 PLC 有货见证；字段缺失/归零不清身份，归零由对账路径读取原始快照。 */
   private applyStationTaskAnnotation(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, stationIndex: 0 | 1, field: string): void {
     const raw = readIntegerField(snapshot.fields, field);
-    if (raw === null) return;
+    if (raw === null || raw === 0) return;
     const cargoKey = model.liftTelemetry.stations[stationIndex].cargoKey;
     if (!cargoKey) return;
     const cargo = this.state.liftCargoMeshes.get(cargoKey);
     if (!cargo) return;
-    if (raw !== 0) model.liftTelemetry.stations[stationIndex].taskAnnotationSeen = true;
+    model.liftTelemetry.stations[stationIndex].taskAnnotationSeen = true;
     const task = normalizeCargoTask(raw);
     if (cargo.task !== task) cargo.task = task;
   }
