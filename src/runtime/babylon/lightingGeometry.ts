@@ -1,3 +1,5 @@
+import { encodeLightingPng } from './lightingPngWorker.ts';
+import { compactLightingGeometryInWorker } from './lightingGeometryCompactWorker.ts';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import { resolveLightingMaterialOverride, getLightingMaterialSourceOwner } from './lightingMaterialOverrides.ts';
 import { Material } from '@babylonjs/core/Materials/material.js';
@@ -69,47 +71,6 @@ export function copyLightingMaterialExportBaseline(source: Material, target: Mat
   if (baseline) registerLightingMaterialExportBaseline(target, baseline);
 }
 
-const pngCrcTable = Uint32Array.from({ length: 256 }, (_, value) => {
-  for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
-  return value >>> 0;
-});
-
-function pngChunk(type: string, bytes: Uint8Array): Uint8Array {
-  const chunk = new Uint8Array(bytes.length + 12), view = new DataView(chunk.buffer);
-  view.setUint32(0, bytes.length);
-  for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
-  chunk.set(bytes, 8);
-  let crc = 0xffffffff;
-  for (let i = 4; i < bytes.length + 8; i++) crc = pngCrcTable[(crc ^ chunk[i]) & 255] ^ (crc >>> 8);
-  view.setUint32(bytes.length + 8, (crc ^ 0xffffffff) >>> 0);
-  return chunk;
-}
-
-/** Canvas 会预乘透明像素并丢失其 RGB；直接编码 RGBA，保留 opaque 忽略 alpha 时仍需使用的原色。 */
-async function encodeLightingRgbaPng(rgba: Uint8Array | Uint8ClampedArray, width: number, height: number,
-  signal?: AbortSignal, writePng?: (bytes: Uint8Array) => Promise<string>): Promise<string> {
-  const stride = width * 4, scanlines = new Uint8Array((stride + 1) * height);
-  for (let y = 0; y < height; y++) scanlines.set(rgba.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
-  if (typeof CompressionStream === 'undefined') throw new Error('当前运行环境不支持保留透明像素原色的 PNG 编码。');
-  const compressed = new Uint8Array(await new Response(
-    new Blob([scanlines]).stream().pipeThrough(new CompressionStream('deflate')),
-  ).arrayBuffer());
-  signal?.throwIfAborted();
-  const header = new Uint8Array(13), headerView = new DataView(header.buffer);
-  headerView.setUint32(0, width); headerView.setUint32(4, height); header[8] = 8; header[9] = 6;
-  const chunks = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', header),
-    pngChunk('IDAT', compressed), pngChunk('IEND', new Uint8Array())];
-  const png = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
-  let offset = 0;
-  for (const chunk of chunks) { png.set(chunk, offset); offset += chunk.length; }
-  if (writePng) return writePng(png);
-  const binary: string[] = [];
-  for (let start = 0; start < png.length; start += 0x8000) {
-    binary.push(String.fromCharCode(...png.subarray(start, start + 0x8000)));
-  }
-  return 'data:image/png;base64,' + btoa(binary.join(''));
-}
-
 /** 捕获 GPU 中实际使用的像素，兼容 GLB 内嵌纹理及压缩纹理，不把 blob URL 交给后台进程。 */
 export function createLightingTextureCapture(signal?: AbortSignal, options?: { workingBytes: number; writePng: (bytes: Uint8Array) => Promise<string> }): LightingTextureCapture {
   const cache = new Map<BaseTexture, Promise<string>>();
@@ -127,23 +88,13 @@ export function createLightingTextureCapture(signal?: AbortSignal, options?: { w
         const pixels = await texture.readPixels();
         signal?.throwIfAborted();
         if (!pixels || pixels.byteLength === 0) throw new Error(`无法读取材质纹理「${texture.name}」。`);
-        const rgba = new Uint8ClampedArray(width * height * 4);
-        if (pixels instanceof Float32Array || pixels instanceof Float64Array) {
-          if (pixels.length !== rgba.length) throw new Error(`纹理「${texture.name}」像素通道长度不正确。`);
-          for (let i = 0; i < rgba.length; i++) {
-            const value = pixels[i];
-            if (!Number.isFinite(value)) throw new Error(`纹理「${texture.name}」包含非有限像素，无法烘焙。`);
-            if (value < 0 || value > 1) {
-              throw new Error(`纹理「${texture.name}」包含超出 [0,1] 范围的 HDR 材质像素，当前 PNG 捕获不支持保真导出；请改用 LDR 贴图配合材质强度，或取消该表面烘焙。`);
-            }
-            rgba[i] = Math.round(value * 255);
-          }
-        } else {
-          const source = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
-          if (source.length !== rgba.length) throw new Error(`纹理「${texture.name}」像素格式不支持无损导出。`);
-          rgba.set(source);
+        const png = await encodeLightingPng(pixels, width, height, texture.name, signal, options?.workingBytes);
+        if (options) return options.writePng(png);
+        const binary: string[] = [];
+        for (let start = 0; start < png.length; start += 0x8000) {
+          binary.push(String.fromCharCode(...png.subarray(start, start + 0x8000)));
         }
-        return encodeLightingRgbaPng(rgba, width, height, signal, options?.writePng);
+        return 'data:image/png;base64,' + btoa(binary.join(''));
       })();
       cache.set(texture, pending);
     }
@@ -248,7 +199,8 @@ export type LightingMeshIdentity = {
 };
 /** 保留每个 subMesh 的材质关系；UV 展开产生的新拓扑仅保存到派生几何中。 */
 export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingMeshIdentity,
-  capture?: LightingTextureCapture, stream?: { workingBytes: number; emit: (input: LightingBakeMeshInput) => Promise<void> }): Promise<LightingBakeMeshInput[]> {
+  capture?: LightingTextureCapture, stream?: { workingBytes: number; emit: (input: LightingBakeMeshInput) => Promise<void> },
+  signal?: AbortSignal): Promise<LightingBakeMeshInput[]> {
   const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh;
   if (!(source instanceof Mesh)) throw new Error(`对象「${mesh.name}」不是支持烘焙的三角网格。`);
   if (source.skeleton || source.morphTargetManager?.numTargets) throw new Error(`对象「${mesh.name}」包含骨骼或形变，应设置为动态。`);
@@ -322,21 +274,10 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
       material: await exportLightingMaterial(primitive.material, capture, mesh), receiver: identity.receiver,
     };
     if (stream) {
-      // 只重映射本primitive真正引用的顶点；所有通道逐值复制，保持三角形顺序和Float64精度。
-      const remap = new Map<number, number>(), used: number[] = [];
-      const compactIndices = new Uint32Array(item.indices.length);
-      for (let index = 0; index < item.indices.length; index++) {
-        const sourceIndex = item.indices[index]; let target = remap.get(sourceIndex);
-        if (target === undefined) { target = used.length; remap.set(sourceIndex, target); used.push(sourceIndex); }
-        compactIndices[index] = target;
-      }
-      for (const [field, width] of [['positions', 3], ['normals', 3], ['uvs', 2], ['uvs2', 2], ['colors', 4], ['tangents', 4]] as const) {
-        const original = item[field]; if (!original) continue;
-        const compact = new Float64Array(used.length * width);
-        for (let index = 0; index < used.length; index++) for (let channel = 0; channel < width; channel++) compact[index * width + channel] = original[used[index] * width + channel];
-        item[field] = compact;
-      }
-      item.indices = compactIndices;
+      // 保留首见顶点顺序及 Float64 精度；预算或能力不足时沿原线程路径压缩。
+      const compact = await compactLightingGeometryInWorker(item, stream.workingBytes, size, signal);
+      signal?.throwIfAborted();
+      Object.assign(item, compact);
       await stream.emit(item); await new Promise<void>(resolve => setTimeout(resolve, 0));
     }
     else result.push(item);

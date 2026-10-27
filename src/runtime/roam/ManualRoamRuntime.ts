@@ -210,6 +210,7 @@ export class ManualRoamRuntime {
   private avatarContainer: Awaited<ReturnType<typeof SceneLoader.LoadAssetContainerAsync>> | null = null;
   private avatarUrl: string | null = null;
   private avatarLoadGeneration = 0;
+  private avatarStrideAbort: AbortController | null = null;
   private resetTransition: ResetTransition | null = null;
   private previousCameraMode = Camera.PERSPECTIVE_CAMERA;
   private previousCameraMinZ: number;
@@ -463,6 +464,8 @@ export class ManualRoamRuntime {
     if (this.disposed) return;
     if (this.snapshot.enabled) this.setEnabled(false);
     this.disposed = true;
+    this.avatarStrideAbort?.abort();
+    this.avatarStrideAbort = null;
     this.clearInputs();
     this.exitPointerLock();
     this.unbindInputEvents();
@@ -619,6 +622,8 @@ export class ManualRoamRuntime {
     const avatarUrl = resolveRuntimeAssetUrl(sourceUrl ?? resolveDefaultManualRoamAvatarUrl());
     if (this.avatarUrl === avatarUrl) return;
     this.avatarUrl = avatarUrl;
+    this.avatarStrideAbort?.abort();
+    this.avatarStrideAbort = null;
     this.stopCurrentAnimation();
     this.skeletalAnimator?.dispose();
     this.skeletalAnimator = null;
@@ -718,9 +723,24 @@ export class ManualRoamRuntime {
       this.skeletalAnimator?.sampleIdle();
       if (!this.snapshot.enabled) this.skeletalAnimator?.pause();
       this.animationGroups = shared ? [] : [...container.animationGroups];
-      this.proceduralAnimator = !shared && isDefaultAvatar && this.animationGroups.length === 0
-        ? ProceduralAvatarMorphAnimator.create(this.options.scene, container.meshes)
-        : null;
+      if (!shared && isDefaultAvatar && this.animationGroups.length === 0) {
+        const abort = new AbortController();
+        this.avatarStrideAbort = abort;
+        let animator: ProceduralAvatarMorphAnimator | null;
+        try {
+          animator = await ProceduralAvatarMorphAnimator.create(this.options.scene, container.meshes, abort.signal);
+        } finally {
+          if (this.avatarStrideAbort === abort) this.avatarStrideAbort = null;
+        }
+        if (this.disposed || generation !== this.avatarLoadGeneration) {
+          animator?.dispose();
+          container.dispose();
+          return;
+        }
+        this.proceduralAnimator = animator;
+      } else {
+        this.proceduralAnimator = null;
+      }
       this.avatarContainer = container;
       const avatarAnimationMode: ManualRoamAvatarAnimationMode = skeletalError ? 'error' : this.skeletalAnimator ? automatic ? 'auto-skeleton' : 'shared-skeleton' : this.animationGroups.length > 0
         ? 'embedded'

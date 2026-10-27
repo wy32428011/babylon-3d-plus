@@ -1,11 +1,10 @@
+import { calculateProceduralStride, estimateProceduralStrideWorkingBytes, MAX_PROCEDURAL_WORKER_ESTIMATED_BYTES } from './proceduralAvatarStrideWorkerClient';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { MorphTarget } from '@babylonjs/core/Morph/morphTarget.js';
 import { MorphTargetManager } from '@babylonjs/core/Morph/morphTargetManager.js';
 import type { AbstractMesh, Scene } from '@babylonjs/core';
 import {
-  createConnectedLimbMask,
-  createProceduralStrideTargets,
   resolveProceduralStrideInfluences,
   type ProceduralLimbSelection,
   type ProceduralStrideLimbLengths,
@@ -32,48 +31,91 @@ type MeshLocalGaitPose = {
 
 /** 为静态人物网格安装 GPU Morph Target 步态，避免每帧重传顶点。 */
 export class ProceduralAvatarMorphAnimator {
-  static create(scene: Scene, meshes: readonly AbstractMesh[]): ProceduralAvatarMorphAnimator | null {
+  static async create(scene: Scene, meshes: readonly AbstractMesh[], signal?: AbortSignal): Promise<ProceduralAvatarMorphAnimator | null> {
     const pairs: MorphPair[] = [];
-    for (const mesh of meshes) {
-      if (mesh.isDisposed() || mesh.getTotalVertices() <= 0 || mesh.morphTargetManager) continue;
-      const limbSelection = resolveLimbSelection(mesh.material?.name ?? mesh.name);
-      const indices = mesh.getIndices();
-      const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-      if (!limbSelection || !indices || !positions) continue;
-      const limbMask = createConnectedLimbMask(positions, indices, limbSelection);
-      const localPose = resolveMeshLocalGaitPose(scene, mesh);
-      const strideTargets = createProceduralStrideTargets(positions, {
-        limbMask,
-        normals: mesh.getVerticesData(VertexBuffer.NormalKind),
-        tangents: mesh.getVerticesData(VertexBuffer.TangentKind),
-        pivots: localPose.pivots,
-        distals: localPose.distals,
-        neutralRotationOffsets: localPose.neutralRotationOffsets,
-        limbLengths: localPose.limbLengths,
-      });
-      if (!strideTargets) continue;
-
-      const manager = new MorphTargetManager(scene, mesh.name);
-      manager.numMaxInfluencers = 2;
-      const neutral = new MorphTarget(`${mesh.name}_manual_roam_stride_neutral`, 1, scene, manager);
-      neutral.setPositions(strideTargets.neutral);
-      neutral.setNormals(strideTargets.neutralNormals);
-      neutral.setTangents(strideTargets.neutralTangents);
-      const forward = new MorphTarget(`${mesh.name}_manual_roam_stride_forward`, 0, scene, manager);
-      forward.setPositions(strideTargets.forward);
-      forward.setNormals(strideTargets.forwardNormals);
-      forward.setTangents(strideTargets.forwardTangents);
-      const backward = new MorphTarget(`${mesh.name}_manual_roam_stride_backward`, 0, scene, manager);
-      backward.setPositions(strideTargets.backward);
-      backward.setNormals(strideTargets.backwardNormals);
-      backward.setTangents(strideTargets.backwardTangents);
-      manager.addTarget(neutral);
-      manager.addTarget(forward);
-      manager.addTarget(backward);
-      mesh.morphTargetManager = manager;
-      pairs.push({ mesh, manager, neutral, forward, backward });
+    const candidates = meshes.filter(mesh => !mesh.isDisposed() && mesh.getTotalVertices() > 0 && !mesh.morphTargetManager
+      && resolveLimbSelection(mesh.material?.name ?? mesh.name));
+    try {
+      // 最多两个独立网格同时计算；结果按原网格顺序安装。
+      for (let offset = 0; offset < candidates.length; offset += 2) {
+        signal?.throwIfAborted();
+        const batch = candidates.slice(offset, offset + 2);
+        const prepared = batch.map(mesh => {
+          const selection = resolveLimbSelection(mesh.material?.name ?? mesh.name);
+          const indices = mesh.getIndices();
+          const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+          if (!selection || !indices || !positions) return null;
+          const normals = mesh.getVerticesData(VertexBuffer.NormalKind);
+          const tangents = mesh.getVerticesData(VertexBuffer.TangentKind);
+          return { selection, indices, positions, normals, tangents, pose: resolveMeshLocalGaitPose(scene, mesh),
+            estimatedBytes: estimateProceduralStrideWorkingBytes(positions, indices, normals, tangents) };
+        });
+        // 大输入回退为原有串行计算；只有两个估算均在预算内时才同时启动线程。
+        const canParallel = prepared.length === 2 && prepared.every(item => item &&
+          item.estimatedBytes <= MAX_PROCEDURAL_WORKER_ESTIMATED_BYTES) &&
+          prepared.reduce((sum, item) => sum + (item?.estimatedBytes ?? 0), 0) <= MAX_PROCEDURAL_WORKER_ESTIMATED_BYTES * 2;
+        const results: Awaited<ReturnType<typeof calculateProceduralStride>>[] = [];
+        const groupSize = canParallel ? 2 : 1;
+        for (let groupOffset = 0; groupOffset < prepared.length; groupOffset += groupSize) {
+          const group = prepared.slice(groupOffset, groupOffset + groupSize);
+          const controller = new AbortController();
+          const abort = () => controller.abort(signal?.reason);
+          signal?.addEventListener('abort', abort, { once: true });
+          if (signal?.aborted) abort();
+          let firstFailure: unknown;
+          let hasFailure = false;
+          try {
+            const outcomes = await Promise.allSettled(group.map(async item => {
+              try {
+                if (!item) return null;
+                return await calculateProceduralStride(item.positions, item.indices, item.normals, item.tangents,
+                  item.selection, item.pose, controller.signal);
+              } catch (error) {
+                if (!hasFailure) { hasFailure = true; firstFailure = error; controller.abort(error); }
+                throw error;
+              }
+            }));
+            signal?.throwIfAborted();
+            if (hasFailure) throw firstFailure;
+            for (const outcome of outcomes) {
+              if (outcome.status === 'rejected') throw outcome.reason;
+              results.push(outcome.value);
+            }
+          } finally {
+            signal?.removeEventListener('abort', abort);
+          }
+        }
+        signal?.throwIfAborted();
+        for (let index = 0; index < batch.length; index++) {
+          const mesh = batch[index], strideTargets = results[index];
+          if (!strideTargets || mesh.isDisposed() || mesh.morphTargetManager) continue;
+          const manager = new MorphTargetManager(scene, mesh.name);
+          manager.numMaxInfluencers = 2;
+          const neutral = new MorphTarget(`${mesh.name}_manual_roam_stride_neutral`, 1, scene, manager);
+          neutral.setPositions(strideTargets.neutral);
+          neutral.setNormals(strideTargets.neutralNormals);
+          neutral.setTangents(strideTargets.neutralTangents);
+          const forward = new MorphTarget(`${mesh.name}_manual_roam_stride_forward`, 0, scene, manager);
+          forward.setPositions(strideTargets.forward);
+          forward.setNormals(strideTargets.forwardNormals);
+          forward.setTangents(strideTargets.forwardTangents);
+          const backward = new MorphTarget(`${mesh.name}_manual_roam_stride_backward`, 0, scene, manager);
+          backward.setPositions(strideTargets.backward);
+          backward.setNormals(strideTargets.backwardNormals);
+          backward.setTangents(strideTargets.backwardTangents);
+          manager.addTarget(neutral);
+          manager.addTarget(forward);
+          manager.addTarget(backward);
+          mesh.morphTargetManager = manager;
+          pairs.push({ mesh, manager, neutral, forward, backward });
+        }
+      }
+      return pairs.length > 0 ? new ProceduralAvatarMorphAnimator(pairs) : null;
+    } catch (error) {
+      // 中途切换人物或关闭场景时撤销已安装的批次。
+      if (pairs.length) new ProceduralAvatarMorphAnimator(pairs).dispose();
+      throw error;
     }
-    return pairs.length > 0 ? new ProceduralAvatarMorphAnimator(pairs) : null;
   }
 
   private constructor(private readonly pairs: MorphPair[]) {}

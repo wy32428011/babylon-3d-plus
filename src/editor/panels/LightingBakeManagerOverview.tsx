@@ -1,5 +1,5 @@
 import type { LightingBakeEngineStatus, SceneLightingBakeSettings, SceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeContract';
-import type { SceneAppearanceConfig, SceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
+import { DEFAULT_SCENE_LIGHTING_CONFIG, type SceneAppearanceConfig, type SceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { SceneDocument } from '../model/SceneDocument';
 import type { LightingManagerPresetId } from './lightingBakeManagerModel';
 import type { GpuCapabilityProfile } from '../../runtime/babylon/gpuCapabilityProfile';
@@ -50,6 +50,14 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
   const onBakeChange = (patch: Partial<SceneLightingBakeSettings>) => onLightingChange({ ...lighting,
     version: patch.lightmapEncoding === 'rgbm-gamma' || patch.lightmapMipLevels ? 3 : lighting.version, bake: { ...bake, ...patch } });
   const onShadowChange = (patch: Partial<SceneLightingConfig['shadows']>) => onLightingChange({ ...lighting, shadows: { ...shadows, ...patch } });
+  const setShadowsEnabled = (enabled: boolean) => {
+    // 标准环境预设没有直接光；用户开启阴影时恢复统一主光，之后仍可单独调整。
+    const needsMainLight = enabled && lighting.environment?.source === 'sandbox'
+      && lighting.main.source === 'managed' && (!lighting.main.enabled || lighting.main.intensity <= 0);
+    onLightingChange({ ...lighting, shadows: { ...shadows, enabled },
+      main: needsMainLight ? { ...lighting.main, enabled: true,
+        intensity: lighting.main.intensity > 0 ? lighting.main.intensity : DEFAULT_SCENE_LIGHTING_CONFIG.main.intensity } : lighting.main });
+  };
   return <div className="lighting-manager-overview">
     <div className="lighting-manager-overview-settings">
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-gpu-title">
@@ -68,7 +76,8 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
       </section>
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-shadow-title">
         <h3 id="lighting-overview-shadow-title">光照与阴影</h3>
-        <LightingManagerToggle label="启用阴影" checked={shadows.enabled} disabled={disabled} onChange={enabled => onShadowChange({ enabled })} />
+        <LightingManagerToggle label="启用阴影" checked={shadows.enabled} disabled={disabled} onChange={setShadowsEnabled} />
+        <p className="lighting-manager-note">GLB 标准环境使用统一主光时，开启阴影会同时启用主光；主光强度为 0 时恢复默认强度。阴影需要有效光源及物体投射、接收设置。</p>
         <LightingManagerToggle label="静态阴影缓存" description="固定遮挡重复使用，动态设备保持更新" checked={bake.cacheStaticShadows}
           disabled={disabled || !shadows.enabled} onChange={cacheStaticShadows => onBakeChange({ cacheStaticShadows })} />
         <LightingManagerToggle label="动态阴影更新" description="运动部件继续产生实时遮挡" checked={bake.dynamicShadows}

@@ -29,7 +29,7 @@ export function LightingBakeManagerLighting({ scene, lighting, disabled, onChang
       <option value="">选择后暂存到草稿</option>
       <option value={GLB_STANDARD_PREVIEW_PRESET_ID}>GLB 标准预览（对齐 Sandbox）</option>{SCENE_THEME_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
     </select></label>
-    <p className="lighting-manager-note">GLB 标准预览会同时暂存照明与显示配置，关闭场景灯、阴影、显示调色和烘焙应用，并保留已有烘焙结果；其他预设只调整照明。应用配置后生效，可一次撤销。</p>
+    <p className="lighting-manager-note">GLB 标准预览会同时暂存照明与显示配置，关闭场景灯、阴影、显示调色和烘焙应用，保留天空盒显隐及已有烘焙结果；其他预设只调整照明。应用配置后生效，可一次撤销。</p>
     <label className="lighting-manager-field"><span>主光来源</span><select aria-label="主光来源" value={lighting.main.source} disabled={disabled}
       onChange={event => changeMain({ source: event.target.value as SceneLightingConfig['main']['source'] })}>
       <option value="managed">统一主光</option><option value="scene">场景方向光</option>
@@ -54,7 +54,7 @@ export function LightingBakeManagerLighting({ scene, lighting, disabled, onChang
     {environmentSource === 'sandbox' ? <>
       <LightingManagerNumberField label="环境旋转" value={lighting.environment?.rotationDegrees ?? 0} min={0} max={360} step={0.1} unit="°" disabled={disabled}
         onChange={rotationDegrees => onChange({ ...lighting, environment: { ...lighting.environment, source: 'sandbox', rotationDegrees } })} />
-      <p className="lighting-manager-note">当前选择：GLB 标准环境。应用后使用标准环境照明与反射；环境背景的显示由显示配置控制。</p>
+      <p className="lighting-manager-note">当前选择：GLB 标准环境。应用后使用标准环境照明与反射；场景天空盒可在显示效果中单独开启，作为背景而不提供照明。</p>
     </> : <p className="lighting-manager-note">{sceneSkybox?.sourceUrl
       ? '当前选择：场景天空盒。环境资源与旋转沿用场景天空盒配置。'
       : '当前选择：场景天空盒，但未配置场景天空盒，环境照明与反射尚无贴图来源。'}</p>}

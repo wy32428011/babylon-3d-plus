@@ -133,7 +133,7 @@ export async function captureRuntimeLightingInput(scene: Scene, document: SceneD
     if (!matrix) throw new Error(`对象「${source.entry.name}」的矩阵已失效，请重新检查分类。`);
     progress?.(`正在捕获静态对象 ${index + 1}/${staticSources.length}：${source.entry.name}`);
     meshes.push(...await exportLightingMesh(source.mesh, { key: source.entry.key, entityId: source.entry.entityId,
-      nodeKey: source.entry.nodeKey, receiver: source.entry.bakeIndirect, worldMatrix: matrix }, capture, stream));
+      nodeKey: source.entry.nodeKey, receiver: source.entry.bakeIndirect, worldMatrix: matrix }, capture, stream, signal));
   }
   if (getLightingGeometrySignature(sources) !== geometrySignature) throw new Error('捕获期间静态几何发生变化，请等待场景稳定后重新烘焙。');
   return { version: 1, jobId, signature, geometrySignature, sceneName: document.name,

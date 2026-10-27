@@ -16,7 +16,7 @@ export function LightingBakeManagerAppearance({ appearance, disabled, onChange, 
     <p className="lighting-manager-note">显示设置在应用配置后生效；曝光、背景和雾的调整不改变已烘焙照明。</p>
     <LightingManagerColorField label="背景颜色" value={appearance.backgroundColor} disabled={disabled} onChange={backgroundColor => patch({ backgroundColor })} />
     <LightingManagerToggle label="显示天空盒" checked={appearance.skyboxVisible} disabled={disabled} onChange={skyboxVisible => patch({ skyboxVisible })} />
-    <p className="lighting-manager-note">隐藏天空盒仍保留已配置环境贴图提供的照明与反射。</p>
+    <p className="lighting-manager-note">显示天空盒需要先配置场景天空盒；若使用天空盒对象，请保持对象及其上级可见。选择 GLB 标准环境时，天空盒只作为背景，照明与反射仍来自标准环境。隐藏背景不会关闭环境照明。</p>
     <LightingManagerNumberField label="曝光" value={appearance.exposure} min={0.1} max={4} step={0.05} disabled={disabled} onChange={exposure => patch({ exposure })} />
     <LightingManagerToggle label="色调映射" checked={appearance.toneMappingEnabled} disabled={disabled} onChange={toneMappingEnabled => patch({ toneMappingEnabled })} />
     <LightingManagerNumberField label="对比度" value={appearance.contrast} min={0.1} max={3} step={0.05} disabled={disabled} onChange={contrast => patch({ contrast })} />

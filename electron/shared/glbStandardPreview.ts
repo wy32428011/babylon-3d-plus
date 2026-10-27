@@ -31,9 +31,9 @@ export function createGlbStandardPreviewLightingConfig(
   });
 }
 
-/** Sandbox 普通模式不默认使用色调映射；背景隐藏不关闭环境照明。 */
+/** 对齐 Sandbox 的显示调色，同时保留用户选择的天空背景显隐。 */
 export function createGlbStandardPreviewAppearanceConfig(current?: SceneAppearanceConfig): SceneAppearanceConfig {
   const appearance = normalizeSceneAppearanceConfig(current);
-  return normalizeSceneAppearanceConfig({ ...appearance, skyboxVisible: false, exposure: 1, contrast: 1,
+  return normalizeSceneAppearanceConfig({ ...appearance, exposure: 1, contrast: 1,
     toneMappingEnabled: false, bloomEnabled: false, fogEnabled: false });
 }
