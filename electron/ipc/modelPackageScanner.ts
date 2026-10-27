@@ -3,6 +3,7 @@ import { trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharac
 import { precompileModelScriptFile } from './modelScriptCompiler.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, normalizeModelLengthUnit, type ModelLengthUnitInfo } from '../modelUnits.js';
 import type { AssetEntry, ImportModelFolderSkippedEntry, ModelPackageVariant } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
@@ -229,11 +230,94 @@ async function parseGlbContainer(modelFilePath: string): Promise<ParsedGlbDocume
   }
 }
 
+function unavailableSourceDensity(unitScaleToMeters: number, sourceScripted: boolean, message: string): SourceModelDensity {
+  return { schemaVersion: 1, scope: 'source-glb-json', status: 'unavailable',
+    unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
+    triangles: null, uniqueTriangles: null, meshCount: null, sourceScripted, unknownReasons: [message], findings: [], findingCount: 0 };
+}
+
+/** Worker 和不可用时的回退共用同一份解析，避免改变密度诊断语义。 */
+export async function inspectSourceModelDensityLocal(modelFilePath: string, unitScaleToMeters: number, sourceScripted: boolean): Promise<SourceModelDensity> {
+  const unavailable = (message: string) => unavailableSourceDensity(unitScaleToMeters, sourceScripted, message);
+  try {
+    const stat = await fs.lstat(modelFilePath);
+    try {
+      const parsed = await parseGlbContainer(modelFilePath);
+      if (!isPlainObject(parsed.gltf.asset) || parsed.gltf.asset.version !== '2.0') return unavailable('未计算：源模型不是 glTF 2.0。');
+      const result = analyzeGltfJson(parsed.gltf, DEFAULT_THRESHOLDS, { unitScaleToMeters });
+      const after = await fs.lstat(modelFilePath);
+      if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino) return unavailable('未计算：诊断期间源模型发生变化，请刷新资源库。');
+      const reasons = [...result.unknownReasons];
+      if (sourceScripted) reasons.push('仅统计源 GLB；脚本生成或参数更新后的最终几何未知。');
+      return { schemaVersion: 1, scope: 'source-glb-json', status: reasons.length ? 'partial' : 'computed',
+        unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
+        triangles: result.triangles, uniqueTriangles: result.uniqueTriangles, meshCount: result.meshCount, sourceScripted,
+        unknownReasons: reasons.slice(0, 16), findings: result.findings.slice(0, 20).map(finding => ({ ...finding, mesh: finding.mesh.slice(0, 160) })), findingCount: result.findings.length,
+        sourceFile: { size: stat.size, mtimeMs: stat.mtimeMs } };
+    } catch { return unavailable('未计算：源 GLB JSON 无法解析；模型仍按原导入规则处理。'); }
+  } catch { return unavailable('未计算：源模型文件当前不可读取。'); }
+}
+
+const MAX_DENSITY_WORKERS = 2;
+const DENSITY_PARALLEL_FILE_BYTES = 32 * 1024 * 1024;
+const DENSITY_WORKER_TIMEOUT_MS = 30 * 60_000;
+let activeDensityWeight = 0;
+const densityWaiters: Array<{ weight: number; resolve: () => void }> = [];
+let densityWorkerWarningShown = false;
+
+function pumpDensityWaiters(): void {
+  while (densityWaiters.length && activeDensityWeight + densityWaiters[0].weight <= MAX_DENSITY_WORKERS) {
+    const next = densityWaiters.shift()!;
+    activeDensityWeight += next.weight;
+    next.resolve();
+  }
+}
+
+async function withDensityWorkerSlot<T>(weight: number, action: () => Promise<T>): Promise<T> {
+  await new Promise<void>(resolve => { densityWaiters.push({ weight, resolve }); pumpDensityWaiters(); });
+  try { return await action(); }
+  finally { activeDensityWeight -= weight; pumpDensityWaiters(); }
+}
+
+async function analyzeSourceDensityInWorker(modelFilePath: string, unitScaleToMeters: number, sourceScripted: boolean, fileSize: number): Promise<SourceModelDensity> {
+  // 大文件保守独占；文件体积大于 JSON 体积，避免两个潜在大 JSON 同时膨胀。
+  const weight = fileSize > DENSITY_PARALLEL_FILE_BYTES ? MAX_DENSITY_WORKERS : 1;
+  return withDensityWorkerSlot(weight, async () => {
+    // 源码直接运行时没有编译后的 .worker.js；Electron 正式与开发入口均运行编译产物。
+    if (import.meta.url.endsWith('.ts')) return inspectSourceModelDensityLocal(modelFilePath, unitScaleToMeters, sourceScripted);
+    let worker: Worker | undefined;
+    try {
+      try {
+        worker = new Worker(new URL('./modelDensityAnalysis.worker.js', import.meta.url), {
+          workerData: { modelFilePath, unitScaleToMeters, sourceScripted },
+        });
+        return await new Promise<SourceModelDensity>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('模型密度分析线程超时。')), DENSITY_WORKER_TIMEOUT_MS);
+          const finish = (action: () => void) => { clearTimeout(timer); action(); };
+          worker!.once('message', (message: { ok: boolean; result?: SourceModelDensity }) => finish(() => {
+            if (message.ok && message.result) resolve(message.result);
+            else reject(new Error('模型密度分析线程返回无效结果。'));
+          }));
+          worker!.once('error', error => finish(() => reject(error)));
+          worker!.once('exit', code => finish(() => reject(new Error(`模型密度分析线程提前退出（退出码 ${code}）。`))));
+        });
+      } finally {
+        if (worker) await worker.terminate();
+      }
+    } catch (error) {
+      if (!densityWorkerWarningShown) {
+        densityWorkerWarningShown = true;
+        console.warn('[模型密度诊断] Worker 不可用，退回主进程分析：', error);
+      }
+      // 回退也占用并发名额，避免线程不可用时在主进程同时积累大量输入。
+      return inspectSourceModelDensityLocal(modelFilePath, unitScaleToMeters, sourceScripted);
+    }
+  });
+}
+
 /** 源模型诊断失败不影响合法模型导入；缓存只保存有界摘要，不保留 GLB JSON/BIN。 */
 export async function inspectSourceModelDensity(modelFilePath: string, unitScaleToMeters: number, sourceScripted = false): Promise<SourceModelDensity> {
-  const unavailable = (message: string): SourceModelDensity => ({ schemaVersion: 1, scope: 'source-glb-json', status: 'unavailable',
-    unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
-    triangles: null, uniqueTriangles: null, meshCount: null, sourceScripted, unknownReasons: [message], findings: [], findingCount: 0 });
+  const unavailable = (message: string) => unavailableSourceDensity(unitScaleToMeters, sourceScripted, message);
   if (path.extname(modelFilePath).toLowerCase() !== '.glb') return unavailable('未计算：仅支持源 GLB JSON，未读取 glTF 外部资源。');
   try {
     const stat = await fs.lstat(modelFilePath);
@@ -241,25 +325,17 @@ export async function inspectSourceModelDensity(modelFilePath: string, unitScale
     const existing = sourceDensityCache.get(key);
     if (existing) return structuredClone(await existing);
     const pending = (async (): Promise<SourceModelDensity> => {
+      const result = await analyzeSourceDensityInWorker(modelFilePath, unitScaleToMeters, sourceScripted, stat.size);
       try {
-        const parsed = await parseGlbContainer(modelFilePath);
-        if (!isPlainObject(parsed.gltf.asset) || parsed.gltf.asset.version !== '2.0') return unavailable('未计算：源模型不是 glTF 2.0。');
-        const result = analyzeGltfJson(parsed.gltf, DEFAULT_THRESHOLDS, { unitScaleToMeters });
         const after = await fs.lstat(modelFilePath);
         if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ino !== after.ino) return unavailable('未计算：诊断期间源模型发生变化，请刷新资源库。');
-        const reasons = [...result.unknownReasons];
-        if (sourceScripted) reasons.push('仅统计源 GLB；脚本生成或参数更新后的最终几何未知。');
-        return { schemaVersion: 1, scope: 'source-glb-json', status: reasons.length ? 'partial' : 'computed',
-          unitScaleToMeters: Number.isFinite(unitScaleToMeters) && unitScaleToMeters > 0 ? unitScaleToMeters : null,
-          triangles: result.triangles, uniqueTriangles: result.uniqueTriangles, meshCount: result.meshCount, sourceScripted,
-          unknownReasons: reasons.slice(0, 16), findings: result.findings.slice(0, 20).map(finding => ({ ...finding, mesh: finding.mesh.slice(0, 160) })), findingCount: result.findings.length,
-          sourceFile: { size: stat.size, mtimeMs: stat.mtimeMs } };
       } catch { return unavailable('未计算：源 GLB JSON 无法解析；模型仍按原导入规则处理。'); }
+      return result;
     })();
     sourceDensityCache.set(key, pending);
     while (sourceDensityCache.size > MAX_SOURCE_DENSITY_CACHE_ENTRIES) sourceDensityCache.delete(sourceDensityCache.keys().next().value!);
     const result = await pending;
-    if (result.status === 'unavailable') sourceDensityCache.delete(key);
+    if (result.status === 'unavailable' && sourceDensityCache.get(key) === pending) sourceDensityCache.delete(key);
     return structuredClone(result);
   } catch { return unavailable('未计算：源模型文件当前不可读取。'); }
 }
@@ -773,16 +849,20 @@ export async function scanModelFolder(
 
   const packageDirectories = entries.filter((entry) => entry.isDirectory());
 
-  for (const entry of packageDirectories) {
-    const packagePath = path.join(rootPath, entry.name);
-
-    try {
-      const result = await scanModelPackage(packagePath);
+  // 分批扫描，既让模型密度计算并行，又保持目录顺序和有限的在途数据。
+  for (let offset = 0; offset < packageDirectories.length; offset += MAX_DENSITY_WORKERS) {
+    const batch = packageDirectories.slice(offset, offset + MAX_DENSITY_WORKERS);
+    const results = await Promise.all(batch.map(async (entry): Promise<ModelPackageScanResult> => {
+      const packagePath = path.join(rootPath, entry.name);
+      try { return await scanModelPackage(packagePath); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { skipped: { packagePath, reason: `扫描失败：${message}` } } satisfies ModelPackageScanResult;
+      }
+    }));
+    for (const result of results) {
       if (result.asset) assets.push(result.asset);
       if (result.skipped) skipped.push(result.skipped);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      skipped.push({ packagePath, reason: `扫描失败：${message}` });
     }
   }
 

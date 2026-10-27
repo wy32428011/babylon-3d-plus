@@ -506,7 +506,7 @@ export function transformVertexDataPreservingNormals(vertexData: VertexData, mat
 
   const normalMatrix = matrix.clone();
   normalMatrix.invert();
-  normalMatrix.transpose();
+  const normalTransform = normalMatrix.transpose();
   const transformed = new Vector3();
 
   if (sourceNormals && vertexData.normals) {
@@ -515,7 +515,7 @@ export function transformVertexDataPreservingNormals(vertexData: VertexData, mat
         sourceNormals[offset],
         sourceNormals[offset + 1],
         sourceNormals[offset + 2],
-        normalMatrix,
+        normalTransform,
         transformed,
       );
       transformed.normalize();
