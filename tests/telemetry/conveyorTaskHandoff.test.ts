@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { MeshBuilder, NullEngine, Quaternion, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 import type { DeviceTelemetrySnapshot } from '../../src/runtime/mqtt/deviceTelemetry';
 import { ConveyorTelemetryDriver } from '../../src/runtime/babylon/telemetry/specialized/conveyorDriver';
@@ -81,8 +81,10 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
   const models = new Map<string, ModelRuntimeEntry>();
   const platformLocators = new Map<string, LocatorRuntimeEntry>();
   const logs: string[] = [];
+  const boundsReads: string[] = [];
 
-  for (const [assetCode, config] of Object.entries(layout)) {
+  const registerDevice = (assetCode: string, config: HarnessDeviceConfig) => {
+    layout[assetCode] = config;
     const root = new TransformNode(`${assetCode}_root`, scene);
     if (config.rotationY !== undefined) root.rotation.y = config.rotationY;
     if (config.centerZ !== undefined) root.position.z = config.centerZ;
@@ -94,6 +96,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     if (config.trajectoryDirection !== undefined) binding.trajectoryDirection = config.trajectoryDirection;
     const model = {
       assetCode,
+      assetHandle: {},
+      stackerTelemetryReady: true,
       root,
       contentRoot: root,
       meshes: [],
@@ -120,12 +124,14 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
         cellSteps: { columnStepX: CARGO_AXIAL, layerStepY: 0.34 },
       } as unknown as LocatorRuntimeEntry);
     }
-  }
+    return model;
+  };
+  for (const [assetCode, config] of Object.entries(layout)) registerDevice(assetCode, config);
   for (const [assetCode, config] of Object.entries(layout)) {
     if (!config.proxyOf) continue;
-    const host = models.get(config.proxyOf);
-    assert.ok(host, `代理 ${assetCode} 的宿主 ${config.proxyOf} 必须存在`);
-    (models.get(assetCode) as { telemetryProxySource?: ModelRuntimeEntry }).telemetryProxySource = host;
+    const proxyHost = models.get(config.proxyOf);
+    assert.ok(proxyHost, `代理 ${assetCode} 的宿主 ${config.proxyOf} 必须存在`);
+    (models.get(assetCode) as { telemetryProxySource?: ModelRuntimeEntry }).telemetryProxySource = proxyHost;
   }
 
   const host = {
@@ -153,6 +159,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     },
     disposeGeneratedCargo: () => undefined,
     getModelWorldBounds: (model: ModelRuntimeEntry) => {
+      boundsReads.push(model.assetCode);
       const config = layout[model.assetCode];
       const centerX = config?.centerX ?? 0;
       const centerZ = config?.centerZ ?? 0;
@@ -215,13 +222,17 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     driver,
     state,
     logs,
+    boundsReads,
     scene,
     models: Object.fromEntries(models),
+    registerDevice,
+    syncTopology: () => driver.syncLinkTopology(),
     dispose: () => { scene.dispose(); engine.dispose(); },
-    /** 镜像 facade 帧调度：应用快照后执行帧尾外部持货拉取扫描（与快照新旧无关）。 */
+    /** 镜像 facade 帧调度：帧首同步拓扑，应用快照后执行帧尾外部持货拉取扫描。 */
     apply: (assetCode: string, fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1, receivedAt?: number) => {
       const model = models.get(assetCode)!;
       for (let i = 0; i < frames; i += 1) {
+        driver.syncLinkTopology();
         driver.applyToModel(model, makeSnapshot(assetCode, fields, receivedAt), deltaSeconds);
         driver.pullExternalHolderCargo();
       }
@@ -323,6 +334,130 @@ function onlyCargo(state: ReturnType<typeof createSpecializedTelemetrySharedStat
   assert.equal(state.conveyorCargoMeshes.size, 1, '输送线货物表中必须恰好一份货物');
   return [...state.conveyorCargoMeshes.values()][0];
 }
+
+test('异步脚本晚就绪：未 ready 候选不参与嗅探，就绪后重建邻接且稳定帧不重扫', () => {
+  const h = makeHarness({ A: { centerX: 0 }, B: { centerX: 4 } });
+  try {
+    const a = h.models.A;
+    const b = h.models.B;
+    b.stackerTelemetryReady = false;
+    h.syncTopology();
+    assert.deepEqual(a.conveyorTelemetry.probeNeighbors, { forward: null, reverse: null });
+    assert.equal(h.boundsReads.includes('B'), false, '未 ready 候选不得读取加载中的退化包围盒');
+    const loadingPlan = a.conveyorTelemetry.travelPlan;
+    assert.ok(loadingPlan);
+
+    b.stackerTelemetryReady = true;
+    h.syncTopology();
+    assert.equal(a.conveyorTelemetry.probeNeighbors?.reverse, 'B');
+    assert.equal(b.conveyorTelemetry.probeNeighbors?.forward, 'A');
+    assert.notStrictEqual(a.conveyorTelemetry.travelPlan, loadingPlan);
+
+    const readyPlan = a.conveyorTelemetry.travelPlan;
+    const readyNeighbors = a.conveyorTelemetry.probeNeighbors;
+    const boundsReadCount = h.boundsReads.length;
+    h.syncTopology();
+    assert.strictEqual(a.conveyorTelemetry.travelPlan, readyPlan);
+    assert.strictEqual(a.conveyorTelemetry.probeNeighbors, readyNeighbors);
+    assert.equal(h.boundsReads.length, boundsReadCount, '稳定帧不得重复几何扫描');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('模型晚注册：先就绪设备的空邻居缓存自动接入新设备', () => {
+  const h = makeHarness({ A: { centerX: 0 } });
+  try {
+    const a = h.models.A;
+    h.syncTopology();
+    assert.deepEqual(a.conveyorTelemetry.probeNeighbors, { forward: null, reverse: null });
+
+    const b = h.registerDevice('B', { centerX: 4 });
+    h.syncTopology();
+    assert.equal(a.conveyorTelemetry.probeNeighbors?.reverse, 'B');
+    assert.equal(b.conveyorTelemetry.probeNeighbors?.forward, 'A');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('三段链路中间设备晚就绪：已有持货与等待补通且同一货物只交付一次', () => {
+  const h = makeHarness({ A: { centerX: 0 }, B: { centerX: 4 }, C: { centerX: 8 } });
+  try {
+    h.models.B.stackerTelemetryReady = false;
+    h.apply('C', { task: 7, movement_x: 1 });
+    assert.equal(h.models.C.conveyorTelemetry.waitingTask, '7');
+    const cargo = h.insertConveyorCargo('A', '7');
+
+    const probe = h.driver as unknown as {
+      notifyAvailable(model: ModelRuntimeEntry, task: string, direction: number): void;
+      sendSubscribe(model: ModelRuntimeEntry, task: string, direction: number): void;
+    };
+    const notifyAvailable = probe.notifyAvailable;
+    const sendSubscribe = probe.sendSubscribe;
+    let availableCount = 0;
+    let subscribeCount = 0;
+    probe.notifyAvailable = function (model, task, direction) {
+      availableCount++;
+      notifyAvailable.call(this, model, task, direction);
+    };
+    probe.sendSubscribe = function (model, task, direction) {
+      subscribeCount++;
+      sendSubscribe.call(this, model, task, direction);
+    };
+
+    h.models.B.stackerTelemetryReady = true;
+    h.syncTopology();
+    assert.ok(availableCount > 0);
+    assert.ok(subscribeCount > 0);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, 'C');
+    assert.equal(h.models.A.conveyorTelemetry.cargoCode, null);
+    assert.equal(h.models.C.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.models.C.conveyorTelemetry.waitingTask, null);
+
+    availableCount = subscribeCount = 0;
+    h.syncTopology();
+    assert.equal(availableCount, 0, '稳定拓扑不得重复补发 available');
+    assert.equal(subscribeCount, 0, '稳定拓扑不得重复补发 subscribe');
+    assert.strictEqual(onlyCargo(h.state), cargo);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('远程 travel 配置晚到：拓扑重建后按 Z 轴与 GD_4 节点重算行程', () => {
+  const h = makeHarness({ A: { centerX: 0 } });
+  try {
+    const a = h.models.A;
+    h.syncTopology();
+    const fallbackPlan = a.conveyorTelemetry.travelPlan;
+    assert.ok(fallbackPlan);
+    assert.equal(fallbackPlan.travelContext.travelAxisName, 'x');
+    fallbackPlan.perpendicularEndOffsets = { positive: 0.5, negative: null };
+
+    const travelNode = MeshBuilder.CreateBox('GD_4', { width: 1, height: 0.2, depth: 4 }, h.scene);
+    travelNode.parent = a.root;
+    a.meshes = [travelNode];
+    a.externalScriptRuntime = {
+      getDataDrivenConfigs: () => [{
+        device: { devType: 'conveyor' },
+        cargo: { travel: { axis: 'z', nodes: ['GD_4'] } },
+      }],
+    } as unknown as ModelRuntimeEntry['externalScriptRuntime'];
+    h.registerDevice('B', { centerX: 4 });
+    h.syncTopology();
+
+    const readyPlan = a.conveyorTelemetry.travelPlan;
+    assert.ok(readyPlan);
+    assert.notStrictEqual(readyPlan, fallbackPlan);
+    assert.equal(readyPlan.travelContext.travelAxisName, 'z');
+    assert.ok(Math.abs((readyPlan.travelContext.spanMeters ?? 0) - 4) < 1e-6);
+    assert.equal(readyPlan.perpendicularEndOffsets, undefined, '旧直角终点必须随行程计划一并失效');
+  } finally {
+    h.dispose();
+  }
+});
 
 test('直接邻居无货：传递式订阅仍向上注册下位链路，本机挂起等待', () => {
   const h = makeHarness({ CV1: { centerX: -4 }, CV2: { centerX: 0 } });

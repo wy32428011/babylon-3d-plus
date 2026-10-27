@@ -164,6 +164,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         = this.performanceStages.arrayRefreshMs = this.performanceStages.externalCargoMs = 0;
     }
     const nowMs = Date.now();
+    this.conveyorDriver.syncLinkTopology();
     for (const driver of this.drivers) {
       const candidateStarted = this.performanceTimingEnabled ? performance.now() : null;
       this.prepareFrameCandidates(driver.deviceType);

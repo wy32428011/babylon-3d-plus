@@ -110,6 +110,8 @@ type ConveyorLinkMessage = {
 export class ConveyorTelemetryDriver {
   /** assetCode→model 索引：帧内首次使用时懒构建，帧尾 pullExternalHolderCargo 结束清空，下一帧重建。 */
   private modelIndex: Map<string, ModelRuntimeEntry> | null = null;
+  /** 专用邻居模型的就绪快照：仅在集合或 ready 变化时重建几何拓扑。 */
+  private linkTopology: Map<ModelRuntimeEntry, boolean> | null = null;
 
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
 
@@ -137,6 +139,64 @@ export class ConveyorTelemetryDriver {
     this.resolveConveyorTravelPlan(model);
     this.resolveProbeNeighbor(model, 1);
     this.resolveProbeNeighbor(model, -1);
+  }
+
+  /** 帧首核对异步模型集合与 ready 状态；拓扑变化时重建几何缓存并补通已有持货/等待。 */
+  syncLinkTopology(): void {
+    const previous = this.linkTopology;
+    let candidateCount = 0;
+    let changed = previous === null;
+    for (const { model } of this.host.collectModels()) {
+      if (!this.isLinkTopologyCandidate(model)) continue;
+      candidateCount++;
+      if (changed) continue;
+      const ready = this.isLinkTopologyReady(model);
+      if (!previous!.has(model) || previous!.get(model) !== ready) changed = true;
+    }
+    if (!changed && candidateCount !== previous!.size) changed = true;
+    if (!changed) return;
+
+    const models: ModelRuntimeEntry[] = [];
+    const next = new Map<ModelRuntimeEntry, boolean>();
+    for (const { model } of this.host.collectModels()) {
+      if (!this.isLinkTopologyCandidate(model)) continue;
+      models.push(model);
+      next.set(model, this.isLinkTopologyReady(model));
+    }
+    this.linkTopology = next;
+    this.modelIndex = null;
+
+    for (const model of models) {
+      if (!this.isLinkTopologyReady(model) || !isConveyorRuntimeModel(model)) continue;
+      model.conveyorTelemetry.probeNeighbors = null;
+      model.conveyorTelemetry.travelPlan = null;
+      this.primeLinkCaches(model);
+    }
+    if (previous === null) return;
+
+    // 先补 available，让已有等待沿新链路订阅；外部持货等无 conveyor 波源的场景再由 waitingTask 补订阅。
+    for (const model of models) {
+      if (!this.isLinkTopologyReady(model) || !isConveyorRuntimeModel(model)) continue;
+      const state = model.conveyorTelemetry;
+      if (state.cargoCode === null) continue;
+      const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
+      if (cargo?.task) this.notifyAvailable(model, cargo.task, this.resolveFlowDirection(model));
+    }
+    for (const model of models) {
+      if (!this.isLinkTopologyReady(model) || !isConveyorRuntimeModel(model)) continue;
+      const state = model.conveyorTelemetry;
+      if (state.cargoCode === null && state.waitingTask) {
+        this.sendSubscribe(model, state.waitingTask, this.resolveFlowDirection(model));
+      }
+    }
+  }
+
+  private isLinkTopologyCandidate(model: ModelRuntimeEntry): boolean {
+    return isConveyorRuntimeModel(model) || isRgvRuntimeModel(model) || model.stackerCapable || isLiftRuntimeModel(model);
+  }
+
+  private isLinkTopologyReady(model: ModelRuntimeEntry): boolean {
+    return Boolean(model.assetHandle && model.stackerTelemetryReady);
   }
 
   /** 对单条输送线应用货物占位/走行和状态 metadata；本体滚筒/链条不再驱动，仅维护货物运动。 */
@@ -1077,7 +1137,7 @@ export class ConveyorTelemetryDriver {
     let nearestDistance = Infinity;
     for (const { model: candidate } of this.host.collectModels()) {
       if (candidate === model || candidate.assetCode === model.assetCode) continue;
-      if (!isConveyorRuntimeModel(candidate) && !isRgvRuntimeModel(candidate) && !candidate.stackerCapable && !isLiftRuntimeModel(candidate)) continue;
+      if (!this.isLinkTopologyCandidate(candidate) || !this.isLinkTopologyReady(candidate)) continue;
       const bounds = this.host.getModelWorldBounds(candidate);
       if (!bounds) continue;
       const { minimum, maximum } = bounds;

@@ -33,6 +33,7 @@ function harness() {
     collectModels: () => entries,
     pushLog: () => {},
     updateExternalScriptContext: () => { injections++; return false; },
+    getModelWorldBounds: () => null,
   } as unknown as SpecializedTelemetryHost;
   const runtime = new SpecializedTelemetryRuntime(scene, host);
   // 只替换运动回调来记录调度，帧分组、快照解析、断流、脚本注入和诊断均执行真实代码。

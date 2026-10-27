@@ -103,6 +103,8 @@ function makeHarness(options: HarnessOptions = {}) {
     if (position) root.position.copyFrom(position);
     const model = {
       assetCode,
+      assetHandle: {},
+      stackerTelemetryReady: true,
       root,
       contentRoot: root,
       meshes: [],
