@@ -91,7 +91,7 @@ export function bindStatusOverlayPointerChordToggle(
   };
 }
 
-/** 加载、阻断和真实运行异常始终展示；正常运行态由用户控制状态层。 */
+/** 加载和阻断始终展示；运行异常是否需要展示由调用方结合用户操作决定。 */
 export function shouldShowPlayerStatusOverlay(
   phase: PlayerStatusOverlayPhase,
   requestedVisible: boolean,

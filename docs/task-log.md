@@ -1,5 +1,145 @@
 # 任务记录
 
+## 2026-10-27 Viewer 状态层 Git 交付
+
+- 已合并远端场景局部同步、撤销记录与运行时生命周期更新，恢复本地 Viewer 异常提示关闭及文档改动，无冲突。
+- 本次按要求不运行测试或验证；Python 字节码缓存保留本地不提交。使用中文四项编号提交说明，推送结果见本次交付回复。
+
+## 2026-10-26 忽略规则与远端同步 Git 交付
+
+- 已合并远端烘焙有界传输与大场景稳定性更新；同名设计审阅文档的远端版本包含本地内容及补充说明，保留远端版本。
+- 提交 `_staging` 忽略规则，Python 缓存保留本地；本次按要求不运行测试或验证，最终推送结果见交付回复。
+## 2026-10-26 设计问题 D04：剩余控制器生命周期收拢
+
+目标：沿现有依赖顺序逐领域迁移，使 `SceneRuntime.dispose()` 只协调停止、资源释放、共享缓存归还与文档清空；不修改业务渲染、脚本契约或其它设计问题。
+
+- [x] 模型资产、参数变体、阵列的停止与分阶段释放移回所有者。
+- [x] 网格/灯光、定位器、CAD、特效与巡检资源自行管理释放。
+- [x] 环境、变换预览、选择、就绪统计、生成产物与文档完成生命周期入口和必要的迟到回调保护。
+- [x] 总门面改为阶段协调；复用最小现有检查并验证浏览器里的重复销毁、迟到结果与异常继续清理，更新设计状态。
+
+实现：门面不再逐项清空子控制器字段，使用 `runSceneRuntimeCleanup` 有序协调停止、临时态/GI归还、实体/产物释放和共享缓存最终释放。资源所有者内部幂等，并在移除索引/使代次失效后释放对象。模型参数绑定和世界包围盒两个辅助控制器没有独立的强引用资源池，不新增空 dispose；参数纹理由模型所有者归还。
+
+实际检查：源码 TypeScript 检查 0 条诊断；筛选复用 `generatedCargoPool.integration` / `generatedEffectTargets` 的 5 项生命周期检查和 `lightingDraftPreviewController` 的 5 项草稿恢复检查，10/10 通过。浏览器 WebGL2、DOM canvas 上的真实 SceneRuntime 使用受控资产结果，确认停止后无统计通知、重复销毁、各受检索引与文档清空、预览/高亮释放、模型租约先于共享缓存、借用 batch 不二次释放、迟到模型/环境释放一次，以及单个材质释放异常不阻断其它清理。烘焙取消边界使用受控天空就绪状态和 IPC：预算等待被 AbortError 终止，cancel 调用一次，订阅归零，未开始捕获且最终不重同步 GI。未新增或修改测试，未运行完整构建。
+
+检查限制与过程：初始浏览器输入误用灯光种类 `rect-area`，改为契约规定的 `rectArea`；原始 Babylon 模块构造的合成模板未满足真实加载器的实例副作用注册，未将该尝试记为实例渲染通过，改用受控 owned-container 结果核对控制器所有权。资源计数区分每份租约，普通模型与参数变体的不同句柄不能误算为同一句柄重复释放。默认天空尚在加载时烘焙准入正常拒绝，随后仅以受控就绪输入验证销毁取消边界；未执行真实烘焙或大场景视觉验收。Scene/Engine、临时预览服务和 launch 条目均已回收；未提交或推送。
+
+## 2026-10-26 设计问题 D04：遥测预览生命周期收拢
+
+本轮边界为遥测、Fetch 库存和动态设备产生器；保留已有 D01–D03 与烘焙改动，不一次性迁移全部控制器。
+
+- [x] Fetch 控制器独立管理停表、请求取消/代际隔离、批次重置与最终释放。
+- [x] 动态设备停止入口先退订再释放；遥测控制器独立管理帧回调、合批与四类箭头的生命周期。
+- [x] 总门面按停止、清理临时态、释放资源的顺序协调；普通退出预览保留编辑态资源，最终销毁不触发编辑态加载重试。
+- [x] 审阅本轮差异，针对退出/重入和迟到响应复用最小现有检查，更新设计文档与实际结果。
+
+结果：`SceneTelemetryController` 不再直接清空 Fetch/动态设备控制器的集合；`SceneRuntime` 对本领域改为阶段调用，停止方法与最终释放均有重复调用门控。清理异常显式记录并继续独立资源的释放，保留日志回调 receiver。
+
+实际检查：按源码类型检查 0 条诊断；现有 `generatedCargoPool.integration` 与 `generatedEffectTargets` 筛选的 5 项，以及 `deviceSpawnerRuntime` 9 项全部通过。浏览器 WebGL2 + 真实 SceneRuntime/Fetch 控制器、可控延迟响应验证了旧请求 abort、迟到响应不应用、旧 finally 不扣减新会话计数、退出保留可重用 Fetch 运行时、最终释放清空与重复销毁。DOM canvas 诊断另确认普通退出恢复编辑态，而最终销毁不调用编辑态恢复/预取重试；注入单个箭头清理异常后其它释放继续，日志 receiver 正确，Scene/Engine 成功释放。未新增或修改测试文件。
+
+检查边界与过程：Babylon Observer 的数组移除是延迟执行，待事件循环推进后确认活动回调归零；首个 OffscreenCanvas 诊断在额外回收原生 Scene 输入系统时失败，已导航关闭该上下文并改用 DOM canvas 验证销毁完成。独立 Viewer 起始页因没有部署清单报启动错误，未以其作为完整应用验收；实际检查直接加载当前源码的运行时模块。临时 preview 服务与配置已回收。其他控制器的生命周期仍待逐个迁移；本轮未提交、推送或执行完整构建。
+
+## 2026-10-26 设计问题 D03：撤销命令补丁化
+
+- 新增 `src/editor/commands/scenePatch.ts`（`captureScenePatch` / `applyScenePatch` / `createSceneUndoRecorder`）；`createFolderCommand`、`deleteEntityCommand`、`updateSceneDocumentCommand`、`moveEntitiesToFolderCommand` 不再持有整份旧文档。补丁按实体字典位置精确还原键顺序（序列化与未保存判断依赖它）；保留键相对顺序被改变时回退为保留旧文档。
+- 对照测试（仓库外临时脚本，已删除）：400 单步与 60×25 步命令链逐键逐顺序一致，撤销到初始后 `serializeScene` 输出相同；5 万实体保留 60 条命令堆占用 180 MB → 0.1 MB（合成数据）。类型检查 0 条诊断；相关集成测试 65 项通过，`builtInSlotAssetSync.test.ts` 因无扩展名导入无法在该运行方式下加载，`HEAD` 副本同样失败。
+- 语义差异：撤销改为把补丁还原到当前场景，而非整体替换为旧文档；历史后进先出时一致，历史之外的场景变更不再被撤销一并抹掉。未做：事务内合并、字节预算、`() => after` 闭包仍保留文档。未提交。
+
+## 2026-10-26 设计问题 D02 剩余部分：按设备类型预分组
+
+- 新增 `src/runtime/babylon/telemetry/arrowModelViews.ts`：`buildArrowModelViews()` 单次遍历只为已启用的箭头系统生成各自相关的条目（条件与各系统内部过滤一致），`SceneTelemetryController` 的 `update*Arrows()` 改为接收该分组视图，无参调用时只为自己构建。
+- 对照检查：真实四个箭头系统 + 记录型渲染器/诊断会话，编辑态与运行态下“全量列表”与“分组视图”两种输入的渲染器调用与诊断输出逐条一致（含类型与绑定类型不一致、未就绪、冲突入口）；27 个箭头相关测试文件 161 项通过；前端按源码类型检查 0 条诊断。4000 模型输入构建约 0.52 → 0.17 ms/帧（合成数据）。
+- 未做并说明原因：跨帧按设备类型候选索引（失效点不全、同帧动态设备增删风险）；专用遥测驱动 `prepareFrameCandidates()` 对每种类型各遍历一次全部模型，属另一处重复遍历，未改动。未提交。
+
+## 2026-10-26 设计问题 D01：局部路径扩展到多实体，命令侧描述不单独实现
+
+- 实测引用比较找变化实体：3000/2 万/5 万实体分别约 0.06/1.1/3.5 ms，而命令执行时 `{...entities}` 复制实体字典分别约 1.3/11/31 ms；命令侧变更描述只能省前者，且需改 40 多个调用点并有描述过期风险，故不实现，在设计汇总 6.2 节记录该结论。
+- 局部路径改为按变化实体集合（`MAX_LOCAL_CHANGE_ENTITY_COUNT = 64`）：`resolvePlanNeutralSceneChangeEntityIds` / `patchEditModeModelThinInstancePlanForPlanNeutralChanges`（覆盖表容量不足整体完整重建）、`SceneDocumentController.syncEntitiesLocally`（`SceneRuntime` 门面同名）；面板用 `useMemo` 以实体表引用为键识别，替换原单实体版本。
+- 对照：300 步多实体（1–6 个）计划补丁与完整重建逐实体一致；NullEngine 下 150 步多实体局部同步（102 步为多实体）与完整同步状态一致；64/65 个实体上限、夹带显隐变更、未声明的变化实体、空列表均正确回退。类型检查 0 条诊断；`alarmManager`、`digitalTwinEffect`、`environmentBuildingEffect`、`modelParameterRestoration` 共 33 项与阴影测试 36 项通过。未提交。
+
+## 2026-10-26 设计问题 D01：阴影路径增量化
+
+- `SceneShadowRuntime`：`updateCatcherBounds()` 在接收面未启用（`!enabled || !catcherEnabled`，编辑器恒为 `catcherEnabled:false`）时只关闭接收面、不再遍历全部网格算包围盒，启用必经 `applySettings` 写设置后的强制网格同步，届时重算；`invalidateCachedShadow()` 在混合模式下只调用新增的 `HybridShadowMeshState.markStale()`，由缓存绑定阴影贴图前已有的 `refreshForFrame()` 每帧合并为一次静态网格签名检查（`syncSceneMeshes` 中紧随 `setMeshes` 的显式 `refresh()` 一并去掉，`setMeshes` 本就重置帧标记）；`applySettings` 在设置未变且接收面未启用时不再强制重登记全部网格，只做常规检测并标记过期，否则保持原强制同步。
+- 对照与测试：两个 NullEngine 运行时（局部 vs 完整同步，200 步随机改位置/名称/灯光强度，含灯光）状态全部一致、144 步走局部路径。同场景 3000 图元 + 3 灯：局部同步 165 ms → 约 120 ms，完整同步 725 ms → 约 680 ms（合成数据，单次测量）。阴影与光照相关 8 个现有测试文件共 135 项中 134 项通过；失败的 `sceneLightingRuntime.test.mjs` 第 8 项（post-activation validation failure rolls back…）在未改动的 `HEAD` 导出副本上同样失败，属已有问题，未调查。前端按源码类型检查 0 条诊断。
+- 限制：混合阴影每帧对静态网格的签名检查是该缓存的检测机制，未改为脏网格驱动；烘焙签名哈希仍线性。未提交。
+
+## 2026-10-26 设计问题 D01：运行时局部同步
+
+- 新增 `SceneDocumentController.syncEntityLocally()`（`SceneRuntime` 门面同名转发）：要求组件集合不变、仅 transform/meshRenderer/light/camera/lighting/名称变化（`isEntityLocalSyncChange`），文档其余字段、其它实体与运行时已同步状态一致，无单体拖拽预览、非遥测预览、阵列身份模式与选区均不变，且目标实体运行时对象完整；否则返回 false 且不改运行时。路径内保留完整同步的顺序：`syncLighting`（含光照失效判断与阴影接收面重算）→ 实体同步 → 阵列批次、遥测代理、选区轮廓。`SceneViewPanel.tsx` 对计划无关的单实体变更先尝试局部同步，失败回退 `sync()`。
+- 对照检查发现并修正：首版漏掉 `syncLighting` 导致阴影接收面尺寸与完整同步不一致。修正后用两个 NullEngine 运行时（图元与灯光实体，300 步随机改位置/名称/颜色/灯光强度，每步比较节点、网格与灯光状态）全部一致，300 步均走局部路径；改组件集合、改显隐、选区同时变化均正确回退。
+- 实测 3000 个图元单实体改位置：完整同步约 114 ms，局部约 64 ms；剩余约 63 ms 为 `syncLighting`（烘焙签名约 28 ms、阴影设置约 35 ms）。合成数据，未测真实场景。
+- 限制：对照测试未覆盖已加载的真实模型实体（NullEngine 下无模型资产，模型实体会因运行时对象不完整而回退）；模型路径复用与参数快路径相同的实体同步与阵列批次刷新，未单独验证。
+- 前端按源码类型检查 0 条诊断；相关现有测试 `modelParameterRestoration`、`alarmManager`、`digitalTwinEffect`、`environmentBuildingEffect` 共 33 项通过。`runtimeVisibilityRoundTrip` 6 项失败，在未改动的 `HEAD` 源码导出副本上同样失败，属已有问题，未调查原因。未提交。
+
+## 2026-10-26 设计问题 D01：合批计划局部补丁
+
+- `editModeModelThinInstances.ts` 新增 `resolvePlanNeutralSceneChangeEntityId()`（判定单实体且仅 `transform`/`meshRenderer`/`light`/`camera`/`lighting`/名称变化，层级、显隐、锁定、组合及其余组件引用全部不变）与 `patchEditModeModelThinInstancePlanForPlanNeutralChange()`（沿用该实体在上一份计划中的原样/合批实例/解除合批形态，只替换这一个实体；覆盖累计 256 项回退完整重建）。`SceneViewPanel.tsx` 在参数变更之后接入，缓存方式与参数路径一致。
+- 用仓库外临时脚本对照完整重建：509 步随机单实体编辑（含模型实例、源、报警独立目标、图元，中途跨过 256 覆盖上限）逐实体与分组计数全部一致；8 种应回退的变更（改模型资产、显隐、父级、子节点、合批关系、货格绑定、报警管理器、实体列表）均判为非中性。现有 3 个相关测试文件 26 项通过；前端按源码类型检查 0 条诊断。
+- 未完成：运行时 `runtime.sync()` 仍是完整同步，计划局部化不改变其耗时；未测量真实场景收益。未提交。
+
+## 2026-10-26 设计问题 D01：烘焙签名按实体复用序列化结果
+
+- `sceneLightingBakeContract.ts`：`lightingContentHash` 的遍历抽成 `walkLightingContent`，新增 `getSceneLightingBakeSignatureCached()`（按实体快照对象缓存序列化片段；存在场景策略或继承策略的实体不缓存）。无缓存的 `getSceneLightingBakeSignature()` 行为不变。渲染端 `SceneLightingRuntime.sync()`、`LightingBakeManager`、`LightingBakeSettingsPanel` 改用缓存版；烘焙提交校验与 Electron 侧保持无缓存。
+- 已用仓库外临时脚本对照原函数：四种配置（普通、sandbox、日夜周期、场景策略）下首次、命中、单实体编辑、环境切换、删除实体共 20 组输出全部一致；合成 20000 实体单次编辑后约 144 ms 降至约 58 ms。运行 4 个相关现有测试文件共 47 项全部通过，并用仓库外临时配置对源码做前端类型检查 0 条诊断。
+- 注意：默认前端 `tsc -p tsconfig.json` 经项目引用读取已构建的 `dist-electron/*.d.ts`，在重新构建前会报新导出不存在；未重建 `dist-electron`。缓存按实体对象保存序列化文本，会增加与文档大小相当的内存占用，未量化。未提交。
+
+## 2026-10-26 设计问题 D01 排查结论：暂停局部同步实现
+
+- 核对后发现局部化运行时同步收益有限：面板侧 `createEditModeModelThinInstancePlan()` 对非参数变更仍全场景重建；`SceneLightingRuntime.sync()` 每次重算全场景 `getSceneLightingBakeSignature()`，局部路径同样必须调用。后者所在文件在烘焙稳定性整改的未提交改动内，未擅自修改。
+- 本轮未新增代码，仅在设计汇总文档 D01 节补充“实施前补充发现”及调整后的实施顺序（先烘焙签名增量化与合批计划局部补丁，再做运行时局部同步）。未运行检查，未提交。
+
+## 2026-10-26 设计问题 D01 第一步：完整同步内的单次分类遍历
+
+- `SceneDocumentController.syncDocument()` 原先对 `entityIds` 做约 20 次独立遍历（各组件 ID 集合、四类箭头开关、`alarmManagerIds`、数据平台屏幕集合）；已合并为一次遍历，产物与判定条件不变。
+- 未完成：命令侧变更描述、Store 累计修订、层级/组件增量索引及更多局部更新路径（文档 6.2 的 1–3、5、6）。完整同步仍随场景规模线性增长，只是常数变小；现有 `syncModelParameters` 快路径本身仍有一次引用比较扫描。局部编辑尚未真正绕开 `runtime.sync()`。
+- 修正前一步 D02 的类型错误（`collectModels()` 返回 `Iterable`，无 `.map`）。已运行前端 `tsc -p tsconfig.json --noEmit`，0 条诊断；未运行测试或页面验证，未提交。
+
+## 2026-10-26 设计问题第一阶段：D02 当帧模型视图、D03 撤销历史上限
+
+- D02：`SceneTelemetryController` 每帧在至少一类运动箭头启用时只调用一次 `collectModels()` 并解析设备类型与可见性，四类箭头共享该只读视图；全部关闭时不收集，各 `update*Arrows()` 保留无参回退。运动计算与更新频率不变；按设备类型的候选索引尚未做。
+- D03：`CommandHistory.executeCommand()` 增加 `MAX_UNDO_HISTORY_ENTRIES = 200` 条数上限并裁剪最旧命令；这不是内存字节上限，批量命令补丁化与交互事务内合并尚未做。已确认保存状态不依赖历史长度。
+- D01、D04–D07 未开始。仅审阅 diff，未运行测试、类型检查或页面验证；未提交。
+
+## 2026-10-26 输入校验修复 Git 交付
+
+- 已拉取远端，无需额外合并；提交 TypedArray 输入校验修复及原任务记录。
+- 本次不运行测试或验证；`_staging/` 与 Python 字节码缓存保留本地不提交。中文编号提交及推送结果见本次交付回复。
+
+## 2026-10-26 修复烘焙 TypedArray 输入校验编译错误
+
+- 核查最新提交 `dfee81f`，确认 `lightingBakeValidation.ts` 将 `ArrayBufferView` 直接读取 `length`、将 `ArrayLike<number>` 用于 `for...of`，导致 `TS2339` 和 `TS2488`。
+- 输入校验明确排除 `DataView`，使用下标遍历普通数组或 TypedArray，保留长度及有限数值检查与零拷贝输入。
+- 按现有前端、Electron TypeScript 配置执行不输出产物的类型检查：前端 0 条诊断，Electron 修复前 2 条、修复后 0 条。已审阅修改 diff；未运行测试、完整构建或启动验证，未提交或推送。
+
+## 2026-10-26 烘焙 TypedArray 传输 Git 交付
+
+- 已快进合并远端 0.4.2、资源修订审计和漫游碰撞相关更新，保留本地烘焙几何与传输改动，无冲突。
+- 按用户要求不运行测试或验证；Python 字节码缓存保留本地不提交。中文编号提交及推送结果见本次交付回复。
+
+## 2026-10-26 中台静态打开图片审计修复
+
+- 图片审计从整个React界面逐项扫描改为唯一场景canvas的owner/runtime绑定，并交叉核验真实绘制canvas；保留只读descriptor、Proxy/getter拒绝、完整图片URL/修订/registry/API/物理文件SHA校验。补充有界并发、阶段进度、请求/总时限及清理时限。
+- 已有图片审计16/16通过，未新增或修改测试。本轮未自行重建产品；启动指纹对应现存构建，其他任务的碰撞修复/构建保留。
+- `output/babylon-optimization-20261026/static-audit-fix/open-3/result.json` 完整单次静态验收通过：打开202.31秒，76个引用文件匹配；18图片槽位/2张图片审计99.36秒完成，清理无错误，验证进程全部退出。两次前置失败仍保留，不合并成成功性能样本。
+- MQTT与GI未执行，实验开关不变；完整五冷五暖及性能门槛仍待验收。本次未提交、推送、部署或覆盖原工程；细节见既有Babylon专项清单。
+
+## 2026-10-26 手动漫游碰撞协调器注册修复
+
+- 启动手动漫游后，`moveWithCollisions()` 触发尚未注册的 `Scene.CollisionCoordinatorFactory`，使 Scene View 报 `DefaultCollisionCoordinator needs to be imported`。
+- 在公共 `babylonSideEffects.ts` 补充 `Collisions/collisionCoordinator.js` 副作用导入，让手动漫游使用的模块图提前注册默认碰撞协调器。
+- 已对照本地 Babylon 实现并审阅变更；未运行测试、构建或真实页面验证，已运行实例是否加载修复尚未确认。
+- 后续按用户要求重新执行 `npm run build`（包含 Viewer）和 `npm run build:electron`，均成功；启动 `dist/index.html` 正式构建，在最近场景 `2026cemat展会` 进入运行态并启用手动漫游。角色实际前进约 2.49 米，移动期间推进 51 帧，退出及重新启用均正常，页面异常与控制台 error 均为 0。
+- 构建日志、坐标/状态记录及截图保存于 `output/manual-roam-recovery-20261026/`；编辑器保留运行。此次验证为本地正式构建，未发布或替换远端数字孪生产物。
+
+## 2026-10-26 Babylon 加载渲染计划续作核查
+
+- 对照用户指定计划及现有专项代码，更新 `docs/tasks/2026-10-26-babylon-load-render.md` 唯一清单，区分历史完成、条件停止和待验收。
+- 补齐固定包SHA在模型重载及GLB/脚本请求中的一致性、声明模型脚本集合换代、所有模板入口的实际声明捕获、生成器/库位目标签名；新增打开前设置的共享Geometry同构建对照开关，保留原默认与已有lease。
+- 现有定向检查42/42通过；开关变更后共享生命周期相关16/16通过（与前组重叠）。日志在 `output/babylon-optimization-20261026/continuation-contracts.log` 与 `continuation-sharing.log`；后续Editor/Electron/Viewer构建通过，未新增或修改测试。
+- 用户选择原383实体工厂，并因无MQTT要求先做静态打开。当前同构建六轮A/B/C/C/B/A完整像素一致：原版中位72.50秒、材质候选60.45秒（−16.61%）、加准备门51.68秒（−28.71%）；见 `continuation-383/local-comparison.json`，不混算旧版本结果。
+- 中台原工程单次最终就绪188.78秒，包含自动全库同步，源/逻辑投影一致并保存实际截图。后置图片CDP遍历长时间未完成，按静态范围收口关闭专用窗口；整套审计保留FAIL而非通过，任务进程已退出，用户原Editor/开发服务保留。详见专项记录与 `continuation-383/remote-open-stable/`。
+- 完整中台五冷五暖、持续动作、完整GI/Viewer及默认晋级未完成，未宣称达到30%/15%。修正静态验收工具的生产迁移/内置ENV输入比较及自动同步后二次就绪判定。保留入场Conflicts与Python缓存改动，未提交或发布。
+
 ## 2026-10-26 烘焙路径与 MQTT 回退 Git 交付
 
 - 已拉取远端，当前分支无需额外合并；提交烘焙短目录、旧任务兼容及 Viewer MQTT 地址回退改动和说明。
@@ -620,3 +760,18 @@ reset2731来源清楚，shadow-all-null2134且混合3 Scene各426 render entry�
 - 原v20 GPU计时器不可用，不补造GPU数据。局部/favicon.ico404及加载期缓存ERR_ABORTED原始观察保存在network-observations；实际模型全部就绪，未把旧烘焙失配标成有效或另起烘焙。
 - 交付`2026cemat-v20-viewer-fps-fixed.zip`，31,664,779B；853文件归档读回与已验目录逐字节一致。SHA和完整结果见同目录summary.json及.sha256。最新通用dist/dist-electron/dist-viewer-template与正式编辑器58.7077FPS验收均保留；新模板直接替换旧HDR的失败记录也保留。
 - 原工程scene SHA保持，未上传/部署/commit/push。任务浏览器及loopback5087已关闭；进度已更新COMPLETE_LOCAL_ONLY。
+
+## 2026-10-26 烘焙性能与大场景稳定性只读评估
+
+- 交付 `docs/数字孪生编辑器烘焙性能与大场景稳定性评估.md`，README 增加索引；用户确认故障阶段为“点击预检或开始后，尚未明显进入计算”。
+- 按当前捕获、IPC、Cycles、材质和结果应用链路区分画质、生成耗时与稳态性能；未将静态阴影缓存或历史局部优化计作 GI 帧率收益。确认预检先完整捕获、逐 primitive 属性复制、二进制解码恢复数组等当前风险。
+- 复核既有完整环境报告：历史约 2.13 GiB 前端堆观察值触发检查脚本 2 GiB 限额并正常取消，不能当作用户本次 OOM 崩溃；直接开始的历史完整环境运行仍超出 10 分钟检查期限，保留 FAIL。当前已有纹理 URL 字典与 GPU 探针缩批等保护，文档按现状记录。
+- 处理建议覆盖轻量准入、有界捕获/传输、分阶段预算、后端恢复、加载峰值及独立收益测量；均为建议，未改业务代码。按文档任务边界只检查内容及差异，未运行测试、构建、烘焙或浏览器验证；用户本次事故的退出原因和精确分配归因仍待证据。
+
+
+## 2026-10-26 烘焙稳定性整改与工厂准入验证
+
+- 用户授权按评估方案整改并指定工厂。实现轻量预检、捕获前任务记录、逐primitive紧凑捕获、4MiB确认分块与文件暂存、分阶段预算、取消收敛、完整阶段恢复和按字节加载；CTS/TS双preload均接通，保留旧接口及原画质/身份/数值合同。未改原工程、未提交/发布。
+- TypeScript编译与54项相关检查通过；另一组102通过/1跳过/1回滚颜色断言失败，替换HEAD运行时代码仍复现。最终加载检查13/13通过。真实七表面恢复9资产SHA一致；正式Electron23表面完成捕获、Cycles及实际应用，无validationErrors。
+- 完整工厂383实体/3913渲染网格，原standard/2048/32texels/4m/256MiB配置；轻量预检8.66秒，821静态表面/870875三角/219源纹理，27081探针超过4096，明确拒绝且窗口仍响应。原文件SHA不变，无rendererGone/pageErrors；工厂全程烘焙和FPS收益未完成，需先明确探针覆盖配置。
+- 更新混合光照指南、原评估文档第9节与 `docs/tasks/2026-10-26-lighting-bake-stability.md`。证据位于 `output/lighting-bake-stability-20261026/`，失败尝试也保留；复用工具的遗留ABBA标签已在结果清单说明并校正，不充当性能证据。临时服务/进程/入口已退出清理，当前生产窗口和安装版未更新。

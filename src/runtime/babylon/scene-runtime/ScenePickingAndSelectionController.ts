@@ -15,6 +15,7 @@ import { mergeSceneRuntimeHighlightEntityIds } from '../sceneRuntimeHighlight';
 import { clearSceneSelectionHighlight, createSceneSelectionHighlightLayer, setSceneSelectionHighlightGroups, type SceneSelectionHighlightLayer } from '../sceneSelectionHighlight';
 import { excludeFixedTrackMeshes, getFixedTrackNodes } from '../fixedTrackHighlightNodes';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { ScenePatrolAndRoamController } from './ScenePatrolAndRoamController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
@@ -32,7 +33,7 @@ type Dependencies = {
   readonly document: Pick<SceneDocumentController, 'syncedEntities' | 'hasGeneratedUnitClickBinding' | 'isEntityVisible' | 'isRuntimeModelSceneSelectable' | 'isEntityScenePickable' | 'appendBuiltInSlotEntityIdsForHost' | 'syncEntityPresentation' | 'resolveSpawnedDeviceModel'>;
   readonly patrol: Pick<ScenePatrolAndRoamController, 'autoPatrolMarkerRuntime' | 'manualRoamSpawnRuntime'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'meshes' | 'lightMarkerRuntime'>;
-  readonly locators: Pick<SceneLocatorController, 'locators' | 'refreshSlotHighlightOverlay' | 'refreshLocatorPresentation'>;
+  readonly locators: Pick<SceneLocatorController, 'locators' | 'refreshSlotHighlightOverlay' | 'refreshLocatorPresentation' | 'disposeSlotHighlightOverlay'>;
   readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayInstanceEntities' | 'resolveModelArrayBatchForEntityId'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'modelGenerators' | 'deviceSpawnerMarkers' | 'generatedOutputOwners'>;
@@ -63,6 +64,28 @@ export class ScenePickingAndSelectionController {
   public lastSelectionSyncDurationMs = 0;
   public maxSelectionSyncDurationMs = 0;
   public lastSelectionChangedEntityCount = 0;
+  private disposed = false;
+
+  /** 清理高亮的拥有关系，不再刷新即将释放的定位器表现。 */
+  clearSlotHighlights(): void {
+    this.localSlotHighlight = this.externalSlotHighlight = null;
+    runSceneRuntimeCleanup(this.context, '本地货格高亮', () => this.dependencies.locators.disposeSlotHighlightOverlay('local'));
+    runSceneRuntimeCleanup(this.context, '外部货格高亮', () => this.dependencies.locators.disposeSlotHighlightOverlay('external'));
+    this.localSlotHighlightOverlay = this.externalSlotHighlightOverlay = null;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.clearSlotHighlights();
+    runSceneRuntimeCleanup(this.context, '模型选择描边', () => this.modelSelectionOutlineLayer.dispose());
+    this.selectedEntityIds.clear();
+    this.localHighlightedEntityIds.clear();
+    this.externalHighlightedEntityIds.clear();
+    this.clickHighlightExcludeTrackEntityIds.clear();
+    this.outlinedModelArrayBatches.clear();
+    this.hierarchySelectionIds = null;
+  }
 
   /** 无限远背景始终不是场景可选对象。 */
   public isEntityPickableFromActiveCamera(entityId: string): boolean {
@@ -416,6 +439,7 @@ export class ScenePickingAndSelectionController {
     entityId: string,
     coordinate: { row: number; column: number; layer: number } | null,
   ): void {
+    if (this.disposed) return;
     const previousEntityId = (source === 'local' ? this.localSlotHighlight : this.externalSlotHighlight)?.entityId ?? null;
     const next = coordinate && entityId
       ? { entityId, coordinate: { row: coordinate.row, column: coordinate.column, layer: coordinate.layer } }
@@ -551,6 +575,7 @@ export class ScenePickingAndSelectionController {
    * 不再展开全部可见实体 ID 或拼接全场景 signature；批次内部再按差量刷新实例选择缓冲。
    */
   public rebuildModelSelectionOutline(): void {
+    if (this.disposed) return;
     const selectedModelGroups: AbstractMesh[][] = [];
     const selectedArrayEntityIdsByBatch = new Map<EntityArrayThinInstanceBatch, Set<string>>();
     const highlightedEntityIds = mergeSceneRuntimeHighlightEntityIds(
@@ -661,6 +686,7 @@ export class ScenePickingAndSelectionController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelSelectionOutlineLayer(): void {
+    if (this.disposed || this.modelSelectionOutlineLayer) return;
     this.modelSelectionOutlineLayer = createSceneSelectionHighlightLayer(this.context.scene, undefined, this.context.pushLog);
   }
 

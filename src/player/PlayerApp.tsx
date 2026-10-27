@@ -239,6 +239,7 @@ export function PlayerApp() {
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
+  const [dismissedStatusIssue, setDismissedStatusIssue] = useState<string | null>(null);
   const openedDigitalTwinFloatingControlRef = useRef<PlayerFloatingControl | null>(null);
   const [openedDigitalTwinFloatingControl, setOpenedDigitalTwinFloatingControl] = useState<PlayerFloatingControl | null>(null);
   const [playerFps, setPlayerFps] = useState<number | null>(null);
@@ -619,6 +620,7 @@ export function PlayerApp() {
         interactionController.markInitialLoadStarted();
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
+        setDismissedStatusIssue(null);
         setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
           parsedConfig.viewer.showStatusOverlay,
           Boolean(parsedConfig.digitalTwin),
@@ -1027,10 +1029,13 @@ export function PlayerApp() {
               clearViewerSelection();
               setChartMarkerError('');
             },
-            resetStatusOverlay: () => setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
-              parsedConfig.viewer.showStatusOverlay,
-              Boolean(parsedConfig.digitalTwin),
-            )),
+            resetStatusOverlay: () => {
+              setDismissedStatusIssue(null);
+              setStatusOverlayVisible(resolveInitialPlayerStatusOverlayVisibility(
+                parsedConfig.viewer.showStatusOverlay,
+                Boolean(parsedConfig.digitalTwin),
+              ));
+            },
             restoreInitialCamera: () => applySavedSceneCameraView(viewport!, sceneDocument.sceneSettings.camera, {
               animate: true,
               lockStandardOrientation: false,
@@ -1211,15 +1216,6 @@ export function PlayerApp() {
   }, [pauseHistoryReplay, updateOpenedDigitalTwinFloatingControl]);
 
   const isDigitalTwin = Boolean(config?.digitalTwin);
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || phase !== 'ready' || !isDigitalTwin) return;
-
-    return bindStatusOverlayPointerChordToggle(canvas, window, () => {
-      setStatusOverlayVisible((visible) => !visible);
-    });
-  }, [isDigitalTwin, phase]);
-
   function handleAutoPatrolAction(
     action: AutoPatrolControlAction,
     routeId: string | null,
@@ -1330,11 +1326,32 @@ export function PlayerApp() {
     openedDigitalTwinFloatingControl,
     'auto-patrol',
   );
+  const runtimeIssueKey = viewportRuntimeIssue || environmentRuntimeIssue || mqttStatus.lastError || lightingRuntimeStatus
+    ? JSON.stringify([viewportRuntimeIssue, environmentRuntimeIssue, mqttStatus.lastError, lightingRuntimeStatus])
+    : null;
   const showOverlay = shouldShowPlayerStatusOverlay(
     phase,
     statusOverlayVisible,
-    viewportRuntimeIssue || environmentRuntimeIssue || Boolean(mqttStatus.lastError) || Boolean(lightingRuntimeStatus),
+    runtimeIssueKey !== null && runtimeIssueKey !== dismissedStatusIssue,
   );
+  const statusOverlayControlRef = useRef({ showOverlay, runtimeIssueKey });
+  statusOverlayControlRef.current = { showOverlay, runtimeIssueKey };
+
+  useEffect(() => {
+    setDismissedStatusIssue((dismissed) => dismissed === runtimeIssueKey ? dismissed : null);
+  }, [runtimeIssueKey]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || phase !== 'ready' || !isDigitalTwin) return;
+
+    return bindStatusOverlayPointerChordToggle(canvas, window, () => {
+      // 以实际显示状态切换，允许关闭当前异常提示；新的异常仍会自动显示。
+      const current = statusOverlayControlRef.current;
+      setStatusOverlayVisible(!current.showOverlay);
+      setDismissedStatusIssue(current.showOverlay ? current.runtimeIssueKey : null);
+    });
+  }, [isDigitalTwin, phase]);
 
   useEffect(() => {
     const sampleLightingStatus = (): void => {

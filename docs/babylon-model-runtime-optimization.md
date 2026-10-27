@@ -42,6 +42,12 @@ npm run declare:model-readonly -- --scene "场景文件.scene.json" --entity "�
 
 导入、资源更新、生成器、保存重开与导出保留声明；资源换版删除声明时不会残留旧优化配置。在其本来支持的场景格式内，旧客户端忽略该优化字段；本功能不提升场景文件版本。新资源修订仍可能使既有烘焙失效，必须走正常重烘焙，不能改签名或跳过发布门禁。诊断 `runtime.loading.modelCache` 新增 `sharedGeometryCloneCount` 和 `capabilityFallbackCount`，前者不表示端到端速度提升。
 
+### 修订更新与同构建对照
+
+固定 SOURCE 包的 `sourceSnapshot.contentSha256` 优先于普通 `assetRevision`，同时用于模板身份、模型重载及 GLB/脚本请求版本。普通模型与参数变体在声明或脚本集合变更时先重建资源再准入；生成器目标签名也保留固定快照、声明和相关配置。模板在所有加载入口都记录实际 glTF 声明，因此独占消费者先加载不会导致后续共享消费者丢失准入信息。
+
+同构建对照使用 `SceneRuntime.setReadonlyGeometrySharingEnabled(false)` 强制后续候选走完整独占克隆；传 `true` 恢复现有的声明准入策略，仍须通过源、配置和结构验证。应在打开场景前设置，并在独立 Scene 中比较。该开关不写场景文件，不追溯改变已有实例的所有权；已有共享 lease 仍在实例释放时归还。诊断字段 `runtime.loading.modelCache.readonlyGeometrySharingEnabled` 表示当前开关，累计命中计数不随切换清零。
+
 ## thinInstance 稀疏上传实验
 
 项目既有空间分片与视锥裁剪不变。新路径在实例布局、可见顺序和缓冲不变时，在矩阵复制中记录变化行并合并相邻区间，使用 Babylon 数字重载 `thinInstancePartialBufferUpdate`（offset/count 为实例单位）。
@@ -78,8 +84,12 @@ const copy = typeof cloneDetachedModelMaterial === "function"
 
 `SceneRuntime.setPreparationClassificationEnabled(true)` 是内部 A/B 开关，**默认关闭**，不写场景文件。编辑器还必须提供真实加载蒙版门，且存在资产解码/脚本初始化工作；运行预览不进入此路径。已有 GI、异步激活、结构待办、分类预览及阴影代理均保留原流程。首次实际渲染就绪检查之前同步补齐分类与阴影绑定，同一会话随后恢复原更新时序；新场景会话重新建立门。
 
-组合候选单次本地打开约50.48秒，完整RGBA与对照一致，但尚未完成配对与冷暖多次验收，因此不默认启用。
+续作同构建六轮A/B/C/C/B/A静态对照中，原版中位72.50秒、材质候选60.45秒、组合候选51.68秒，完整RGBA一致。组合相对原版下降28.71%，尚未完成真实中台五冷五暖与持续动作验收，因此不默认启用；输入范围与明细见执行清单。
 
 ## 当前结果与边界
+
+中台静态打开脚本 `scripts/smoke-real-project-loading.mjs` 使用 `captureSceneOpenLogicalImages` 的 `runtimeBinding: 'scene-canvas'`：从唯一场景视口的React owner定位活动运行时，核验其engine绘制canvas身份，再检查实际图片注入与文件字节。绑定缺失或不唯一直接失败，不回退扫描图库，也不关闭Proxy/getter保护。
+
+图片审计在正式打开计时结束后执行。`logical-images/progress.json` 记录阶段、进度、请求数与耗时；`receipt.json` 保存最终结果和清理错误。单请求20秒、审计180秒、每项清理5秒上限。`PASS_ACTUAL_INPUT_IMAGE_BYTES_ONLY` 仅证明输入映射与字节一致，不等于GPU纹理像素正确；完整静态打开状态与性能配对状态仍分别判断。
 
 本轮实现、实机检查和未完成工作统一记录在 [执行清单](tasks/2026-10-26-babylon-load-render.md)。不要将少量矩阵上传、单次克隆计时或 NullEngine 检查当成工厂 FPS / 完整打开收益。

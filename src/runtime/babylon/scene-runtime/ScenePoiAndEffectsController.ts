@@ -12,6 +12,7 @@ import { PoiEffectRuntime } from '../effects/PoiEffectRuntime';
 import type { EffectRuntimeTarget } from '../../../editor/model/effectConfiguration';
 import { describeGeneratedEffectTarget } from '../GeneratedEffectTargets';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneTelemetryController } from './SceneTelemetryController';
 import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
 import type { SceneLocatorFetchController } from './SceneLocatorFetchController';
@@ -58,10 +59,57 @@ export class ScenePoiAndEffectsController {
   public readonly effectPoseNodes = new Map<string, TransformNode>();
   public poiEffectRuntime!: PoiEffectRuntime;
   public openingCameraOwned = false;
+  private updatesStopped = false;
+  private effectsDisposed = false;
+  private disposed = false;
+  private entrancePreparationGeneration = 0;
+  private readonly updatesAbortController = new AbortController();
+
+  /** 入场材质必须在模型、光照释放前还原；同时封闭等待光照就绪后的迟到准备。 */
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    this.entrancePreparationGeneration += 1;
+    runSceneRuntimeCleanup(this.context, '入场准备等待', () => this.updatesAbortController.abort());
+    runSceneRuntimeCleanup(this.context, '模型入场运行时', () => this.modelEntranceRuntime?.dispose());
+    this.modelEntranceIncludesEnvironment = false;
+    this.modelEntranceVisible = false;
+    this.openingCameraOwned = false;
+  }
+
+  /** 模型与生成产物先释放，使效果租约仍可完成解绑，再释放效果及独立位姿节点。 */
+  disposeEffects(): void {
+    if (this.effectsDisposed) return;
+    this.effectsDisposed = true;
+    this.stopUpdates();
+    runSceneRuntimeCleanup(this.context, 'POI 效果运行时', () => this.poiEffectRuntime?.dispose());
+    const poses = [...this.effectPoseNodes];
+    this.effectPoseNodes.clear();
+    for (const [entityId, node] of poses) {
+      runSceneRuntimeCleanup(this.context, `效果位姿节点 ${entityId}`, () => node.dispose());
+    }
+  }
+
+  /** 最终阶段释放点击/报警和大屏纹理；不释放借用的模型、环境与光照。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopUpdates();
+    this.disposeEffects();
+    this.onAlarmActivated = undefined;
+    runSceneRuntimeCleanup(this.context, '点击事件标记', () => this.clickEventBindingRuntime?.dispose());
+    runSceneRuntimeCleanup(this.context, '报警运行时', () => this.alarmRuntime?.dispose());
+    const textures = [...this.dataPlatformScreenTextures];
+    this.dataPlatformScreenTextures.clear();
+    for (const [entityId, entry] of textures) {
+      runSceneRuntimeCleanup(this.context, `大屏纹理 ${entityId}`, () => entry.texture.dispose());
+    }
+    this.alarmManagerIds.clear();
+  }
 
   /** 运行态目录按绑定器节流读取；普通编辑实体仍由绑定器从文档解析。 */
   public getRuntimeEffectTargets(): readonly EffectRuntimeTarget[] {
-    if (!this.dependencies.telemetry.telemetryPreviewActive) return [];
+    if (this.updatesStopped || !this.dependencies.telemetry.telemetryPreviewActive) return [];
     const targets: EffectRuntimeTarget[] = [];
     for (const owner of this.dependencies.outputs.generatedOutputOwners.values()) {
       const target = describeGeneratedEffectTarget(owner);
@@ -72,7 +120,7 @@ export class ScenePoiAndEffectsController {
   }
 
   public resolveGeneratedEffectTargetNode(id: string): TransformNode | null {
-    if (!this.dependencies.telemetry.telemetryPreviewActive) return null;
+    if (this.updatesStopped || !this.dependencies.telemetry.telemetryPreviewActive) return null;
     const owner = this.dependencies.outputs.generatedOutputOwners.get(id);
     if (owner) {
       if (describeGeneratedEffectTarget(owner)?.state !== 'ready' || owner.output?.kind !== 'model') return null;
@@ -88,18 +136,21 @@ export class ScenePoiAndEffectsController {
 
   /** 开场占用镜头时暂停相机跟随，设备和遥测继续更新。 */
   setOpeningCameraOwned(owned: boolean): void {
-    this.openingCameraOwned = owned;
+    if (!this.updatesStopped) this.openingCameraOwned = owned;
   }
 
   /** 收集就绪的环境和业务模型；阵列按来源批次处理，不拆实例、不包含编辑标记。 */
   async prepareModelEntrance(settings: SceneModelEntranceSettings, signal?: AbortSignal): Promise<void> {
+    if (this.updatesStopped) return;
+    const generation = ++this.entrancePreparationGeneration;
     const config = normalizeSceneModelEntranceSettings(settings);
     // 只对显式入口等待真实GI提交；否则会克隆隐藏源而让可见代理跳过动画。
     if (config.enabled) {
       const ready = this.dependencies.environment.lightingRuntime.whenReady();
-      if (signal) await awaitLightingTaskStep(ready, signal); else await ready;
+      await awaitLightingTaskStep(awaitLightingTaskStep(ready, this.updatesAbortController.signal), signal);
       signal?.throwIfAborted();
     }
+    if (this.updatesStopped || generation !== this.entrancePreparationGeneration) return;
     const visibleMeshes = (id: string, meshes: readonly AbstractMesh[]) => config.enabled
       ? this.dependencies.environment.lightingRuntime.getSelectionMeshes(id, meshes) : [...meshes];
     const targets: Array<{ id: string; node: TransformNode | AbstractMesh; meshes: AbstractMesh[] }> = [];
@@ -127,18 +178,25 @@ export class ScenePoiAndEffectsController {
     }
     if (config.enabled && !targets.length) throw new Error('没有可播放入场的就绪模型，请检查作用范围和模型可见性。');
     await this.dependencies.readiness.loadDiagnostics.measureAsync('entrancePrepare', () => this.modelEntranceRuntime.prepare(config, targets, signal));
+    if (this.updatesStopped || generation !== this.entrancePreparationGeneration) return;
     const unsupported = this.modelEntranceRuntime.getSnapshot().unsupportedMeshCount;
     if (unsupported) Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [`模型入场：${unsupported} 个网格材质不支持入场覆盖，保留原外观。`]);
   }
 
-  startModelEntrance(): void { this.modelEntranceRuntime.start(); }
-  cancelModelEntrance(): void { this.modelEntranceIncludesEnvironment = false; this.modelEntranceRuntime.cancel(); }
-  setModelEntranceVisible(visible: boolean): void { this.modelEntranceVisible = visible; }
+  startModelEntrance(): void { if (!this.updatesStopped) this.modelEntranceRuntime.start(); }
+  cancelModelEntrance(): void {
+    if (this.updatesStopped) return;
+    this.entrancePreparationGeneration += 1;
+    this.modelEntranceIncludesEnvironment = false;
+    this.modelEntranceRuntime.cancel();
+  }
+  setModelEntranceVisible(visible: boolean): void { if (!this.updatesStopped) this.modelEntranceVisible = visible; }
   isModelEntranceReady(): boolean { return this.context.scene.isReady(); }
   getModelEntranceSnapshot() { return this.modelEntranceRuntime.getSnapshot(); }
 
   /** 返回需要在 Babylon 画布上方挂载 iframe 的大屏平面。 */
   getDataPlatformScreenOverlayItems(): DataPlatformScreenOverlayItem[] {
+    if (this.updatesStopped) return [];
     const items: DataPlatformScreenOverlayItem[] = [];
     for (const [entityId, entity] of this.dependencies.document.syncedEntities.entries()) {
       const screen = entity.components.dataPlatformScreen;
@@ -172,12 +230,15 @@ export class ScenePoiAndEffectsController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeModelEntranceRuntime(): void {
+    if (this.updatesStopped || this.modelEntranceRuntime) return;
     this.modelEntranceRuntime = new ModelEntranceRuntime(this.context.scene);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializePoiEffectRuntime(): void {
+    if (this.updatesStopped || this.poiEffectRuntime) return;
     this.poiEffectRuntime = new PoiEffectRuntime(this.context.scene, id => {
+      if (this.updatesStopped) return null;
       if (id === ENVIRONMENT_EFFECT_TARGET_ID) return this.dependencies.environment.environmentRuntime?.getBuildingEffectTarget() ?? null;
       const generated = this.resolveGeneratedEffectTargetNode(id);
       if (generated) return generated;
@@ -197,21 +258,24 @@ export class ScenePoiAndEffectsController {
         return node;
       }
       return this.dependencies.presentation.meshes.get(id) ?? model?.root ?? null;
-    }, () => this.dependencies.telemetry.telemetryPreviewActive && !this.openingCameraOwned, false, { getRuntimeTargets: () => this.getRuntimeEffectTargets() });
+    }, () => !this.updatesStopped && this.dependencies.telemetry.telemetryPreviewActive && !this.openingCameraOwned, false, { getRuntimeTargets: () => this.getRuntimeEffectTargets() });
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeClickEventBindingRuntime(): void {
+    if (this.updatesStopped || this.clickEventBindingRuntime) return;
     this.clickEventBindingRuntime = new EditorClickEventBindingRuntime(this.context.scene);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeAlarmRuntime(): void {
+    if (this.updatesStopped || this.alarmRuntime) return;
     this.alarmRuntime = new AlarmManagerRuntime(this.context.scene, {
-      node: id => this.dependencies.presentation.meshes.get(id) ?? this.dependencies.assets.models.get(id)?.root ?? null,
-      meshes: id => this.dependencies.assets.models.get(id)?.meshes ?? (this.dependencies.presentation.meshes.has(id) ? [this.dependencies.presentation.meshes.get(id)!] : []),
-      bounds: id => this.dependencies.bounds.getEntityWorldBounds(id), visible: id => this.dependencies.document.isEntityVisible(id),
-      activate: event => this.onAlarmActivated?.call(this.context.callbackReceiver, event), report: message => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]),
+      node: id => this.updatesStopped ? null : this.dependencies.presentation.meshes.get(id) ?? this.dependencies.assets.models.get(id)?.root ?? null,
+      meshes: id => this.updatesStopped ? [] : this.dependencies.assets.models.get(id)?.meshes ?? (this.dependencies.presentation.meshes.has(id) ? [this.dependencies.presentation.meshes.get(id)!] : []),
+      bounds: id => this.updatesStopped ? null : this.dependencies.bounds.getEntityWorldBounds(id), visible: id => !this.updatesStopped && this.dependencies.document.isEntityVisible(id),
+      activate: event => { if (!this.updatesStopped) this.onAlarmActivated?.call(this.context.callbackReceiver, event); },
+      report: message => { if (!this.updatesStopped) Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]); },
     });
   }
 

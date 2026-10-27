@@ -48,21 +48,23 @@ function LightingBakeManagerTaskToolsPage({ preflight, currentSignature, costs, 
     <section className="lighting-manager-card" aria-labelledby="lighting-preflight-title">
       <div className="lighting-manager-card-heading"><h3 id="lighting-preflight-title">烘焙前检查</h3>
         <button type="button" disabled={disabled || preflight.phase === 'checking'} onClick={onCheck}>{checkLabel}</button></div>
-      <p className="lighting-manager-note">检查真实静态几何、接收表面、图集面积和探针数量；检查不会启动 Cycles。{dirty ? '先应用草稿后检查。' : ''}</p>
+      <p className="lighting-manager-note">先按对象、纹理尺寸和探针范围检查资源预算，不读回纹理像素、不导出整场景几何，也不启动 Cycles。{dirty ? '先应用草稿后检查。' : ''}</p>
       {preflight.message && <p className="lighting-manager-warning" role="status">{preflight.message}</p>}
       {stale && <p className="lighting-manager-warning" role="status">配置已变化，以下检查结果仅供参考，请重新检查。</p>}
       {report ? <>
         <dl className="lighting-manager-resource-summary">
           <div><dt>静态几何 / 接收表面</dt><dd>{report.meshCount} / {report.receiverCount}</dd></div>
           <div><dt>三角形</dt><dd>{report.triangleCount.toLocaleString()}</dd></div>
-          <div><dt>接收面积</dt><dd>{report.receiverArea.toFixed(1)} m²</dd></div>
-          <div><dt>图集面积下界</dt><dd>至少 {report.minAtlasCount} 张 / {formatLightingBytes(report.minTextureBytes)}</dd></div>
+          <div><dt>接收面积</dt><dd>{report.metadataOnly ? '捕获后精确复验' : `${report.receiverArea.toFixed(1)} m²`}</dd></div>
+          <div><dt>图集面积下界</dt><dd>{report.metadataOnly ? '捕获后精确复验' : `至少 ${report.minAtlasCount} 张 / ${formatLightingBytes(report.minTextureBytes)}`}</dd></div>
           <div><dt>探针 / 上限</dt><dd>{report.probeCountExact === false ? '至少 ' : ''}{report.probeCount.toLocaleString()} / {report.probeLimit}</dd></div>
           <div><dt>探针覆盖范围（世界米）</dt><dd>{(['X', 'Y', 'Z'] as const).map((axis, index) => axis + ' ' + report.bounds.min[index].toFixed(2) + ' ～ ' + report.bounds.max[index].toFixed(2)).join(' · ')}</dd></div>
           <div><dt>几何数字数据</dt><dd>{formatLightingBytes(report.geometryBytes)}</dd></div>
           <div><dt>二进制输入估算</dt><dd>{formatLightingBytes(report.estimatedInputBytes)}</dd></div>
           <div><dt>派生数字数据估算</dt><dd>{report.estimatedDerivedNumericBytes === undefined ? '未测' : formatLightingBytes(report.estimatedDerivedNumericBytes)}</dd></div>
           <div><dt>源纹理（编码字节）</dt><dd>{report.sourceTextureCount} 项{report.sourceTextureBytes !== undefined ? ' / ' + formatLightingBytes(report.sourceTextureBytes) : ' · 未测字节'}</dd></div>
+          {report.largestCaptureBytes !== undefined && <div><dt>最大单项准备估计</dt><dd>{formatLightingBytes(report.largestCaptureBytes)} / {formatLightingBytes(report.resourceBudget?.workingBytes ?? 0)}</dd></div>}
+          {report.sourceTextureDecodedBytes !== undefined && <div><dt>源纹理基础像素估计</dt><dd>{formatLightingBytes(report.sourceTextureDecodedBytes)}</dd></div>}
         </dl>
         <p className="lighting-manager-note">图集数是面积下界，最终以 UV 排版为准。派生数字数据按裁切前逐三角角点展开估算，不含 JSON 文本、额外分片或引擎开销，不是内存上界。贴图预算不能代表总内存；IPC、源纹理和 Cycles 还会产生额外开销。</p>
         {report.issues.length ? <ul className="lighting-manager-preflight-issues">{report.issues.map(issue => <li key={issue.code} className={issue.severity === 'error' ? 'lighting-manager-warning' : ''}>

@@ -19,6 +19,7 @@ import { classifyEntityMobility } from '../../editor/model/lightingMobility';
 import { createLightingTextureCapture, exportLightingMesh } from './lightingGeometry.ts';
 import type { LightingRuntimeSource } from './lightingClassificationRuntime.ts';
 import { lightingGeometrySignatureCache } from './lightingGeometrySignatureCache.ts';
+import type { LightingCaptureStream } from './lightingBakeStream.ts';
 
 export function sourceGeometryMesh(mesh: AbstractMesh): Mesh {
   const source = mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh;
@@ -121,18 +122,18 @@ export function lightingMaterialFingerprint(mesh: AbstractMesh): string {
 }
 
 export async function captureRuntimeLightingInput(scene: Scene, document: SceneDocument, sources: readonly LightingRuntimeSource[], jobId: string,
-  signal?: AbortSignal, progress?: (message: string) => void): Promise<LightingBakeInput> {
+  signal?: AbortSignal, progress?: (message: string) => void, stream?: LightingCaptureStream): Promise<LightingBakeInput> {
   const staticSources = sources.filter(source => source.entry.mobility === 'static' && lightingSourceVisible(source));
   if (!staticSources.some(source => source.entry.bakeIndirect)) throw new Error('没有参与间接光烘焙的静态表面，请先检查对象分类。');
   const geometrySignature = getLightingGeometrySignature(sources), signature = getSceneLightingBakeSignature(document);
-  const capture = createLightingTextureCapture(signal), meshes: LightingBakeInput['meshes'] = [];
+  const capture = createLightingTextureCapture(signal, stream), meshes: LightingBakeInput['meshes'] = [];
   for (const [index, source] of staticSources.entries()) {
     signal?.throwIfAborted();
     const matrix = source.getWorldMatrix();
     if (!matrix) throw new Error(`对象「${source.entry.name}」的矩阵已失效，请重新检查分类。`);
     progress?.(`正在捕获静态对象 ${index + 1}/${staticSources.length}：${source.entry.name}`);
     meshes.push(...await exportLightingMesh(source.mesh, { key: source.entry.key, entityId: source.entry.entityId,
-      nodeKey: source.entry.nodeKey, receiver: source.entry.bakeIndirect, worldMatrix: matrix }, capture));
+      nodeKey: source.entry.nodeKey, receiver: source.entry.bakeIndirect, worldMatrix: matrix }, capture, stream));
   }
   if (getLightingGeometrySignature(sources) !== geometrySignature) throw new Error('捕获期间静态几何发生变化，请等待场景稳定后重新烘焙。');
   return { version: 1, jobId, signature, geometrySignature, sceneName: document.name,

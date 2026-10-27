@@ -11,6 +11,7 @@ import { getLightingLightmapBaseEncoding } from '../../../electron/shared/sceneL
 import { isLightingLightmapMipEncoding, validateLightingLightmapMipAsset } from '../../../electron/shared/sceneLightingLightmapMips.ts';
 import { validateSceneLightingBakeSnapshot } from '../../../electron/shared/sceneLightingBakeData.ts';
 import type { createLightingLightmapMipTexture } from './lightingLightmapMipTexture.ts';
+import { assertLightingRendererHeadroom, assertLightingWorkingBytes, lightingBakeResourceBudget } from '../../../electron/shared/sceneLightingBakeResources.ts';
 export { validateLightingGeometry } from '../../../electron/shared/sceneLightingBakeArtifacts.ts';
 
 export type LoadedLightingResources = {
@@ -86,8 +87,28 @@ async function loadTexture(scene: Scene, bytes: ArrayBuffer, signal: AbortSignal
 /** 内部对照入口：生产默认四项并发，设为 1 可重复串行基线。 */
 export type LightingResourceLoadOptions = { concurrency?: 1 | 4; textureDecoder?: 'bitmap' | 'image';
   maxTextureBytes?: number; onRestoreError?: (error: Error) => void;
+  /** 包含仍存活的上一套GI；估算包含CPU恢复数据和GPU副本，不代表驱动实测显存。 */
+  previousSnapshot?: SceneLightingBakeSnapshot; maxWorkingBytes?: number; maxResidentBytes?: number;
   /** 内部事务单元注入；生产使用真实WebGL2适配，不能据mock宣称GPU上传已通过。 */
   mipTextureFactory?: typeof createLightingLightmapMipTexture };
+
+export function estimateLightingResourceBytes(snapshot: SceneLightingBakeSnapshot): { resident: number; weights: number[] } {
+  const dimensions = getLightingAtlasDimensions(snapshot);
+  let resident = 0;
+  const weights = snapshot.assets.map(asset => {
+    if (!Number.isSafeInteger(asset.byteLength) || asset.byteLength < 0) throw new Error('光照资源长度无效。');
+    if (asset.kind === 'lightmap') {
+      const rgba = asset.textureBytes ?? dimensions.width * dimensions.height * 4;
+      if (!Number.isSafeInteger(rgba) || rgba <= 0) throw new Error('光照贴图驻留估计无效。');
+      resident += rgba * 2;
+      return asset.byteLength + rgba * 3;
+    }
+    const bytes = asset.byteLength * (asset.kind === 'geometry' && asset.encoding === 'binary-v1' ? 3 : 8);
+    resident += bytes; return bytes;
+  });
+  if (!Number.isSafeInteger(resident)) throw new Error('光照资源总量超出有效范围。');
+  return { resident, weights };
+}
 
 /** 全部资源验证、解码完成后才返回候选集合，调用方在一次同步事务内切换可见几何。 */
 export async function loadLightingResources(snapshot: SceneLightingBakeSnapshot, scene: Scene, signal?: AbortSignal,
@@ -101,6 +122,17 @@ export async function loadLightingResources(snapshot: SceneLightingBakeSnapshot,
   try {
     controller.signal.throwIfAborted();
     const atlasDimensions = getLightingAtlasDimensions(snapshot);
+    const systemBudget = typeof window !== 'undefined' && window.editorApi?.lightingBakeResourceBudget
+      ? await window.editorApi.lightingBakeResourceBudget() : lightingBakeResourceBudget(null);
+    controller.signal.throwIfAborted();
+    const estimate = estimateLightingResourceBytes(snapshot);
+    const previous = options.previousSnapshot ? estimateLightingResourceBytes(options.previousSnapshot).resident : 0;
+    const workingLimit = options.maxWorkingBytes ?? systemBudget.workingBytes;
+    const residentLimit = options.maxResidentBytes ?? systemBudget.backendBytes;
+    // 独立Viewer没有OS余量接口，不能用虚构可用值拒绝既有资源；显式限额与桌面实测仍严格执行。
+    if (options.maxResidentBytes !== undefined || systemBudget.availableBytes !== null) assertLightingWorkingBytes(estimate.resident + previous, residentLimit, '新旧GI共同驻留');
+    assertLightingRendererHeadroom(estimate.resident);
+    for (let index = 0; index < estimate.weights.length; index++) assertLightingWorkingBytes(estimate.weights[index], workingLimit, `资源「${snapshot.assets[index].id}」解码`);
     const hasMips = snapshot.assets.some(asset => asset.kind === 'lightmap' && isLightingLightmapMipEncoding(asset.encoding));
     if (hasMips && !validateSceneLightingBakeSnapshot(snapshot)) throw new Error('光照mip资源清单或recipe无效。');
     const textureBudget = options.maxTextureBytes ?? snapshot.statistics.textureBytes;
@@ -138,17 +170,24 @@ export async function loadLightingResources(snapshot: SceneLightingBakeSnapshot,
         throw new LightingResourceError(error, asset, surface);
       }
     };
-    let nextAsset = 0;
+    let nextAsset = 0, activeBytes = 0;
+    const available = new Set<() => void>();
+    const wake = () => { for (const notify of available) notify(); available.clear(); };
+    controller.signal.addEventListener('abort', wake);
     const worker = async () => {
       while (!controller.signal.aborted && nextAsset < snapshot.assets.length) {
-        const asset = snapshot.assets[nextAsset++];
-        try { await loadAsset(asset); }
+        const index = nextAsset, weight = estimate.weights[index];
+        if (activeBytes + weight > workingLimit) { await new Promise<void>(resolve => available.add(resolve)); continue; }
+        const asset = snapshot.assets[nextAsset++]; activeBytes += weight;
+        try { assertLightingRendererHeadroom(weight); await loadAsset(asset); }
         catch (error) { if (!controller.signal.aborted) controller.abort(error); }
+        finally { activeBytes -= weight; wake(); }
       }
     };
     // 单项失败立即停止派发并取消同批任务；等待所有 worker 收束后才释放候选或返回。
     // 即使底层读取忽略 AbortSignal，也不能在仍可能写入候选集合时提前抛错。
     await Promise.all(Array.from({ length: Math.min(options.concurrency === 1 ? 1 : 4, snapshot.assets.length) }, worker));
+    controller.signal.removeEventListener('abort', wake);
     controller.signal.throwIfAborted();
     if (!probes) throw new Error('光照资源缺少动态间接光探针。');
     // 保持原串行实现的清单迭代顺序，避免把异步完成顺序泄漏给调用方。

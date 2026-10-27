@@ -28,3 +28,5 @@ Platforms
 .superpowers
 test-artifacts
 .tmp-*
+Conflicts/
+_staging

@@ -271,6 +271,9 @@ function registerEditorAssetProtocol(): void {
 }
 
 if (hasSingleInstanceLock) app.whenReady().then(() => {
+  app.on('child-process-gone', (_event, details) => {
+    console.error(`[electron] 子进程退出：type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
+  });
   configureModelScriptPersistentCache(path.join(app.getPath('userData'), 'model-script-cache'), safeStorage.isEncryptionAvailable() ? {
     protect: key => safeStorage.encryptString(key.toString('base64')),
     unprotect: encrypted => Buffer.from(safeStorage.decryptString(encrypted), 'base64'),

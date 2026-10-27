@@ -15,6 +15,7 @@ import { waitForSceneRenderReady } from '../sceneRenderReadiness';
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { resolveRuntimeAssetUrl } from '../../assets/editorAssetUrl';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { SceneTransformPreviewController } from './SceneTransformPreviewController';
@@ -35,9 +36,33 @@ export class SceneCadReferenceController {
   constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
 
   public readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
+  private updatesStopped = false;
+  private disposed = false;
+  private readonly stoppedLoads = new WeakSet<CadReferenceRuntimeEntry>();
+  private readonly disposedReferences = new WeakSet<CadReferenceRuntimeEntry>();
+
+  /** 先封闭新加载并取消在途任务，线稿保留到对应的资源释放阶段。 */
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    for (const [entityId, reference] of this.cadReferences) {
+      runSceneRuntimeCleanup(this.context, `CAD 加载 ${entityId}`, () => this.cancelCadReferenceLoad(reference));
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopUpdates();
+    for (const [entityId, reference] of [...this.cadReferences]) {
+      runSceneRuntimeCleanup(this.context, `CAD 参考图 ${entityId}`, () => this.disposeCadReference(entityId, reference));
+    }
+    this.cadReferences.clear();
+  }
 
   /** 同步 CAD/DXF 网格参考层，线稿不可拾取，只作为建模布局底图。 */
   public syncCadReferenceEntity(entity: Entity): void {
+    if (this.updatesStopped) return;
     const reference = entity.components.cadReference;
     if (!reference) return;
     const existing = this.cadReferences.get(entity.id);
@@ -78,6 +103,7 @@ export class SceneCadReferenceController {
 
   /** 新导入复用缓存；重开同时检查元数据和响应长度，旧场景未知大小走安全后台路径。 */
   public async loadCadReferenceGeometry(entityId: string, pending: CadReferenceRuntimeEntry, reference: CadReferenceComponent): Promise<void> {
+    if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
     const signal = pending.abortController.signal;
     let geometry = consumeCadReferenceParseResult(reference.sourceUrl, reference.unitScaleToMeters);
     if (!geometry) {
@@ -95,13 +121,17 @@ export class SceneCadReferenceController {
       if (useWorker) geometry = await parseInWorker();
       else {
         const response = await fetch(resolveRuntimeAssetUrl(reference.sourceUrl), { signal });
+        if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
         if (!response.ok) throw new Error('读取 CAD 文件失败：HTTP ' + response.status);
         const headerSize = Number(response.headers.get('content-length') ?? 0);
         if (!Number.isFinite(headerSize) || headerSize <= 0 || headerSize >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES) {
           await response.body?.cancel();
+          if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
           geometry = await parseInWorker();
         } else {
-          const content = decodeCadDxfBytes(new Uint8Array(await response.arrayBuffer()));
+          const bytes = await response.arrayBuffer();
+          if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
+          const content = decodeCadDxfBytes(new Uint8Array(bytes));
           const { parseCadReferenceDxf } = await import('../../../editor/cad/cadReferenceParser');
           if (!this.isActiveCadReferenceLoad(entityId, pending) || signal.aborted) return;
           geometry = parseCadReferenceDxf(content, { unitScaleToMeters: reference.unitScaleToMeters });
@@ -113,24 +143,39 @@ export class SceneCadReferenceController {
     await this.applyCadReferenceGeometry(entityId, pending, geometry);
   }
 
+  /** 先使任务失效，再逐项取消；某个注销或取消失败不能阻断其它任务与几何的清理。 */
+  private cancelCadReferenceLoad(cadReference: CadReferenceRuntimeEntry): void {
+    if (this.stoppedLoads.has(cadReference)) return;
+    this.stoppedLoads.add(cadReference);
+    const unregister = cadReference.unregisterCancellation;
+    const cancel = cadReference.cancelLoad;
+    cadReference.unregisterCancellation = () => undefined;
+    cadReference.cancelLoad = null;
+    const label = cadReference.root.name;
+    runSceneRuntimeCleanup(this.context, `CAD 取消入口 ${label}`, () => unregister());
+    runSceneRuntimeCleanup(this.context, `CAD 请求 ${label}`, () => cadReference.abortController.abort());
+    runSceneRuntimeCleanup(this.context, `CAD 解析任务 ${label}`, () => cancel?.());
+  }
+
   /** 停止后台和构建任务，保留终止记录，避免其它实体编辑自动重试大图。 */
   public stopCadReferenceLoad(cadReference: CadReferenceRuntimeEntry): void {
-    cadReference.unregisterCancellation();
-    cadReference.abortController.abort();
-    cadReference.cancelLoad?.();
-    cadReference.cancelLoad = null;
-    for (const lineMesh of cadReference.lineMeshes) lineMesh.dispose();
-    cadReference.lineMeshes.length = 0;
+    this.cancelCadReferenceLoad(cadReference);
+    const meshes = cadReference.lineMeshes.splice(0);
     cadReference.geometryReady = false;
+    for (const [index, lineMesh] of meshes.entries()) {
+      runSceneRuntimeCleanup(this.context, `CAD 线稿 ${cadReference.root.name}/${index}`, () => lineMesh.dispose());
+    }
   }
 
   /** 释放 CAD 参考图的所有线稿 Mesh 与根节点。 */
   public disposeCadReference(entityId: string, cadReference: CadReferenceRuntimeEntry): void {
-    this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId);
+    if (this.disposedReferences.has(cadReference)) return;
+    this.disposedReferences.add(cadReference);
+    if (this.cadReferences.get(entityId) === cadReference) this.cadReferences.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `CAD 阵列预览 ${entityId}`, () => this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId));
     this.stopCadReferenceLoad(cadReference);
-    cadReference.root.dispose();
-    this.cadReferences.delete(entityId);
-    forgetCadReferenceLoadStatus(entityId);
+    runSceneRuntimeCleanup(this.context, `CAD 根节点 ${entityId}`, () => cadReference.root.dispose());
+    runSceneRuntimeCleanup(this.context, `CAD 加载状态 ${entityId}`, () => forgetCadReferenceLoadStatus(entityId));
   }
 
   /** 根据解析后的紧凑 CAD 几何分批创建 Babylon 线稿，避免大图纸制造海量 Vector3 临时对象。 */
@@ -139,6 +184,7 @@ export class SceneCadReferenceController {
     cadReference: CadReferenceRuntimeEntry,
     geometry: CadReferenceParseResult,
   ): Promise<void> {
+    if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
     const maxBatchPointCount = CAD_REFERENCE_MAX_BATCH_POINTS;
     const maxBatchPolylineCount = CAD_REFERENCE_MAX_BATCH_POLYLINES;
     const renderLayers = mergeCadReferenceRenderLayers(geometry.layers);
@@ -241,7 +287,10 @@ export class SceneCadReferenceController {
   /** 判断当前 CAD 分批任务是否仍属于场景中的有效加载记录。 */
   public isActiveCadReferenceLoad(entityId: string, cadReference: CadReferenceRuntimeEntry): boolean {
     const activeEntry = this.cadReferences.get(entityId);
-    return activeEntry === cadReference && activeEntry.loadToken === cadReference.loadToken;
+    return !this.updatesStopped && !this.context.scene.isDisposed
+      && !this.stoppedLoads.has(cadReference) && !cadReference.abortController.signal.aborted
+      && !cadReference.root.isDisposed()
+      && activeEntry === cadReference && activeEntry.loadToken === cadReference.loadToken;
   }
 
   /** 从紧凑点数组直接创建单个受控大小的 CAD LinesMesh，避免二次对象化和通用 Builder 拷贝。 */

@@ -9,6 +9,10 @@ import { getLightingBakeTaskHistory, cleanupLightingBakeTasks, readLightingBakeT
 import { LightingBakeJobs, validateLightingBakeInput } from './lightingBakeValidation.js';
 import type { LightingBakeBinaryInput } from '../shared/sceneLightingBakeBinary.ts';
 import type { LightingBakeProgress, SceneLightingBakeSnapshot } from '../shared/sceneLightingBakeContract.js';
+import { freemem } from 'node:os';
+import { lightingBakeResourceBudget } from '../shared/sceneLightingBakeResources.ts';
+import type { LightingBakeStreamCommand, LightingBakeStreamReply } from '../shared/sceneLightingBakeStream.ts';
+import { LightingBakeUpload } from './lightingBakeUpload.ts';
 
 let registered = false;
 const jobs = new LightingBakeJobs();
@@ -34,6 +38,79 @@ export function registerLightingBakeIpc(): void {
     return window;
   };
   const requireProject = () => { const root = getCurrentProjectRoot(); if (!root) throw new Error('请先打开工程。'); return root; };
+  const uploads = new Map<string, { upload: LightingBakeUpload; controller: AbortController; running: boolean;
+    options: Parameters<typeof runLightingBakeJob>[0]; release: () => void; cleanup?: Promise<void> }>();
+  ipcMain.handle('lighting-bake:resourceBudget', event => { requireEditorWindow(event); return lightingBakeResourceBudget(freemem()); });
+  ipcMain.handle('lighting-bake:stream', async (event, command: LightingBakeStreamCommand): Promise<LightingBakeStreamReply> => {
+    requireEditorWindow(event);
+    if (!command || typeof command !== 'object') throw new Error('烘焙流请求无效。');
+    const id = command.kind === 'begin' ? command.header?.jobId : command.jobId;
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('烘焙任务标识无效。');
+    const key = `${event.sender.id}:${id}`;
+    if (command.kind === 'begin') {
+      if (uploads.has(key)) throw new Error('烘焙捕获已存在。');
+      const project = requireProject(), generation = getProjectSessionGeneration();
+      const releaseConfiguration = engineConfiguration.acquireBakeLease();
+      const lifetime = new AbortController();
+      let controller: AbortController | undefined;
+      const cancel = () => { lifetime.abort(); controller?.abort(); };
+      event.sender.once('destroyed', cancel); event.sender.once('render-process-gone', cancel);
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const release = () => {
+        if (timer) clearInterval(timer);
+        if (controller) jobs.release(event.sender.id, id, controller);
+        event.sender.removeListener('destroyed', cancel); event.sender.removeListener('render-process-gone', cancel);
+        if (uploads.get(key)?.controller === controller) uploads.delete(key);
+        releaseConfiguration();
+      };
+      try {
+        controller = await jobs.acquire(event.sender.id, id, lifetime.signal);
+        const current = () => !event.sender.isDestroyed() && getCurrentProjectRoot() === project && getProjectSessionGeneration() === generation;
+        const engine = (await engineConfiguration.getConfiguration()).engine;
+        controller.signal.throwIfAborted();
+        if (!current() || !engine.available || !engine.path) throw new Error(engine.message ?? '工程已切换或Blender不可用。');
+        const upload = await LightingBakeUpload.create(project, command, engine.version ?? '', { decodeAssetUrl, encodeAssetUrl, isAuthorizedAssetFile }, controller.signal, current);
+        const entry: NonNullable<ReturnType<typeof uploads.get>> = { upload, controller, running: false, release,
+          options: { input: upload.input, prepared: { task: upload.task, preflight: command.preflight }, projectRoot: project,
+            enginePath: engine.path, engineVersion: engine.version, signal: controller.signal, isProjectCurrent: current,
+            decodeAssetUrl, encodeAssetUrl, isAuthorizedAssetFile, authorizeAssetFile,
+            onProgress: progress => { if (!event.sender.isDestroyed()) event.sender.send('lighting-bake:progress', progress); } } };
+        uploads.set(key, entry);
+        const aborted = () => {
+          if (entry.running || entry.cleanup) return;
+          entry.cleanup = upload.abort('捕获已取消或窗口/工程已切换；原结果保持可用。').finally(release);
+          void entry.cleanup.catch(error => console.error('[lighting-bake] 捕获清理失败', error));
+        };
+        controller.signal.addEventListener('abort', aborted, { once: true });
+        timer = setInterval(() => { if (!current() || !entry.running && upload.expired) controller?.abort(); }, 1000);
+        if (controller.signal.aborted) aborted();
+        return { budget: upload.budget };
+      } catch (error) { release(); throw error; }
+    }
+    const entry = uploads.get(key);
+    if (!entry) { if (command.kind === 'abort') return {}; throw new Error('烘焙捕获会话不存在或已结束。'); }
+    if (command.kind === 'abort') {
+      if (command.error && !entry.running && !entry.cleanup) entry.cleanup = entry.upload.abort(String(command.error).slice(0, 4096)).finally(entry.release);
+      else entry.controller.abort();
+      await entry.cleanup; return {};
+    }
+    if (entry.running) throw new Error('捕获已提交，不能继续写入。');
+    try {
+      const reply = await entry.upload.command(command);
+      if (command.kind !== 'finish') return reply;
+      entry.running = true;
+      const result = await runLightingBakeJob({ ...entry.options, input: entry.upload.input,
+        prepared: { task: entry.upload.task, preflight: entry.upload.preflight() } });
+      return { result };
+    } catch (error) {
+      if (!entry.running && !entry.cleanup) entry.cleanup = entry.upload.abort(error instanceof Error ? error.message : String(error));
+      if (entry.running && !['completed', 'cancelled', 'error'].includes(entry.upload.task.record.status)) {
+        await entry.upload.task.finish(entry.controller.signal.aborted ? 'cancelled' : 'error', error instanceof Error ? error.message : String(error));
+      }
+      await entry.cleanup;
+      throw error;
+    } finally { if (entry.running || entry.cleanup) entry.release(); }
+  });
   ipcMain.handle('lighting-bake:preflight', async (_event, raw: unknown) => {
     const project = requireProject(), generation = getProjectSessionGeneration();
     const report = await inspectLightingBakeRequest(validateLightingBakeInput(raw), { decodeAssetUrl, isAuthorizedAssetFile });

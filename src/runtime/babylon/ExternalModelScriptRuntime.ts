@@ -181,7 +181,8 @@ export class ExternalModelScriptRuntime {
     try {
       const expected = this.options.expectedScriptHashes;
       if (expected && !Object.hasOwn(expected, scriptAsset.name)) throw new Error(`只读模型声明缺少脚本：${scriptAsset.name}`);
-      const compiledScript = await loadCompiledExternalModelScript(scriptAsset, this.modelAsset.assetRevision, expected?.[scriptAsset.name]);
+      const compiledScript = await loadCompiledExternalModelScript(scriptAsset,
+        this.modelAsset.sourceSnapshot?.contentSha256 ?? this.modelAsset.assetRevision, expected?.[scriptAsset.name]);
       if (this.disposed) return;
       this.initializationError ??= compiledScript.initializationError ?? null;
       if (compiledScript.dataDriven !== undefined) {

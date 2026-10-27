@@ -1,7 +1,6 @@
 import { AssetContainer } from '@babylonjs/core/assetContainer.js';
 import { loadCapabilityModelTemplate } from '../modelRuntimeCapabilities.ts';
 import { modelRuntimeConfigurationKey } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
-import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 
@@ -32,6 +31,7 @@ import type { SceneTriangleAndReadinessController } from './SceneTriangleAndRead
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
 import type { GeneratedModelOutputController } from './GeneratedModelOutputController';
 import type { EnvironmentAndSkyboxController } from './EnvironmentAndSkyboxController';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import { EDITOR_ENTITY_ID_METADATA_KEY, type LoadedModelRuntimeAssets, type ModelRuntimeEntry, type GeneratedOutputOwnerRuntimeEntry, readRuntimeTimestampMs } from './sceneRuntimeTypes';
 
 /** 只读取组件快照的own-data描述符；不为准备阶段求值新的脚本/参数元数据getter。 */
@@ -80,12 +80,48 @@ export class ModelAssetRuntimeController {
   public modelPresentationRefreshPending = false;
   public readonly sharedModelAssetCache = new SharedModelAssetCache();
   public modelLoadSequence = 0;
+  private updatesStopped = false;
+  private disposed = false;
+
+  /** 先关闭新增加载与呈现入口；已运行的解码允许结束，但结果不能再交给场景。 */
+  public stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    this.modelPresentationRefreshPending = false;
+    runSceneRuntimeCleanup(this.context, '模型加载调度器', () => this.assetLoadScheduler.dispose());
+  }
+
+  /** 逐模型归还脚本、阵列与资产句柄；共享模板仍供其它领域完成释放。 */
+  public disposeModels(): void {
+    this.stopUpdates();
+    for (const [entityId, model] of [...this.models]) {
+      runSceneRuntimeCleanup(this.context, `模型 ${entityId}`, () => this.disposeModel(entityId, model));
+    }
+    this.models.clear();
+  }
+
+  /** 最终阶段调用：普通模型、参数变体及生成物等所有消费者须先归还租约。 */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.disposeModels();
+    runSceneRuntimeCleanup(this.context, '模型着色器预热', () => this.shaderWarmup.dispose());
+    runSceneRuntimeCleanup(this.context, '共享模型资产缓存', () => this.sharedModelAssetCache.dispose());
+  }
+
+  /** 加载前后都检查终止状态；不能只依赖调度器取消尚未开始的任务。 */
+  private assertUpdatesActive(signal?: AbortSignal): void {
+    if (this.updatesStopped || signal?.aborted) {
+      throw new DOMException('模型资产更新已停止或加载已取消。', 'AbortError');
+    }
+  }
 
   /** 记录独立矩阵实例实体；其几何由 sourceEntityId 对应源模型的批次统一提交。 */
   public syncModelArrayInstanceEntity(
     entity: Entity,
     highlightSet: ReadonlySet<string> = this.dependencies.selection.selectedEntityIds,
   ): void {
+    if (this.updatesStopped) return;
     this.dependencies.arrays.modelArrayInstanceEntities.set(entity.id, entity);
     if (this.dependencies.transforms.modelArrayGizmoProxy?.entityId === entity.id) {
       this.dependencies.presentation.applyTransform(this.dependencies.transforms.modelArrayGizmoProxy.node, entity.components.transform);
@@ -104,6 +140,7 @@ export class ModelAssetRuntimeController {
     selected: boolean,
     highlightSet: ReadonlySet<string> = this.dependencies.selection.selectedEntityIds,
   ): void {
+    if (this.updatesStopped) return;
     const modelAsset = entity.components.modelAsset;
     if (!modelAsset) return;
 
@@ -204,8 +241,8 @@ export class ModelAssetRuntimeController {
     void this.loadModelRuntimeAssets(modelAsset, assetSignature, loadAbortController.signal, entity.id)
       .then((loadedAssets) => {
         const activeEntry = this.models.get(entity.id);
-        if (!activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
-          loadedAssets.handle.dispose();
+        if (this.updatesStopped || !activeEntry || activeEntry.loadToken !== loadToken || activeEntry.assetSignature !== assetSignature) {
+          runSceneRuntimeCleanup(this.context, `过期模型资产 ${entity.id}`, () => loadedAssets.handle.dispose());
           return;
         }
         return this.dependencies.readiness.loadDiagnostics.withTrace(traceScope, () => this.dependencies.readiness.loadDiagnostics.measure('modelInitialize', () => {
@@ -232,6 +269,7 @@ export class ModelAssetRuntimeController {
         }, { entityId: entity.id }, traceScope));
       })
       .catch((error) => {
+        if (this.updatesStopped) return;
         const activeEntry = this.models.get(entity.id);
         if (activeEntry?.loadToken === loadToken) {
           this.disposeModel(entity.id, activeEntry);
@@ -245,23 +283,31 @@ export class ModelAssetRuntimeController {
 
   /** 仅预取并解码模板，不创建业务实例或执行脚本；句柄随生成器配置归还。 */
   public async preloadModelRuntimeAsset(modelAsset: ModelAssetComponent, signal?: AbortSignal): Promise<SharedModelTemplateLease> {
+    this.assertUpdatesActive(signal);
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope);
     const { rootUrl, fileName } = this.splitAssetUrl(
-      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.sourceSnapshot?.contentSha256 ?? modelAsset.assetRevision),
     );
     const sequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
     try {
-      return await this.sharedModelAssetCache.preload(
+      const lease = await this.sharedModelAssetCache.preload(
         createModelAssetTemplateKey(modelAsset),
         sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
           this.dependencies.readiness.updateModelLoadProgressUnit(sequence, event);
-        }, traceScope, trace, resolveModelAssetSharedInstancingPolicy(modelAsset).mode === 'shared-geometry-clone'),
+        }, traceScope, trace),
         signal,
         this.shaderWarmup.getMetrics().enabled && canPrepareSharedTemplate(modelAsset)
-          ? source => this.shaderWarmup.registerContainer(source) : undefined,
+          ? source => { if (!this.updatesStopped) this.shaderWarmup.registerContainer(source); } : undefined,
         trace,
       );
+      try {
+        this.assertUpdatesActive(signal);
+        return lease;
+      } catch (error) {
+        runSceneRuntimeCleanup(this.context, `过期模型预取租约 ${fileName}`, () => lease.dispose());
+        throw error;
+      }
     } finally {
       this.dependencies.readiness.settleModelLoadProgressUnit(sequence);
     }
@@ -275,10 +321,11 @@ export class ModelAssetRuntimeController {
     entityId?: string,
     forceOwnedContainer = false,
   ): Promise<LoadedModelRuntimeAssets> {
+    this.assertUpdatesActive(loadSignal);
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     const trace = this.dependencies.readiness.loadDiagnostics.createAssetTrace(traceScope, { entityId });
     const { rootUrl, fileName } = this.splitAssetUrl(
-      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.assetRevision),
+      this.resolveVersionedRuntimeAssetUrl(modelAsset.sourceUrl, modelAsset.sourceSnapshot?.contentSha256 ?? modelAsset.assetRevision),
     );
 
     const loadSequence = this.dependencies.readiness.beginModelLoadProgressUnit(fileName);
@@ -289,15 +336,19 @@ export class ModelAssetRuntimeController {
           createModelAssetTemplateKey(modelAsset),
           sourceSignal => this.loadAssetContainer(rootUrl, fileName, sourceSignal, event => {
             this.dependencies.readiness.updateModelLoadProgressUnit(loadSequence, event);
-          }, traceScope, trace, true), modelAsset, loadSignal,
+          }, traceScope, trace), modelAsset, loadSignal,
           (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }), trace,
         );
         try {
+          this.assertUpdatesActive(loadSignal);
           acquired.container.addAllToScene();
           return { kind: 'owned-container', handle: { kind: 'owned-container', animationGroups: acquired.container.animationGroups,
             runtimeCapabilities: acquired.runtimeCapabilities, dispose: acquired.dispose },
           meshes: acquired.container.meshes, transformNodes: acquired.container.transformNodes };
-        } catch (error) { acquired.dispose(); throw error; }
+        } catch (error) {
+          runSceneRuntimeCleanup(this.context, `未交付共享几何模型 ${fileName}`, () => acquired.dispose());
+          throw error;
+        }
       }
       if (!forceOwnedContainer && instancingPolicy.mode === 'shared-instance') {
         const sharedInstance = await this.sharedModelAssetCache.instantiate(
@@ -310,15 +361,21 @@ export class ModelAssetRuntimeController {
           (ms, failed) => this.dependencies.readiness.loadDiagnostics.record('modelClone', ms, failed, { resource: fileName, entityId }),
           trace,
         );
-        return {
-          kind: 'shared-instance',
-          handle: {
+        try {
+          this.assertUpdatesActive(loadSignal);
+          return {
             kind: 'shared-instance',
-            animationGroups: sharedInstance.entries.animationGroups,
-            dispose: sharedInstance.dispose,
-          },
-          rootNodes: sharedInstance.entries.rootNodes,
-        };
+            handle: {
+              kind: 'shared-instance',
+              animationGroups: sharedInstance.entries.animationGroups,
+              dispose: sharedInstance.dispose,
+            },
+            rootNodes: sharedInstance.entries.rootNodes,
+          };
+        } catch (error) {
+          runSceneRuntimeCleanup(this.context, `未交付模型实例 ${fileName}`, () => sharedInstance.dispose());
+          throw error;
+        }
       }
 
       const container = await this.sharedModelAssetCache.acquireOwnedContainer(
@@ -331,6 +388,7 @@ export class ModelAssetRuntimeController {
         trace,
       );
       try {
+        this.assertUpdatesActive(loadSignal);
         container.addAllToScene();
         return {
           kind: 'owned-container',
@@ -343,10 +401,11 @@ export class ModelAssetRuntimeController {
           transformNodes: container.transformNodes,
         };
       } catch (error) {
-        container.dispose();
+        runSceneRuntimeCleanup(this.context, `未交付独占模型 ${fileName}`, () => container.dispose());
         throw error;
       }
     } catch (error) {
+      this.assertUpdatesActive(loadSignal);
       const aborted = error instanceof Error && error.name === 'AbortError';
       if (!aborted) {
         this.dependencies.readiness.failedModelAcquisitions += 1;
@@ -360,33 +419,48 @@ export class ModelAssetRuntimeController {
 
   /** 释放导入模型的容器、根节点与所有子资源。 */
   public disposeModel(entityId: string, model: ModelRuntimeEntry): void {
-    this.dependencies.telemetry.motionStaticBatchRuntime.markModelDirty(model);
+    if (this.models.get(entityId) !== model) return;
+    // 先撤销所有权与加载代次，清理回调重入及迟到 Promise 都不能重新找到此模型。
+    this.models.delete(entityId);
+    model.loadToken = 0;
+    const cleanup = (resource: string, action: () => void): void => {
+      runSceneRuntimeCleanup(this.context, `模型 ${entityId} ${resource}`, action);
+    };
+    cleanup('动静批次', () => this.dependencies.telemetry.motionStaticBatchRuntime.markModelDirty(model));
     for (const [key, failure] of this.dependencies.readiness.modelReadinessErrors) {
       if (failure.entityIds.includes(entityId)) this.dependencies.readiness.modelReadinessErrors.delete(key);
     }
-    this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId);
+    cleanup('阵列预览', () => this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId));
     const trajectory = this.dependencies.presentation.conveyorTrajectories.get(entityId);
-    if (trajectory) this.dependencies.presentation.disposeConveyorTrajectory(entityId, trajectory);
+    if (trajectory) cleanup('输送轨迹', () => this.dependencies.presentation.disposeConveyorTrajectory(entityId, trajectory));
     model.telemetryPreviewBaseline = null;
-    model.cancelLoad?.();
+    const cancelLoad = model.cancelLoad;
     model.cancelLoad = null;
-    this.dependencies.arrays.endModelArrayHostRenderSuppression(model);
-    this.dependencies.selection.applyModelSelection(model, false);
-    this.restoreModelArrayHostMeshes(model);
-    model.root.setEnabled(true);
-    model.externalScriptRuntime?.dispose();
-    for (const texture of model.textureCache.values()) {
-      texture.dispose();
-    }
-    this.dependencies.variants.disposeModelArrayParameterVariantsForSource(entityId);
-    this.dependencies.arrays.disposeModelArrayBatch(model);
-    model.assetHandle?.dispose();
-    this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForAssetCode(model.assetCode);
-    model.contentRoot.dispose();
-    model.root.dispose();
+    cleanup('在途加载', () => cancelLoad?.());
+    cleanup('渲染抑制', () => this.dependencies.arrays.endModelArrayHostRenderSuppression(model));
+    cleanup('选择状态', () => this.dependencies.selection.applyModelSelection(model, false));
+    cleanup('宿主网格恢复', () => this.restoreModelArrayHostMeshes(model));
+    cleanup('宿主启用状态', () => { if (!model.root.isDisposed()) model.root.setEnabled(true); });
+    const scriptRuntime = model.externalScriptRuntime;
+    model.externalScriptRuntime = null;
+    model.externalScriptStarting = false;
+    cleanup('外置脚本', () => scriptRuntime?.dispose());
+    const textures = [...model.textureCache.values()];
+    model.textureCache.clear();
+    for (const texture of textures) cleanup('参数纹理', () => texture.dispose());
+    cleanup('参数变体', () => this.dependencies.variants.disposeModelArrayParameterVariantsForSource(entityId));
+    // 批次借用源材质，必须先释放隔离 Geometry，再归还可能共享源几何的资产租约。
+    cleanup('阵列批次', () => this.dependencies.arrays.disposeModelArrayBatch(model));
+    const assetHandle = model.assetHandle;
+    model.assetHandle = null;
+    cleanup('资产句柄', () => assetHandle?.dispose());
+    cleanup('遥测货物', () => this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForAssetCode(model.assetCode));
+    cleanup('内容节点', () => { if (!model.contentRoot.isDisposed()) model.contentRoot.dispose(); });
+    cleanup('根节点', () => { if (!model.root.isDisposed()) model.root.dispose(); });
     model.modelArraySuspendedMeshes.clear();
-    this.models.delete(entityId);
-    Reflect.apply(this.context.onModelMeasurementChanged, this.context.callbackReceiver, [entityId]);
+    model.parameterBaseline.clear();
+    model.meshes = [];
+    cleanup('测量通知', () => Reflect.apply(this.context.onModelMeasurementChanged, this.context.callbackReceiver, [entityId]));
   }
 
   /** 将显隐和锁定状态应用到导入模型的根节点与子 Mesh。 */
@@ -532,7 +606,7 @@ export class ModelAssetRuntimeController {
     model: ModelRuntimeEntry,
     onSettled: (current: ModelRuntimeEntry) => void,
   ): void {
-    if (!model.assetHandle) return;
+    if (this.updatesStopped || model.root.isDisposed() || !model.assetHandle) return;
     const traceScope = this.dependencies.readiness.loadDiagnostics.captureTrace();
     // 阵列会把脚本宿主 Mesh 移出 scene.meshes；生命周期执行前临时恢复，兼容按场景列表查找部件的模型包。
     // 参数/脚本更新的最终批次统一由 onSettled 原子提交；上下文注入阶段只恢复宿主，不得提前缩减旧批次覆盖。
@@ -545,11 +619,12 @@ export class ModelAssetRuntimeController {
     }
     this.dependencies.parameters.syncModelScriptMetadata(model.contentRoot, modelAsset);
     const settle = (current: ModelRuntimeEntry): void => {
+      if (this.updatesStopped || current.root.isDisposed()) return;
       try {
         this.dependencies.readiness.loadDiagnostics.withTrace(traceScope, () => onSettled(current));
       } finally {
         this.dependencies.arrays.endModelArrayHostRenderSuppression(current);
-        this.dependencies.readiness.invalidateModelStatistics();
+        if (!this.updatesStopped) this.dependencies.readiness.invalidateModelStatistics();
       }
     };
 
@@ -676,6 +751,7 @@ export class ModelAssetRuntimeController {
 
   /** 在普通模型和生成器派生模型中查找仍处于活动状态的脚本宿主。 */
   public findActiveModelRuntimeEntry(runtime: ExternalModelScriptRuntime): ModelRuntimeEntry | null {
+    if (this.updatesStopped) return null;
     for (const model of this.models.values()) {
       if (model.externalScriptRuntime === runtime) return model;
     }
@@ -697,12 +773,14 @@ export class ModelAssetRuntimeController {
   public createModelAssetSignature(modelAsset: ModelAssetComponent): string {
     return JSON.stringify({
       sourceUrl: modelAsset.sourceUrl,
+      templateKey: createModelAssetTemplateKey(modelAsset),
       assetRevision: modelAsset.assetRevision ?? null,
       lengthUnit: modelAsset.lengthUnit,
       unitScaleToMeters: modelAsset.unitScaleToMeters,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
       ...(modelAsset.runtimeCapabilities ? { runtimeCapabilities: modelAsset.runtimeCapabilities,
-        capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset) } : {}),
+        capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset),
+        capabilityScripts: modelAsset.scriptAssets ?? [] } : {}),
     });
   }
 
@@ -757,23 +835,36 @@ export class ModelAssetRuntimeController {
     onProgress?: (event: ISceneLoaderProgressEvent) => void,
     traceScope: SceneLoadTraceScope | null = this.dependencies.readiness.loadDiagnostics.captureTrace(),
     trace?: SceneAssetTrace,
-    captureCapabilities = false,
   ): Promise<AssetContainer> {
+    if (this.updatesStopped) return Promise.reject(new DOMException('模型资产更新已停止。', 'AbortError'));
     const queuedAt = readRuntimeTimestampMs();
     const context = { resource: fileName, resourceOrdinal: trace?.resourceOrdinal };
     const queueToken = this.dependencies.readiness.loadDiagnostics.beginTraceTask('assetQueue', context, traceScope);
     return this.assetLoadScheduler.run(
       () => {
+        this.assertUpdatesActive(loadSignal);
         queueToken?.end();
         this.dependencies.readiness.loadDiagnostics.record('assetQueue', readRuntimeTimestampMs() - queuedAt);
         return this.dependencies.readiness.loadDiagnostics.measureAsync('assetReadDecode',
-          () => captureCapabilities ? loadCapabilityModelTemplate(rootUrl, fileName, this.context.scene, onProgress)
-            : SceneLoader.LoadAssetContainerAsync(rootUrl, fileName, this.context.scene, onProgress), context, traceScope);
+          // 所有入口共享同一模板缓存；先独占加载的模板也必须保留实际源声明，避免准入依赖加载顺序。
+          () => loadCapabilityModelTemplate(rootUrl, fileName, this.context.scene, event => {
+            if (!this.updatesStopped && !loadSignal?.aborted) onProgress?.(event);
+          }), context, traceScope);
       },
       loadSignal,
-    ).catch(error => {
-      queueToken?.end(error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error',
-        error instanceof Error && error.name === 'AbortError' ? 'aborted' : 'operation-failed');
+    ).then(container => {
+      try {
+        this.assertUpdatesActive(loadSignal);
+        return container;
+      } catch (error) {
+        // 调度器无法取消已开始的底层解码，迟到容器必须在进入共享缓存前自行释放。
+        runSceneRuntimeCleanup(this.context, `过期模型容器 ${fileName}`, () => container.dispose());
+        throw error;
+      }
+    }).catch(error => {
+      const aborted = this.updatesStopped || loadSignal?.aborted || (error instanceof Error && error.name === 'AbortError');
+      queueToken?.end(aborted ? 'cancelled' : 'error', aborted ? 'aborted' : 'operation-failed');
+      this.assertUpdatesActive(loadSignal);
       throw error;
     });
   }

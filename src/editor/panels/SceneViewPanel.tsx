@@ -125,6 +125,8 @@ import {
 import {
   createEditModeModelThinInstancePlan,
   patchEditModeModelThinInstancePlanForModelParameters,
+  patchEditModeModelThinInstancePlanForPlanNeutralChanges,
+  resolvePlanNeutralSceneChangeEntityIds,
   resolveModelParameterOnlySceneChangeEntityId,
   type EditModeModelThinInstancePlan,
 } from '../model/editModeModelThinInstances';
@@ -562,6 +564,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       ? cachedParameterSceneChange.entityId
       : resolveModelParameterOnlySceneChangeEntityId(sceneDocumentRef.current, sceneDocument)
     : null;
+  // 仅改动不影响合批分组的少量实体（如姿态、材质、灯光参数）时，只替换这些实体而不重建整份计划。
+  // 以实体表引用为键：同一份文档只识别一次，提交后 ref 前移也不会重算。
+  const planNeutralSceneChangeEntityIds = useMemo(
+    () => editModeThinInstancePlanRef.current && !parameterSceneChangeEntityId
+      ? resolvePlanNeutralSceneChangeEntityIds(sceneDocumentRef.current, { entityIds: sceneEntityIds, entities: sceneEntities })
+      : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 读取的 ref 在提交后才前移，不能作为依赖。
+    [sceneEntityIds, sceneEntities, parameterSceneChangeEntityId],
+  );
   const editModeThinInstancePlanComputation = useMemo(() => {
     const startedAt = readScenePanelTimestampMs();
     const previousPlan = editModeThinInstancePlanRef.current;
@@ -569,16 +580,21 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const entityGraph = { entityIds: sceneEntityIds, entities: sceneEntities };
     const plan = parameterSyncEntityId && previousPlan
       ? patchEditModeModelThinInstancePlanForModelParameters(entityGraph, previousPlan, parameterSyncEntityId)
-      : createEditModeModelThinInstancePlan(entityGraph, previousPlan ?? undefined);
+      : planNeutralSceneChangeEntityIds && previousPlan && sceneDocumentRef.current
+        ? patchEditModeModelThinInstancePlanForPlanNeutralChanges(
+          entityGraph, previousPlan, sceneDocumentRef.current, planNeutralSceneChangeEntityIds)
+        : createEditModeModelThinInstancePlan(entityGraph, previousPlan ?? undefined);
     return {
       plan,
       parameterSyncEntityId,
+      planNeutralEntityIds: planNeutralSceneChangeEntityIds,
       durationMs: Math.max(0, readScenePanelTimestampMs() - startedAt),
       entityCount: sceneEntityIds.length,
     };
-  }, [sceneEntityIds, sceneEntities, parameterSceneChangeEntityId]);
+  }, [sceneEntityIds, sceneEntities, parameterSceneChangeEntityId, planNeutralSceneChangeEntityIds]);
   const editModeThinInstancePlan = editModeThinInstancePlanComputation.plan;
   const modelParameterSyncEntityId = editModeThinInstancePlanComputation.parameterSyncEntityId;
+  const localSyncEntityIds = editModeThinInstancePlanComputation.planNeutralEntityIds;
   const editRuntimeSceneDocument = useMemo(
     () => editModeThinInstancePlan.entities === sceneDocument.entities
       ? sceneDocument
@@ -1530,7 +1546,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument,
   });
 
-  /** 参数值变化走单实体同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
+  /** 参数值变化走单实体同步；计划无关的少量实体变更先尝试局部同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
   useEffect(() => {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
@@ -1550,7 +1566,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         useEditorStore.getState().hierarchySelectionIds,
         { modelArrayIdentityMode: 'visual' },
       );
-    } else {
+    } else if (!(localSyncEntityIds && runtime.syncEntitiesLocally(
+      currentDocument,
+      localSyncEntityIds,
+      useEditorStore.getState().hierarchySelectionIds,
+      { modelArrayIdentityMode: 'visual' },
+    ))) {
       runtime.sync(
         currentDocument,
         useEditorStore.getState().hierarchySelectionIds,
@@ -1566,6 +1587,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
     modelParameterSyncEntityId,
+    localSyncEntityIds,
     sceneRuntimeStartupDeferred,
     isRuntimePreview,
     attachCurrentSelectionGizmo,

@@ -1,6 +1,7 @@
 import { updateCompositionFrames } from '../composition/composition';
 import type { Command } from './Command';
 import { executeCommand, type CommandHistory } from './CommandHistory';
+import { createSceneUndoRecorder } from './scenePatch';
 import type {
   AutoPatrolComponent,
   CadReferenceComponent,
@@ -59,7 +60,7 @@ export function createEntityCommand(entity: Entity): Command {
 
 /** 创建一个仅用于 Hierarchy 分组的文件夹命令，可直接挂到任意可用父文件夹。 */
 export function createFolderCommand(folder: Entity, parentId: string | null = folder.parentId): Command {
-  let previousScene: SceneDocument | null = null;
+  const recorder = createSceneUndoRecorder();
 
   return {
     label: `新建文件夹 ${folder.name}`,
@@ -80,28 +81,27 @@ export function createFolderCommand(folder: Entity, parentId: string | null = fo
         };
       }
 
-      previousScene = scene;
-      return {
+      const next = {
         ...scene,
         entityIds: scene.entityIds.includes(folder.id) ? scene.entityIds : [...scene.entityIds, folder.id],
         entities,
         selectedEntityId: folder.id,
       };
+      recorder.capture(scene, next);
+      return next;
     },
-    undo: (scene) => previousScene ?? scene,
+    undo: recorder.undo,
   };
 }
 
 export function deleteEntityCommand(entityId: string): Command {
-  let previousScene: SceneDocument | null = null;
+  const recorder = createSceneUndoRecorder();
 
   return {
     label: '删除实体',
     execute: (scene) => {
       const entity = scene.entities[entityId];
       if (!entity) return scene;
-
-      previousScene = scene;
 
       const { [entityId]: _removed, ...entities } = scene.entities;
       const normalizedEntities = Object.fromEntries(
@@ -129,16 +129,16 @@ export function deleteEntityCommand(entityId: string): Command {
           ? scene.selectedEntityId
           : null;
 
-      return {
+      const next = {
         ...scene,
         entityIds: scene.entityIds.filter((id) => id !== entityId),
         entities: normalizedEntities,
         selectedEntityId,
       };
+      recorder.capture(scene, next);
+      return next;
     },
-    undo: (scene) => {
-      return previousScene ?? scene;
-    },
+    undo: recorder.undo,
   };
 }
 
@@ -147,17 +147,16 @@ export function updateSceneDocumentCommand(
   label: string,
   updateScene: (scene: SceneDocument) => SceneDocument,
 ): Command {
-  let previousScene: SceneDocument | null = null;
+  const recorder = createSceneUndoRecorder();
 
   return {
     label,
     execute: (scene) => {
-      previousScene = scene;
-      return updateScene(scene);
+      const next = updateScene(scene);
+      recorder.capture(scene, next);
+      return next;
     },
-    undo: (scene) => {
-      return previousScene ?? scene;
-    },
+    undo: recorder.undo,
   };
 }
 
@@ -210,17 +209,16 @@ export function updateSceneDefaultCargoGeneratorCommand(
 
 /** 批量移动实体或完整文件夹子树到目标文件夹/根层级，并拒绝形成层级循环。 */
 export function moveEntitiesToFolderCommand(entityIds: string[], targetFolderId: string | null): Command {
-  let previousScene: SceneDocument | null = null;
+  const recorder = createSceneUndoRecorder();
 
   return {
     label: targetFolderId ? '移动到文件夹' : '移动到根层级',
     execute: (scene) => {
-      previousScene = scene;
-      return moveEntitiesToFolder(scene, entityIds, targetFolderId);
+      const next = moveEntitiesToFolder(scene, entityIds, targetFolderId);
+      recorder.capture(scene, next);
+      return next;
     },
-    undo: (scene) => {
-      return previousScene ?? scene;
-    },
+    undo: recorder.undo,
   };
 }
 

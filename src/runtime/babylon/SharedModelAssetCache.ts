@@ -56,6 +56,7 @@ export class SharedModelAssetCache {
   private ownedCloneMs = 0;
   private sharedGeometryCloneCount = 0;
   private capabilityFallbackCount = 0;
+  private readonlyGeometrySharingEnabled = true;
   private idleOrder = 0;
 
   constructor(options: { maxIdleEntries?: number; maxIdleBytes?: number } = {}) {
@@ -72,7 +73,13 @@ export class SharedModelAssetCache {
       instantiationCount: this.instantiationCount, instantiationMs: this.instantiationMs,
       ownedCloneCount: this.ownedCloneCount, ownedCloneMs: this.ownedCloneMs,
       sharedGeometryCloneCount: this.sharedGeometryCloneCount, capabilityFallbackCount: this.capabilityFallbackCount,
+      readonlyGeometrySharingEnabled: this.readonlyGeometrySharingEnabled,
       idleEntries: idleEntries.length, idleBytes: idleEntries.reduce((bytes, entry) => bytes + entry.estimatedBytes, 0) };
+  }
+
+  /** 仅控制后续创建的候选实例；既有实例的所有权与 lease 不随开关改变。 */
+  setReadonlyGeometrySharingEnabled(enabled: boolean): void {
+    this.readonlyGeometrySharingEnabled = enabled;
   }
 
   /** 预先读取并驻留解析模板；取消只结束本次等待，不打断其他同源消费者。 */
@@ -152,7 +159,7 @@ export class SharedModelAssetCache {
       const capability = await verifyModelTemplateCapabilities(source, asset);
       this.assertAvailable(signal);
       if (entry.disposed) throw new Error('共享模型解析模板已失效。');
-      const shared = capability?.geometry === 'shared-readonly';
+      const shared = this.readonlyGeometrySharingEnabled && capability?.geometry === 'shared-readonly';
       const token = beginSceneAssetTrace(trace, 'modelClone');
       const startedAt = performance.now();
       let failed = true;

@@ -15,6 +15,8 @@ import subprocess
 import struct
 import sys
 import time
+import threading
+import hashlib
 from typing import Any
 
 import bpy
@@ -76,6 +78,92 @@ def progress(phase: str, completed: int, total: int, message: str) -> None:
 def write_json(file: Path, data: object) -> None:
     with file.open("w", encoding="utf-8") as stream:
         json.dump(data, stream, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+
+
+def file_digest(file: Path) -> str:
+    digest = hashlib.sha256()
+    with file.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class BakeCheckpoint:
+    """只复用同工程、同输入字节/脚本/引擎/设备的已完成阶段；损坏缓存不算成功。"""
+    def __init__(self, root: Path, data: dict) -> None:
+        self.root = root
+        identity = {key: value for key, value in data.items() if key not in ("jobId", "captureMetrics")}
+        digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+        files = set()
+        for mesh in data["meshes"]:
+            if mesh.get("geometryBinary"):
+                files.add(mesh["geometryBinary"]["file"])
+            for texture in mesh.get("material", {}).get("textures", {}).values():
+                if texture.get("file"):
+                    files.add(texture["file"])
+        if data["environment"].get("textureFile"):
+            files.add(data["environment"]["textureFile"])
+        for name in sorted(files):
+            digest.update(name.encode()); digest.update(file_digest(Path(source_path(root, name))).encode())
+        for name in ("cycles_bake.py", "rgbm_gamma_codec.py", "lightmap_mips.py"):
+            if (root / name).is_file():
+                digest.update(file_digest(root / name).encode())
+        digest.update(bpy.app.version_string.encode())
+        digest.update(json.dumps(BAKE_DEVICE_SELECTION, sort_keys=True).encode())
+        self.fingerprint = digest.hexdigest()
+        self.stages: dict = {}
+        self.candidates: list[tuple[Path, dict]] = []
+        # 只看同一任务根最近的有限记录，拒绝链接、未知格式和过大的清单。
+        directories = sorted((entry for entry in root.parent.iterdir() if entry.is_dir() and not entry.is_symlink()),
+                             key=lambda entry: entry.stat().st_mtime, reverse=True)[:20]
+        for directory in directories:
+            manifest = directory / "checkpoint.json"
+            try:
+                if directory.resolve().parent != root.parent.resolve() or manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 4 * 1024 * 1024:
+                    continue
+                record = json.loads(manifest.read_text(encoding="utf-8"))
+                if record.get("format") == "lighting-bake-checkpoint-v1" and record.get("fingerprint") == self.fingerprint and isinstance(record.get("stages"), dict):
+                    self.candidates.append((directory, record["stages"]))
+            except (OSError, ValueError, TypeError):
+                continue
+
+    def restore(self, key: str) -> Any | None:
+        for directory, stages in self.candidates:
+            stage = stages.get(key)
+            if not isinstance(stage, dict) or not isinstance(stage.get("files"), dict) or not stage["files"]:
+                continue
+            try:
+                for name, expected in stage["files"].items():
+                    if not re.fullmatch(r"(?:lightmap|geometry)-\d+\.(?:png|bin|json)|probes\.json", name):
+                        raise ValueError("checkpoint文件名无效")
+                    file = Path(source_path(directory, name))
+                    if file.stat().st_size != expected["size"] or file_digest(file) != expected["sha256"]:
+                        raise ValueError("checkpoint字节不一致")
+                for name in stage["files"]:
+                    if directory.resolve() != self.root.resolve():
+                        shutil.copyfile(source_path(directory, name), self.root / name)
+                self.stages[key] = stage
+                return stage["value"]
+            except (OSError, ValueError, TypeError, KeyError):
+                continue
+        return None
+
+    def save(self, key: str, names: list[str], value: Any) -> None:
+        self.stages[key] = {"files": {name: {"size": (self.root / name).stat().st_size, "sha256": file_digest(self.root / name)} for name in names}, "value": value}
+        temporary = self.root / "checkpoint.json.tmp"
+        write_json(temporary, {"format": "lighting-bake-checkpoint-v1", "fingerprint": self.fingerprint, "stages": self.stages})
+        temporary.replace(self.root / "checkpoint.json")
+
+
+def lightmap_layout_signature(objects: list[Any]) -> str:
+    """UV排版也必须相同，不能只凭源输入相同复用落在其它图集位置的像素。"""
+    digest = hashlib.sha256()
+    for obj in objects:
+        digest.update(str(obj["input_index"]).encode())
+        for loop in obj.data.loops:
+            uv = obj.data.uv_layers["LightmapUV"].data[loop.index].uv
+            digest.update(struct.pack("<Idd", loop.vertex_index, uv.x, uv.y))
+    return digest.hexdigest()
 
 
 def source_path(root: Path, name: str) -> str:
@@ -1613,8 +1701,6 @@ def main() -> None:
     root = file.parent
     with file.open(encoding="utf-8") as stream:
         data = json.load(stream)
-    for source in data["meshes"]:
-        load_binary_geometry(source, root)
     started = time.monotonic()
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -1622,6 +1708,10 @@ def main() -> None:
     scene.render.engine = "CYCLES"
     # CPU 是稳定默认值；不会借用用户当前 Blender 会话或改动其偏好配置。
     configure_bake_device(data["settings"].get("device", "cpu"))
+    # 旧全数组调用仍可运行；只对有界二进制输入创建恢复索引，避免另造巨型JSON。
+    checkpoint = BakeCheckpoint(root, data) if all(source.get("geometryBinary") for source in data["meshes"]) else None
+    for source in data["meshes"]:
+        load_binary_geometry(source, root)
     scene.cycles.samples = {"preview": 16, "standard": 64, "high": 256}[data["settings"]["quality"]]
     scene.cycles.use_denoising = False
     scene.cycles.max_bounces = 8
@@ -1670,6 +1760,12 @@ def main() -> None:
     atlas_results = []
     for index, page in enumerate(pages):
         progress("baking", index, len(pages), "正在烘焙间接光与环境漫反射")
+        checkpoint_key = f"atlas-{index}:" + lightmap_layout_signature(page) if checkpoint else ""
+        restored = checkpoint.restore(checkpoint_key) if checkpoint else None
+        if restored is not None:
+            atlas_results.append(restored)
+            progress("baking", index + 1, len(pages), "复用同输入且已校验的完整图集")
+            continue
         pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
         if lightmap_mip_levels:
             payload = mip_module.prepare_lightmap_mips(pixels, size, size, lightmap_mip_meshes(page, data["meshes"]), lightmap_mip_levels,
@@ -1681,14 +1777,33 @@ def main() -> None:
             name = f"lightmap-{index}.png"
             dynamic_range = save_rgbm(pixels, size, root / name, lightmap_encoding)
             atlas_results.append({"file": name, "width": size, "height": size, "encoding": lightmap_encoding, "rgbmRange": dynamic_range})
+        if checkpoint:
+            checkpoint.save(checkpoint_key, [name], atlas_results[-1])
+        # 下一图集分配前解除工作数组所有权，不依赖显式GC。
+        del pixels
+        if lightmap_mip_levels:
+            del payload
     mesh_results = []
     for obj in receivers:
         index = obj["input_index"]
         source = data["meshes"][index]
-        geometry = write_export_geometry(collect_export_geometry(obj, source), root / f"geometry-{index}")
+        checkpoint_key = f"geometry-{index}:" + lightmap_layout_signature([obj]) if checkpoint else ""
+        geometry = checkpoint.restore(checkpoint_key) if checkpoint else None
+        if geometry is None:
+            geometry = write_export_geometry(collect_export_geometry(obj, source), root / f"geometry-{index}")
+            if checkpoint:
+                checkpoint.save(checkpoint_key, [geometry["geometryFile"]], geometry)
         mesh_results.append({"key": source["key"], "entityId": source["entityId"], "nodeKey": source["nodeKey"],
                              **geometry, "atlasIndex": obj["atlas"]})
-    count = bake_probes(objects, lights, settings["probeSpacing"], root, positions)
+    probe_signature = hashlib.sha256()
+    for position in positions:
+        probe_signature.update(struct.pack("<ddd", *position))
+    probe_key = "probes:" + probe_signature.hexdigest()
+    count = checkpoint.restore(probe_key) if checkpoint else None
+    if count is None:
+        count = bake_probes(objects, lights, settings["probeSpacing"], root, positions)
+        if checkpoint:
+            checkpoint.save(probe_key, ["probes.json"], count)
     write_json(root / "result.json", {"version": 1, "signature": data["signature"], "engineVersion": bpy.app.version_string,
                                     "atlases": atlas_results, "meshes": mesh_results, "probesFile": "probes.json",
                                     "statistics": {"meshCount": len(objects), "triangleCount": sum(len(entry["indices"]) // 3 for entry in data["meshes"]),
@@ -1699,8 +1814,18 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # 长UV/Cycles调用仍记录进程峰值；线程不触碰Blender场景API。
+    heartbeat_stop = threading.Event()
+    def memory_heartbeat() -> None:
+        while not heartbeat_stop.wait(5):
+            print("LIGHTING_BAKE_MEMORY " + json.dumps(process_peak_memory_bytes()), flush=True)
+    heartbeat_thread = threading.Thread(target=memory_heartbeat, daemon=True)
+    heartbeat_thread.start()
     try:
         main()
     except Exception as error:
         print("LIGHTING_BAKE_ERROR " + str(error), file=sys.stderr, flush=True)
         raise
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1)

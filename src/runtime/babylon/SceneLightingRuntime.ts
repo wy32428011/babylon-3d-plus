@@ -1,4 +1,7 @@
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
+import { inspectLightingCaptureAdmission } from './lightingBakeAdmission.ts';
+import type { LightingBakeResourceBudget } from '../../../electron/shared/sceneLightingBakeResources.ts';
+import type { LightingCaptureStream } from './lightingBakeStream.ts';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig.ts';
 import { consumeLightingEntranceAttributeUpdate } from './lightingEntranceGeometryUpdates';
 import { isLightingLightmapMipEncoding } from '../../../electron/shared/sceneLightingLightmapMips.ts';
@@ -24,7 +27,7 @@ import type {
   LightingBakeInput, LightingClassificationEntry, SceneLightingBakeSettings, SceneLightingBakeSnapshot,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
 import {
-  getSceneLightingBakeSignature, lightingContentHash, validateSceneLightingBakeSnapshot, isLightingLightmapRecipeCompatible,
+  getSceneLightingBakeSignature, getSceneLightingBakeSignatureCached, lightingContentHash, validateSceneLightingBakeSnapshot, isLightingLightmapRecipeCompatible,
 } from '../../../electron/shared/sceneLightingBakeContract.ts';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import { BakedLightingMaterialPlugin, LIGHTING_UV_ATTRIBUTE, type BakedLightingBinding } from './BakedLightingMaterialPlugin';
@@ -185,7 +188,7 @@ export class SceneLightingRuntime {
     this.dirtyConsumptionDepth++;
     try {
       if (this.disposed) return;
-      const documentSignature = getSceneLightingBakeSignature(document);
+      const documentSignature = getSceneLightingBakeSignatureCached(document);
       if (documentSignature !== this.documentSignature) this.invalidatedSnapshotKey = null;
       this.documentSignature = documentSignature;
       this.document = document;
@@ -343,7 +346,13 @@ export class SceneLightingRuntime {
     if (camera.upperRadiusLimit !== null) camera.radius = Math.min(camera.radius, camera.upperRadiusLimit);
   }
 
-  async captureBakeInput(jobId: string, signal?: AbortSignal, progress?: (message: string) => void): Promise<LightingBakeInput> {
+  async inspectBakeAdmission(budget: LightingBakeResourceBudget, signal?: AbortSignal) {
+    if (!this.document || this.disposed) throw new Error('没有可检查的当前场景。');
+    this.refreshSources('capture');
+    return inspectLightingCaptureAdmission(this.scene, this.document, this.sources, budget, signal);
+  }
+
+  async captureBakeInput(jobId: string, signal?: AbortSignal, progress?: (message: string) => void, stream?: LightingCaptureStream): Promise<LightingBakeInput> {
     this.dirtyConsumptionDepth++;
     try {
       if (!this.document || this.disposed) throw new Error('没有可烘焙的当前场景。');
@@ -352,7 +361,7 @@ export class SceneLightingRuntime {
         this.options.pushLog('当前采用内置 Sandbox 环境的既有平均辐照度烘焙策略；自定义天空使用原始 HDR/EXR。');
       }
       const materials = this.staticMaterialSignature(), lighting = lightingContentHash(captureLightingEnvironment(this.scene, this.document));
-      const input = await captureRuntimeLightingInput(this.scene, this.document, this.sources, jobId, signal, progress);
+      const input = await captureRuntimeLightingInput(this.scene, this.document, this.sources, jobId, signal, progress, stream);
       this.refreshSources('capture');
       if (materials !== this.staticMaterialSignature() || lighting !== lightingContentHash(captureLightingEnvironment(this.scene, this.document))) {
         throw new Error('捕获期间实际静态材质或灯光发生变化，请等待场景稳定后重新烘焙。');
@@ -399,10 +408,9 @@ export class SceneLightingRuntime {
           const geometrySignature = getLightingGeometrySignature(this.sources);
           if (snapshot.geometrySignature && snapshot.geometrySignature !== geometrySignature) throw new Error('模型几何或实际姿态与烘焙资源不一致，请重新烘焙。');
           const loadResources = this.options.loadResources ?? loadLightingResources;
-          resources = snapshot.assets.some(asset => isLightingLightmapMipEncoding(asset.encoding))
-            ? await loadResources(snapshot, this.scene, controller.signal, { maxTextureBytes: requestedBake.maxTextureMiB * 1048576,
-              onRestoreError: error => { if (!this.disposed && this.state?.resources === resources) this.reportError(error); } })
-            : await loadResources(snapshot, this.scene, controller.signal);
+          resources = await loadResources(snapshot, this.scene, controller.signal, { maxTextureBytes: requestedBake.maxTextureMiB * 1048576,
+            previousSnapshot: this.state?.snapshot,
+            onRestoreError: error => { if (!this.disposed && this.state?.resources === resources) this.reportError(error); } });
           check(); this.refreshSources('snapshot');
           if (getLightingGeometrySignature(this.sources) !== geometrySignature) throw new Error('加载光照期间静态几何已经变化，候选结果未提交。');
           preparedStructureRevision = this.structureRevision;

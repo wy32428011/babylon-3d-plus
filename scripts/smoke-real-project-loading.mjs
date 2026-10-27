@@ -80,13 +80,24 @@ function runtimeSnapshot() {
 function installSceneOpenDomAudit({ actualClick = false } = {}) {
   window.__loadAuditObserver?.disconnect();
   if (window.__loadAuditClickListener) document.removeEventListener('click', window.__loadAuditClickListener, true);
-  window.__loadAudit = { startedAt: actualClick ? null : performance.now(), seen: false, completedMs: null, transitions: [] };
+  window.__loadAudit = { startedAt: actualClick ? null : performance.now(), seen: false, completedMs: null, readySinceMs: null, transitions: [] };
   const sample = () => {
     const state = window.__loadAudit; if (state.startedAt === null) return;
     const phase = document.querySelector('[data-scene-preparation-phase]')?.getAttribute('data-scene-preparation-phase') ?? null;
+    const library = actualClick ? document.querySelector('button.library-import-button[title^="同步中台全部普通、组合和环境模型"]') : null;
+    const libraryBusy = actualClick && (!library || library.disabled);
     if (phase) state.seen = true;
-    if (state.transitions.at(-1)?.phase !== phase) state.transitions.push({ phase, at: performance.now() - state.startedAt });
-    if (!phase && state.seen && state.completedMs === null) state.completedMs = performance.now() - state.startedAt;
+    if (state.transitions.at(-1)?.phase !== phase || state.transitions.at(-1)?.libraryBusy !== libraryBusy) {
+      state.transitions.push({ phase, libraryBusy, at: performance.now() - state.startedAt });
+    }
+    // 首帧后的自动全库事务也是这次打开的一部分；再次进入准备状态必须撤销瞬时 ready。
+    if (phase || libraryBusy) { state.readySinceMs = null; state.completedMs = null; }
+    else if (state.seen) {
+      state.readySinceMs ??= performance.now();
+      if (state.completedMs === null && (!actualClick || performance.now() - state.readySinceMs >= 1000)) {
+        state.completedMs = performance.now() - state.startedAt;
+      }
+    }
   };
   if (actualClick) {
     window.__loadAuditClickListener = event => {
@@ -98,6 +109,7 @@ function installSceneOpenDomAudit({ actualClick = false } = {}) {
     document.addEventListener('click', window.__loadAuditClickListener, true);
   }
   window.__loadAuditObserver = new MutationObserver(sample);
+  window.__sampleLoadAudit = sample;
   window.__loadAuditObserver.observe(document.body, { subtree: true, childList: true, attributes: true });
 }
 
@@ -359,7 +371,9 @@ async function p0Launch({ directory, manifest, prepare = false, source }) {
   await writeFile(path.join(userData, 'recent-workspaces.json'), JSON.stringify({ version: 1, projects: [], scenes: [] }));
   const bootstrap = path.join(directory, 'bootstrap.mjs');
   await writeFile(bootstrap, p0Bootstrap({ userData, workspace, artifact: directory, manifest, prepare, source }), { flag: 'wx' });
-  const env = { ...process.env, OPEN_DEVTOOLS: 'false', VITE_DEV_SERVER_URL: '' };
+  const env = { ...process.env, OPEN_DEVTOOLS: 'false' };
+  // 正式文件入口必须移除开发地址；空字符串仍会进入天空资源的页面来源校验并产生 Invalid URL。
+  delete env.VITE_DEV_SERVER_URL;
   delete env.ELECTRON_RUN_AS_NODE; delete env.ZENDING_EDITOR_STORAGE_ROOT; delete env.ZENDING_ALLOW_STORAGE_ROOT_OVERRIDE;
   let owned;
   try {
@@ -526,7 +540,14 @@ async function runSceneOpenP0() {
   assert.equal(manifest.baseUrl, normalizeSceneOpenBase(values.url)); assert.equal(manifest.inputSceneSha256, sceneOpenSha256(expectedBytes));
   // 元数据查询清单不决定路径字段语义；始终从同一份冻结SOURCE及当前生产schema派生，避免旧枚举漏掉合法换根。
   const traversal=await import(pathToFileURL(path.join(repo,'dist-electron/shared/sceneResourceTraversal.js')).href);
-  const sourceLocations={locationPointers:collectSceneOpenLocationPointers(expectedDocument,traversal),locationRules:collectSceneOpenLocationRules(expectedDocument,traversal)};
+  const sceneVersions=await import(pathToFileURL(path.join(repo,'dist-electron/shared/sceneFileVersion.js')).href);
+  const sceneLighting=await import(pathToFileURL(path.join(repo,'dist-electron/shared/sceneLightingConfig.js')).href);
+  assert.ok(sceneVersions.isSupportedSceneFileVersion(expectedDocument.version),'冻结 SOURCE 格式不受当前生产迁移支持');
+  // 物化过程按生产协议升级格式；原始压缩包 SHA 仍独立逐字节核对，不能把版本字段泛忽略。
+  const materializedExpected={...expectedDocument,version:sceneVersions.CURRENT_SCENE_FILE_VERSION,
+    scene:sceneLighting.migrateSceneLightingDocument(structuredClone(expectedDocument.scene))};
+  const materializedExpectedBytes=Buffer.from(stableSceneOpenJson(materializedExpected));
+  const sourceLocations={locationPointers:collectSceneOpenLocationPointers(materializedExpected,traversal),locationRules:collectSceneOpenLocationRules(materializedExpected,traversal)};
   let resolvedBaseline, resolvedBaselineBytes, resolvedBytes;
   if(values['resolved-baseline']) {
     resolvedBaselineBytes=await readFile(path.resolve(values['resolved-baseline']));resolvedBaseline=JSON.parse(resolvedBaselineBytes.toString('utf8'));
@@ -618,9 +639,9 @@ async function runSceneOpenP0() {
         try {
           await button.click(); const deadline = Date.now() + timeoutMs; let observed;
           while (Date.now() < deadline) {
-            observed = await target.evaluate(() => ({ trace: window.__loadAudit, visible: document.visibilityState, focused: document.hasFocus(),
+            observed = await target.evaluate(() => { window.__sampleLoadAudit?.(); return { trace: window.__loadAudit, visible: document.visibilityState, focused: document.hasFocus(),
               homeError: document.querySelector('.home-status-error')?.textContent, issue: document.querySelector('aside[aria-label="场景资源状态"]')?.textContent,
-              label: document.querySelector('[data-scene-preparation-phase]')?.textContent?.slice(-550), heap: performance.memory?.usedJSHeapSize ?? null }));
+              label: document.querySelector('[data-scene-preparation-phase]')?.textContent?.slice(-550), heap: performance.memory?.usedJSHeapSize ?? null }; });
             heapSamples.push({ rendererHeapBytes: observed.heap });
             assert.equal(observed.visible, 'visible'); assert.equal(observed.focused, true, '打开期间失焦，不能与其它条件混算');
             if (diskError) throw new Error(diskError);
@@ -642,9 +663,12 @@ async function runSceneOpenP0() {
           await writeFile(path.join(runRoot, 'source-context.json'), JSON.stringify({ file: sourceState.file, binding: sourceState.binding }, null, 2), { flag: 'wx' });
           assert.equal(sourceState.binding.projectId, manifest.projectId); assert.equal(sourceState.binding.latestVersionId, manifest.project.source.versionId);
           assert.equal(sourceState.binding.resourceRevision, manifest.project.currentResourceRevision);
-          const roots = [...manifest.originalRoots, { tag: 'project', path: sourceState.projectRoot }, { tag: 'workspace', path: owned.workspace }];
+          const roots = [...manifest.originalRoots, ...(resolvedBaseline?.roots??[]), { tag: 'project', path: sourceState.projectRoot }, { tag: 'workspace', path: owned.workspace }];
           const freezeOptions = { roots,...sourceLocations };
-          const expected = freezeSceneOpenInput(expectedBytes, freezeOptions);
+          const expected = freezeSceneOpenInput(materializedExpectedBytes, freezeOptions);
+          run.sourceFormatMigration={from:expectedDocument.version,to:materializedExpected.version,
+            rawSourceSha256:sceneOpenSha256(expectedBytes),materializedExpectedSha256:sceneOpenSha256(materializedExpectedBytes),
+            basis:'production sceneFileVersion and migrateSceneLightingDocument; original SOURCE archive remains byte-verified'};
           const actualSource = freezeSceneOpenInput(Buffer.from(sourceState.text), freezeOptions);
           const logicalFreezeOptions=resolvedBaseline?{roots:[...roots,...resolvedBaseline.roots],locationPointers:resolvedBaseline.locationPointers,locationRules:resolvedBaseline.locationRules}:freezeOptions;
           const originalLive = freezeSceneOpenInput(resolvedBytes??Buffer.from(stableSceneOpenJson({ scene: expectedDocument.scene })),logicalFreezeOptions);
@@ -653,7 +677,8 @@ async function runSceneOpenP0() {
           run.logicalVsExpected = compareSceneOpenInputs(originalLive, live, { requireCanonicalSourceBytes: false });
           assert.ok(run.sourceVsExpected.equal && run.logicalVsExpected.equal, 'E3_BUSINESS_OR_RESOURCE_VERSION_DIFF; see saved full projection differences');
           const frozen = { source: actualSource, logical: live, resources: await hashSceneOpenReferencedFiles(JSON.parse(logical.text),
-            { locationPointers: logicalFreezeOptions.locationPointers, workspaceRoot: owned.workspace, projectRoot: sourceState.projectRoot }) };
+            { locationPointers: logicalFreezeOptions.locationPointers, workspaceRoot: owned.workspace, projectRoot: sourceState.projectRoot,
+              bundledSkyboxRoot:path.join(repo,'public','builtin-skybox-environments') }) };
           if(resolvedBaseline)assert.equal(stableSceneOpenJson(frozen.resources),stableSceneOpenJson(resolvedBaseline.resources),'E3_APPROVED_RESOLVED_BASELINE_FILE_BYTES_DRIFT');
           run.rendererAtReady=await rendererIdentity();
           const heapSession=await target.context().newCDPSession(target);
@@ -669,7 +694,7 @@ async function runSceneOpenP0() {
           if(resolvedBaseline){
             assert.equal(stableSceneOpenJson(deriveSceneOpenLogicalImageSlots(JSON.parse(logical.text))),stableSceneOpenJson(resolvedBaseline.logicalImages.slots),'实际活跃图片槽位/修订漂移');
             const images=await captureSceneOpenLogicalImages(target,resolvedBaseline.logicalImages,{output:path.join(runRoot,'logical-images'),
-              workspaceRoot:owned.workspace,bundledRoot:path.join(repo,'dist'),bindingVerified:true});
+              workspaceRoot:owned.workspace,bundledRoot:path.join(repo,'dist'),bindingVerified:true,runtimeBinding:'scene-canvas'});
             assert.equal(images.status,'PASS_ACTUAL_INPUT_IMAGE_BYTES_ONLY');
             run.logicalImages={status:images.status,receiptFile:path.join(runRoot,'logical-images/receipt.json'),slotCount:images.slots.length,uniqueImages:images.images.length,provesGpuTextureSuccess:false};
             logicalImageInputs={slots:images.slots.map(({actualResolvedUrl,...slot})=>slot),images:images.images.map(image=>({logicalReference:image.logicalReference,

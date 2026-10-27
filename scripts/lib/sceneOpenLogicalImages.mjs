@@ -10,6 +10,26 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const referencePattern = /^editor-image:\/\/(platform|builtin)\/[a-z][a-z0-9_-]{1,63}$/;
 const escapePointer = value => value.replaceAll('~', '~0').replaceAll('/', '~1');
 const fileCleanupErrors = new WeakMap();
+const CDP_READ_CONCURRENCY = 16;
+
+async function boundedReadAll(values, read) {
+  const result = [];
+  for (let start = 0; start < values.length; start += CDP_READ_CONCURRENCY) {
+    // 本批全部收束后才传播错误，避免释放对象组时仍有后台读取。
+    const rows = await Promise.allSettled(values.slice(start, start + CDP_READ_CONCURRENCY).map(read));
+    const failure = rows.find(row => row.status === 'rejected');
+    if (failure) throw failure.reason;
+    result.push(...rows.map(row => row.value));
+  }
+  return result;
+}
+
+async function withDeadline(promise, timeoutMs, label) {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} 超时 (${timeoutMs}ms)`)), timeoutMs);
+  })]); } finally { clearTimeout(timer); }
+}
 
 /** 输入来自已冻结 JSON；这里仍拒绝 Proxy/accessor，避免纯枚举执行业务代码。 */
 function own(value, key, required = false) {
@@ -141,9 +161,15 @@ function validateExpected(expected) {
 
 /** CDP 只读 own-data；Proxy 在 getProperties 之前拒绝，不运行业务 getter/Map 方法。 */
 class OwnRemoteReader {
-  constructor(session, group) { this.session = session; this.group = group; this.cache = new Map(); this.requests = 0; }
+  constructor(session, group) {
+    this.session = session; this.group = group; this.cache = new Map(); this.requests = 0;
+    this.completedRequests = 0; this.startedAt = Date.now(); this.deadline = this.startedAt + 180000;
+  }
   async send(method, params) {
-    assert.ok(++this.requests <= 150000, '图片CDP读取超过有界预算'); const result = await this.session.send(method, params);
+    assert.ok(Date.now() < this.deadline, '图片审计超过180秒总预算');
+    assert.ok(++this.requests <= 150000, '图片CDP读取超过有界预算');
+    const result = await withDeadline(this.session.send(method, params), Math.min(20000, this.deadline - Date.now()), `图片 ${method}`);
+    this.completedRequests++;
     if (result.exceptionDetails) {
       const bounded = value => typeof value === 'string' ? value.slice(0, 2048) : '';
       const evidence = { method: bounded(method), expression: bounded(params.expression ?? params.functionDeclaration),
@@ -153,11 +179,11 @@ class OwnRemoteReader {
     return result;
   }
   async evaluate(expression) { return (await this.send('Runtime.evaluate', { expression, objectGroup: this.group, returnByValue: false, generatePreview: false, throwOnSideEffect: true, silent: true })).result; }
-  async domRoot() {
+  async domRoot(selector = '#root') {
     // 原生CDP节点解析不执行Window.document或DOM方法getter；不能为读根节点关闭副作用守卫。
     const document = await this.send('DOM.getDocument', { depth: 1, pierce: false });
     assert.ok(Number.isInteger(document.root?.nodeId) && document.root.nodeId > 0, '图片CDP document unavailable');
-    const matches = await this.send('DOM.querySelectorAll', { nodeId: document.root.nodeId, selector: '#root' });
+    const matches = await this.send('DOM.querySelectorAll', { nodeId: document.root.nodeId, selector });
     assert.ok(Array.isArray(matches.nodeIds) && matches.nodeIds.length === 1 && Number.isInteger(matches.nodeIds[0]) && matches.nodeIds[0] > 0, '图片DOM root必须严格唯一');
     const resolved = await this.send('DOM.resolveNode', { nodeId: matches.nodeIds[0], objectGroup: this.group });
     assert.ok(resolved.object?.objectId && resolved.object.type === 'object' && resolved.object.subtype === 'node', '图片DOM root不是原生节点');
@@ -165,8 +191,9 @@ class OwnRemoteReader {
   }
   async properties(value, label) {
     assert.ok(value?.objectId && value.type === 'object', `${label} 没有可读对象`); assert.notEqual(value.subtype, 'proxy', `${label} Proxy unavailable`);
-    if (!this.cache.has(value.objectId)) this.cache.set(value.objectId, await this.send('Runtime.getProperties', { objectId: value.objectId, ownProperties: true, accessorPropertiesOnly: false, generatePreview: false }));
-    const properties = this.cache.get(value.objectId); assert.ok(properties.result.length <= 50000, `${label} own属性超限`); return properties;
+    // 缓存进行中的读取，同一批碰到同一对象也只发一次协议请求。
+    if (!this.cache.has(value.objectId)) this.cache.set(value.objectId, this.send('Runtime.getProperties', { objectId: value.objectId, ownProperties: true, accessorPropertiesOnly: false, generatePreview: false }));
+    const properties = await this.cache.get(value.objectId); assert.ok(properties.result.length <= 50000, `${label} own属性超限`); return properties;
   }
   async data(value, key, required = true) {
     const property = (await this.properties(value, key)).result.find(row => row.name === key);
@@ -185,8 +212,9 @@ class OwnRemoteReader {
     assert.equal(value?.subtype, 'map', '图片实际 models 不是原生Map');
     const entries = (await this.properties(value, 'models')).internalProperties?.find(row => row.name === '[[Entries]]')?.value;
     assert.ok(entries, '图片原生Map entries unavailable'); const result = new Map();
-    for (const entry of await this.array(entries, 'models entries')) {
-      const key = await this.scalar(entry, 'key'); assert.equal(typeof key, 'string'); assert.ok(!result.has(key), '图片models key重复'); result.set(key, await this.data(entry, 'value'));
+    const rows = await boundedReadAll(await this.array(entries, 'models entries'), async entry => [await this.scalar(entry, 'key'), await this.data(entry, 'value')]);
+    for (const [key, item] of rows) {
+      assert.equal(typeof key, 'string'); assert.ok(!result.has(key), '图片models key重复'); result.set(key, item);
     }
     return result;
   }
@@ -214,7 +242,7 @@ class OwnRemoteReader {
   }
 }
 
-async function findRuntime(reader) {
+async function findRuntime(reader, progress) {
   const root = await reader.domRoot(), rootProperties = await reader.properties(root, 'React root');
   const containers = rootProperties.result.filter(row => row.name.startsWith('__reactContainer$')); assert.equal(containers.length, 1, '图片实际React root不唯一');
   assert.ok(containers[0].value && !containers[0].get && !containers[0].set, 'React root getter unavailable');
@@ -229,20 +257,78 @@ async function findRuntime(reader) {
     if (!scene?.objectId || !assets?.objectId) return;
     const disposed = await reader.scalar(scene, '_isDisposed'); assert.equal(typeof disposed, 'boolean', '图片runtime释放状态未知'); if (disposed) return;
     assert.equal((await reader.data(assets, 'models')).subtype, 'map', '图片runtime模型表未知');
-    if (!(await Promise.all(runtimes.map(x => reader.same(x, candidate)))).some(Boolean)) runtimes.push(candidate);
+    return candidate;
   };
   while (stack.length) {
-    const fiber = stack.pop(); if (!fiber?.objectId || seen.has(fiber.objectId)) continue;
-    seen.add(fiber.objectId); assert.ok(seen.size <= 30000, '图片React树超过上限');
-    const props = await reader.data(fiber, 'memoizedProps', false);
-    if (props?.objectId) {
-      await visit(props); for (const row of (await reader.properties(props, 'React props')).result) if (row.value) await visit(row.value);
+    const batch = [];
+    while (stack.length && batch.length < CDP_READ_CONCURRENCY) {
+      const fiber = stack.pop(); if (!fiber?.objectId || seen.has(fiber.objectId)) continue;
+      seen.add(fiber.objectId); assert.ok(seen.size <= 30000, '图片React树超过上限'); batch.push(fiber);
     }
-    let hook = await reader.data(fiber, 'memoizedState', false), count = 0;
-    while (hook?.objectId) { assert.ok(++count <= 500, '图片React hook链超过上限'); await visit(await reader.data(hook, 'memoizedState', false)); hook = await reader.data(hook, 'next', false); }
-    for (const key of ['child', 'sibling']) { const next = await reader.data(fiber, key, false); if (next?.objectId) stack.push(next); }
+    const rows = await boundedReadAll(batch, async fiber => {
+      const candidates = [], children = [], props = await reader.data(fiber, 'memoizedProps', false);
+      if (props?.objectId) {
+        candidates.push(await visit(props));
+        for (const row of (await reader.properties(props, 'React props')).result) if (row.value) candidates.push(await visit(row.value));
+      }
+      let hook = await reader.data(fiber, 'memoizedState', false), count = 0;
+      while (hook?.objectId) { assert.ok(++count <= 500, '图片React hook链超过上限'); candidates.push(await visit(await reader.data(hook, 'memoizedState', false))); hook = await reader.data(hook, 'next', false); }
+      for (const key of ['child', 'sibling']) { const next = await reader.data(fiber, key, false); if (next?.objectId) children.push(next); }
+      return { candidates: candidates.filter(Boolean), children };
+    });
+    // 身份去重保持串行；并发读取不能让同一个runtime被重复计为多个实例。
+    for (const row of rows) {
+      stack.push(...row.children);
+      for (const candidate of row.candidates) if (!(await Promise.all(runtimes.map(value => reader.same(value, candidate)))).some(Boolean)) runtimes.push(candidate);
+    }
+    await progress('runtime-discovery', { fibers: seen.size, queuedFibers: stack.length });
   }
   assert.equal(runtimes.length, 1, '图片实际non-disposed runtime必须唯一'); return runtimes[0];
+}
+
+/** 从唯一真实绘制canvas沿React owner查找，避免把资源库数千节点当图片输入扫描。 */
+async function findViewportRuntime(reader, progress) {
+  const canvas = await reader.domRoot('#root .scene-panel .scene-viewport > canvas.scene-canvas');
+  const fibers = (await reader.properties(canvas, 'scene canvas')).result.filter(row => row.name.startsWith('__reactFiber$'));
+  assert.equal(fibers.length, 1, '图片场景canvas React绑定必须唯一');
+  assert.ok(fibers[0].value && !fibers[0].get && !fibers[0].set, '图片canvas React绑定getter不可用');
+  let fiber = fibers[0].value;
+  for (let depth = 0; fiber?.objectId && depth < 100; depth++) {
+    let hook = await reader.data(fiber, 'memoizedState', false), hookCount = 0, ownsCanvas = false;
+    const runtimes = [];
+    while (hook?.objectId) {
+      assert.ok(++hookCount <= 500, '图片React hook链超过上限');
+      const value = await reader.data(hook, 'memoizedState', false);
+      if (value?.objectId && value.type === 'object') {
+        const candidate = await reader.data(value, 'current', false);
+        if (candidate?.objectId && candidate.type === 'object') {
+          if (candidate.subtype === 'node') ownsCanvas ||= await reader.same(candidate, canvas);
+          else {
+            const scene = await reader.data(candidate, 'scene', false), assets = await reader.data(candidate, 'assets', false);
+            if (scene?.objectId && assets?.objectId) {
+              const disposed = await reader.scalar(scene, '_isDisposed');
+              assert.equal(typeof disposed, 'boolean', '图片runtime释放状态未知');
+              if (!disposed) {
+                assert.equal((await reader.data(assets, 'models')).subtype, 'map', '图片runtime模型表未知');
+                const engine = await reader.data(scene, '_engine'), actualCanvas = await reader.data(engine, '_renderingCanvas');
+                assert.ok(await reader.same(actualCanvas, canvas), '图片runtime实际绘制canvas与DOM绑定不一致');
+                if (!(await Promise.all(runtimes.map(runtime => reader.same(runtime, candidate)))).some(Boolean)) runtimes.push(candidate);
+              }
+            }
+          }
+        }
+      }
+      hook = await reader.data(hook, 'next', false);
+      await progress('viewport-runtime-discovery', { depth, hooks: hookCount });
+    }
+    // 同一owner须同时持有canvasRef与唯一活动runtimeRef，不能取全局的任意场景。
+    if (ownsCanvas) {
+      assert.equal(runtimes.length, 1, '图片视口owner的non-disposed runtime必须唯一');
+      return runtimes[0];
+    }
+    fiber = await reader.data(fiber, 'return', false);
+  }
+  throw new Error('图片场景canvas未找到可验证的owner runtime');
 }
 
 async function registryEntries(reader, api, references) {
@@ -287,19 +373,32 @@ function dataImageBytes(url, image) {
  * 在正式ready计时以外调用；只证明实际注入URL与图片输入字节，不证明GPU纹理成功。
  * expected.slots 必须来自同轮已严格核对完整业务投影的 scene。bindingVerified 由宿主核当前owned project后传入。
  */
-export async function captureSceneOpenLogicalImages(page, expected, { output, workspaceRoot, bundledRoot, bindingVerified } = {}) {
+export async function captureSceneOpenLogicalImages(page, expected, { output, workspaceRoot, bundledRoot, bindingVerified, runtimeBinding = 'root' } = {}) {
   assert.equal(bindingVerified, true, '图片缓存读取必须先核当前owned绑定'); const images = validateExpected(expected);
+  assert.ok(runtimeBinding === 'root' || runtimeBinding === 'scene-canvas', '图片runtime绑定方式未知');
   assert.ok(path.isAbsolute(output) && path.isAbsolute(workspaceRoot) && path.isAbsolute(bundledRoot), '图片根/输出必须绝对路径');
   await noLinks(path.dirname(output)); await fs.mkdir(output); const group = 'scene-open-images-' + randomUUID();
-  const receipt = { version: 1, status: 'CAPTURING', provesGpuTextureSuccess: false, slots: [], images: [], cleanupErrors: [] };
-  let session, failure;
+  const receipt = { version: 1, status: 'CAPTURING', provesGpuTextureSuccess: false, runtimeBinding, slots: [], images: [], cleanupErrors: [] };
+  let session, failure, reader, lastProgressAt = 0;
+  const progress = async (phase, details = {}, force = false) => {
+    receipt.phase = phase; receipt.progress = details;
+    if (!force && Date.now() - lastProgressAt < 1000) return;
+    lastProgressAt = Date.now();
+    await fs.writeFile(path.join(output, 'progress.json'), JSON.stringify({ phase, ...details,
+      elapsedMs: reader ? Date.now() - reader.startedAt : 0, cdpRequests: reader?.requests ?? 0,
+      completedRequests: reader?.completedRequests ?? 0, updatedAt: new Date().toISOString() }, null, 2));
+  };
   try {
-    session = await page.context().newCDPSession(page); const reader = new OwnRemoteReader(session, group), runtime = await findRuntime(reader);
+    session = await page.context().newCDPSession(page); reader = new OwnRemoteReader(session, group);
+    await progress('runtime-discovery', {}, true);
+    const runtime = runtimeBinding === 'scene-canvas' ? await findViewportRuntime(reader, progress) : await findRuntime(reader, progress);
+    await progress('runtime-models', {}, true);
     const models = await reader.map(await reader.data(await reader.data(runtime, 'assets'), 'models'));
     const window = await reader.evaluate('this'), api = await reader.data(window, 'editorApi');
     const platformRefs = new Set([...images.values()].filter(x => x.kind === 'platform').map(x => x.logicalReference));
     const entries = platformRefs.size ? await registryEntries(reader, api, platformRefs) : new Map();
     const injected = new Map();
+    await progress('instance-bindings', { slotCount: expected.slots.length }, true);
     for (const slot of expected.slots) {
       const model = models.get(slot.entityId); assert.ok(model, `图片实际model缺失 ${slot.entityId}`);
       assert.equal(await reader.scalar(model, 'assetRevision'), slot.modelAssetRevision, '图片实际模型修订漂移');
@@ -318,6 +417,7 @@ export async function captureSceneOpenLogicalImages(page, expected, { output, wo
       injected.set(slot.logicalReference, { actualUrl, fileKey }); receipt.slots.push({ ...slot, actualResolvedUrl: actualUrl, canonicalFileKey: fileKey, instanceCount: instances.length, imageSha256: image.sha256 });
     }
     for (const [reference, image] of images) {
+      await progress('image-bytes', { logicalReference: reference, completedImages: receipt.images.length }, true);
       const mapping = injected.get(reference); let bytes, physical;
       if (image.kind === 'platform') {
         const entry = entries.get(reference); physical = await readImageFile(entry.filePath, workspaceRoot); assertImageBytes(physical, image);
@@ -329,11 +429,13 @@ export async function captureSceneOpenLogicalImages(page, expected, { output, wo
       assertImageBytes(bytes, image); const file = path.join(output, `${String(receipt.images.length + 1).padStart(2, '0')}-${image.sha256}.bin`);
       await fs.writeFile(file, bytes, { flag: 'wx' }); receipt.images.push({ logicalReference: reference, kind: image.kind, canonicalFileKey: mapping.fileKey, bytes: bytes.length, sha256: digest(bytes), localEvidenceFile: file, independentlyMatchedPhysicalFile: !!physical, actualRegistry: entries.get(reference) ?? null });
     }
-    receipt.status = 'PASS_ACTUAL_INPUT_IMAGE_BYTES_ONLY'; receipt.cdpRequests = reader.requests;
+    receipt.status = 'PASS_ACTUAL_INPUT_IMAGE_BYTES_ONLY'; await progress('complete', { imageCount: receipt.images.length }, true);
   } catch (error) { failure = error; receipt.status = 'FAIL'; receipt.error = { name: error.name, message: error.message, stack: error.stack, cdpException: error.sceneOpenLogicalImageCdpException ?? null }; receipt.cleanupErrors.push(...(fileCleanupErrors.get(error) ?? [])); }
   finally {
-    if (session) { for (const [method, params] of [['Runtime.releaseObjectGroup', { objectGroup: group }]]) try { await session.send(method, params); } catch (error) { receipt.cleanupErrors.push({ method, message: error.message }); }
-      try { await session.detach(); } catch (error) { receipt.cleanupErrors.push({ method: 'detach', message: error.message }); } }
+    if (session) { for (const [method, params] of [['Runtime.releaseObjectGroup', { objectGroup: group }]]) try { await withDeadline(session.send(method, params), 5000, method); } catch (error) { receipt.cleanupErrors.push({ method, message: error.message }); }
+      try { await withDeadline(session.detach(), 5000, 'detach'); } catch (error) { receipt.cleanupErrors.push({ method: 'detach', message: error.message }); } }
+    receipt.cdpRequests = reader?.requests ?? 0; receipt.completedRequests = reader?.completedRequests ?? 0;
+    receipt.elapsedMs = reader ? Date.now() - reader.startedAt : 0;
   }
   if (receipt.cleanupErrors.length) receipt.status = 'FAIL';
   try { await fs.writeFile(path.join(output, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n', { flag: 'wx' }); }

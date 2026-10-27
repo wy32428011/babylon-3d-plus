@@ -130,15 +130,23 @@ export class DeviceSpawnerRuntime {
 
   /** 结束预览时销毁全部动态实例并退订消息。 */
   disposeAll(): void {
-    for (const key of [...this.instances.keys()]) {
-      this.host.disposeDeviceInstance(key);
-    }
+    // 先断开消息入口和注册表，再调用宿主释放，避免释放回调重入生成新实例。
+    const unsubscribe = this.unsubscribeMessages;
+    this.unsubscribeMessages = null;
+    unsubscribe?.();
+    const keys = [...this.instances.keys()];
     this.instances.clear();
     this.instancesByAssetCode.clear();
     this.spawners.clear();
     this.reportedMissingSpawnerCodes.clear();
-    this.unsubscribeMessages?.();
-    this.unsubscribeMessages = null;
+    for (const key of keys) {
+      try {
+        this.host.disposeDeviceInstance(key);
+      } catch (error) {
+        const message = `设备产生器实例清理失败：${error instanceof Error ? error.message : String(error)}`;
+        try { this.host.pushLog(message); } catch (logError) { console.error(message, error, logError); }
+      }
+    }
   }
 
   private removeInstance(key: SpawnedDeviceKey): void {

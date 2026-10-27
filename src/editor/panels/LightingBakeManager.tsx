@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { getSceneLightingBakeSignature, requiresSceneLightingBake, type LightingBakeEngineStatus } from '../../../electron/shared/sceneLightingBakeContract';
+import { getSceneLightingBakeSignatureCached, requiresSceneLightingBake, type LightingBakeEngineStatus } from '../../../electron/shared/sceneLightingBakeContract';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import { useEditorStore } from '../store/editorStore';
 import type { LightingManagerTab } from '../store/lightingManagementState';
@@ -80,7 +80,7 @@ function LightingBakeManagerSession() {
     return value;
   }, { static: 0, dynamic: 0 }), [rows]);
   const sourceCount = useMemo(() => getLightingManagerEntities(scene).length, [scene]);
-  const signature = useMemo(() => getSceneLightingBakeSignature(scene), [scene]);
+  const signature = useMemo(() => getSceneLightingBakeSignatureCached(scene), [scene]);
   const result = useMemo(() => getSceneLightingConfig(scene).result ?? null, [scene]);
   const resultStale = Boolean(result && result.signature !== signature);
   const resultLabel = busy ? LIGHTING_MANAGER_PHASE_LABELS[status.phase] : !requiresSceneLightingBake(scene) ? '无需静态烘焙'

@@ -1,5 +1,15 @@
 # 实现经验
 
+## 静态图片审计应绑定真实视口（2026-10-26）
+
+- 通过CDP逐属性扫描整个React界面，会把模型库UI规模转化为大量跨进程等待；本例16路并发仍未在180秒内完成运行时发现。
+- 从唯一场景canvas沿owner定位runtime，并核验engine的实际绘制canvas，再执行原有实例/字节校验；保留只读descriptor与Proxy拒绝，补充阶段进度和有限超时。本例18槽位/2张图片完整核对约99秒完成，不能把审计耗时当加载或GPU指标。
+
+## Babylon 按需导入须保留碰撞协调器注册（2026-10-26）
+
+- 手动漫游调用 `moveWithCollisions()` 时，单独导入 Mesh/Scene 不会注册默认碰撞协调器，`Scene.CollisionCoordinatorFactory` 会抛出缺少 `DefaultCollisionCoordinator` 导入的异常。
+- 在公共副作用入口导入 `@babylonjs/core/Collisions/collisionCoordinator.js`；该入口调用 `RegisterCollisionCoordinator()`，仅导入类型或纯实现不能替代注册。
+
 ## Babylon共享几何与局部缓冲更新须明确所有权（2026-10-26）
 
 - 触发：从完整独占容器改为共享Geometry，以及将thinInstance全量上传改为局部上传。
@@ -191,6 +201,8 @@
 - 原因：this.callback(...) 与 context.callback(...) 会把不同对象作为普通 function 回调的 receiver；仅归一化正文 tokens 会遗漏此差异。
 - 修复：公共可选订阅继续保留原字段，在直接调用处恢复原 SceneRuntime receiver；原裸调用的环境通知继续裸调用，传给子运行时的原函数引用保持原样，optional call 保留短路。
 - 预防：除方法体、构造/帧/释放顺序外，增加真实实例 function 回调 receiver、取消订阅不扫描以及异步失败通知回归。
+- 生命周期收拢（2026-10-26）：普通退出预览需要恢复编辑态，最终销毁不能沿该路径再次触发脚本或加载重试；先停帧回调、退订消息、取消请求，再释放临时态与共享资源。借用 batch 的索引不拥有销毁权，模型/变体/生成物须先归还各自租约，共享缓存最后释放；组合取消信号时仍保留原请求信号作为 Trace 归属键。
+- 跨预览请求：AbortSignal 与响应代际校验不能代替在途计数的代际隔离；重置计数后，旧请求的 finally 只能释放旧会话，不能扣减新会话计数。
 
 ## 2026-10-22 浏览器条件导出与验收夹具
 
@@ -445,6 +457,7 @@
 - 两个独立工具实测：bootstrap顶层`await app.whenReady()`会使入口模块未结束、ready无法推进，Playwright launch超时且尚未创建renderer；这不是GI或产品启动失败。
 - 使用`app.whenReady().then(async () => { ... })`注册式初始化，并等待明确host/window就绪receipt；或复用已通过的主入口bootstrap。新工具保持独立userData、核实owned PID退出、删除精确临时bootstrap，失败目录保留。
 - 若bootstrap还要导入产品main，必须在ready前完成该模块求值，使`protocol.registerSchemesAsPrivileged`来得及注册；只把需要ready的查询放进回调。POST-only无窗口入口可以在ready回调运行，两条路径分别测试，不能把主入口也移入ready回调。
+- 2026-10-26：实际主窗口加载 `preload.cts` 生成的 `preload.cjs`；只更新同名 `preload.ts` 不会接通桌面API。类型检查与直接调用服务通过不能代替实际窗口到IPC的连通检查。复用旧UI脚本时须按当前惰性分类入口触发，不能等待已不再自动刷新的Store列表。
 
 ## 真实准备门按当前实体合同，采集不能跳过GPU独占缓冲（2026-10-25）
 

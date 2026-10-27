@@ -208,7 +208,7 @@ export function validateSceneOpenResolvedBaseline(baseline, manifest, resolvedBy
   assert.ok(stableSceneOpenJson(baseline.locationRules)===stableSceneOpenJson(derived.locationRules),'新基线资源身份规则必须来自实际schema');
   assert.ok(Array.isArray(baseline.roots)&&baseline.roots.length>0&&baseline.roots.every(row=>typeof row.tag==='string'&&typeof row.path==='string'&&row.path));
   assert.ok(Array.isArray(baseline.resources)&&baseline.resources.length>0&&baseline.resources.every(row=>typeof row.key==='string'
-    &&/^@(?:PROJECT|WORKSPACE)\//.test(row.key)&&Number.isSafeInteger(row.bytes)&&row.bytes>=0&&/^[a-f0-9]{64}$/.test(row.sha256)));
+      &&/^@(?:PROJECT|WORKSPACE|BUNDLED\/skybox-environments)\//.test(row.key)&&Number.isSafeInteger(row.bytes)&&row.bytes>=0&&/^[a-f0-9]{64}$/.test(row.sha256)));
   assert.equal(new Set(baseline.resources.map(row=>row.key)).size,baseline.resources.length,'新基线引用文件键不能重复');
   const frozen=freezeSceneOpenInput(resolvedBytes,{roots:baseline.roots,locationPointers:derived.locationPointers,locationRules:derived.locationRules});
   assert.ok(stableSceneOpenJson(frozen)===stableSceneOpenJson(baseline.frozen),'新基线投影/可逆映射收据漂移');
@@ -216,13 +216,17 @@ export function validateSceneOpenResolvedBaseline(baseline, manifest, resolvedBy
 }
 
 /** 文件逐个流式hash；仅owned根内、无链接的真实引用文件，不读原工程缓存凑warm。 */
-export async function hashSceneOpenReferencedFiles(document, { locationPointers, workspaceRoot, projectRoot }) {
+export async function hashSceneOpenReferencedFiles(document, { locationPointers, workspaceRoot, projectRoot, bundledSkyboxRoot }) {
   const values = new Map(); const walk = (value, pointer) => { values.set(pointer, value); if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) walk(item, child(pointer, key)); };
   walk(document, ''); const files = new Map(), pending = [],checkedAncestors=new Set(),scene=document.scene??document;
   const openingPointer=(document.scene?'/scene':'')+'/sceneSettings/openingAnimation/package/manifestUrl',opening=scene.sceneSettings?.openingAnimation?.package;
-  const within = file => { const relative = path.relative(workspaceRoot, file); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); };
+  const withinRoot = (root, file) => { const relative = path.relative(root, file); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); };
+  // 原生天空可引用随应用交付的只读 ENV；仅允许调用方明确指定的这一资源根，仍校验链接和实际字节。
+  const rootFor = file => withinRoot(workspaceRoot, file) ? workspaceRoot
+    : bundledSkyboxRoot && withinRoot(bundledSkyboxRoot, file) ? bundledSkyboxRoot : null;
+  const within = file => rootFor(file) !== null;
   const noAncestorLinks=async file=>{
-    const relative=path.relative(workspaceRoot,file);assert.ok(within(file));let cursor=path.resolve(workspaceRoot);
+    const root=rootFor(file);assert.ok(root);const relative=path.relative(root,file);let cursor=path.resolve(root);
     for(const part of ['',...relative.split(path.sep).filter(Boolean)]){if(part)cursor=path.join(cursor,part);if(checkedAncestors.has(cursor))continue;
       assert.equal((await fs.lstat(cursor)).isSymbolicLink(),false,'引用资源祖先含junction/符号链接');checkedAncestors.add(cursor);}
   };
@@ -252,7 +256,9 @@ export async function hashSceneOpenReferencedFiles(document, { locationPointers,
     else if (stat.isFile()) {
       const hash = createHash('sha256'); for await (const chunk of createReadStream(actual)) hash.update(chunk);
       const projectRelative = path.relative(projectRoot, actual), project = projectRelative === '' || (!projectRelative.startsWith('..') && !path.isAbsolute(projectRelative));
-      const key = (project ? '@PROJECT/' + projectRelative : '@WORKSPACE/' + path.relative(workspaceRoot, actual)).replaceAll('\\', '/');
+      const key = (project ? '@PROJECT/' + projectRelative : withinRoot(workspaceRoot, actual)
+        ? '@WORKSPACE/' + path.relative(workspaceRoot, actual)
+        : '@BUNDLED/skybox-environments/' + path.relative(bundledSkyboxRoot, actual)).replaceAll('\\', '/');
       files.set(key, { key, bytes: stat.size, sha256: hash.digest('hex') });
     } else throw new Error('未知资源文件类型');
   }

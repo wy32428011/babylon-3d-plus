@@ -25,6 +25,7 @@ import { clampNumber, createLocalAxis, filterTopLevelMotionNodes, findModelNodes
 import { readConveyorCargoSurfaceOffset, readConveyorCargoTravelConfig } from '../telemetry/specialized/specializedModelAssets';
 import type { ConveyorCargoTravelConfig } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { ScenePoiAndEffectsController } from './ScenePoiAndEffectsController';
 import type { SceneTransformPreviewController } from './SceneTransformPreviewController';
@@ -57,6 +58,47 @@ export class SceneMeshPresentationController {
   public _trajectoryVisible = false;
   public readonly lights = new Map<string, Light>();
   public lightMarkerRuntime!: EditorLightMarkerRuntime;
+  private meshesDisposed = false;
+  private trajectoriesDisposed = false;
+  private disposed = false;
+  private readonly disposedMeshes = new WeakSet<Mesh>();
+  private readonly disposedTrajectories = new WeakSet<ConveyorTrajectoryRuntimeEntry>();
+  private readonly disposedLights = new WeakSet<Light>();
+  private readonly areaLightTransforms = new WeakMap<Light, TransformNode>();
+
+  /** 原始网格先于定位器和模型释放；不提前释放轨迹或灯光。 */
+  disposeMeshes(): void {
+    if (this.meshesDisposed) return;
+    this.meshesDisposed = true;
+    for (const [entityId, mesh] of [...this.meshes]) {
+      runSceneRuntimeCleanup(this.context, `基础网格 ${entityId}`, () => this.disposeMesh(entityId, mesh));
+    }
+    this.meshes.clear();
+  }
+
+  /** 轨迹在 CAD 后、模型前释放，独立于原始网格阶段。 */
+  disposeTrajectories(): void {
+    if (this.trajectoriesDisposed) return;
+    this.trajectoriesDisposed = true;
+    for (const [entityId, trajectory] of [...this.conveyorTrajectories]) {
+      runSceneRuntimeCleanup(this.context, `输送线轨迹 ${entityId}`, () => this.disposeConveyorTrajectory(entityId, trajectory));
+    }
+    this.conveyorTrajectories.clear();
+    this._trajectoryVisible = false;
+  }
+
+  /** 灯光最后释放；独立调用时兜底前两个阶段，但不接管环境灯光或阴影运行时。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.disposeMeshes();
+    this.disposeTrajectories();
+    for (const [entityId, light] of [...this.lights]) {
+      runSceneRuntimeCleanup(this.context, `实体灯光 ${entityId}`, () => this.disposeLight(entityId, light));
+    }
+    this.lights.clear();
+    runSceneRuntimeCleanup(this.context, '编辑器灯光标记', () => this.lightMarkerRuntime?.dispose());
+  }
 
   /** 发布 Viewer 在首次同步前永久禁用编辑器专用灯光标记。 */
   disableEditorLightMarkers(): void {
@@ -65,6 +107,7 @@ export class SceneMeshPresentationController {
 
   /** 设置输送线轨迹可视化的全局开关，控制所有已创建轨迹的显示/隐藏。 */
   setTrajectoryVisible(visible: boolean): void {
+    if (this.trajectoriesDisposed || this.disposed) return;
     this._trajectoryVisible = visible;
     for (const [entityId, entry] of this.conveyorTrajectories) {
       entry.root.setEnabled(visible && this.dependencies.document.isEntityVisible(entityId));
@@ -73,6 +116,7 @@ export class SceneMeshPresentationController {
 
   /** 同步基础几何体 Mesh 类型、Transform 与选中材质状态。 */
   public syncPrimitiveMeshEntity(entity: Entity, selected: boolean): void {
+    if (this.meshesDisposed || this.disposed) return;
     const meshRenderer = entity.components.meshRenderer;
     if (!meshRenderer) return;
 
@@ -97,6 +141,7 @@ export class SceneMeshPresentationController {
 
   /** 将大屏缩略图挂到平面材质上；iframe 模式也保留纹理作为 Overlay 加载失败时的底图。 */
   public syncDataPlatformScreenEntity(entity: Entity): void {
+    if (this.meshesDisposed || this.disposed) return;
     const screen = entity.components.dataPlatformScreen;
     const mesh = this.meshes.get(entity.id);
     if (!screen || !mesh || mesh.metadata?.editorMeshKind !== 'plane') return;
@@ -140,6 +185,7 @@ export class SceneMeshPresentationController {
 
   /** 同步灯光类型、位置/方向、强度及编辑器标记。 */
   public syncLightEntity(entity: Entity, selected: boolean): void {
+    if (this.disposed) return;
     const lightComponent = entity.components.light;
     if (!lightComponent) return;
 
@@ -227,7 +273,9 @@ export class SceneMeshPresentationController {
       ensureLocalAreaLightTextures(this.context.scene);
       const area = new RectAreaLight(entityId, Vector3.Zero(), light.width ?? DEFAULT_AREA_LIGHT_SIZE,
         light.height ?? DEFAULT_AREA_LIGHT_SIZE, this.context.scene);
-      area.parent = new TransformNode(`${entityId}_areaLightTransform`, this.context.scene);
+      const areaTransform = new TransformNode(`${entityId}_areaLightTransform`, this.context.scene);
+      area.parent = areaTransform;
+      this.areaLightTransforms.set(area, areaTransform);
       return area;
     }
 
@@ -236,17 +284,21 @@ export class SceneMeshPresentationController {
 
   /** 释放实体对应的 Mesh 与材质资源。 */
   public disposeMesh(entityId: string, mesh: Mesh): void {
-    this.dependencies.effects.chartMarkerPresentation.remove(mesh);
-    this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId);
-    mesh.material?.dispose();
-    mesh.dispose();
-    this.meshes.delete(entityId);
+    if (this.disposedMeshes.has(mesh)) return;
+    this.disposedMeshes.add(mesh);
+    if (this.meshes.get(entityId) === mesh) this.meshes.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `立标辅助资源 ${entityId}`, () => this.dependencies.effects.chartMarkerPresentation.remove(mesh));
+    runSceneRuntimeCleanup(this.context, `基础网格阵列预览 ${entityId}`, () => this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId));
+    // 大屏纹理由 effects 持有，材质释放不能连带销毁纹理。
+    runSceneRuntimeCleanup(this.context, `基础网格材质 ${entityId}`, () => mesh.material?.dispose());
+    runSceneRuntimeCleanup(this.context, `基础网格节点 ${entityId}`, () => mesh.dispose());
   }
 
   // ===== 输送线轨迹可视化 =====
 
   /** 同步输送线轨迹：conveyor 且模型就绪时创建（trajectoryDirection 缺省按 'x'），反之释放。 */
   public syncConveyorTrajectory(entity: Entity, model: ModelRuntimeEntry | null): void {
+    if (this.trajectoriesDisposed || this.disposed) return;
     const binding = entity.components.telemetryBinding;
     const enabled = Boolean(
       binding
@@ -345,7 +397,7 @@ export class SceneMeshPresentationController {
 
   /** 创建轨迹虚线 + 方向箭头；全部网格非拾取，挂独立根节点（阵列源模型 root 会被合批挂起禁用）。 */
   public createConveyorTrajectory(entity: Entity, context: ConveyorTrajectoryContext, signature: string): void {
-    if (context.spanMeters <= 0.001) return;
+    if (this.trajectoriesDisposed || this.disposed || context.spanMeters <= 0.001) return;
 
     const half = context.spanMeters / 2;
     const baseY = context.surfaceYLocal;
@@ -462,7 +514,7 @@ export class SceneMeshPresentationController {
 
     let flowTime = 0;
     const flowObserver = this.context.scene.onBeforeRenderObservable.add(() => {
-      if (!root.isEnabled()) return;
+      if (this.trajectoriesDisposed || root.isDisposed() || this.conveyorTrajectories.get(entity.id)?.root !== root || !root.isEnabled()) return;
       const dtSeconds = this.context.scene.getEngine().getDeltaTime() / 1000;
       flowTime = (flowTime + (dtSeconds * flowSpeed) / context.spanMeters) % 1;
       updateFlow(flowTime);
@@ -487,21 +539,34 @@ export class SceneMeshPresentationController {
   }
 
   public disposeConveyorTrajectory(entityId: string, entry: ConveyorTrajectoryRuntimeEntry): void {
-    this.context.scene.onBeforeRenderObservable.remove(entry.flowObserver);
-    for (const lineMesh of entry.lineMeshes) lineMesh.dispose(false, true);
-    for (const mesh of entry.arrowMeshes) mesh.dispose();
-    for (const armMaterial of entry.arrowMaterials) armMaterial.dispose();
-    entry.root.dispose();
-    this.conveyorTrajectories.delete(entityId);
+    if (this.disposedTrajectories.has(entry)) return;
+    this.disposedTrajectories.add(entry);
+    if (this.conveyorTrajectories.get(entityId) === entry) this.conveyorTrajectories.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `轨迹帧回调 ${entityId}`, () => this.context.scene.onBeforeRenderObservable.remove(entry.flowObserver));
+    for (const [index, lineMesh] of entry.lineMeshes.entries()) {
+      runSceneRuntimeCleanup(this.context, `轨迹线材质 ${entityId}/${index}`, () => lineMesh.material?.dispose(false, true));
+      runSceneRuntimeCleanup(this.context, `轨迹线网格 ${entityId}/${index}`, () => lineMesh.dispose(false, false));
+    }
+    for (const [index, mesh] of entry.arrowMeshes.entries()) {
+      runSceneRuntimeCleanup(this.context, `轨迹箭头 ${entityId}/${index}`, () => mesh.dispose());
+    }
+    for (const [index, material] of entry.arrowMaterials.entries()) {
+      runSceneRuntimeCleanup(this.context, `轨迹箭头材质 ${entityId}/${index}`, () => material.dispose());
+    }
+    runSceneRuntimeCleanup(this.context, `轨迹根节点 ${entityId}`, () => entry.root.dispose());
   }
 
   public disposeLight(entityId: string, light: Light): void {
-    this.dependencies.environment.shadowRuntime.removeLight(entityId);
-    this.lightMarkerRuntime.disposeEntity(entityId);
-    const areaTransform = light instanceof RectAreaLight ? light.parent : null;
-    light.dispose();
-    areaTransform?.dispose();
-    this.lights.delete(entityId);
+    if (this.disposedLights.has(light)) return;
+    this.disposedLights.add(light);
+    if (this.lights.get(entityId) === light) this.lights.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `实体灯光阴影 ${entityId}`, () => this.dependencies.environment.shadowRuntime.removeLight(entityId));
+    runSceneRuntimeCleanup(this.context, `实体灯光标记 ${entityId}`, () => this.lightMarkerRuntime?.disposeEntity(entityId));
+    // 只释放本领域为面光源创建的节点，不能把后来借用的 parent 当作自有资源。
+    const areaTransform = this.areaLightTransforms.get(light);
+    this.areaLightTransforms.delete(light);
+    runSceneRuntimeCleanup(this.context, `实体灯光节点 ${entityId}`, () => light.dispose());
+    runSceneRuntimeCleanup(this.context, `面光源变换节点 ${entityId}`, () => areaTransform?.dispose(true));
   }
 
   /** 将显隐和锁定状态应用到可拾取 Mesh。 */
@@ -553,6 +618,7 @@ export class SceneMeshPresentationController {
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeLightMarkerRuntime(): void {
+    if (this.disposed || this.lightMarkerRuntime) return;
     this.lightMarkerRuntime = new EditorLightMarkerRuntime(this.context.scene);
   }
 

@@ -3,6 +3,7 @@ import { Scene } from '@babylonjs/core/scene.js';
 import type { Nullable, Observer } from '@babylonjs/core';
 import { ConveyorSurfaceArrowRenderer } from '../effects/ConveyorSurfaceArrowRenderer';
 import { ConveyorSurfaceArrowSystem } from '../telemetry/ConveyorSurfaceArrowSystem';
+import { buildArrowModelViews, type ArrowModelViews, type ArrowSystemKind } from '../telemetry/arrowModelViews';
 import { StackerMotionArrowSystem } from '../telemetry/StackerMotionArrowSystem';
 import { StackerMotionArrowRenderer } from '../effects/StackerMotionArrowRenderer';
 import { RgvMotionArrowSystem } from '../telemetry/RgvMotionArrowSystem';
@@ -16,6 +17,7 @@ import { resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTeleme
 import { SpecializedTelemetryRuntime } from '../telemetry/specialized/SpecializedTelemetryRuntime';
 import type { SpecializedTelemetryHost } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
+import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
 import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
@@ -38,9 +40,9 @@ type Dependencies = {
   readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayTelemetryProxies' | 'refreshModelArrayRuntimeRepresentation' | 'prepareModelArrayRuntimeMutation'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants'>;
-  readonly outputs: Pick<GeneratedModelOutputController, 'spawnedDeviceModels' | 'getGeneratedCargoFallbackSpec' | 'ensureGeneratedCargoFallback' | 'ensureGeneratedCargoOutputOwner' | 'syncGeneratedCargoVisual' | 'setGeneratedCargoRootPose' | 'disposeGeneratedCargo' | 'clearModelGeneratorLoadFailureCache' | 'syncAllModelGeneratorPresentations' | 'syncDeviceSpawnerMarkerVisibility' | 'configureDeviceSpawnersFromDocument' | 'deviceSpawnerRuntime' | 'spawnedDeviceRevealPending' | 'spawnedDeviceHiddenLayerMasks' | 'generatedOutputOwners' | 'revealDrivenSpawnedDevices'>;
+  readonly outputs: Pick<GeneratedModelOutputController, 'spawnedDeviceModels' | 'getGeneratedCargoFallbackSpec' | 'ensureGeneratedCargoFallback' | 'ensureGeneratedCargoOutputOwner' | 'syncGeneratedCargoVisual' | 'setGeneratedCargoRootPose' | 'disposeGeneratedCargo' | 'clearModelGeneratorLoadFailureCache' | 'syncAllModelGeneratorPresentations' | 'syncDeviceSpawnerMarkerVisibility' | 'configureDeviceSpawnersFromDocument' | 'deviceSpawnerRuntime' | 'stopDeviceSpawning' | 'generatedOutputOwners' | 'revealDrivenSpawnedDevices'>;
   readonly locators: Pick<SceneLocatorController, 'findLocatorByDevice' | 'findLocatorsByDevice' | 'findLocatorByAisle' | 'findLocatorsByAisle' | 'findLayerChangePlatformLocator' | 'findBuiltInSlotLocatorForHostModel' | 'resolveBuiltInSlotHost' | 'resolveCargoGeneratorForModel' | 'resolveColumnTargetPose' | 'refreshAllBuiltInSlotRenderability'>;
-  readonly fetch: Pick<SceneLocatorFetchController, 'resolveFetchDriveRowForLocator' | 'suppressFetchCellForLocator' | 'retainFetchCellForLocator' | 'releaseRetainedFetchCellForLocator' | 'handleFetchRowSync' | 'keepCargoForFetchRowSync' | 'stopFetchSyncTimer' | 'fetchSyncFailureReported' | 'locatorFetchRuntimes' | 'latestFetchRequestByRow' | 'fetchKeptCargoByRow' | 'fetchConfigSnapshot'>;
+  readonly fetch: Pick<SceneLocatorFetchController, 'resolveFetchDriveRowForLocator' | 'suppressFetchCellForLocator' | 'retainFetchCellForLocator' | 'releaseRetainedFetchCellForLocator' | 'handleFetchRowSync' | 'keepCargoForFetchRowSync' | 'stopPreviewRequests' | 'resetPreview'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'getModelWorldBounds'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'clearEntityArrayPreview' | 'clearFolderGroupGizmoTarget'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'lightMarkerRuntime' | 'meshes'>;
@@ -77,6 +79,31 @@ export class SceneTelemetryController {
   public telemetryFrameTimeMs: number | null = null;
   public readonly telemetryOuterStages = { diagnosticsMs: 0, baselineMs: 0, alarmsMs: 0 };
   public telemetryMaxFrameTimeMs: number | null = null;
+  private updatesStopped = false;
+  private disposed = false;
+
+  /** 最终销毁的第一阶段；先停帧回调并归还合批接管的原件，光照与模型资源此时仍须存活。 */
+  stopUpdates(): void {
+    if (this.updatesStopped) return;
+    this.updatesStopped = true;
+    if (this.telemetryObserver) this.context.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
+    this.telemetryObserver = null;
+    runSceneRuntimeCleanup(this.context, '遥测动静合批', () => this.motionStaticBatchRuntime.dispose());
+  }
+
+  /** 最终销毁的释放阶段；普通退出预览不释放这些可重用系统。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.stopUpdates();
+    runSceneRuntimeCleanup(this.context, '遥测预览', () => this.endTelemetryPreview());
+    runSceneRuntimeCleanup(this.context, '输送线箭头', () => this.conveyorSurfaceArrowSystem.dispose());
+    runSceneRuntimeCleanup(this.context, '堆垛机箭头', () => this.stackerMotionArrowSystem.dispose());
+    runSceneRuntimeCleanup(this.context, 'RGV 箭头', () => this.rgvMotionArrowSystem.dispose());
+    runSceneRuntimeCleanup(this.context, '提升机箭头', () => this.liftMotionArrowSystem.dispose());
+    runSceneRuntimeCleanup(this.context, '专用遥测', () => this.specializedTelemetryRuntime.dispose());
+    this.hasConveyorSurfaceArrows = this.hasStackerMotionArrows = this.hasRgvMotionArrows = this.hasLiftMotionArrows = false;
+  }
 
   /** 诊断开关不入文档，用于同一正式运行时的受控 A/B；需显式启用。 */
   setMotionStaticBatchingEnabled(enabled: boolean): void {
@@ -182,7 +209,7 @@ export class SceneTelemetryController {
 
   /** 开始 MQTT 运行预览；该方法幂等，并在真正驱动前清空上一次预览残留运行态。 */
   beginTelemetryPreview(): void {
-    if (this.telemetryPreviewActive) return;
+    if (this.telemetryPreviewActive || this.updatesStopped || this.dependencies.document.disposed) return;
     this.dependencies.transforms.clearEntityArrayPreview();
     this.dependencies.transforms.clearFolderGroupGizmoTarget();
     this.telemetryPreviewActive = true;
@@ -205,28 +232,30 @@ export class SceneTelemetryController {
 
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
   endTelemetryPreview(): void {
-    this.dependencies.effects.cancelModelEntrance();
-    // 停表必须先于早退与代际表清理：tick 会重写 latestFetchRequestByRow，清表后再停会让在途响应被放行、批次在编辑态复活
-    this.dependencies.fetch.stopFetchSyncTimer();
-    this.dependencies.fetch.fetchSyncFailureReported = false;
-    // 动态设备实例不依赖基线恢复，无论预览态标志如何都先统一销毁并退订消息。
-    this.dependencies.outputs.deviceSpawnerRuntime.disposeAll();
-    this.dependencies.outputs.spawnedDeviceRevealPending.clear();
-    this.dependencies.outputs.spawnedDeviceHiddenLayerMasks.clear();
-    this.dependencies.outputs.syncDeviceSpawnerMarkerVisibility();
-    const hadPreviewState = this.telemetryPreviewActive
+    runSceneRuntimeCleanup(this.context, '遥测预览复位', () => this.resetTelemetryPreview());
+  }
+
+  private resetTelemetryPreview(): void {
+    const wasPreviewActive = this.telemetryPreviewActive;
+    this.telemetryPreviewActive = false;
+    runSceneRuntimeCleanup(this.context, '模型入场动画', () => this.dependencies.effects.cancelModelEntrance());
+    this.dependencies.fetch.stopPreviewRequests();
+    runSceneRuntimeCleanup(this.context, '动态设备预览', () => this.dependencies.outputs.stopDeviceSpawning());
+    const hadPreviewState = wasPreviewActive
       || [...this.dependencies.assets.models.values()].some((model) => model.telemetryPreviewBaseline)
       || [...this.dependencies.outputs.generatedOutputOwners.values()].some((owner) => (
         owner.output?.kind === 'model' && owner.output.model.telemetryPreviewBaseline !== null
       ));
-    if (!hadPreviewState) return;
+    if (!hadPreviewState) {
+      this.dependencies.fetch.resetPreview();
+      return;
+    }
 
-    this.telemetryPreviewActive = false;
-    this.conveyorSurfaceArrowSystem.clear();
-    this.stackerMotionArrowSystem.clear();
-    this.rgvMotionArrowSystem.clear();
-    this.liftMotionArrowSystem.clear();
-    this.dependencies.effects.alarmRuntime.reset();
+    runSceneRuntimeCleanup(this.context, '输送线箭头预览', () => this.conveyorSurfaceArrowSystem.clear());
+    runSceneRuntimeCleanup(this.context, '堆垛机箭头预览', () => this.stackerMotionArrowSystem.clear());
+    runSceneRuntimeCleanup(this.context, 'RGV 箭头预览', () => this.rgvMotionArrowSystem.clear());
+    runSceneRuntimeCleanup(this.context, '提升机箭头预览', () => this.liftMotionArrowSystem.clear());
+    runSceneRuntimeCleanup(this.context, '告警预览', () => this.dependencies.effects.alarmRuntime.reset());
     for (const id of this.dependencies.effects.alarmManagerIds) this.dependencies.presentation.meshes.get(id)?.setEnabled(this.dependencies.document.isEntityVisible(id));
     this.dependencies.presentation.lightMarkerRuntime.setPreviewActive(false);
     this.dependencies.patrol.autoPatrolMarkerRuntime.setPreviewActive(false);
@@ -234,13 +263,8 @@ export class SceneTelemetryController {
     this.dependencies.effects.clickEventBindingRuntime.setPreviewActive(false);
     // 点击单元产生的单格高亮属于预览交互产物，随预览结束一并清除。
     this.dependencies.selection.setLocalSlotHighlight('', null);
-    this.specializedTelemetryRuntime.disposeAllCargo();
-    for (const fetchRuntime of this.dependencies.fetch.locatorFetchRuntimes.values()) {
-      fetchRuntime.clearAllBatches();
-    }
-    this.dependencies.fetch.latestFetchRequestByRow.clear();
-    this.dependencies.fetch.fetchKeptCargoByRow.clear();
-    this.dependencies.fetch.fetchConfigSnapshot = null;
+    runSceneRuntimeCleanup(this.context, '预览货物', () => this.specializedTelemetryRuntime.disposeAllCargo());
+    this.dependencies.fetch.resetPreview();
     for (const model of this.dependencies.assets.models.values()) {
       if (model.telemetryPreviewBaseline) {
         restoreModelTelemetryPreviewBaseline(model.telemetryPreviewBaseline);
@@ -280,6 +304,8 @@ export class SceneTelemetryController {
       resetConveyorTelemetryState(proxy);
     }
     this.clearTelemetryPreviewRuntimeState();
+    // 最终销毁不重新进入编辑态脚本、不重试加载；共享资源由后续销毁阶段释放。
+    if (this.updatesStopped || this.dependencies.document.disposed) return;
     this.updateAllExternalScriptRuntimeContexts('edit', null);
     this.dependencies.outputs.clearModelGeneratorLoadFailureCache();
     this.dependencies.outputs.syncAllModelGeneratorPresentations();
@@ -308,52 +334,53 @@ export class SceneTelemetryController {
   }
 
   /** 箭头同时覆盖编辑预览和运行态，失效状态也更新，避免停机或断流后残留。 */
-  public updateConveyorSurfaceArrows(): void {
+  public updateConveyorSurfaceArrows(views?: ArrowModelViews): void {
     // 没有启用箭头的输送线时跳过逐帧收集；缺省开启，显式关闭保留。
-    if (!this.hasConveyorSurfaceArrows) return;
-    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
-
+    if (this.updatesStopped || !this.hasConveyorSurfaceArrows) return;
     const delta = Math.min(0.25, Math.max(0, this.context.scene.getEngine().getDeltaTime() / 1000));
-    this.conveyorSurfaceArrowSystem.tick(models.map(({ entityId, model }) => ({
-      entityId, model,
-      deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model),
-      visible: this.dependencies.document.isEntityVisible(entityId),
-    })), this.telemetryPreviewActive, delta);
+    this.conveyorSurfaceArrowSystem.tick((views ?? this.buildArrowModelViews(['conveyor'])).conveyor, this.telemetryPreviewActive, delta);
   }
 
   /** 读取本帧已执行的四路运动，只在显式启用堆垛机箭头时收集实例。 */
-  public updateStackerMotionArrows(): void {
-    if (!this.hasStackerMotionArrows) return;
-    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+  public updateStackerMotionArrows(views?: ArrowModelViews): void {
+    if (this.updatesStopped || !this.hasStackerMotionArrows) return;
     const delta = Math.min(.25, Math.max(0, this.context.scene.getEngine().getDeltaTime() / 1000));
-    this.stackerMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
-      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.dependencies.document.isEntityVisible(entityId),
-    })), this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
+    this.stackerMotionArrowSystem.tick((views ?? this.buildArrowModelViews(['stacker'])).stacker, this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
   }
 
   /** RGV 三路箭头与设备共用类型解析；没有配置时跳过逐帧收集。 */
-  public updateRgvMotionArrows(): void {
-    if (!this.hasRgvMotionArrows) return;
-    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+  public updateRgvMotionArrows(views?: ArrowModelViews): void {
+    if (this.updatesStopped || !this.hasRgvMotionArrows) return;
     const delta = Math.min(.25, Math.max(0, this.context.scene.getEngine().getDeltaTime() / 1000));
-    this.rgvMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
-      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.dependencies.document.isEntityVisible(entityId),
-    })), this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
+    this.rgvMotionArrowSystem.tick((views ?? this.buildArrowModelViews(['rgv'])).rgv, this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
   }
 
   /** 提升机与换层提升机在驱动后读取本帧实际运动；缺省关闭时不收集模型。 */
-  public updateLiftMotionArrows(): void {
-    if (!this.hasLiftMotionArrows) return;
-    const models = [...this.specializedTelemetryRuntime.host.collectModels()];
+  public updateLiftMotionArrows(views?: ArrowModelViews): void {
+    if (this.updatesStopped || !this.hasLiftMotionArrows) return;
     const delta = Math.min(.25, Math.max(0, this.context.scene.getEngine().getDeltaTime() / 1000));
-    this.liftMotionArrowSystem.tick(models.map(({ entityId, model }) => ({
-      entityId, model, deviceType: this.specializedTelemetryRuntime.resolveDeviceType(model), visible: this.dependencies.document.isEntityVisible(entityId),
-    })), this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
+    this.liftMotionArrowSystem.tick((views ?? this.buildArrowModelViews(['lift'])).lift, this.telemetryPreviewActive, delta, this.context.scene.getFrameId());
+  }
+
+  /** 只为已启用且被请求的箭头系统收集一次模型并按设备类型分组；结果仅在当前帧回调内同步使用。 */
+  private buildArrowModelViews(kinds: readonly ArrowSystemKind[]): ArrowModelViews {
+    const wants = (kind: ArrowSystemKind, enabled: boolean) => enabled && kinds.includes(kind);
+    return buildArrowModelViews(
+      this.specializedTelemetryRuntime.host.collectModels(),
+      {
+        conveyor: wants('conveyor', this.hasConveyorSurfaceArrows),
+        stacker: wants('stacker', this.hasStackerMotionArrows),
+        rgv: wants('rgv', this.hasRgvMotionArrows),
+        lift: wants('lift', this.hasLiftMotionArrows),
+      },
+      (model) => this.specializedTelemetryRuntime.resolveDeviceType(model),
+      (entityId) => this.dependencies.document.isEntityVisible(entityId),
+    );
   }
 
   /** 每帧把最新 MQTT 设备遥测分发到对应设备运行时。 */
   public applyDeviceTelemetryFrame(): void {
-    if (!this.telemetryPreviewActive) return;
+    if (!this.telemetryPreviewActive || this.updatesStopped || this.dependencies.document.disposed) return;
     const startedAt = this.telemetryPerformanceTimingEnabled ? performance.now() : null;
     try {
       this.specializedTelemetryRuntime.clearInactiveDiagnostics();
@@ -493,14 +520,22 @@ export class SceneTelemetryController {
 
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeTelemetryObserver(): void {
+    if (this.telemetryObserver || this.updatesStopped || this.dependencies.document.disposed) return;
     this.telemetryObserver = this.context.scene.onBeforeRenderObservable.add(() => {
+      if (this.updatesStopped || this.dependencies.document.disposed) return;
       this.applyDeviceTelemetryFrame();
+      if (this.updatesStopped || this.dependencies.document.disposed) return;
       this.dependencies.document.flushSingleTransformPreview();
       this.motionStaticBatchRuntime?.sync();
-      this.updateConveyorSurfaceArrows();
-      this.updateStackerMotionArrows();
-      this.updateRgvMotionArrows();
-      this.updateLiftMotionArrows();
+      if (this.updatesStopped || this.dependencies.document.disposed) return;
+      // 至少一类箭头启用时才收集一次模型并按设备类型分组；全部关闭时各更新方法自行早退，不收集模型。
+      const anyArrows = this.hasConveyorSurfaceArrows || this.hasStackerMotionArrows || this.hasRgvMotionArrows || this.hasLiftMotionArrows;
+      const arrowViews = anyArrows ? this.buildArrowModelViews(['conveyor', 'stacker', 'rgv', 'lift']) : undefined;
+      this.updateConveyorSurfaceArrows(arrowViews);
+      this.updateStackerMotionArrows(arrowViews);
+      this.updateRgvMotionArrows(arrowViews);
+      this.updateLiftMotionArrows(arrowViews);
+      if (this.updatesStopped || this.dependencies.document.disposed) return;
       this.dependencies.effects.modelEntranceRuntime.tick(Math.min(this.context.scene.getEngine().getDeltaTime() / 1000, 0.1), this.dependencies.effects.modelEntranceVisible);
     });
   }
