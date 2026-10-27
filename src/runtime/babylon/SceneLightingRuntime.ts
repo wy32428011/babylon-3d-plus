@@ -1145,14 +1145,20 @@ export class SceneLightingRuntime {
   }
 
   private updateShadowRoles(): void {
+    const automatic = getSceneLightingConfig(this.document).shadows.managementMode === 'automatic';
+    // 独立于 GI 的条目计算阴影角色，旧分类及烘焙资产不因切换阴影模式而改写。
+    const shadowSources = automatic ? this.sources.map(source => ({ ...source,
+      entry: { ...source.entry, mobility: source.automaticShadowMobility ?? 'dynamic' as const,
+        castShadows: true, receiveShadows: true } })) : this.sources;
+    const shadowByKey = new Map(shadowSources.map(source => [source.entry.key, source]));
     let shadowInstancesChanged: boolean;
     this.creatingDerived = true;
     try {
-      shadowInstancesChanged = this.shadowInstances.sync(this.sources, Boolean(!this.state && !this.disposed
+      shadowInstancesChanged = this.shadowInstances.sync(shadowSources, Boolean(!this.state && !this.disposed
         && this.document && getSceneLightingConfig(this.document).shadows.enabled));
     } finally { this.creatingDerived = false; }
     const roles = new Map<AbstractMesh, ShadowRole>();
-    for (const source of this.sources) {
+    for (const source of shadowSources) {
       const role = roles.get(source.mesh);
       roles.set(source.mesh, { mobility: role?.mobility === 'dynamic' || source.entry.mobility === 'dynamic' ? 'dynamic' : 'static',
         castShadows: (role?.castShadows ?? false) || source.entry.castShadows, receiveShadows: (role?.receiveShadows ?? false) || source.entry.receiveShadows });
@@ -1161,8 +1167,14 @@ export class SceneLightingRuntime {
     if (visible.records.length) {
       for (const [mesh] of visible.hiddenSources) roles.set(mesh, { mobility: 'static', castShadows: false, receiveShadows: false });
       for (const record of visible.records) if (record.source.instance) roles.set(record.source.instance.mesh, { mobility: 'static', castShadows: false, receiveShadows: false });
-      for (const record of visible.records) roles.set(record.mesh, { mobility: record.source.entry.mobility,
-        castShadows: record.source.entry.castShadows, receiveShadows: record.source.entry.receiveShadows });
+      const visibleRoles = new Map<AbstractMesh, ShadowRole>();
+      for (const record of visible.records) {
+        const entry = shadowByKey.get(record.source.entry.key)?.entry ?? record.source.entry;
+        const prior = automatic ? visibleRoles.get(record.mesh) : undefined;
+        visibleRoles.set(record.mesh, { mobility: prior?.mobility === 'dynamic' || entry.mobility === 'dynamic' ? 'dynamic' : 'static',
+          castShadows: Boolean(prior?.castShadows || entry.castShadows), receiveShadows: Boolean(prior?.receiveShadows || entry.receiveShadows) });
+      }
+      for (const [mesh, role] of visibleRoles) roles.set(mesh, role);
     }
     this.options.setShadowRoles(roles, getSceneLightingConfig(this.document).bake);
     if (!this.state) this.updateProxyLightPolicies();

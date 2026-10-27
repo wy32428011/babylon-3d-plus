@@ -31,6 +31,7 @@ type ViewerTemplateCapabilities = {
   openingAnimation: { template: string; assets: (FileIntegrity & { id: string })[] };
   openingPackages?: { runtimeApiVersion: number; renderers: string[]; isolatedPlayback?: boolean };
   lightingCodecs?: { configVersions: number[]; lightmapEncodings: string[]; mipRecipes?: string[] };
+  shadowModes?: string[];
 };
 
 function invalidManifest(): Error {
@@ -78,6 +79,8 @@ function parseCapabilities(value: unknown): ViewerTemplateCapabilities {
     || value.lightingCodecs.mipRecipes !== undefined && (!Array.isArray(value.lightingCodecs.mipRecipes) || !value.lightingCodecs.mipRecipes.every(recipe => typeof recipe === 'string' && /^[a-zA-Z0-9-]{1,128}$/.test(recipe))))) throw invalidManifest();
   if (value.sceneFileVersions !== undefined && (!Array.isArray(value.sceneFileVersions)
     || !value.sceneFileVersions.every(version => Number.isSafeInteger(version) && version > 0))) throw invalidManifest();
+  if (value.shadowModes !== undefined && (!Array.isArray(value.shadowModes)
+    || !value.shadowModes.every(mode => typeof mode === 'string' && /^[a-z0-9-]{1,64}$/.test(mode)))) throw invalidManifest();
   if (value.skybox !== undefined && (!isRecord(value.skybox) || value.skybox.presentation !== 'infinite'
     || !Array.isArray(value.skybox.resourceVersions) || !value.skybox.resourceVersions.every(version => Number.isSafeInteger(version) && version > 0)
     || !Array.isArray(value.skybox.runtimeFormats) || !value.skybox.runtimeFormats.every(format => typeof format === 'string')
@@ -106,6 +109,7 @@ export function createViewerTemplateCapabilities(
     },
     openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline', 'prismatic-genesis'], isolatedPlayback: true },
     lightingCodecs: { configVersions: [2, 3], lightmapEncodings: ['rgbm', 'rgbm-gamma', 'rgbm-linear-mips-v1', 'rgbm-gamma-mips-v1'], mipRecipes: [LIGHTING_LIGHTMAP_MIP_RECIPE] },
+    shadowModes: ['automatic-v1'],
   });
 }
 
@@ -129,17 +133,18 @@ async function checkTemplate(
   const openingEnabled = opening?.enabled === true;
   const lighting = settings && isRecord(settings.lighting) ? normalizeSceneLightingConfig(settings.lighting) : null;
   const needsLightingCodecs = lighting?.version === 3;
+  const needsAutomaticShadows = lighting?.shadows.managementMode === 'automatic';
   const needsSkybox = collectSceneSkyboxReferences(scene).length > 0;
   const sceneVersion = isRecord(sceneFile) && typeof sceneFile.version === 'number' ? sceneFile.version : 0;
   const needsSceneVersion = sceneVersion >= 7;
-  if (!coreOnly && !openingEnabled && !needsLightingCodecs && !needsSkybox && !needsSceneVersion) return;
+  if (!coreOnly && !openingEnabled && !needsLightingCodecs && !needsAutomaticShadows && !needsSkybox && !needsSceneVersion) return;
   if (!coreOnly && openingEnabled && opening && opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
     throw new Error(`Viewer 模板不支持场景配置的开场动画。${REBUILD_HINT}`);
   }
   const filesByPath = new Map(templateFiles.map(file => [file.destinationRelativePath, file]));
   const manifestFile = filesByPath.get(VIEWER_TEMPLATE_CAPABILITIES_PATH);
   if (!manifestFile && coreOnly) return;
-  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前${needsSkybox || needsSceneVersion ? '场景版本或天空环境' : needsLightingCodecs ? '光照配置或贴图编码' : '开场动画'}。${REBUILD_HINT}`);
+  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前${needsSkybox || needsSceneVersion ? '场景版本或天空环境' : needsAutomaticShadows ? '全场景自动阴影' : needsLightingCodecs ? '光照配置或贴图编码' : '开场动画'}。${REBUILD_HINT}`);
   if (manifestFile.size <= 0 || manifestFile.size > MAX_MANIFEST_BYTES) throw invalidManifest();
   let manifest: ViewerTemplateCapabilities;
   try {
@@ -155,6 +160,9 @@ async function checkTemplate(
   }
   if (needsSceneVersion && !manifest.sceneFileVersions?.includes(sceneVersion)) {
     throw new Error(`Viewer 模板不支持场景文件 v${sceneVersion}。${REBUILD_HINT}`);
+  }
+  if (needsAutomaticShadows && !manifest.shadowModes?.includes('automatic-v1')) {
+    throw new Error(`Viewer 模板不支持全场景自动阴影。${REBUILD_HINT}`);
   }
   if (needsSkybox && (!manifest.skybox?.resourceVersions.includes(1) || !manifest.skybox.runtimeFormats.includes('env')
     || manifest.skybox.presentation !== 'infinite' || !manifest.skybox.recipes.includes(SKYBOX_ENVIRONMENT_RECIPE))) {

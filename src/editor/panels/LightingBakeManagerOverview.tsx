@@ -50,6 +50,16 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
   const onBakeChange = (patch: Partial<SceneLightingBakeSettings>) => onLightingChange({ ...lighting,
     version: patch.lightmapEncoding === 'rgbm-gamma' || patch.lightmapMipLevels ? 3 : lighting.version, bake: { ...bake, ...patch } });
   const onShadowChange = (patch: Partial<SceneLightingConfig['shadows']>) => onLightingChange({ ...lighting, shadows: { ...shadows, ...patch } });
+  const setShadowManagementMode = (managementMode: 'automatic' | 'rules') => {
+    // 自动模式只接管当前阴影策略，不覆写规则与对象例外，切回时仍可恢复原策略。
+    const automatic = managementMode === 'automatic';
+    const needsMainLight = automatic && lighting.environment?.source === 'sandbox'
+      && lighting.main.source === 'managed' && (!lighting.main.enabled || lighting.main.intensity <= 0);
+    onLightingChange({ ...lighting, shadows: { ...shadows, managementMode, ...(automatic ? { enabled: true } : {}) },
+      bake: automatic ? { ...bake, dynamicShadows: true } : bake,
+      main: needsMainLight ? { ...lighting.main, enabled: true,
+        intensity: lighting.main.intensity > 0 ? lighting.main.intensity : DEFAULT_SCENE_LIGHTING_CONFIG.main.intensity } : lighting.main });
+  };
   const setShadowsEnabled = (enabled: boolean) => {
     // 标准环境预设没有直接光；用户开启阴影时恢复统一主光，之后仍可单独调整。
     const needsMainLight = enabled && lighting.environment?.source === 'sandbox'
@@ -76,6 +86,12 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
       </section>
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-shadow-title">
         <h3 id="lighting-overview-shadow-title">光照与阴影</h3>
+        <label className="lighting-manager-field"><span>阴影管理方式</span><select aria-label="阴影管理方式"
+          value={shadows.managementMode ?? 'rules'} disabled={disabled}
+          onChange={event => setShadowManagementMode(event.target.value as 'automatic' | 'rules')}>
+          <option value="rules">按规则和例外</option><option value="automatic">全场景自动阴影</option>
+        </select></label>
+        <p className="lighting-manager-note">全场景自动阴影统一管理有效模型和部件的投射与接收，保留原规则和例外；切回后恢复原策略。选择自动模式时会启用阴影和动态更新，此后仍可单独调整；阴影还需要有效光源。</p>
         <LightingManagerToggle label="启用阴影" checked={shadows.enabled} disabled={disabled} onChange={setShadowsEnabled} />
         <p className="lighting-manager-note">GLB 标准环境使用统一主光时，开启阴影会同时启用主光；主光强度为 0 时恢复默认强度。阴影需要有效光源及物体投射、接收设置。</p>
         <LightingManagerToggle label="静态阴影缓存" description="固定遮挡重复使用，动态设备保持更新" checked={bake.cacheStaticShadows}

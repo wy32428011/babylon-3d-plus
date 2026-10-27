@@ -12,7 +12,9 @@ export type SceneLightingConfig = {
   environment?: { source: 'scene' | 'sandbox'; rotationDegrees: number };
   disabledLightIds: string[];
   allowDayNightCycle: boolean;
-  shadows: { enabled: boolean; quality: 'performance' | 'balanced' | 'quality'; darkness: number; distanceMeters: number; bias: number; normalBias: number };
+  shadows: { enabled: boolean; quality: 'performance' | 'balanced' | 'quality'; darkness: number; distanceMeters: number; bias: number; normalBias: number;
+    /** 缺省沿用已有规则和例外；自动模式不改写原有策略。 */
+    managementMode?: 'automatic' | 'rules' };
   bake: SceneLightingBakeSettings;
   policy?: SceneLightingPolicy;
   result?: SceneLightingBakeSnapshot | null;
@@ -120,7 +122,8 @@ export function normalizeSceneLightingConfig(value: unknown): SceneLightingConfi
       rotationDegrees: finite(object(raw.environment).rotationDegrees, object(raw.environment).source === 'sandbox' ? 5.54 * 180 / Math.PI : 0, 0, 360),
     } } : {}),
     allowDayNightCycle: boolean(raw.allowDayNightCycle, true),
-    shadows: { ...shadows, enabled: boolean(shadows.enabled, d.shadows.enabled),
+    shadows: { ...without(shadows, ['managementMode']), enabled: boolean(shadows.enabled, d.shadows.enabled),
+      ...(shadows.managementMode === 'automatic' || shadows.managementMode === 'rules' ? { managementMode: shadows.managementMode } : {}),
       quality: shadows.quality === 'performance' || shadows.quality === 'quality' ? shadows.quality : 'balanced',
       darkness: finite(shadows.darkness, d.shadows.darkness, 0, .85), distanceMeters: finite(shadows.distanceMeters, d.shadows.distanceMeters, 0, 800),
       bias: finite(shadows.bias, d.shadows.bias, 0, .02), normalBias: finite(shadows.normalBias, d.shadows.normalBias, 0, .2) },

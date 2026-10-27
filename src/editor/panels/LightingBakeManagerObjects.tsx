@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { matchesLightingPolicyTarget, type LightingPolicyField } from '../../../electron/shared/sceneLightingPolicy';
+import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { SceneDocument } from '../model/SceneDocument';
 import { isEntityEffectivelyLocked } from '../model/entityHierarchy';
 import type { LightingManagerFocus } from '../store/lightingManagementState';
@@ -178,6 +179,7 @@ function LightingBakeManagerObjectsPage({ scene, rows, focus, disabled, onStage,
         <button type="button" aria-pressed={scope === 'issues'} onClick={() => setScope('issues')}><LightingManagerIcon name="warning" size={17} /><span>需要检查</span><b>{countScope('issues')}</b></button></div>
     </aside>
     <section className="lighting-manager-card lighting-manager-object-table">
+      {getSceneLightingConfig(scene).shadows.managementMode === 'automatic' && <p className="lighting-manager-note">全场景自动阴影正在接管投射和接收；下表显示原规则和例外及间接光分类，切回规则模式后继续生效。</p>}
       <div className="lighting-manager-object-filters">
         <label className="lighting-manager-search"><LightingManagerIcon name="search" size={16} /><input type="search" aria-label="搜索模型或部件" placeholder="搜索模型或部件…" value={search} onChange={event => setSearch(event.target.value)} /></label>
         <select aria-label="筛选有效分类" value={mobility} onChange={event => setMobility(event.target.value)}><option value="all">全部分类</option><option value="static">静态</option><option value="dynamic">动态</option></select>
