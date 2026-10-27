@@ -23,6 +23,7 @@ import {
   resolveDigitalTwinCameraFocusRadius,
   clampDigitalTwinCameraRadius,
   syncDigitalTwinCameraPanScale,
+  setDigitalTwinCameraDepthPrecision,
 } from './cameraControlStandard';
 import type { Vector3Data } from '../../editor/model/math';
 import {
@@ -79,6 +80,8 @@ export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRunti
 export type BabylonViewportOptions = {
   showGrid?: boolean;
   allowCameraControl?: boolean;
+  /** 编辑器轨道视口启用中距离深度精度补偿；默认关闭以保留 Viewer 行为。 */
+  depthPrecisionCompensation?: boolean;
   /** 显式不透明画布选项；缺省仍保留原透明上下文，供 Viewer 单独验收后选择。 */
   opaqueCanvas?: boolean;
   /** 显式运动降分辨率，静止后恢复；缺省关闭，不改变脚本或MQTT节拍。 */
@@ -459,6 +462,7 @@ export function createBabylonViewport(
     scene,
   );
   const allowCameraControl = options.allowCameraControl ?? true;
+  setDigitalTwinCameraDepthPrecision(camera, allowCameraControl && options.depthPrecisionCompensation === true);
   const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
   let cameraSensitivity: SceneSensitivitySettings = options.initialSensitivity
     ? { ...options.initialSensitivity }
@@ -633,6 +637,7 @@ export function createBabylonViewport(
     },
     setCameraControlsEnabled: (enabled) => {
       cameraControlsEnabled = allowCameraControl && enabled;
+      setDigitalTwinCameraDepthPrecision(camera, cameraControlsEnabled && options.depthPrecisionCompensation === true);
       if (cameraControlsEnabled) attachCameraControl();
       else {
         flyControls.clear();

@@ -45,6 +45,8 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
     minRadiusMeters: 0.2,
     minZMeters: 0.02,
     perspectiveMinZRadiusRatio: 0.001,
+    perspectivePrecisionRadiusRatio: 0.01,
+    perspectivePrecisionMaxZMeters: 0.2,
   },
   focus: {
     minCameraHeightMeters: 0.05,
@@ -64,6 +66,13 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
 } as const;
 
 const panSensitivityMultiplierByCamera = new WeakMap<ArcRotateCamera, number>();
+const depthPrecisionCameras = new WeakSet<ArcRotateCamera>();
+
+/** 编辑器轨道视口可启用有限的深度精度补偿，漫游及 Viewer 保持原裁剪规则。 */
+export function setDigitalTwinCameraDepthPrecision(camera: ArcRotateCamera, enabled: boolean): void {
+  if (enabled) depthPrecisionCameras.add(camera);
+  else depthPrecisionCameras.delete(camera);
+}
 
 function sanitizeSensitivityValue(value: number): number {
   const { min, max, default: fallback } = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity;
@@ -106,12 +115,16 @@ export function resolveDigitalTwinCameraFocusBeta(): number {
 
 /**
  * 透视投影的深度精度主要集中在 near plane 附近；远景时按观察距离同步放大近裁剪面，
- * 避免大尺度模型的相邻表面因深度精度不足出现条纹、缺面，同时保留近景 2 cm 下限。
+ * 中等距离增加有限的精度补偿，降低近乎共面表面的条纹，同时保留近景 2 cm 下限。
  */
 function resolveDigitalTwinCameraMinZ(camera: ArcRotateCamera): number {
-  const { minZMeters, perspectiveMinZRadiusRatio } = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom;
+  const { minZMeters, perspectiveMinZRadiusRatio, perspectivePrecisionRadiusRatio, perspectivePrecisionMaxZMeters } =
+    DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom;
   if (camera.mode !== Camera.PERSPECTIVE_CAMERA) return minZMeters;
-  return Math.max(minZMeters, clampDigitalTwinCameraRadius(camera.radius) * perspectiveMinZRadiusRatio);
+  const radius = clampDigitalTwinCameraRadius(camera.radius);
+  const precisionNear = depthPrecisionCameras.has(camera)
+    ? Math.min(radius * perspectivePrecisionRadiusRatio, perspectivePrecisionMaxZMeters) : minZMeters;
+  return Math.max(minZMeters, radius * perspectiveMinZRadiusRatio, precisionNear);
 }
 
 /** 仅在近裁剪面实际变化时更新投影矩阵，避免稳定画面每帧重复失效。 */

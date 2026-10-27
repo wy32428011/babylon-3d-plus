@@ -28,8 +28,8 @@ const inside = (root: string, file: string) => { const relative = path.relative(
 /** 本地恢复保持编辑快照；只有用户明确选择后才允许环境切换文件修订。 */
 export async function recoverLocalSceneResourceTransaction(options: Options): Promise<LocalSceneResourceSyncResult & { resolvedFiles: string[] }> {
   const { request, signal } = options;
-  if (typeof request.sceneContent !== 'string' || Buffer.byteLength(request.sceneContent, 'utf8') > 64 * 1024 * 1024) {
-    throw new Error('本地场景恢复内容无效或超过 64 MiB。');
+  if (typeof request.sceneContent !== 'string' || !request.sceneContent) {
+    throw new Error('本地场景恢复内容不能为空。');
   }
   const envelope: unknown = JSON.parse(request.sceneContent);
   if (!object(envelope) || !isSupportedSceneFileVersion(envelope.version) || !object(envelope.scene)) throw new Error('本地场景恢复格式无效。');

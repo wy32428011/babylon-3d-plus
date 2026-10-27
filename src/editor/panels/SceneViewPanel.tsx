@@ -949,6 +949,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     try {
       viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
+        depthPrecisionCompensation: true,
         requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
         onLog: pushLog,
         initialSensitivity: useEditorStore.getState().scene.sceneSettings.sensitivity,
