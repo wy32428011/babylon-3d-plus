@@ -80,7 +80,7 @@ export type BabylonViewportRuntimeStatusCallback = (status: BabylonViewportRunti
 export type BabylonViewportOptions = {
   showGrid?: boolean;
   allowCameraControl?: boolean;
-  /** 编辑器轨道视口启用中距离深度精度补偿；默认关闭以保留 Viewer 行为。 */
+  /** 轨道视口可显式启用中距离深度精度补偿，不依赖鼠标控制权限；人物漫游接管时关闭。 */
   depthPrecisionCompensation?: boolean;
   /** 显式不透明画布选项；缺省仍保留原透明上下文，供 Viewer 单独验收后选择。 */
   opaqueCanvas?: boolean;
@@ -462,7 +462,8 @@ export function createBabylonViewport(
     scene,
   );
   const allowCameraControl = options.allowCameraControl ?? true;
-  setDigitalTwinCameraDepthPrecision(camera, allowCameraControl && options.depthPrecisionCompensation === true);
+  // 禁止交互的发布页面仍需相同深度精度，显示精度不受鼠标控制权限影响。
+  setDigitalTwinCameraDepthPrecision(camera, options.depthPrecisionCompensation === true);
   const defaultSensitivity = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.sensitivity.default;
   let cameraSensitivity: SceneSensitivitySettings = options.initialSensitivity
     ? { ...options.initialSensitivity }
@@ -637,7 +638,7 @@ export function createBabylonViewport(
     },
     setCameraControlsEnabled: (enabled) => {
       cameraControlsEnabled = allowCameraControl && enabled;
-      setDigitalTwinCameraDepthPrecision(camera, cameraControlsEnabled && options.depthPrecisionCompensation === true);
+      setDigitalTwinCameraDepthPrecision(camera, enabled && options.depthPrecisionCompensation === true);
       if (cameraControlsEnabled) attachCameraControl();
       else {
         flyControls.clear();

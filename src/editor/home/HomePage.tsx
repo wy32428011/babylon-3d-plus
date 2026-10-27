@@ -341,6 +341,8 @@ export function HomePage({
       if (!loaded) {
         setStatus({ kind: 'info', message: '已取消打开场景文件。' });
       }
+    } catch (error) {
+      setStatus({ kind: 'error', message: `打开场景文件失败：${getHomeErrorMessage(error)}` });
     } finally {
       setBusyActionId(null);
     }

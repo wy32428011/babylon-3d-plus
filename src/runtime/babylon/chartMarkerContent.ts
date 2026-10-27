@@ -73,16 +73,32 @@ function createTransparentChartMarkerTexture() {
   return {
     update(style: Required<ChartMarkerComponent>, value: string): ChartMarkerTextureFrame {
       const now = performance.now();
-      if (style !== previous || value !== previousValue) {
+      if (imageUrl !== style.backgroundImage) {
+        if (image) { image.onload = null; image.onerror = null; }
+        imageUrl = style.backgroundImage;
+        image = imageUrl ? new Image() : undefined;
+        if (image) {
+          image.onload = () => { dirty = true; };
+          image.onerror = () => { dirty = true; console.warn('图表立标背景图片解码失败'); };
+          image.src = imageUrl;
+        }
+        dirty = true;
+      }
+      // 背景图加载完成后按原图分辨率提高纹理精度，限制新增纹理占用。
+      const imageFactor = image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0
+        ? Math.max(1, image.naturalWidth / style.width, image.naturalHeight / style.height) : 1;
+      const limit = Math.min(2048 / style.width, 2048 / style.height, Math.sqrt(2097152 / (style.width * style.height)));
+      const factor = style.panelShape === 'ring' ? Math.min(imageFactor, limit) : Math.max(1, Math.min(imageFactor, limit));
+      const width = Math.max(1, Math.floor(style.width * factor)), height = Math.max(1, Math.floor(style.height * factor));
+      const resized = canvas.width !== width || canvas.height !== height;
+      if (resized) {
+        canvas.width = width;
+        canvas.height = height;
+        dirty = true;
+      }
+      if (style !== previous || value !== previousValue || resized) {
         dirty = true;
         if (previous?.marquee !== style.marquee || previous?.fontSize !== style.fontSize || previous?.width !== style.width) animationStart = now;
-        const factor = style.panelShape === 'ring'
-          ? Math.min(1, 2048 / style.width, 2048 / style.height, Math.sqrt(2097152 / (style.width * style.height))) : 1;
-        const width = Math.max(1, Math.floor(style.width * factor)), height = Math.max(1, Math.floor(style.height * factor));
-        if (canvas.width !== width || canvas.height !== height) {
-          canvas.width = width;
-          canvas.height = height;
-        }
         context.setTransform(width / style.width, 0, 0, height / style.height, 0, 0);
         context.font = `${style.fontSize}px "Microsoft YaHei", sans-serif`;
         textWidth = context.measureText(value).width;
@@ -97,17 +113,6 @@ function createTransparentChartMarkerTexture() {
         }
         previous = style;
         previousValue = value;
-      }
-      if (imageUrl !== style.backgroundImage) {
-        if (image) { image.onload = null; image.onerror = null; }
-        imageUrl = style.backgroundImage;
-        image = imageUrl ? new Image() : undefined;
-        if (image) {
-          image.onload = () => { dirty = true; };
-          image.onerror = () => { dirty = true; console.warn('图表立标背景图片解码失败'); };
-          image.src = imageUrl;
-        }
-        dirty = true;
       }
       // 静态内容只在变更时上传；跑马灯最多每秒 30 帧，避免多个立标无界上传纹理。
       const animationFrame = Math.floor((now - animationStart) / (1000 / 30));

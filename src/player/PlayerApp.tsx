@@ -661,6 +661,7 @@ export function PlayerApp() {
         setStartupPercent(30);
 
         viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
+          depthPrecisionCompensation: true,
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
           opaqueCanvas: parsedConfig.viewer.opaqueCanvas,

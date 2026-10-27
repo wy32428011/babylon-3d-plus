@@ -222,15 +222,16 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null, content: null };
     }
 
-    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen);
-    if (!canCommitSceneOpen()) return { canceled: true, filePath: null, content: null };
+    const warnings: string[] = [];
+    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen, warnings);
+    if (!canCommitSceneOpen()) throw new Error('场景打开请求已失效，请重试。');
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
 
     assertSceneSwitchAllowed();
-    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) return { canceled: true, filePath: null, content: null };
-    return { canceled: false, filePath, content, sceneOpenToken };
+    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) throw new Error('场景打开请求已失效，请重试。');
+    return { canceled: false, filePath, content, sceneOpenToken, ...(warnings.length ? { warning: warnings.join('；') } : {}) };
   });
 
   ipcMain.handle('scene:loadFile', async (_event, request: LoadSceneFileRequest): Promise<LoadSceneResult> => {
@@ -244,15 +245,16 @@ export function registerProjectIpc(): void {
     };
     const filePath = await assertRecentSceneFile(loadRequest.filePath);
     assertSceneSwitchAllowed();
-    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen);
-    if (!canCommitSceneOpen()) return { canceled: true, filePath: null, content: null };
+    const warnings: string[] = [];
+    const content = await prepareSceneResourceContent(await readUtf8File(filePath, '场景文件'), filePath, canCommitSceneOpen, warnings);
+    if (!canCommitSceneOpen()) throw new Error('场景打开请求已失效，请重试。');
     authorizeSceneFile(filePath);
     authorizeModelAssetsFromSceneContent(content);
     await rememberRecentSceneFile(filePath);
 
     assertSceneSwitchAllowed();
-    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) return { canceled: true, filePath: null, content: null };
-    return { canceled: false, filePath, content, sceneOpenToken };
+    if (!stageScenePublishScopeFile(sceneOpenToken, filePath)) throw new Error('场景打开请求已失效，请重试。');
+    return { canceled: false, filePath, content, sceneOpenToken, ...(warnings.length ? { warning: warnings.join('；') } : {}) };
   });
 
   ipcMain.handle('scene:confirmOpen', async (_event, request: { sceneOpenToken?: unknown }): Promise<boolean> => {
@@ -277,13 +279,14 @@ export function registerProjectIpc(): void {
 
 
 /** 完整校验场景伴随资产后再授权；仅移动地址不改变有效烘焙内容。 */
-async function prepareSceneResourceContent(content: string, filePath: string, canCommit?: () => boolean): Promise<string> {
+async function prepareSceneResourceContent(content: string, filePath: string, canCommit?: () => boolean, warnings?: string[]): Promise<string> {
   const opening = await prepareOpeningSceneContent(content, filePath);
   // 打开准备跨越异步边界后再次校验；发布开始或会话关闭时不能授权迟到的光照资源。
   if (canCommit && !canCommit()) return opening;
-  const prepared = await prepareLightingSceneContent(opening, filePath, { projectRoot: getCurrentProjectRoot(), isAuthorizedFile: isAuthorizedAssetFile });
+  const prepared = await prepareLightingSceneContent(opening, filePath, { projectRoot: getCurrentProjectRoot(), isAuthorizedFile: isAuthorizedAssetFile, allowMissingDisabled: Boolean(warnings) });
   if (canCommit && !canCommit()) return prepared.content;
   for (const file of prepared.files) authorizeAssetFile(file);
+  if (prepared.warning) warnings?.push(prepared.warning);
   return prepared.content;
 }
 

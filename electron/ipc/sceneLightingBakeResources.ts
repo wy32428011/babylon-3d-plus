@@ -8,7 +8,7 @@ import { getSceneLightingConfig, migrateSceneLightingDocument } from '../shared/
 import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 
 type JsonObject = Record<string, unknown>;
-type ResourceOptions = { projectRoot?: string | null; isAuthorizedFile?: (file: string) => boolean; signal?: AbortSignal };
+type ResourceOptions = { projectRoot?: string | null; isAuthorizedFile?: (file: string) => boolean; signal?: AbortSignal; allowMissingDisabled?: boolean };
 export type ResolvedLightingBakeAsset = { asset: LightingBakeAsset; sourcePath: string; relativePath: string; sha256: string; byteLength: number };
 const object = (value: unknown): JsonObject | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null;
 const localUrl = (value: string) => 'editor-asset://local/' + encodeURIComponent(value);
@@ -161,7 +161,7 @@ export async function prepareLightingSceneSave(content: string, sceneFilePath: s
 }
 
 /** 打开工程时恢复便携资产 URL，校验成功后由 IPC 按实际文件逐项授权。 */
-export async function prepareLightingSceneContent(content: string, sceneFilePath: string, options: ResourceOptions = {}): Promise<{ content: string; files: string[] }> {
+export async function prepareLightingSceneContent(content: string, sceneFilePath: string, options: ResourceOptions = {}): Promise<{ content: string; files: string[]; warning?: string }> {
   const envelope = object(JSON.parse(content));
   const rawScene = object(envelope?.scene);
   if (!rawScene || !envelope) return { content, files: [] };
@@ -172,7 +172,28 @@ export async function prepareLightingSceneContent(content: string, sceneFilePath
   if (!assetReferences(scene).length) return { content: JSON.stringify(envelope), files: [] };
   const restore = captureSceneLightingBakeRelocation(scene);
   const targetRoot = sceneResourceRoot(sceneFilePath);
-  for (const asset of assetReferences(scene)) {
+  const assets = assetReferences(scene);
+  // 停用的旧结果可保留引用供后续恢复，但不能授权缺失或未经授权的文件。
+  if (options.allowMissingDisabled && !getSceneLightingConfig(scene).bake.enabled) {
+    let unavailable = false;
+    for (const asset of assets) {
+      const reference = decodeLightingReference(asset, targetRoot);
+      const relocated = path.resolve(targetRoot, ...reference.relativePath.split('/'));
+      try { await fs.lstat(relocated); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        const authorized = Boolean(options.isAuthorizedFile?.(reference.sourcePath)
+          || options.projectRoot && inside(path.resolve(options.projectRoot), reference.sourcePath));
+        if (!authorized) { unavailable = true; continue; }
+        try { await fs.lstat(reference.sourcePath); } catch (sourceError) {
+          if ((sourceError as NodeJS.ErrnoException).code !== 'ENOENT') throw sourceError;
+          unavailable = true;
+        }
+      }
+    }
+    if (unavailable) return { content: JSON.stringify(envelope), files: [],
+      warning: '已关闭的光照烘焙结果有资产缺失或未授权，已保留原引用。请恢复资产后重新打开场景，或在光照管理器中清除旧结果后再保存或重新启用烘焙。' };
+  }
+  for (const asset of assets) {
     const relativePath = decodeLightingReference(asset, targetRoot).relativePath;
     const relocated = path.resolve(targetRoot, ...relativePath.split('/'));
     try { await fs.lstat(relocated); asset.url = localUrl(relocated); }

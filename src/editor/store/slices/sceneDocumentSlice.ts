@@ -1790,46 +1790,66 @@ export const createSceneDocumentSlice: EditorSlice<
       return false;
     }
   },
-  loadScene: async () => {
+  loadScene: async (onFailure) => {
     if (get().runtimeMode === 'preview') {
       set((state) => guardRuntimePreviewMutation(state, '加载场景'));
+      onFailure?.('运行预览期间无法加载场景。');
       return false;
     }
 
     const openingSceneSessionId = get().sceneSessionId;
     try {
       const result = await window.editorApi.loadScene();
-      if (get().sceneSessionId !== openingSceneSessionId) return false;
+      if (get().sceneSessionId !== openingSceneSessionId) {
+        onFailure?.('场景已切换，打开请求已失效。');
+        return false;
+      }
 
-      if (result.canceled || result.content === null) {
+      if (result.canceled) {
         set((state) => ({ logs: prependLog(state.logs, '已取消加载场景。') }));
         return false;
       }
+      if (result.content === null) throw new Error('场景文件内容为空。');
 
       const scene = deserializeScene(result.content);
       // 先完成只读缓存恢复，再提交新场景，避免脚本先于图片登记启动。
       const cachedImages = await window.editorApi.listSyncedImages?.() ?? [];
-      if (get().sceneSessionId !== openingSceneSessionId) return false;
+      if (get().sceneSessionId !== openingSceneSessionId) {
+        onFailure?.('场景已切换，打开请求已失效。');
+        return false;
+      }
       const sceneOpenToken = result.sceneOpenToken;
       if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
         || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
-      if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })
-        || get().sceneSessionId !== openingSceneSessionId) return false;
+      if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })) {
+        onFailure?.('场景打开请求已失效，请重试。');
+        return false;
+      }
+      if (get().sceneSessionId !== openingSceneSessionId) {
+        onFailure?.('场景已切换，打开请求已失效。');
+        return false;
+      }
 
       setSyncedImageAssets(cachedImages);
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);
         return { ...loaded, sceneResourcePolicy: 'local-refresh',
           sceneSourceFilePath: result.filePath ?? null,
+          ...(result.warning ? { lightingBakeStatus: { phase: 'error' as const, message: result.warning } } : {}),
           sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
+      if (result.warning) get().pushLog(result.warning);
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (get().sceneSessionId !== openingSceneSessionId) return false;
+      if (get().sceneSessionId !== openingSceneSessionId) {
+        onFailure?.('场景已切换，打开请求已失效。');
+        return false;
+      }
       set((state) => ({ logs: prependLog(state.logs, `加载场景失败：${message}`) }));
+      onFailure?.(message);
       return false;
     }
   },
@@ -1886,6 +1906,7 @@ export const createSceneDocumentSlice: EditorSlice<
         return { ...loaded,
           sceneResourcePolicy: deferEnvironmentUntilSync ? 'data-platform-refresh' : 'local-refresh',
           sceneSourceFilePath: result.filePath ?? filePath,
+          ...(result.warning ? { lightingBakeStatus: { phase: 'error' as const, message: result.warning } } : {}),
           sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
@@ -1894,6 +1915,7 @@ export const createSceneDocumentSlice: EditorSlice<
         if (committed.scene !== scene || committed.sceneSessionId === openingSceneSessionId || !isCurrent()
           || !bindProjectOpenScene(openTrace, committed.sceneSessionId)) stopTrace('stale');
       }
+      if (result.warning) get().pushLog(result.warning);
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
     } catch (error) {

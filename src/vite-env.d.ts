@@ -27,6 +27,7 @@ type LoadSceneResult = {
   filePath: string | null;
   content: string | null;
   sceneOpenToken?: number;
+  warning?: string;
 };
 
 type ReadTextFileRequest = {

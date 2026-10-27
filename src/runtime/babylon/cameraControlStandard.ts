@@ -68,7 +68,7 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
 const panSensitivityMultiplierByCamera = new WeakMap<ArcRotateCamera, number>();
 const depthPrecisionCameras = new WeakSet<ArcRotateCamera>();
 
-/** 编辑器轨道视口可启用有限的深度精度补偿，漫游及 Viewer 保持原裁剪规则。 */
+/** 编辑器与 Viewer 的轨道视口可启用有限的深度精度补偿，人物漫游保持原裁剪规则。 */
 export function setDigitalTwinCameraDepthPrecision(camera: ArcRotateCamera, enabled: boolean): void {
   if (enabled) depthPrecisionCameras.add(camera);
   else depthPrecisionCameras.delete(camera);

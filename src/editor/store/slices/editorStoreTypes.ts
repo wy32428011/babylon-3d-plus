@@ -475,7 +475,7 @@ export type EditorState = {
   hasUnsavedChanges: () => boolean;
   markScenePersisted: (content?: string) => void;
   saveScene: () => Promise<boolean>;
-  loadScene: () => Promise<boolean>;
+  loadScene: (onFailure?: (message: string) => void) => Promise<boolean>;
   loadSceneFromFile: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean, openTrace?: ProjectOpenTraceContext) => Promise<boolean>;
   loadSceneFromContent: (content: string, sourceName: string) => boolean;
   pushLog: (message: string) => void;

@@ -118,7 +118,9 @@ export default function App() {
 
   /** 通过系统文件选择器加载场景，成功后切换到编辑器。 */
   async function handleOpenSceneDialog(): Promise<boolean> {
-    const loaded = await useEditorStore.getState().loadScene();
+    let failure: string | undefined;
+    const loaded = await useEditorStore.getState().loadScene((message) => { failure = message; });
+    if (failure !== undefined) throw new Error(failure);
     if (loaded) setView('editor');
     return loaded;
   }
