@@ -2,6 +2,9 @@ import './babylonSideEffects.js';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { Engine } from '@babylonjs/core/Engines/engine.js';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
+import type { ViewportBackend, ViewportBackendDecision } from './viewportBackend';
+import { prepareGpuParticleRuntime } from './gpuParticleRuntime';
 import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight.js';
 import { Axis } from '@babylonjs/core/Maths/math.axis.js';
 import { TmpVectors, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
@@ -96,6 +99,11 @@ export type BabylonViewportOptions = {
   keepRenderingInBackground?: boolean;
   /** 仅在不可交互的准备蒙版下节流绘制；就绪后立即恢复完整渲染频率。 */
   isScenePreparing?: () => boolean;
+  /** 默认 WebGL；Editor/Player 用同一文档兼容门决定显式 WebGPU 请求。 */
+  backendDecision?: ViewportBackendDecision;
+  signal?: AbortSignal;
+  /** 由 React 换新画布，不能在已绑定 WebGPU context 的同一 DOM canvas 上创建 WebGL。 */
+  replaceCanvas?: (previous: HTMLCanvasElement, signal: AbortSignal) => Promise<HTMLCanvasElement>;
 };
 
 export type BabylonFocusOptions = CameraViewTransitionOptions & {
@@ -108,7 +116,10 @@ export type BabylonFocusOptions = CameraViewTransitionOptions & {
 };
 
 export type BabylonViewport = {
-  engine: Engine;
+  engine: AbstractEngine;
+  canvas: HTMLCanvasElement;
+  backend: ViewportBackend;
+  fallbackReason: string | null;
   scene: Scene;
   camera: ArcRotateCamera;
   focusOnBounds: (bounds: EditorWorldBounds, options?: BabylonFocusOptions) => void;
@@ -206,7 +217,7 @@ export function isSoftwareWebGLFallbackAllowed(): boolean {
 function getFocusCameraRadius(
   bounds: EditorWorldBounds,
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   maxRadiusMeters?: number,
   useModelFocusAngle: boolean = true,
 ): number {
@@ -233,7 +244,7 @@ function getFocusCameraRadius(
 /** 只计算聚焦位姿，供同步聚焦与相机控制器动画共用同一套距离和位置规则。 */
 function getFocusCameraPose(
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   bounds: EditorWorldBounds,
   maxRadiusMeters?: number,
   useModelFocusAngle: boolean = true,
@@ -255,7 +266,7 @@ function getFocusCameraPose(
  */
 export function focusArcRotateCameraOnBounds(
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   bounds: EditorWorldBounds,
   maxRadiusMeters?: number,
   useModelFocusAngle: boolean = true,
@@ -276,7 +287,7 @@ export function focusArcRotateCameraOnBounds(
 export function focusArcRotateCameraViewOnBounds(
   cameraViewController: ArcRotateCameraViewController,
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   bounds: EditorWorldBounds,
   options?: BabylonFocusOptions,
 ): void {
@@ -317,7 +328,7 @@ const CAMERA_FLY_MIN_SPEED_METERS_PER_SECOND = 0.5;
  */
 function createCameraFlyKeyControls(
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   scene: Scene,
   getNavigationMode: () => CameraNavigationMode,
   isEnabled: () => boolean,
@@ -403,15 +414,45 @@ function createCameraFlyKeyControls(
   };
 }
 
-export function createBabylonViewport(
+const canvasInitializations = new WeakMap<HTMLCanvasElement, Promise<void>>();
+
+/** StrictMode/快速切换可能在前一初始化尚未结算时重入；同一画布必须串行释放和创建。 */
+async function initializeOnCanvas<T extends AbstractEngine>(
   canvas: HTMLCanvasElement,
-  onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
-  options: BabylonViewportOptions = {},
-): BabylonViewport {
+  signal: AbortSignal | undefined,
+  initialize: () => T | Promise<T>,
+): Promise<T> {
+  const previous = canvasInitializations.get(canvas);
+  let release!: () => void;
+  const completed = new Promise<void>(resolve => { release = resolve; });
+  canvasInitializations.set(canvas, completed);
+  try {
+    if (previous) await previous;
+    signal?.throwIfAborted();
+    const engine = await initialize();
+    try { signal?.throwIfAborted(); } catch (error) { engine.dispose(); throw error; }
+    return engine;
+  } finally {
+    release();
+    if (canvasInitializations.get(canvas) === completed) canvasInitializations.delete(canvas);
+  }
+}
+
+function assertHardwareAcceleratedBackend(engine: AbstractEngine, onLog?: (message: string) => void): void {
+  if (engine instanceof Engine) { assertHardwareAcceleratedWebGL(engine, onLog); return; }
+  // AbstractEngine 没有 getInfo 声明；只读取具体后端确实公开的诊断能力，不伪装为 Engine。
+  const getInfo: unknown = Reflect.get(engine, 'getInfo');
+  const info: unknown = typeof getInfo === 'function' ? getInfo.call(engine) : null;
+  const renderer: unknown = info && typeof info === 'object' ? Reflect.get(info, 'renderer') : null;
+  if (typeof renderer !== 'string' || !renderer.trim() || UNKNOWN_WEBGL_RENDERER_PATTERN.test(renderer.trim()) || isSoftwareWebGLRenderer(renderer)) {
+    throw new Error('WebGPU 未提供可确认的硬件 GPU renderer，保留硬件 WebGL 路径。');
+  }
+  onLog?.(`[Babylon] 硬件加速 WebGPU 已启用：renderer=${renderer}`);
+}
+
+function createWebGLViewportEngine(canvas: HTMLCanvasElement, options: BabylonViewportOptions): Engine {
   const requireHardwareAcceleration = options.requireHardwareAcceleration ?? false;
   if (!requireHardwareAcceleration) assertWebGLSupported();
-
-  let engine: Engine;
   try {
     const candidate = new Engine(canvas, true, {
       alpha: options.opaqueCanvas !== true,
@@ -423,7 +464,7 @@ export function createBabylonViewport(
     });
     try {
       if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(candidate, options.onLog);
-      engine = candidate;
+      return candidate;
     } catch (error) {
       candidate.dispose();
       throw error;
@@ -435,6 +476,87 @@ export function createBabylonViewport(
       : '';
     throw new Error('Babylon Engine ' + mode + ' 创建失败：' + getErrorMessage(error) + guidance, { cause: error });
   }
+}
+
+/** 保留旧调用方的同步 WebGL 入口；显式 WebGPU 和可选异步预热使用 Async 入口。 */
+export function createBabylonViewport(
+  canvas: HTMLCanvasElement,
+  onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
+  options: BabylonViewportOptions = {},
+): BabylonViewport {
+  options.signal?.throwIfAborted();
+  if (options.backendDecision?.backend === 'webgpu') throw new Error('WebGPU 必须通过 createBabylonViewportAsync 初始化。');
+  const engine = createWebGLViewportEngine(canvas, options);
+  try { return createViewportResources(canvas, engine, onRuntimeStatus, options, options.backendDecision?.reasons.join('；') || null); }
+  catch (error) { engine.dispose(); throw error; }
+}
+
+export async function createBabylonViewportAsync(
+  initialCanvas: HTMLCanvasElement,
+  onRuntimeStatus?: BabylonViewportRuntimeStatusCallback,
+  options: BabylonViewportOptions = {},
+): Promise<BabylonViewport> {
+  const signal = options.signal;
+  signal?.throwIfAborted();
+  const decision = options.backendDecision;
+  let canvas = initialCanvas;
+  let engine: AbstractEngine | null = null;
+  let fallbackReason = decision?.reasons.join('；') || null;
+  if (decision?.requested === 'webgpu' && decision.backend === 'webgl') {
+    options.onLog?.(`[Babylon] WebGPU 请求已回退完整 WebGL：${fallbackReason}`);
+  }
+  if (decision?.backend === 'webgpu') {
+    let attemptedInitialization = false;
+    try {
+      if (typeof navigator === 'undefined' || !navigator.gpu) throw new Error('当前环境未提供 WebGPU（需要安全上下文及可用的 GPU adapter）。');
+      const { createWebGPUViewportEngine } = await import('./webgpuViewportEngine');
+      signal?.throwIfAborted();
+      attemptedInitialization = true;
+      engine = await initializeOnCanvas(canvas, signal, () => createWebGPUViewportEngine(canvas, options.opaqueCanvas === true, signal));
+      if (options.requireHardwareAcceleration) assertHardwareAcceleratedBackend(engine, options.onLog);
+    } catch (error) {
+      if (engine) { engine.dispose(); engine = null; }
+      signal?.throwIfAborted();
+      fallbackReason = getErrorMessage(error);
+      options.onLog?.(`[Babylon] WebGPU 初始化失败，回退完整 WebGL：${fallbackReason}`);
+      if (attemptedInitialization) {
+        if (!options.replaceCanvas || !signal) throw new Error('WebGPU 回退需要宿主提供新的 canvas。', { cause: error });
+        // 只在这一处换画布并重试一次 WebGL；不重放宿主配置、资源清单、MQTT 或开场流程。
+        canvas = await options.replaceCanvas(canvas, signal);
+      }
+    }
+  }
+  if (!engine) engine = await initializeOnCanvas(canvas, signal, () => createWebGLViewportEngine(canvas, options));
+  let viewport: BabylonViewport | null = null;
+  const disposeAbortedViewport = () => viewport?.dispose();
+  try {
+    signal?.throwIfAborted();
+    options.onLog?.(`[Babylon] 当前渲染后端：${engine.isWebGPU ? 'WebGPU' : 'WebGL'}`);
+    viewport = createViewportResources(canvas, engine, onRuntimeStatus, options, fallbackReason);
+    // 预热尚未结算时宿主还未取得 viewport；取消必须立即释放旧渲染循环，不能等到模块下载结束。
+    signal?.addEventListener('abort', disposeAbortedViewport, { once: true });
+    signal?.throwIfAborted();
+    await prepareGpuParticleRuntime(viewport.scene, new URLSearchParams(globalThis.location?.search ?? '').get('gpuParticles') === '1');
+    signal?.throwIfAborted();
+    return viewport;
+  } catch (error) {
+    if (viewport) viewport.dispose();
+    else engine.dispose();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', disposeAbortedViewport);
+  }
+}
+
+function createViewportResources(
+  canvas: HTMLCanvasElement,
+  engine: AbstractEngine,
+  onRuntimeStatus: BabylonViewportRuntimeStatusCallback | undefined,
+  options: BabylonViewportOptions,
+  fallbackReason: string | null,
+): BabylonViewport {
+  const requireHardwareAcceleration = options.requireHardwareAcceleration ?? false;
+  const backend: ViewportBackend = engine.isWebGPU ? 'webgpu' : 'webgl';
   registerKtx2WorkerEngine(engine);
   const backgroundFrameRequester = options.keepRenderingInBackground
     ? createBackgroundFrameRequester()
@@ -443,7 +565,7 @@ export function createBabylonViewport(
     engine.customAnimationFrameRequester = backgroundFrameRequester;
     engine.renderEvenInBackground = true;
   }
-  if (!requireHardwareAcceleration && isSoftwareWebGLFallbackAllowed()) {
+  if (engine instanceof Engine && !requireHardwareAcceleration && isSoftwareWebGLFallbackAllowed()) {
     const message = '[Babylon] 已按开发环境配置允许软件 WebGL 回退：renderer=' + engine.getGlInfo().renderer;
     console.warn(message);
     options.onLog?.(message);
@@ -548,20 +670,20 @@ export function createBabylonViewport(
     contextLost = true;
     onRuntimeStatus?.({
       type: 'context-lost',
-      message: 'Scene View WebGL 上下文已丢失，正在自动恢复。',
+      message: `Scene View ${engine.isWebGPU ? 'WebGPU 设备' : 'WebGL 上下文'}已丢失，正在自动恢复。`,
     });
   });
 
   /** 上下文恢复后重新校验 renderer，避免 GPU 异常后静默切换到软件后端。 */
   const contextRestoredObserver = engine.onContextRestoredObservable.add(() => {
     try {
-      if (requireHardwareAcceleration) assertHardwareAcceleratedWebGL(engine, options.onLog);
+      if (requireHardwareAcceleration) assertHardwareAcceleratedBackend(engine, options.onLog);
     } catch (error) {
       contextLost = true;
       renderFailed = true;
       onRuntimeStatus?.({
         type: 'render-error',
-        message: `Scene View 硬件加速 WebGL 恢复失败：${getErrorMessage(error)}`,
+        message: `Scene View 硬件加速 ${engine.isWebGPU ? 'WebGPU' : 'WebGL'} 恢复失败：${getErrorMessage(error)}`,
         error,
       });
       return;
@@ -577,7 +699,7 @@ export function createBabylonViewport(
     renderFailed = false;
     onRuntimeStatus?.({
       type: 'context-restored',
-      message: 'Scene View WebGL 上下文已恢复。',
+      message: `Scene View ${engine.isWebGPU ? 'WebGPU 设备' : 'WebGL 上下文'}已恢复。`,
     });
   });
 
@@ -619,6 +741,9 @@ export function createBabylonViewport(
 
   return {
     engine,
+    canvas,
+    backend,
+    fallbackReason,
     scene,
     camera,
     focusOnBounds: (bounds, transitionOptions) => {
@@ -668,8 +793,9 @@ export function createBabylonViewport(
     setBaseHardwareScalingLevel,
     getAdaptiveResolutionState: () => adaptiveResolution?.getSnapshot() ?? null,
     dispose: () => {
-      adaptiveResolution?.dispose(); adaptiveResolution = null; clearAdaptiveCamera();
+      if (disposed) return;
       disposed = true;
+      adaptiveResolution?.dispose(); adaptiveResolution = null; clearAdaptiveCamera();
       flyControls.dispose();
       scene.onBeforeRenderObservable.remove(cameraPanScaleObserver);
       cameraViewController.dispose();

@@ -1,4 +1,5 @@
 import { prepareSceneSkyboxEnvironments } from '../../assets/skyboxPreparationService.ts';
+import { confirmSceneLeave, isSceneLeaveApprovalCurrent } from '../../project/sceneLeaveGuard';
 import { updateSceneModelEntranceCommand } from '../../commands/sceneModelEntranceCommands';
 import { normalizeSceneModelEntranceSettings } from '../../model/sceneModelEntrance';
 import { normalizeSceneOpeningConfig } from '../../model/sceneOpeningAnimation';
@@ -45,6 +46,7 @@ import type { ProjectOpenSpanToken } from '../../../../electron/shared/projectOp
 import type { EditorSlice } from './editorStoreTypes';
 
 const initialEditorScene = createEmptySceneDocument();
+const savingStores = new WeakSet<object>();
 
 /** 文档、实体命令与历史提交的同一入口。 */
 export const createSceneDocumentSlice: EditorSlice<
@@ -1748,6 +1750,10 @@ export const createSceneDocumentSlice: EditorSlice<
     set({ persistedSceneContent });
   },
   saveScene: async () => {
+    if (savingStores.has(get)) {
+      get().pushLog('场景正在保存，请等待当前保存完成。');
+      return false;
+    }
     if (get().latestSceneResourceTransaction) {
       get().pushLog('新版模型尚未完成渲染校验，请等待同步完成后保存。');
       return false;
@@ -1760,6 +1766,7 @@ export const createSceneDocumentSlice: EditorSlice<
     const sceneSnapshot = get().scene;
     const sceneSessionId = get().sceneSessionId;
     const controller = new AbortController();
+    savingStores.add(get);
 
     try {
       const prepared = await prepareSceneSkyboxEnvironments(sceneSnapshot, controller.signal, () => {
@@ -1788,6 +1795,8 @@ export const createSceneDocumentSlice: EditorSlice<
       const message = error instanceof Error ? error.message : String(error);
       set((state) => ({ logs: prependLog(state.logs, `保存场景失败：${message}`) }));
       return false;
+    } finally {
+      savingStores.delete(get);
     }
   },
   loadScene: async (onFailure) => {
@@ -1798,8 +1807,19 @@ export const createSceneDocumentSlice: EditorSlice<
     }
 
     const openingSceneSessionId = get().sceneSessionId;
+    let pendingSceneOpenToken: number | undefined;
+    let sceneCommitted = false;
     try {
+      const approval = await confirmSceneLeave(get, '加载其他场景');
+      if (!approval || get().runtimeMode === 'preview' || !isSceneLeaveApprovalCurrent(get(), approval)) return false;
+      const ensureUnchanged = () => {
+        if (get().runtimeMode === 'preview' || !isSceneLeaveApprovalCurrent(get(), approval)) {
+          throw new Error('加载期间场景已变化，已保留当前修改，请重新打开。');
+        }
+      };
       const result = await window.editorApi.loadScene();
+      pendingSceneOpenToken = result.sceneOpenToken;
+      ensureUnchanged();
       if (get().sceneSessionId !== openingSceneSessionId) {
         onFailure?.('场景已切换，打开请求已失效。');
         return false;
@@ -1819,12 +1839,14 @@ export const createSceneDocumentSlice: EditorSlice<
         return false;
       }
       const sceneOpenToken = result.sceneOpenToken;
+      ensureUnchanged();
       if (typeof sceneOpenToken !== 'number' || !Number.isSafeInteger(sceneOpenToken) || sceneOpenToken <= 0
-        || !window.editorApi.confirmSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
+        || !window.editorApi.confirmSceneOpen || !window.editorApi.cancelSceneOpen) throw new Error('当前编辑器缺少场景打开确认能力，请更新编辑器。');
       if (!await window.editorApi.confirmSceneOpen({ sceneOpenToken })) {
         onFailure?.('场景打开请求已失效，请重试。');
         return false;
       }
+      ensureUnchanged();
       if (get().sceneSessionId !== openingSceneSessionId) {
         onFailure?.('场景已切换，打开请求已失效。');
         return false;
@@ -1839,6 +1861,7 @@ export const createSceneDocumentSlice: EditorSlice<
           sceneStartupResourceSessionId: loaded.sceneSessionId,
           environmentStartupRelinkSessionId: scene.sceneSettings.environment ? loaded.sceneSessionId : null };
       });
+      sceneCommitted = true;
       if (result.warning) get().pushLog(result.warning);
       void syncDataPlatformImagesAfterLocalSceneLoad((message) => get().pushLog(message));
       return true;
@@ -1851,6 +1874,12 @@ export const createSceneDocumentSlice: EditorSlice<
       set((state) => ({ logs: prependLog(state.logs, `加载场景失败：${message}`) }));
       onFailure?.(message);
       return false;
+    } finally {
+      if (!sceneCommitted && pendingSceneOpenToken !== undefined && window.editorApi?.cancelSceneOpen) {
+        await window.editorApi.cancelSceneOpen({ sceneOpenToken: pendingSceneOpenToken }).catch(error => {
+          get().pushLog(`取消场景发布归属失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     }
   },
   loadSceneFromFile: async (filePath, isCurrent = () => true, deferEnvironmentUntilSync = false, openTrace) => {

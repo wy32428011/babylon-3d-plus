@@ -1,4 +1,4 @@
-import type { Engine } from '@babylonjs/core/Engines/engine.js';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
 
 export const GPU_CAPABILITY_PROFILE_ALGORITHM = 'webgl2-fixed-fragment-v1';
 export const GPU_CAPABILITY_PROFILE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -18,6 +18,7 @@ export type GpuCapabilityProfile = {
   createdAt: number; expiresAt: number | null; fingerprint: string | null; driver: GpuCapabilityDriver | null;
   measurement: GpuCapabilityMeasurement | null; provenance: GpuCapabilityProvenance | null; reason: string | null;
   calibration: 'heuristic-not-cross-device-calibrated';
+  backend?: 'webgl' | 'webgpu';
 };
 type StorageAccess = Pick<Storage, 'getItem' | 'setItem'>;
 /** 仅用于聚焦回归的环境seam；正式调用只需engine/signal，不替换host渲染或画质。 */
@@ -25,11 +26,11 @@ export type GpuCapabilityEnvironment = {
   createCanvas?: () => Pick<HTMLCanvasElement, 'width' | 'height' | 'getContext'> | null;
   storage?: StorageAccess | null; now?: () => number; timestamp?: () => number; yieldFrame?: (signal?: AbortSignal) => Promise<void>;
 };
-const profiles = new WeakMap<Engine, GpuCapabilityProfile>();
+const profiles = new WeakMap<AbstractEngine, GpuCapabilityProfile>();
 type PendingProfile = { promise: Promise<GpuCapabilityProfile>; signal?: AbortSignal };
-const pending = new WeakMap<Engine, PendingProfile>();
-const engineLifetimes = new WeakMap<Engine, { epoch: number; disposed: boolean; needsProbe: boolean; remove: () => void }>();
-function engineLifetime(engine: Engine) {
+const pending = new WeakMap<AbstractEngine, PendingProfile>();
+const engineLifetimes = new WeakMap<AbstractEngine, { epoch: number; disposed: boolean; needsProbe: boolean; remove: () => void }>();
+function engineLifetime(engine: AbstractEngine) {
   const previous = engineLifetimes.get(engine); if (previous) return previous;
   const state = { epoch: 0, disposed: false, needsProbe: false, remove: () => {} }; engineLifetimes.set(engine, state);
   const restored = engine.onContextRestoredObservable, disposed = engine.onDisposeObservable;
@@ -55,10 +56,17 @@ export function resolveGpuCapabilityTier(renderer: string, caps: GpuCapabilityCa
   return medianMs <= 12 && p95Ms <= 20 ? 'T1' : 'T0';
 }
 
-function readDriver(engine: Engine): GpuCapabilityDriver {
+function readDriver(engine: AbstractEngine): GpuCapabilityDriver {
   if (engine.isDisposed) throw new Error('host engine已释放。');
-  const info = engine.getGlInfo(), caps = engine.getCaps();
-  const driver = { renderer: info.renderer, vendor: info.vendor, version: info.version, webGLVersion: engine.webGLVersion,
+  if (engine.isWebGPU) throw new Error('WebGPU 不使用独立 WebGL2 探针。');
+  const getInfo: unknown = Reflect.get(engine, 'getGlInfo');
+  const info: unknown = typeof getInfo === 'function' ? getInfo.call(engine) : null;
+  const webGLVersion: unknown = Reflect.get(engine, 'webGLVersion');
+  if (!info || typeof info !== 'object' || webGLVersion !== 2) throw new Error('host缺少有效WebGL2 renderer/caps。');
+  const renderer: unknown = Reflect.get(info, 'renderer'), vendor: unknown = Reflect.get(info, 'vendor'), version: unknown = Reflect.get(info, 'version');
+  if (typeof renderer !== 'string' || typeof vendor !== 'string' || typeof version !== 'string') throw new Error('host缺少有效WebGL2 renderer/caps。');
+  const caps = engine.getCaps();
+  const driver = { renderer, vendor, version, webGLVersion,
     caps: { maxTextureSize: caps.maxTextureSize, maxTexturesImageUnits: caps.maxTexturesImageUnits } };
   if (![driver.renderer, driver.vendor, driver.version].every(value => typeof value === 'string' && value.trim().length > 0)
     || !Object.values(driver.caps).every(value => Number.isSafeInteger(value) && value > 0) || driver.webGLVersion !== 2) {
@@ -89,10 +97,10 @@ function measured(driver: GpuCapabilityDriver, measurement: GpuCapabilityMeasure
     expiresAt: createdAt + GPU_CAPABILITY_PROFILE_CACHE_TTL_MS, fingerprint: fingerprint(driver), driver, measurement, provenance,
     reason: null, calibration: 'heuristic-not-cross-device-calibrated' });
 }
-function unavailable(reason: string, driver: GpuCapabilityDriver | null, timestamp: number): GpuCapabilityProfile {
+function unavailable(reason: string, driver: GpuCapabilityDriver | null, timestamp: number, backend: 'webgl' | 'webgpu' = 'webgl'): GpuCapabilityProfile {
   return freeze({ schema: SCHEMA, version: 1, algorithmVersion: GPU_CAPABILITY_PROFILE_ALGORITHM, status: 'unavailable', tier: null,
     source: 'unavailable', createdAt: timestamp, expiresAt: null, fingerprint: driver ? fingerprint(driver) : null,
-    driver, measurement: null, provenance: null, reason, calibration: 'heuristic-not-cross-device-calibrated' });
+    driver, measurement: null, provenance: null, reason, backend, calibration: 'heuristic-not-cross-device-calibrated' });
 }
 function readCache(storage: StorageAccess | null, driver: GpuCapabilityDriver, timestamp: number): GpuCapabilityProfile | null {
   try {
@@ -208,16 +216,22 @@ async function probe(driver: GpuCapabilityDriver, signal: AbortSignal | undefine
 }
 
 /** 只返回已准备结果；getter不读取storage、不创建DOM/context、不触发分类或probe。 */
-export function getGpuCapabilityProfile(engine: Engine): GpuCapabilityProfile | null { return profiles.get(engine) ?? null; }
+export function getGpuCapabilityProfile(engine: AbstractEngine): GpuCapabilityProfile | null { return profiles.get(engine) ?? null; }
 
 /** 在准备遮罩中显式await；非取消失败仅返回unavailable，不阻断正常3D，也不改变任何画质默认值。 */
-export async function prepareGpuCapabilityProfile(engine: Engine, signal?: AbortSignal, environment: GpuCapabilityEnvironment = {}): Promise<GpuCapabilityProfile> {
+export async function prepareGpuCapabilityProfile(engine: AbstractEngine, signal?: AbortSignal, environment: GpuCapabilityEnvironment = {}): Promise<GpuCapabilityProfile> {
   signal?.throwIfAborted();
   const timestamp = environment.timestamp ?? Date.now;
   let driver: GpuCapabilityDriver | null = null, checkedAt = 0;
   let lifetime: ReturnType<typeof engineLifetime>;
   try {
     checkedAt = timestamp(); if (!Number.isFinite(checkedAt) || checkedAt < 0) throw new Error('本机诊断时钟不可用。');
+    if (engine.isWebGPU) {
+      engineLifetime(engine);
+      const profile = unavailable(engine.isDisposed ? 'host engine已释放。' : 'WebGPU 不使用独立 WebGL2 探针；当前能力分级不可用。', null, checkedAt, 'webgpu');
+      profiles.set(engine, profile);
+      return profile;
+    }
     driver = readDriver(engine); lifetime = engineLifetime(engine);
     if (lifetime.disposed) throw new Error('host engine已释放。');
   } catch (error) {

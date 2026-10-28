@@ -2,12 +2,14 @@ import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
-import type { AbstractMesh, Engine, Material, Scene, Observer } from '@babylonjs/core';
+import type { AbstractMesh, AbstractEngine, Material, Scene, Observer } from '@babylonjs/core';
 import { EngineInstrumentation } from '@babylonjs/core/Instrumentation/engineInstrumentation';
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
 import type { SceneRuntimePerformanceMetrics } from './SceneRuntime';
 import { getGpuCapabilityProfile } from './gpuCapabilityProfile';
 import { FrameTimingWindow, type FrameTimingReport, type FrameTimingWallClockReport } from './FrameTimingWindow';
+import { SceneRenderPassDiagnostics, type SceneRenderPassSnapshot } from './SceneRenderPassDiagnostics.ts';
+import { getGpuParticleRuntimeSnapshot, type GpuParticleRuntimeSnapshot } from './gpuParticleRuntime.ts';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 const MAX_HISTORY_SAMPLES = 60;
@@ -111,6 +113,9 @@ export type ScenePerformanceSnapshot = {
   renderTimeMs: number | null;
   activeMeshesEvaluationMs: number | null;
   gpuFrameTimeMs: number | null;
+  /** 诊断开启期间完整帧的阶段统计；包含式 CPU 时间与 GPU 帧时间分开报告。 */
+  renderPasses?: SceneRenderPassSnapshot | null;
+  gpuParticles?: GpuParticleRuntimeSnapshot | null;
   /** 实际渲染表面，避免运动降分辨率或DPR变化的收益被误认为同画质提升。 */
   renderSurface?: { width: number; height: number; hardwareScalingLevel: number } | null;
   shaderCompilationMs: number | null;
@@ -163,6 +168,10 @@ type ScenePerformanceMonitorOptions = {
   captureFrameTimings?: boolean;
   /** 编辑器仅在诊断可见/运行时启用GPU查询，普通渲染不承担查询成本。 */
   captureGpuFrameTime?: boolean | (() => boolean);
+  /** 默认跟随诊断 GPU 开关；允许单独关闭阶段观察，不影响原有帧计数器。 */
+  captureRenderPasses?: boolean | (() => boolean);
+  /** 后开启的原生诊断观察器同样登记为宿主回调，不能触发已有合批安全门回退。 */
+  withControlledSceneObservers?: (initialize: () => void) => void;
 };
 
 /** 未支持或尚未采样不能冒充零；实际 PerfCounter 已采集的零仍为有效测量。 */
@@ -176,7 +185,24 @@ function isAvailableMetric(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
-function readRenderSurface(engine: Engine): ScenePerformanceSnapshot['renderSurface'] {
+function readEngineInfo(engine: AbstractEngine): { vendor: string; renderer: string; version: string } {
+  for (const key of ['getGlInfo', 'getInfo'] as const) {
+    if (!(key in engine)) continue;
+    const getter = Reflect.get(engine, key);
+    if (typeof getter !== 'function') continue;
+    try {
+      const info: unknown = Reflect.apply(getter, engine, []);
+      if (typeof info !== 'object' || info === null) continue;
+      const vendor = Reflect.get(info, 'vendor'), renderer = Reflect.get(info, 'renderer'), version = Reflect.get(info, 'version');
+      if (typeof vendor === 'string' && typeof renderer === 'string' && typeof version === 'string') return { vendor, renderer, version };
+    } catch {
+      // 不同后端或受限驱动可能不提供标识；诊断缺失不能阻止场景运行。
+    }
+  }
+  return { vendor: 'unavailable', renderer: engine.getClassName(), version: 'unavailable' };
+}
+
+function readRenderSurface(engine: AbstractEngine): ScenePerformanceSnapshot['renderSurface'] {
   try {
     const width = engine.getRenderWidth(), height = engine.getRenderHeight(), hardwareScalingLevel = engine.getHardwareScalingLevel();
     return [width, height, hardwareScalingLevel].every(value => Number.isFinite(value) && value > 0)
@@ -447,7 +473,7 @@ function readMetadataString(metadata: Record<string, unknown> | null | undefined
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function collectCameraSnapshot(engine: Engine, scene: Scene): ScenePerformanceCameraSnapshot | null {
+function collectCameraSnapshot(engine: AbstractEngine, scene: Scene): ScenePerformanceCameraSnapshot | null {
   const camera = scene.activeCamera;
   if (!(camera instanceof ArcRotateCamera)) return null;
 
@@ -475,6 +501,7 @@ function collectCameraSnapshot(engine: Engine, scene: Scene): ScenePerformanceCa
 export class ScenePerformanceMonitor {
   private readonly sceneInstrumentation: SceneInstrumentation;
   private readonly engineInstrumentation: EngineInstrumentation;
+  private readonly renderPassDiagnostics: SceneRenderPassDiagnostics;
   private readonly history: ScenePerformanceSnapshot[] = [];
   private readonly glInfo: { vendor: string; renderer: string; version: string };
   private sampleTimer: ReturnType<typeof setInterval> | null = null;
@@ -482,6 +509,7 @@ export class ScenePerformanceMonitor {
   private pendingLongTaskCount = 0;
   private pendingLongTaskDurationMs = 0;
   private gpuFrameTimeCaptureEnabled = false;
+  private renderPassCaptureEnabled = false;
   private gpuCaptureStartCount = 0;
   private disposed = false;
   private frameTimings: FrameTimingWindow | null = null;
@@ -489,7 +517,7 @@ export class ScenePerformanceMonitor {
   private readonly breakFrameTimingContinuity = () => this.frameTimings?.breakContinuity();
 
   constructor(
-    private readonly engine: Engine,
+    private readonly engine: AbstractEngine,
     private readonly scene: Scene,
     private readonly options: ScenePerformanceMonitorOptions,
   ) {
@@ -500,13 +528,14 @@ export class ScenePerformanceMonitor {
 
     this.engineInstrumentation = new EngineInstrumentation(engine);
     this.engineInstrumentation.captureShaderCompilationTime = true;
+    this.renderPassDiagnostics = new SceneRenderPassDiagnostics(scene, () => {
+      const counter = this.sceneInstrumentation.drawCallsCounter;
+      return counter && counter.count > 0 && isAvailableMetric(counter.current) ? counter.current : null;
+    });
     this.syncGpuFrameTimeCapture();
+    this.syncRenderPassCapture();
 
-    try {
-      this.glInfo = engine.getGlInfo();
-    } catch {
-      this.glInfo = engine.getInfo();
-    }
+    this.glInfo = readEngineInfo(engine);
     this.observeLongTasks();
     if (options.captureFrameTimings) this.setFrameTimingEnabled(true);
   }
@@ -575,6 +604,7 @@ export class ScenePerformanceMonitor {
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
     this.syncGpuFrameTimeCapture();
+    this.syncRenderPassCapture();
     const gpuCounter = this.gpuFrameTimeCaptureEnabled ? this.engineInstrumentation.gpuFrameTimeCounter : null;
     const gpuFrameTimeNanoseconds = gpuCounter && gpuCounter.count > this.gpuCaptureStartCount ? readCounterValue(gpuCounter) : null;
     // installed Babylon 的公开 getter 委托到 engine._drawCalls；缺少此来源时保持不可用，不造替代 counter。
@@ -590,6 +620,8 @@ export class ScenePerformanceMonitor {
       gpuFrameTimeMs: gpuFrameTimeNanoseconds !== null
         ? gpuFrameTimeNanoseconds * GPU_NANOSECONDS_TO_MILLISECONDS
         : null,
+      renderPasses: this.renderPassDiagnostics.sample(),
+      gpuParticles: getGpuParticleRuntimeSnapshot(this.scene),
       renderSurface: readRenderSurface(this.engine),
       shaderCompilationMs: readCounterValue(this.engineInstrumentation.shaderCompilationTimeCounter),
       drawCalls: drawCalls === null ? null : Math.round(drawCalls),
@@ -614,6 +646,16 @@ export class ScenePerformanceMonitor {
     this.history.push(snapshot);
     if (this.history.length > MAX_HISTORY_SAMPLES) this.history.shift();
     return snapshot;
+  }
+
+  private syncRenderPassCapture(): void {
+    const option = this.options.captureRenderPasses ?? this.options.captureGpuFrameTime ?? this.options.captureFrameTimings ?? false;
+    const enabled = typeof option === 'function' ? option() : option;
+    if (enabled === this.renderPassCaptureEnabled) return;
+    const initialize = () => this.renderPassDiagnostics.setEnabled(enabled);
+    if (this.options.withControlledSceneObservers) this.options.withControlledSceneObservers(initialize);
+    else initialize();
+    this.renderPassCaptureEnabled = enabled;
   }
 
   /** 低频同步诊断开关；重新启用后必须取得新样本，不能把停用前残留计数当成本次测量。 */
@@ -661,6 +703,7 @@ export class ScenePerformanceMonitor {
         // Engine 正在释放时只需继续清理 instrumentation observer。
       }
     }
+    this.renderPassDiagnostics.dispose();
     this.engineInstrumentation.dispose();
     this.sceneInstrumentation.dispose();
     this.history.length = 0;

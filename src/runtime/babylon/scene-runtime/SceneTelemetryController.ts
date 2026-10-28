@@ -55,6 +55,8 @@ type Dependencies = {
 };
 
 
+type TelemetryModelSnapshotEntry = { readonly entityId: string; readonly model: ModelRuntimeEntry };
+
 /** SceneTelemetryController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class SceneTelemetryController {
   constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
@@ -79,6 +81,7 @@ export class SceneTelemetryController {
   public telemetryFrameTimeMs: number | null = null;
   public readonly telemetryOuterStages = { diagnosticsMs: 0, baselineMs: 0, alarmsMs: 0 };
   public telemetryMaxFrameTimeMs: number | null = null;
+  private collectedModels: readonly TelemetryModelSnapshotEntry[] | null = null;
   private modelEntranceHidden = false;
   private updatesStopped = false;
   private disposed = false;
@@ -108,6 +111,7 @@ export class SceneTelemetryController {
     runSceneRuntimeCleanup(this.context, 'RGV 箭头', () => this.rgvMotionArrowSystem.dispose());
     runSceneRuntimeCleanup(this.context, '提升机箭头', () => this.liftMotionArrowSystem.dispose());
     runSceneRuntimeCleanup(this.context, '专用遥测', () => this.specializedTelemetryRuntime.dispose());
+    this.collectedModels = null;
     this.hasConveyorSurfaceArrows = this.hasStackerMotionArrows = this.hasRgvMotionArrows = this.hasLiftMotionArrows = false;
   }
 
@@ -165,26 +169,39 @@ export class SceneTelemetryController {
       observer._willBeUnregistered || this.controlledMotionObservers.has(observer)));
   }
 
+  /**
+   * 每次读取公开模型 Map 的实时内容和顺序；稳定集合复用快照，变化时写时复制。
+   * 不以帧号、数量或 Map 引用判断有效性，嵌套收集也不能修改外层正在遍历的旧快照。
+   * 只缓存成员身份，不缓存 ready、绑定或脚本 metadata，驱动仍在原检查边界读取这些可变状态。
+   */
+  private collectTelemetryModels(): readonly TelemetryModelSnapshotEntry[] {
+    const previous = this.collectedModels;
+    let next: TelemetryModelSnapshotEntry[] | null = null;
+    let count = 0;
+    const append = (model: ModelRuntimeEntry, entityId: string): void => {
+      const cached = previous?.[count];
+      if (cached?.entityId === entityId && cached.model === model) {
+        next?.push(cached);
+      } else {
+        next ??= previous?.slice(0, count) ?? [];
+        next.push({ entityId, model });
+      }
+      count++;
+    };
+    // Map.forEach 不为每个成员创建 entries() 的键值对数组。
+    this.dependencies.assets.models.forEach(append);
+    this.dependencies.variants.modelArrayParameterVariants.forEach(variant => append(variant.model, variant.representativeEntityId));
+    this.dependencies.arrays.modelArrayTelemetryProxies.forEach(append);
+    this.dependencies.outputs.spawnedDeviceModels.forEach((model, key) => append(model, `spawned:${key}`));
+    this.collectedModels = next ?? (previous && count === previous.length ? previous : previous?.slice(0, count) ?? []);
+    return this.collectedModels;
+  }
+
   /** 构造专用遥测门面所需的宿主委托对象。 */
   public createSpecializedTelemetryHost(): SpecializedTelemetryHost {
     return {
       pushLog: (message) => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]),
-      collectModels: () => {
-        const models: { entityId: string; model: ModelRuntimeEntry }[] = [];
-        for (const [entityId, model] of this.dependencies.assets.models.entries()) {
-          models.push({ entityId, model });
-        }
-        for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) {
-          models.push({ entityId: variant.representativeEntityId, model: variant.model });
-        }
-        for (const [entityId, proxy] of this.dependencies.arrays.modelArrayTelemetryProxies.entries()) {
-          models.push({ entityId, model: proxy });
-        }
-        for (const [key, model] of this.dependencies.outputs.spawnedDeviceModels.entries()) {
-          models.push({ entityId: `spawned:${key}`, model });
-        }
-        return models;
-      },
+      collectModels: () => this.collectTelemetryModels(),
       findLocatorByDevice: (assetCode, x, y, z, storageDepth) => this.dependencies.locators.findLocatorByDevice(assetCode, x, y, z, storageDepth),
       findLocatorsByDevice: (assetCode) => this.dependencies.locators.findLocatorsByDevice(assetCode),
       findLocatorByAisle: (aisleCode, x, y, z, storageDepth) => this.dependencies.locators.findLocatorByAisle(aisleCode, x, y, z, storageDepth),
@@ -239,6 +256,7 @@ export class SceneTelemetryController {
   /** 结束 MQTT 运行预览；该方法幂等，按驱动关闭、运行态清理、模型恢复的顺序回到编辑态。 */
   endTelemetryPreview(): void {
     runSceneRuntimeCleanup(this.context, '遥测预览复位', () => this.resetTelemetryPreview());
+    this.collectedModels = null;
   }
 
   private resetTelemetryPreview(): void {
@@ -536,6 +554,8 @@ export class SceneTelemetryController {
       if (this.updatesStopped || this.dependencies.document.disposed) return;
       // 至少一类箭头启用时才收集一次模型并按设备类型分组；全部关闭时各更新方法自行早退，不收集模型。
       const anyArrows = this.hasConveyorSurfaceArrows || this.hasStackerMotionArrows || this.hasRgvMotionArrows || this.hasLiftMotionArrows;
+      // 编辑态没有收集消费者时释放快照，避免保留此后已被删除的模型。
+      if (!this.telemetryPreviewActive && !anyArrows) this.collectedModels = null;
       const arrowViews = anyArrows ? this.buildArrowModelViews(['conveyor', 'stacker', 'rgv', 'lift']) : undefined;
       this.updateConveyorSurfaceArrows(arrowViews);
       this.updateStackerMotionArrows(arrowViews);

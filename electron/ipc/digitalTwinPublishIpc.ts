@@ -1,6 +1,7 @@
 import { isDataPlatformProjectClosing } from './dataPlatformIpc.js';
 import { isDataPlatformProjectOpening } from './dataPlatformProjectService.js';
-import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { app, BrowserWindow, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type {

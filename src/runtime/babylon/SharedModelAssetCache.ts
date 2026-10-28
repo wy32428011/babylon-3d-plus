@@ -1,4 +1,5 @@
-import { verifyModelTemplateCapabilities } from './modelRuntimeCapabilities.ts';
+import { collectReadonlyModelMaterials, verifyModelTemplateCapabilities } from './modelRuntimeCapabilities.ts';
+import { ReadonlyMaterialOwnership } from './readonlyMaterialOwnership.ts';
 import { normalizeModelRuntimeCapabilities, type ModelRuntimeCapabilities } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import type { AssetContainer, InstantiatedEntries } from '@babylonjs/core';
 import type { ModelAssetComponent } from '../../editor/model/components';
@@ -36,6 +37,7 @@ type SharedModelSourceEntry = {
   idleOrder: number;
   controller: AbortController;
   needsSourceDrawRefresh: boolean;
+  readonlyMaterialOwnership: ReadonlyMaterialOwnership | null;
   sourceRef: ProjectOpenSpanRef | null;
 };
 
@@ -55,6 +57,7 @@ export class SharedModelAssetCache {
   private ownedCloneCount = 0;
   private ownedCloneMs = 0;
   private sharedGeometryCloneCount = 0;
+  private sharedMaterialCloneCount = 0;
   private capabilityFallbackCount = 0;
   private readonlyGeometrySharingEnabled = true;
   private idleOrder = 0;
@@ -72,7 +75,8 @@ export class SharedModelAssetCache {
     return { hits: this.hits, misses: this.misses, entries: this.entries.size,
       instantiationCount: this.instantiationCount, instantiationMs: this.instantiationMs,
       ownedCloneCount: this.ownedCloneCount, ownedCloneMs: this.ownedCloneMs,
-      sharedGeometryCloneCount: this.sharedGeometryCloneCount, capabilityFallbackCount: this.capabilityFallbackCount,
+      sharedGeometryCloneCount: this.sharedGeometryCloneCount, sharedMaterialCloneCount: this.sharedMaterialCloneCount,
+      capabilityFallbackCount: this.capabilityFallbackCount,
       readonlyGeometrySharingEnabled: this.readonlyGeometrySharingEnabled,
       idleEntries: idleEntries.length, idleBytes: idleEntries.reduce((bytes, entry) => bytes + entry.estimatedBytes, 0) };
   }
@@ -146,7 +150,7 @@ export class SharedModelAssetCache {
     }
   }
 
-  /** 新声明路径保持独立节点/材质，只读几何持有源到最后一个实例释放；验证不符则完整克隆。 */
+  /** 新声明路径保留独立节点；通过验证的只读几何/材质共同持有源到最后一个消费者释放。 */
   async acquireCapabilityContainer(
     key: string, loader: (signal: AbortSignal) => Promise<AssetContainer>, asset: ModelAssetComponent,
     signal?: AbortSignal, onClone?: CloneObserver, trace?: SceneAssetTrace,
@@ -159,14 +163,24 @@ export class SharedModelAssetCache {
       const capability = await verifyModelTemplateCapabilities(source, asset);
       this.assertAvailable(signal);
       if (entry.disposed) throw new Error('共享模型解析模板已失效。');
-      const shared = this.readonlyGeometrySharingEnabled && capability?.geometry === 'shared-readonly';
+      const sharedGeometry = this.readonlyGeometrySharingEnabled && capability?.geometry === 'shared-readonly';
+      const readonlyMaterials = collectReadonlyModelMaterials(source, asset, capability);
+      const sharedMaterials = readonlyMaterials.size > 0;
+      if (sharedMaterials) {
+        entry.readonlyMaterialOwnership ??= new ReadonlyMaterialOwnership(source.scene);
+        // 先登记再克隆：clone 的 finally 会保留已登记的源材质，工作容器不拥有这些资源。
+        entry.readonlyMaterialOwnership.register(readonlyMaterials);
+      }
+      const shared = sharedGeometry || sharedMaterials;
       const token = beginSceneAssetTrace(trace, 'modelClone');
       const startedAt = performance.now();
       let failed = true;
       try {
-        const container = cloneModelAssetContainer(source, shared);
+        const container = cloneModelAssetContainer(source, sharedGeometry, readonlyMaterials);
         this.ownedCloneCount++;
-        if (shared) this.sharedGeometryCloneCount++; else this.capabilityFallbackCount++;
+        if (sharedGeometry) this.sharedGeometryCloneCount++;
+        if (sharedMaterials) this.sharedMaterialCloneCount++;
+        if (!shared) this.capabilityFallbackCount++;
         retained = shared;
         let disposed = false;
         failed = false;
@@ -290,6 +304,7 @@ export class SharedModelAssetCache {
       idleOrder: 0,
       controller: new AbortController(),
       needsSourceDrawRefresh: true,
+      readonlyMaterialOwnership: null,
       sourceRef: sourceToken?.ref ?? null,
     };
     // 延后调用避免同步抛错/重入发生在 Map 注册前；同资源的并发调用共享同一任务。
@@ -383,8 +398,12 @@ export class SharedModelAssetCache {
     if (entry.disposed) return;
     entry.disposed = true;
     entry.controller.abort();
-    entry.container?.dispose();
-    entry.container = null;
+    try { entry.container?.dispose(); }
+    finally {
+      entry.readonlyMaterialOwnership?.dispose();
+      entry.readonlyMaterialOwnership = null;
+      entry.container = null;
+    }
   }
 }
 
@@ -408,6 +427,7 @@ export type ModelAssetSharedInstancingReason =
   | 'parameter-script-metadata'
   | 'animation-script-metadata'
   | 'declared-readonly-geometry'
+  | 'declared-readonly-materials'
   | 'declared-owned-geometry';
 
 /** 模型共享策略快照结果，只表达准入结论，不触碰运行时场景或外部资源。 */
@@ -425,11 +445,16 @@ export function resolveModelAssetSharedInstancingPolicy(
   modelAsset: ModelAssetComponent,
 ): ModelAssetSharedInstancingPolicy {
   const capability = normalizeModelRuntimeCapabilities(modelAsset.runtimeCapabilities);
-  if (capability?.geometry === 'owned') return { mode: 'owned-container', reason: 'declared-owned-geometry' };
+  const readonlyMaterialsDeclared = capability?.materials === 'shared-readonly' && !Object.keys(capability.scripts).length
+    && !hasArrayEntries(modelAsset.scriptAssets) && !hasArrayEntries(modelAsset.parameterScriptMetadata)
+    && !hasArrayEntries(modelAsset.animationScriptMetadata);
   if ((modelAsset.sourceSnapshot?.contentSha256 || modelAsset.assetRevision)
-    && capability?.geometry === 'shared-readonly') {
-    return { mode: 'shared-geometry-clone', reason: 'declared-readonly-geometry' };
+    && (capability?.geometry === 'shared-readonly' || readonlyMaterialsDeclared)) {
+    // 沿用既有 capability 工作容器路由名；材质只读时 Geometry 仍可按声明独占。
+    return { mode: 'shared-geometry-clone', reason: capability?.geometry === 'shared-readonly'
+      ? 'declared-readonly-geometry' : 'declared-readonly-materials' };
   }
+  if (capability?.geometry === 'owned') return { mode: 'owned-container', reason: 'declared-owned-geometry' };
   const blockingReason = findOwnedContainerReason(modelAsset);
   if (blockingReason) {
     return { mode: 'owned-container', reason: blockingReason };

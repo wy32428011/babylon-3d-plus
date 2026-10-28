@@ -1,0 +1,24 @@
+.unsaved-scene-dialog {
+  width: min(480px, calc(100vw - 48px));
+  box-sizing: border-box;
+  padding: 24px;
+  border: 1px solid #465260;
+  border-radius: 10px;
+  color: #eef3f8;
+  background: #202832;
+  box-shadow: 0 18px 60px #0009;
+}
+
+.unsaved-scene-dialog::backdrop { background: #0008; }
+.unsaved-scene-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.unsaved-scene-dialog p { margin: 0 0 24px; line-height: 1.7; }
+.unsaved-scene-actions { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; }
+.unsaved-scene-actions button {
+  padding: 8px 14px;
+  border: 1px solid #576576;
+  border-radius: 5px;
+  color: inherit;
+  background: #303d4c;
+  cursor: pointer;
+}
+.unsaved-scene-actions button:focus-visible { outline: 2px solid #72b4ff; outline-offset: 2px; }

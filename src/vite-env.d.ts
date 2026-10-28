@@ -638,9 +638,12 @@ interface Window {
     importCompositionPackage: import('../electron/shared/compositionTypes').CompositionLibraryApi['importCompositionPackage'];
     exportCompositionPackage: import('../electron/shared/compositionTypes').CompositionLibraryApi['exportCompositionPackage'];
     version: string;
+    onWindowCloseRequest: (handler: (requestId: string) => Promise<void>) => () => void;
+    confirmWindowClose: (requestId: string, allowed: boolean) => Promise<void>;
     saveScene: (request: SaveSceneRequest) => Promise<SaveSceneResult>;
     loadScene: () => Promise<LoadSceneResult>;
     loadSceneFile: (request: LoadSceneFileRequest) => Promise<LoadSceneResult>;
+    cancelSceneOpen: (request: { sceneOpenToken: number }) => Promise<void>;
     confirmSceneOpen: (request: { sceneOpenToken: number }) => Promise<boolean>;
     readTextFile: (request: ReadTextFileRequest) => Promise<ReadTextFileResult>;
     scanAssets: () => Promise<AssetEntry[]>;

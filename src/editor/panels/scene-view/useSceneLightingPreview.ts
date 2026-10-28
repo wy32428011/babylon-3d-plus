@@ -19,11 +19,13 @@ type Options = {
   statisticsSceneSessionRef: RefObject<string | null>;
   lightingManagerPreviewRequest: EditorState['lightingManagerPreviewRequest'];
   sceneDocument: SceneDocument;
+  runtimeReady: boolean;
+  runtimeReadyGeneration: number;
 };
 
 /** 保留视口原有执行顺序和依赖，集中管理光照预览与烘焙。 */
 export function useSceneLightingPreview({
-  lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument,
+  lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument, runtimeReady, runtimeReadyGeneration,
 }: Options) {
   const preflightRequest = useEditorStore(state => state.lightingBakePreflightRequest);
   const draftPreview = useEditorStore(state => state.lightingDraftPreview);
@@ -31,6 +33,9 @@ export function useSceneLightingPreview({
   const inspectorSelection = useEditorStore(state => state.lightingInspectorEntityIds.join('\0'));
   const previewOwner = useRef<SceneRuntime | null>(null);
   const previousSession = useRef(sceneSessionId);
+  // 已真正启动的事务沿用原取消语义；换代只重试此前因初始化等待而尚未启动的请求。
+  const startedBake = useRef<{ request: NonNullable<EditorState['lightingBakeRequest']>; runtime: SceneRuntime } | null>(null);
+  const startedPreflight = useRef<{ request: NonNullable<EditorState['lightingBakePreflightRequest']>; runtime: SceneRuntime } | null>(null);
 
   useEffect(() => {
     const state = useEditorStore.getState();
@@ -39,17 +44,26 @@ export function useSceneLightingPreview({
     }
     if (previousSession.current !== sceneSessionId) {
       previousSession.current = sceneSessionId;
+      startedBake.current = null;
+      startedPreflight.current = null;
       useEditorStore.setState({ lightingBakeTaskHistory: null, lightingBakeTaskHistoryError: null, lightingShadowCosts: null, lightingRuntimeDiagnostic: null });
     }
   }, [sceneDocument, sceneSessionId]);
 
   useEffect(() => {
-    if (!preflightRequest) return;
+    if (!preflightRequest) { startedPreflight.current = null; return; }
+    if (!runtimeReady) return;
     if (preflightRequest.sceneSessionId !== sceneSessionId || preflightRequest.scene !== sceneDocument) {
       useEditorStore.setState({ lightingBakePreflightRequest: null, lightingBakePreflight: { phase: 'idle' } }); return;
     }
     const runtime = runtimeRef.current, controller = new AbortController();
-    if (!runtime || isRuntimePreview) { useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, '请等待编辑场景就绪后检查。'); return; }
+    if (!runtime) return;
+    if (isRuntimePreview) { useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, '请等待编辑场景就绪后检查。'); return; }
+    if (startedPreflight.current?.request === preflightRequest) {
+      useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, '视口就绪状态已变化，本次检查已取消，请重新发起。');
+      return;
+    }
+    startedPreflight.current = { request: preflightRequest, runtime };
     let active = true;
     void runtime.preflightLightingBake(sceneDocument, controller.signal).then(report => {
       if (active) useEditorStore.getState().completeLightingBakePreflight(preflightRequest.id, report);
@@ -57,9 +71,10 @@ export function useSceneLightingPreview({
       if (active) useEditorStore.getState().failLightingBakePreflight(preflightRequest.id, error instanceof Error ? error.message : String(error));
     });
     return () => { active = false; controller.abort(); };
-  }, [preflightRequest, sceneDocument, sceneSessionId, isRuntimePreview, runtimeRef]);
+  }, [preflightRequest, sceneDocument, sceneSessionId, isRuntimePreview, runtimeRef, runtimeReady, runtimeReadyGeneration]);
 
   useEffect(() => {
+    if (!runtimeReady) return;
     const runtime = runtimeRef.current;
     if (!runtime) return;
     if (draftPreview && (draftPreview.baseScene !== sceneDocument || draftPreview.sceneSessionId !== sceneSessionId || !lightingManagerOpen || isRuntimePreview)) {
@@ -82,15 +97,22 @@ export function useSceneLightingPreview({
         void runtime.setLightingDraftPreview(null).catch(error => useEditorStore.getState().pushLog('恢复临时光照预览失败：' + String(error)));
       }
     };
-  }, [draftPreview, sceneDocument, sceneSessionId, lightingManagerOpen, isRuntimePreview, runtimeRef]);
+  }, [draftPreview, sceneDocument, sceneSessionId, lightingManagerOpen, isRuntimePreview, runtimeRef, runtimeReady, runtimeReadyGeneration]);
   useEffect(() => {
-    if (!lightingBakeRequest) return;
+    if (!lightingBakeRequest) { startedBake.current = null; return; }
+    if (!runtimeReady) return;
     const runtime = runtimeRef.current;
     const state = useEditorStore.getState();
-    if (!runtime || isRuntimePreview) {
+    if (!runtime) return;
+    if (isRuntimePreview) {
       state.failLightingBake(lightingBakeRequest.id, '请在场景编辑就绪后烘焙材质与间接光。');
       return;
     }
+    if (startedBake.current?.request === lightingBakeRequest) {
+      state.failLightingBake(lightingBakeRequest.id, '视口就绪状态已变化，本次烘焙已取消，请重新发起。');
+      return;
+    }
+    startedBake.current = { request: lightingBakeRequest, runtime };
     // 清理时读取当前所有者，不能把已退役运行时重新同步到新场景。
     const readCurrentRuntime = () => runtimeRef.current;
     const controller = new AbortController();
@@ -109,18 +131,18 @@ export function useSceneLightingPreview({
       const current = useEditorStore.getState();
       if (readCurrentRuntime() === runtime) runtime.syncLighting(current.scene);
     };
-  }, [lightingBakeRequest, isRuntimePreview, sceneSessionId, runtimeRef]);
+  }, [lightingBakeRequest, isRuntimePreview, sceneSessionId, runtimeRef, runtimeReady, runtimeReadyGeneration]);
 
   useEffect(() => {
-    runtimeRef.current?.setLightingPreview(lightingDebugVisible, lightingComparisonEnabled);
-  }, [lightingDebugVisible, lightingComparisonEnabled, sceneSessionId, runtimeRef]);
+    if (runtimeReady) runtimeRef.current?.setLightingPreview(lightingDebugVisible, lightingComparisonEnabled);
+  }, [lightingDebugVisible, lightingComparisonEnabled, sceneSessionId, runtimeRef, runtimeReady, runtimeReadyGeneration]);
 
   useEffect(() => {
-    if (lightingNodeFocusRequest) runtimeRef.current?.focusLightingNode(lightingNodeFocusRequest.entityId, lightingNodeFocusRequest.nodeKey);
-  }, [lightingNodeFocusRequest, runtimeRef]);
+    if (runtimeReady && lightingNodeFocusRequest) runtimeRef.current?.focusLightingNode(lightingNodeFocusRequest.entityId, lightingNodeFocusRequest.nodeKey);
+  }, [lightingNodeFocusRequest, runtimeRef, runtimeReady, runtimeReadyGeneration]);
 
   useEffect(() => {
-    if (!lightingManagerOpen || managerTab !== 'overview') return;
+    if (!runtimeReady || !lightingManagerOpen || managerTab !== 'overview') return;
     const viewport = viewportRef.current;
     if (!viewport) return;
     const scene = viewport.scene, sourceCanvas = viewport.engine.getRenderingCanvas();
@@ -180,9 +202,10 @@ export function useSceneLightingPreview({
       previewCanvas.width = 0; previewCanvas.height = 0;
     };
   }, [lightingManagerOpen, managerTab, lightingManagerPreviewRequest, sceneSessionId, isRuntimePreview,
-    lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, sceneDocument.sceneSettings, sceneDocument.entities, runtimeRef, viewportRef, statisticsSceneSessionRef]);
+    lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, sceneDocument.sceneSettings, sceneDocument.entities, runtimeRef, viewportRef, statisticsSceneSessionRef, runtimeReady, runtimeReadyGeneration]);
 
   useEffect(() => {
+    if (!runtimeReady) return;
     let previous: ReturnType<SceneRuntime['getLightingClassification']> | null = null;
     const poll = () => {
       const runtime = runtimeRef.current;
@@ -209,5 +232,5 @@ export function useSceneLightingPreview({
     poll();
     const timer = window.setInterval(poll, 400);
     return () => window.clearInterval(timer);
-  }, [sceneSessionId, lightingManagerOpen, inspectorSelection, runtimeRef]);
+  }, [sceneSessionId, lightingManagerOpen, inspectorSelection, runtimeRef, runtimeReady, runtimeReadyGeneration]);
 }

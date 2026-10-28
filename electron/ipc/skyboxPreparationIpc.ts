@@ -1,5 +1,6 @@
 import { BUILTIN_SKYBOX_SHA256, getBuiltinSkyboxEnvironment } from './builtinSkyboxAssets.ts';
-import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, type IpcMainInvokeEvent } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { authorizeAssetFile, decodeAssetUrl, encodeAssetUrl, isAuthorizedAssetFile } from './assetRegistry.js';

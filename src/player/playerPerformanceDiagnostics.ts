@@ -1,5 +1,6 @@
 import type { ScenePerformanceSnapshot } from '../runtime/babylon/ScenePerformanceMonitor';
 import type { FrameTimingReport } from '../runtime/babylon/FrameTimingWindow';
+import { copySceneRenderPassSnapshot } from '../runtime/babylon/SceneRenderPassDiagnostics.ts';
 import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
 
 const SAMPLE_INTERVAL_MS = 1_000;
@@ -8,7 +9,7 @@ const MAX_SAMPLES = 60;
 
 export type PlayerPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
   'sampledAt' | 'fps' | 'frameTimeMs' | 'renderTimeMs' | 'activeMeshesEvaluationMs'
-  | 'gpuFrameTimeMs' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
+  | 'gpuFrameTimeMs' | 'renderPasses' | 'gpuParticles' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
   | 'totalMeshes' | 'totalVertices' | 'thinInstances' | 'longTaskCount' | 'longTaskDurationMs'>;
 
 export type PlayerPerformanceMonitor = {
@@ -49,6 +50,11 @@ function selectPerformanceMetrics(sample: PlayerPerformanceSourceSnapshot): Play
     renderTimeMs: nullableMetric(sample.renderTimeMs),
     activeMeshesEvaluationMs: nullableMetric(sample.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(sample.gpuFrameTimeMs),
+    ...(sample.renderPasses !== undefined ? { renderPasses: copySceneRenderPassSnapshot(sample.renderPasses) } : {}),
+    ...(sample.gpuParticles ? { gpuParticles: {
+      requested: sample.gpuParticles.requested, backend: sample.gpuParticles.backend, ready: sample.gpuParticles.ready,
+      reason: sample.gpuParticles.reason, activeGpuSystems: sample.gpuParticles.activeGpuSystems, activeCpuSystems: sample.gpuParticles.activeCpuSystems,
+    } } : {}),
     shaderCompilationMs: nullableMetric(sample.shaderCompilationMs),
     drawCalls: nullableMetric(sample.drawCalls),
     activeMeshes: sample.activeMeshes,

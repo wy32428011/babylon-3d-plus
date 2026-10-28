@@ -6,8 +6,8 @@ const CHUNK_BYTES = 256 * 1024;
  * 授权检查由 editor-asset 协议入口完成。每个块独占其 ArrayBuffer，避免 Node→Web
  * 通用适配器为 Buffer 再复制一次；字节队列最多预取一个块，取消后关闭同一文件句柄。
  */
-export function createAssetFileByteStream(filePath: string, signal?: AbortSignal, sizeHint?: number): ReadableStream<Uint8Array> {
-  let opening: Promise<FileHandle> | null = null;
+export function createAssetFileByteStream(filePath: string | FileHandle, signal?: AbortSignal, sizeHint?: number): ReadableStream<Uint8Array> {
+  let opening: Promise<FileHandle> | null = typeof filePath === 'string' ? null : Promise.resolve(filePath);
   let closing: Promise<void> | null = null;
   let stopped = false;
   let abort: (() => void) | null = null;
@@ -29,7 +29,7 @@ export function createAssetFileByteStream(filePath: string, signal?: AbortSignal
       };
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener('abort', abort, { once: true });
-      opening = open(filePath, 'r');
+      opening ??= open(filePath as string, 'r');
       return opening.then(() => {
         if (stopped) return close();
       }, error => {

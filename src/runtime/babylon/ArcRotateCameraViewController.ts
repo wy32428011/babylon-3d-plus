@@ -1,7 +1,7 @@
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { Scalar } from '@babylonjs/core/Maths/math.scalar.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import type { ArcRotateCamera, Engine, Observer, Scene } from '@babylonjs/core';
+import type { AbstractEngine, ArcRotateCamera, Observer, Scene } from '@babylonjs/core';
 import {
   isStandardSceneCameraOrientation,
   type SceneCameraOrientation,
@@ -133,7 +133,7 @@ function lockCameraAngles(camera: ArcRotateCamera, alpha: number, beta: number):
 }
 
 /** 正交模式下把 radius 映射为投影边界，保持滚轮缩放和透视取景范围一致。 */
-function syncOrthographicBounds(camera: ArcRotateCamera, engine: Engine): void {
+function syncOrthographicBounds(camera: ArcRotateCamera, engine: AbstractEngine): void {
   const renderHeight = engine.getRenderHeight();
   const renderWidth = engine.getRenderWidth();
   if (renderHeight <= 0 || renderWidth <= 0) return;
@@ -176,7 +176,7 @@ export class ArcRotateCameraViewController {
 
   constructor(
     private readonly camera: ArcRotateCamera,
-    private readonly engine: Engine,
+    private readonly engine: AbstractEngine,
     private readonly scene: Scene,
     private readonly options: ArcRotateCameraViewControllerOptions = {},
   ) {

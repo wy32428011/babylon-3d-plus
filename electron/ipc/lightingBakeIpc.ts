@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, dialog, type IpcMainInvokeEvent } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { authorizeAssetFile, decodeAssetUrl, encodeAssetUrl, isAuthorizedAssetFile } from './assetRegistry.js';

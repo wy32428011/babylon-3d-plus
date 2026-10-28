@@ -12,6 +12,7 @@ export type ScenePublishScope = Readonly<{
 let updateSequence = 0;
 let currentScope: ScenePublishScope = Object.freeze({ kind: 'unspecified', generation: 0 });
 let pendingFile: { token: number; filePath: string } | null = null;
+let confirmedFile: { token: number; previous: ScenePublishScope } | null = null;
 
 export function getScenePublishScope(): ScenePublishScope {
   return currentScope;
@@ -47,9 +48,25 @@ export function stageScenePublishScopeFile(token: number, filePath: string): boo
 export async function confirmScenePublishScopeFile(token: number, assertCanCommit?: () => void): Promise<boolean> {
   const candidate = pendingFile;
   if (!candidate || candidate.token !== token || token !== updateSequence) return false;
+  const previous = currentScope;
   const committed = await commitScenePublishScopeFromFile(token, candidate.filePath, assertCanCommit);
-  if (committed && pendingFile === candidate) pendingFile = null;
+  if (committed && pendingFile === candidate) {
+    pendingFile = null;
+    confirmedFile = { token, previous };
+  }
   return committed;
+}
+
+/** renderer 发现确认期间又有编辑时，只撤销本次尚未被后续请求替代的归属。 */
+export function cancelScenePublishScopeFile(token: number): void {
+  if (token !== updateSequence) return;
+  if (confirmedFile?.token === token && currentScope.generation === token) {
+    currentScope = Object.freeze({ ...confirmedFile.previous, generation: ++updateSequence });
+  } else {
+    updateSequence += 1;
+  }
+  pendingFile = null;
+  confirmedFile = null;
 }
 
 /** 按实际场景文件的父目录识别绑定，不按模型路径或上次资产库根目录推断。 */

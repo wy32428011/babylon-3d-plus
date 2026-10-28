@@ -29,6 +29,14 @@ Electron 主进程会在 `app ready` 前请求高性能 GPU，主窗口明确开
 
 场景 JSON、GLB/GLTF 文件读取、格式解析和部分纹理解码仍由 CPU 或 Worker 完成；解析后的几何、材质和纹理上传到 WebGL 后，模型绘制、Shader、纹理采样和画面合成由 GPU 执行。
 
+## 可选择的 GPU 路径
+
+默认仍使用现有硬件 WebGL，不因显卡档位自动改变场景效果。浏览器编辑器和重新构建后的发布 Viewer 可在 URL 使用 `?backend=webgpu` 显式请求 WebGPU；已有查询参数时使用 `&backend=webgpu`。视口会在创建前核对实际文档功能，混合阴影缓存、烘焙 GI、入场/模型效果插件、未知脚本等不兼容路径完整回退 WebGL并说明原因，不通过关闭功能换取兼容。编辑中出现不兼容功能时会保留编辑状态并重建到 WebGL，同一会话不自动反复升降后端。编辑器运行预览在业务启动前即选 WebGL，避免运行中因光照管理等操作重建遥测/设备状态；这不改变兼容的独立 Viewer 后端选择。WebGPU 保持兼容模式，未默认开启 Snapshot Rendering 或自定义 Compute 裁剪。
+
+`?gpuParticles=1` 独立启用框架旧式 POI 基础粒子的 GPU 实现，可与 `backend=webgpu`、`performance=1` 组合。它在准备阶段按实际引擎能力加载 WebGL2 transform feedback 或 WebGPU compute 实现；不支持或模块加载失败时保留 CPU。默认不加载这些 GPU 模块、不转换用户脚本粒子；原有基于 Shader 的雨雪等效果不重复转换。GPU 粒子保留预设的发射率、容量、颜色、尺寸、寿命和启停行为，但随机粒子轨迹不保证与 CPU 路径逐像素一致，因此仅显式选择，不改变原场景默认结果。
+
+性能快照中的 `gpuParticles` 仅统计该框架路径实际持有的系统数量与后端，不代表场景全部粒子或 GPU 利用率。任何路径的 FPS 净收益均需同条件实测，不能从启用后端、减少上传字节或少量合成场景推断生产收益。
+
 ## 静态同源模型共享
 
 `SceneRuntime` 会为每个模型资产计算实例化策略：
@@ -185,6 +193,12 @@ Scene View 左上角显示低频性能摘要，点击后展开详细 HUD。Toolb
 - 浏览器 Long Task 次数与持续时间。
 
 “复制最近一分钟报告”会输出 renderer、60 个有界采样和摘要 JSON，便于在 Intel、NVIDIA、AMD 设备上对比。GPU 使用率低不等于 GPU 未启用：如果 GPU frame time 较低而 CPU frame time、完整同步、分组、Long Task 或 Draw Call 偏高，瓶颈在主线程、场景遍历或提交阶段；如果 GPU frame time 接近或超过 frame time，则应继续检查材质、像素填充、阴影和后处理。
+
+### 分阶段渲染诊断
+
+展开性能诊断或开启性能运行时，报告新增 `renderPasses`。它记录采样窗口内完整帧的阶段 CPU 墙钟均值，以及每个阴影目标/级联或立方体面的提交次数和 Draw Call；`shadowDrawCallsPerFrame` 与 `otherDrawCallsPerFrame` 区分阴影和其余绘制，后者包括主画面、其它渲染目标及后处理。
+
+阶段时间标记为 `inclusive-cpu-wall-ms`，包含嵌套阶段，不能相加，也不是各阶段 GPU 执行时间；整帧 GPU 时间仍使用原生 timer query，缺失保持 `null`。未完成首帧时阶段结果同样不可用，失败/中断帧不作为完整样本。阶段观察器跟随诊断开关安装与释放，不包装 draw、不改阴影列表、不增加 GPU 像素读回。复制报告保留数值和运行期 ID，不包含灯光名称或资源路径。
 
 ### 编辑器性能运行
 

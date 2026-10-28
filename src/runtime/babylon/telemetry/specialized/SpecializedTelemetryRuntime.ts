@@ -587,6 +587,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     group.changed = false;
     for (const { entityId, model } of this.host.collectModels()) {
       if (!model.assetHandle || !model.stackerTelemetryReady) continue;
+      // 显式绑定只可能进入对应驱动组，其它组无需重复解析脚本能力；不缓存可原位变化的绑定或脚本声明。
+      const binding = model.telemetryBinding;
+      if (binding?.enabled === false) continue;
+      const configuredDeviceType = binding?.deviceType.trim().toLowerCase();
+      if (configuredDeviceType && configuredDeviceType !== deviceType) continue;
       if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
       const candidate = this.getCachedCandidate(entityId, model, deviceType);
       if (!candidate) continue;

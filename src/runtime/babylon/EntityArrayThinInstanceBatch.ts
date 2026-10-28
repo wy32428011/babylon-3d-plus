@@ -8,7 +8,8 @@ import { ENTITY_ARRAY_MATRIX_INSTANCE_LIMIT, ENTITY_ARRAY_MATRIX_DETERMINANT_EPS
 import { groupRepeatedStaticGeometryCandidates, mergeStaticCandidatesByMaterial } from './thinInstanceStaticGeometry';
 import { resolveBatchSourceMesh, getSourceMatrixCount, captureCandidateSourceWorldMatrices, captureSourceWorldMatrices, captureMatrixOrientations, getMatrixOrientation, createMatrixBatch, applyBatchOrientation, isCommittedBatchStateUnchanged, commitMatrixBuffer, applyBatchInteractionState, syncBatchEffectiveInteractionState, resolveFormalBatchMaxInstancesPerPartition, createSpatialMatrixPartitions, createEntityInstanceRanges, acquireIndependentFloatBuffer, acquireIndependentEntityIndexBuffer, acquireFloatBuffer, acquireDetachedFloatBuffer, acquireDetachedEntityIndexBuffer, resetInactiveBatchBuffers, applyNegativeOrientationCarrierToBuffer, acquireEntityIndexBuffer, createEntityRangeStarts, appendEntityInstanceRange, writeSelectionRange, isFiniteMatrixData, isRigidTransformMatrix, createTransformMatrix, isFiniteVector3, isFiniteTransform, isFiniteMatrix, disposeBatches } from './thinInstanceMatrixBuilder';
 import { isTransformedBoxInFrustum, isFiniteVector3Data, cloneBoundingInfo, calculateTransformedExtentToRef } from './thinInstanceFrustum';
-import { copyMatrixRows, sparseMatrixUploadsEnabled } from './thinInstanceSparseUpdates';
+import { copyMatrixRows, matrixUploadRangesForRows, sparseMatrixUploadsEnabled } from './thinInstanceSparseUpdates';
+import { captureEntityArrayTransformSnapshot, prepareEntityArrayTransformUpdate, type EntityArrayTransformSnapshot } from './thinInstanceTransformUpdates';
 export type { EntityArrayThinInstanceBatchOptions, EntityArrayThinInstanceTransform, EntityArrayLightingInstance } from './thinInstanceBatchTypes';
 
 
@@ -40,6 +41,7 @@ export class EntityArrayThinInstanceBatch {
   private readonly rotationPreviewResultMatrix = new Matrix();
   private translationPreviewSession: EntityArrayTranslationPreviewSession | null = null;
   private rotationPreviewSession: EntityArrayRotationPreviewSession | null = null;
+  private transformUpdateSnapshot: EntityArrayTransformSnapshot | null = null;
 
   private constructor(
     private readonly sources: EntityArrayMatrixSource[],
@@ -150,6 +152,7 @@ export class EntityArrayThinInstanceBatch {
    */
   updateOffsets(offsets: readonly Vector3Data[]): boolean {
     if (offsets.length < 1 || offsets.some((offset) => !isFiniteVector3(offset))) return false;
+    this.transformUpdateSnapshot = null;
 
     const plans: Array<{
       source: EntityArrayMatrixSource;
@@ -276,6 +279,9 @@ export class EntityArrayThinInstanceBatch {
       return false;
     }
     inverseSourceRoot.invert();
+
+    if (this.tryUpdateEntityTransformsIncrementally(inverseSourceRoot, instances)) return true;
+    this.transformUpdateSnapshot = null;
 
     // 实体布局（顺序与 ID 集合）不变是跳过批次提交的前提：picking 的实体映射依赖该顺序。
     const nextEntityIds = instances.map((instance) => instance.entityId);
@@ -574,6 +580,51 @@ export class EntityArrayThinInstanceBatch {
       this.cullingDirty = true;
     }
     this.updateFrustumCulling();
+    this.transformUpdateSnapshot = this.interactive ? captureEntityArrayTransformSnapshot(plans, instances) : null;
+    return true;
+  }
+
+  /** 稳定完整布局只重算实际变化的实体行；仍执行原交互、边界和光照失效链。 */
+  private tryUpdateEntityTransformsIncrementally(
+    inverseSourceRoot: Matrix,
+    instances: readonly EntityArrayThinInstanceTransform[],
+  ): boolean {
+    const snapshot = this.transformUpdateSnapshot;
+    if (!this.interactive || !snapshot) return false;
+    const prepared = prepareEntityArrayTransformUpdate(snapshot, inverseSourceRoot, instances);
+    if (!prepared) return false;
+    // 提交期间异常不得留下可复用的旧快照；下次同步仍可按原全量事务恢复。
+    this.transformUpdateSnapshot = null;
+    for (const source of snapshot.sources) for (const { batch } of source.batches) {
+      applyBatchOrientation(batch, batch.orientation);
+    }
+    for (const { batch, rows, matrices } of prepared.patches) {
+      const sourceMatrices = batch.sourceMatrixBuffer!;
+      const renderMatrices = batch.matrixBuffer!;
+      for (let index = 0; index < rows.length; index++) {
+        const row = matrices.subarray(index * 16, index * 16 + 16);
+        sourceMatrices.set(row, rows[index] * 16);
+        renderMatrices.set(row, rows[index] * 16);
+      }
+      const count = batch.sourceEntityIndexBuffer!.length;
+      batch.mesh._thinInstanceDataStorage.worldMatrices = null;
+      commitMatrixBuffer(batch, renderMatrices, count, true, matrixUploadRangesForRows(rows, count));
+      const bounds = batch.mesh.getBoundingInfo().boundingBox;
+      batch.fullBoundingInfo = new BoundingInfo(bounds.minimumWorld.clone(), bounds.maximumWorld.clone());
+      batch.lastFrustumContainment = -1;
+      this.lightingSourceRevision += 1;
+    }
+    for (const source of snapshot.sources) for (const { batch, sourceIndexes } of source.batches) {
+      applyBatchInteractionState(batch, true, sourceIndexes.some(index => instances[index].pickable));
+    }
+    this.pickableEntityIds = new Set(instances.filter(instance => instance.pickable).map(instance => instance.entityId));
+    if (prepared.patches.length) {
+      this.entityLayoutRevision += 1;
+      this.cullingDirty = true;
+    }
+    this.updateFrustumCulling(true, new Set(snapshot.sources.flatMap(source => source.batches.map(layout => layout.batch))));
+    for (const change of prepared.changes) snapshot.instances[change.index].transform = change.transform;
+    this.transformUpdateSnapshot = snapshot;
     return true;
   }
 
@@ -875,7 +926,10 @@ export class EntityArrayThinInstanceBatch {
   }
 
   /** 相机变化时只上传保守视锥内的实例；完整源矩阵、参数脚本和逻辑实体始终保留。 */
-  private updateFrustumCulling(refreshSelectionMask = true): boolean {
+  private updateFrustumCulling(
+    refreshSelectionMask = true,
+    currentMatrixBatches?: ReadonlySet<EntityArrayMatrixBatch>,
+  ): boolean {
     const scene = this.scene;
     const frustumPlanes = scene?.frustumPlanes;
     const camera = scene?.activeCamera;
@@ -900,7 +954,7 @@ export class EntityArrayThinInstanceBatch {
     let layoutChanged = false;
     for (const batch of this.batches) {
       if (!batch.requestedVisible || !batch.sourceMatrixBuffer || !batch.sourceEntityIndexBuffer) continue;
-      layoutChanged = this.updateBatchFrustumVisibility(batch, effectiveFrustumPlanes, forceMatrixUpdate)
+      layoutChanged = this.updateBatchFrustumVisibility(batch, effectiveFrustumPlanes, forceMatrixUpdate, currentMatrixBatches?.has(batch) === true)
         || layoutChanged;
     }
     if (layoutChanged) {
@@ -914,6 +968,7 @@ export class EntityArrayThinInstanceBatch {
     batch: EntityArrayMatrixBatch,
     frustumPlanes: Plane[] | null,
     forceMatrixUpdate: boolean,
+    renderMatricesCurrent = false,
   ): boolean {
     const sourceMatrixBuffer = batch.sourceMatrixBuffer;
     const sourceEntityIndexBuffer = batch.sourceEntityIndexBuffer;
@@ -984,7 +1039,8 @@ export class EntityArrayThinInstanceBatch {
         }
       }
     }
-    if (sameVisibleLayout && !forceMatrixUpdate) return false;
+    // 受控变换增量已同步当前完整渲染布局；视锥布局未变时不能再复制并全量上传同一批矩阵。
+    if (sameVisibleLayout && (!forceMatrixUpdate || renderMatricesCurrent)) return false;
     const visibleLayoutChanged = !sameVisibleLayout;
 
     const renderMatrixBuffer = acquireIndependentFloatBuffer(
@@ -1158,6 +1214,7 @@ export class EntityArrayThinInstanceBatch {
 
   /** 捕获目标逻辑实体的矩阵平移基线，后续预览始终按绝对 delta 重算。 */
   beginEntityTranslationPreview(entityIds: ReadonlySet<string>): boolean {
+    this.transformUpdateSnapshot = null;
     if (this.translationPreviewSession) this.endEntityTranslationPreview(true);
     if (this.rotationPreviewSession) this.endEntityRotationPreview(true);
     const selectedEntityIndexes = new Set<number>();
@@ -1261,6 +1318,7 @@ export class EntityArrayThinInstanceBatch {
 
   /** 捕获目标逻辑实体的完整矩阵基线，后续旋转预览始终按绝对世界增量矩阵重算。 */
   beginEntityRotationPreview(entityIds: ReadonlySet<string>): boolean {
+    this.transformUpdateSnapshot = null;
     if (this.rotationPreviewSession) this.endEntityRotationPreview(true);
     if (this.translationPreviewSession) this.endEntityTranslationPreview(true);
     const selectedEntityIndexes = new Set<number>();
@@ -1542,6 +1600,7 @@ export class EntityArrayThinInstanceBatch {
 
   /** 只释放批次自身的隔离 Geometry，保留源材质、纹理、骨骼和源模型节点。 */
   dispose(): void {
+    this.transformUpdateSnapshot = null;
     if (this.frustumObserver && this.scene) {
       this.scene.onBeforeActiveMeshesEvaluationObservable.remove(this.frustumObserver);
       this.frustumObserver = null;

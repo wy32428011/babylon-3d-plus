@@ -1,7 +1,6 @@
 import './babylonSideEffects.js';
 import './babylonGltfLoader.js';
 import { setSparseMatrixUploadsEnabled } from './thinInstanceSparseUpdates';
-import type { Engine } from '@babylonjs/core/Engines/engine.js';
 import { getGpuCapabilityProfile as readGpuCapabilityProfile } from './gpuCapabilityProfile';
 import { SceneDocumentController } from './scene-runtime/SceneDocumentController';
 import { ModelAssetRuntimeController } from './scene-runtime/ModelAssetRuntimeController';
@@ -591,7 +590,7 @@ export class SceneRuntime {
   getPerformanceMetrics(): SceneRuntimePerformanceMetrics { return this.readiness.getPerformanceMetrics(); }
 
   /** 只读已完成的准备诊断；打开管理器不会启动离屏检测或分类。 */
-  getGpuCapabilityProfile() { return readGpuCapabilityProfile(this.scene.getEngine() as Engine); }
+  getGpuCapabilityProfile() { return readGpuCapabilityProfile(this.scene.getEngine()); }
 
   getShaderWarmupMetrics() { return this.assets.shaderWarmup.getMetrics(); }
 

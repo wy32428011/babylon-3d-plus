@@ -19,7 +19,9 @@ import { fetchRuntimeAsset } from '../runtime/assets/runtimeAssetFetch';
 import type { PublishedReleaseCacheState } from './publishedReleasePrefetch';
 import { PublishedCacheStatus } from './PublishedCacheStatus';
 import { getPublishedAssetLoadDiagnostics, installPublishedViewerCache } from './publishedBabylonCache';
-import { createBabylonViewport, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
+import { createBabylonViewportAsync, isSoftwareWebGLFallbackAllowed, type BabylonViewport, type BabylonViewportRuntimeStatus } from '../runtime/babylon/createEngine';
+import { resolveViewportBackend } from '../runtime/babylon/viewportBackend';
+import { useViewportCanvas } from '../runtime/babylon/useViewportCanvas';
 import { applySavedSceneCameraView } from '../runtime/babylon/sceneCameraView';
 import { DIGITAL_TWIN_CAMERA_CONTROL_STANDARD } from '../runtime/babylon/cameraControlStandard';
 import { SceneRuntime, type SceneRuntimeModelLoadProgress } from '../runtime/babylon/SceneRuntime';
@@ -211,6 +213,7 @@ function applySceneBackground(viewport: BabylonViewport, color: string): void {
 export function PlayerApp() {
   const playerRootRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const { revision: canvasRevision, attachCanvas, replaceCanvas } = useViewportCanvas(canvasRef);
   const sceneFullscreen = useDigitalTwinFullscreen(playerRootRef);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const chartMarkerClickRef = useRef<((entityId: string) => boolean) | null>(null);
@@ -352,8 +355,9 @@ export function PlayerApp() {
   });
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const initialCanvas = canvasRef.current;
+    if (!initialCanvas) return;
+    let canvas: HTMLCanvasElement = initialCanvas;
 
     const abortController = new AbortController();
     let disposed = false;
@@ -660,7 +664,14 @@ export function PlayerApp() {
         if (disposed || initialLoadFailed) return;
         setStartupPercent(30);
 
-        viewport = createBabylonViewport(canvas, handleRuntimeStatus, {
+        viewport = await createBabylonViewportAsync(canvas, handleRuntimeStatus, {
+          backendDecision: resolveViewportBackend(sceneDocument),
+          signal: abortController.signal,
+          replaceCanvas,
+          onLog: logMessage => {
+            console.info(`[Viewer] ${logMessage}`);
+            if (!disposed) setRuntimeMessage(previous => updatePlayerRuntimeMessage(previous, logMessage));
+          },
           depthPrecisionCompensation: true,
           showGrid: parsedConfig.viewer.showGrid,
           allowCameraControl: parsedConfig.viewer.allowCameraControl,
@@ -670,6 +681,10 @@ export function PlayerApp() {
           keepRenderingInBackground: true,
           initialSensitivity: sceneDocument.sceneSettings.sensitivity,
         });
+        if (disposed || abortController.signal.aborted || initialLoadFailed) {
+          viewport.dispose(); viewport = null; return;
+        }
+        canvas = viewport.canvas;
         viewportRef.current = viewport;
         publishedCache?.attach(viewport.scene);
         applySceneBackground(viewport, parsedConfig.page.backgroundColor);
@@ -1214,7 +1229,7 @@ export function PlayerApp() {
       clearDeploymentAssetManifest();
       publishedCache?.dispose();
     };
-  }, [pauseHistoryReplay, updateOpenedDigitalTwinFloatingControl]);
+  }, [pauseHistoryReplay, updateOpenedDigitalTwinFloatingControl, replaceCanvas]);
 
   const isDigitalTwin = Boolean(config?.digitalTwin);
   function handleAutoPatrolAction(
@@ -1390,6 +1405,7 @@ export function PlayerApp() {
     try {
       runtime.setTelemetryPerformanceTimingEnabled(true);
       session = runtime.withControlledSceneObservers(() => startPlayerPerformanceSession(true, () => new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+        withControlledSceneObservers: initialize => runtime.withControlledSceneObservers(initialize),
         getRuntimeMetrics: () => runtime.getPerformanceMetrics(),
         getEditThinInstancePlanMetrics: () => ({
           planCount: 0, lastDurationMs: 0, maxDurationMs: 0,
@@ -1452,7 +1468,7 @@ export function PlayerApp() {
 
   return (
     <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}${openingActive ? ' opening-presentation-active' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
-      <canvas aria-label="Babylon 3D 场景" className="player-canvas" ref={canvasRef} />
+      <canvas key={canvasRevision} aria-label="Babylon 3D 场景" className="player-canvas" ref={attachCanvas} />
       {phase === 'ready' && initialLoadCompleted && openingSettings.enabled ? <OpeningReplayButton onReplay={() => replayOpeningRef.current()} /> : null}
       {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
       {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
@@ -1519,6 +1535,12 @@ export function PlayerApp() {
               <p>FPS {formatPlayerStatusFps(performanceSnapshot.fps)} · CPU 帧 {performanceSnapshot.frameTimeMs?.toFixed(2) ?? '不可用'} ms</p>
               <p>绘制 {performanceSnapshot.renderTimeMs?.toFixed(2) ?? '不可用'} ms · GPU {performanceSnapshot.gpuFrameTimeMs === null ? '不可用' : `${performanceSnapshot.gpuFrameTimeMs.toFixed(2)} ms`}</p>
               <p>活动网格评估 {performanceSnapshot.activeMeshesEvaluationMs?.toFixed(2) ?? '不可用'} ms</p>
+              {performanceSnapshot.renderPasses ? (
+                <>
+                  <p>阴影 Draw Call {performanceSnapshot.renderPasses.shadowDrawCallsPerFrame ?? '不可用'} · 其他 Draw Call {performanceSnapshot.renderPasses.otherDrawCallsPerFrame ?? '不可用'}</p>
+                  <p>CPU（包含式，不相加）：Render Targets {performanceSnapshot.renderPasses.cpuMs.renderTargets?.toFixed(2) ?? '不可用'} ms · Draw {performanceSnapshot.renderPasses.cpuMs.draw?.toFixed(2) ?? '不可用'} ms</p>
+                </>
+              ) : null}
               <p>Draw Call {performanceSnapshot.drawCalls ?? '不可用'} · Mesh {performanceSnapshot.activeMeshes}/{performanceSnapshot.totalMeshes}</p>
               <p>长任务 {performanceSnapshot.longTaskCount} 次 / {performanceSnapshot.longTaskDurationMs.toFixed(1)} ms</p>
               {performanceSnapshot.telemetry ? (
