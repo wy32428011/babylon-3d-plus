@@ -35,7 +35,7 @@ const cellSize = FORMAL_BATCH_MIN_PARTITION_SPAN_METERS;
 function supportedMaterial(material: Material | null, mesh: Mesh): boolean {
   if (!material || (Object.getPrototypeOf(material) !== PBRMaterial.prototype
     && Object.getPrototypeOf(material) !== StandardMaterial.prototype)) return false;
-  if (material.customShaderNameResolve || material.shadowDepthWrapper || material.onBindObservable.hasObservers()
+  if (Boolean(material.customShaderNameResolve) || material.shadowDepthWrapper || material.onBindObservable.hasObservers()
     || (material.animations?.length ?? 0) > 0 || material.stencil.enabled || material.fillMode !== Material.TriangleFillMode
     || material.needAlphaBlendingForMesh(mesh) || material.needAlphaTestingForMesh(mesh)) return false;
   // 仅承认当前材质实际持有的原生配置插件；不按插件名称猜测自定义 shader 是否逐对象取值。
