@@ -337,7 +337,6 @@ export class ConveyorTelemetryDriver {
         }
         return;
       }
-      if (!state.cargoCode) return;
     }
 
     // task 模式：新 task 边沿（pendingTask 登记）即刷出/订阅判定，不再等线体运行；movement_x 为 0 时按正转处理。

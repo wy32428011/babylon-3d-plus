@@ -759,6 +759,34 @@ test('输送线先取（订阅波 pull）：探测登记触达 lift，step2 货�
   }
 });
 
+test('现场回归：mode=2 空机短 task 脉冲仍订阅 lift，归零后接走 18948', () => {
+  const h = makeHarness();
+  try {
+    const cargo = h.insertConveyorCargo('CIN', '18948');
+    const incoming = { reference_upper_step: 1, level_upper: 1, work_state: 1 };
+    runUntil(h, incoming, () => h.liftModel.liftTelemetry.stations[1].cargoOnBoard);
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 6 };
+    runUntil(h, outgoing, () => h.liftModel.liftTelemetry.arrivedTargetKey === '1:2');
+
+    h.applyConveyor('COUT', { task: 18948, mode: 2, movement_x: 0, front_has_goods: 0, back_has_goods: 0 });
+    const cout = h.models.COUT.conveyorTelemetry;
+    assert.equal(cout.pendingTask, '18948');
+    assert.equal(cout.waitingTask, '18948', '空机 mode=2 不得跳过任务订阅');
+    assert.equal(cout.externalPulls.get('COUT')?.holderAssetCode, 'LIFT1', '订阅必须触达上游 lift');
+
+    h.applyConveyor('COUT', { task: 0, mode: 2, movement_x: 0, front_has_goods: 0, back_has_goods: 0 });
+    assert.equal(cout.waitingTask, '18948', 'task 脉冲归零不得撤销已登记等待');
+    h.pullExternal();
+    assert.equal(cargo.assetCode, 'COUT');
+    assert.equal(cargo.task, '18948');
+    assert.equal(cout.cargoCode, 'cargo');
+    assert.equal(h.liftModel.liftTelemetry.stations[1].cargoKey, null, '18948 必须离开 lift 工位');
+    assert.equal(h.state.liftCargoMeshes.size, 0, 'lift 不得残留 18948');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('提升机先给 + 输送线后接 task：保留自身 task 交付滞留，新 task 复用盖戳走到轨迹终点，step1 货接续交付', () => {
   const h = makeHarness();
   try {
