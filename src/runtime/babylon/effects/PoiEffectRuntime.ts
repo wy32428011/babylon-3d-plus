@@ -57,6 +57,7 @@ type PoiEntry = {
   kind: PoiEffectKind;
   resources: PoiResources;
   visible: boolean;
+  effectEnabled: boolean;
   pickable: boolean;
   selected: boolean;
   seed: number;
@@ -86,6 +87,7 @@ export class PoiEffectRuntime {
   private readonly bindings: EffectBindingRuntime;
   private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null;
   private previousFrameTime: number | null = null;
+  private modelEntranceHidden = false;
 
   /** 创建运行时并注册唯一 before-render 观察者。 */
   constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, private readonly alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[] } = {}) {
@@ -101,6 +103,16 @@ export class PoiEffectRuntime {
       getRuntimeTargets: options.getRuntimeTargets,
     });
     this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => this.animate());
+  }
+
+  /** 入场期间隐藏独立效果，但保留实体显隐和启用状态供恢复使用。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const entry of this.entries.values()) {
+      entry.root.setEnabled(entry.visible && !hidden);
+      this.applyParticlePlayback(entry, entry.visible && entry.effectEnabled && !hidden);
+    }
   }
 
   setGlobalLightingControl(allowDayNightCycle: boolean): void {
@@ -146,10 +158,11 @@ export class PoiEffectRuntime {
 
     this.applyTransform(entry.root, entity.components.transform);
     entry.visible = visible;
+    entry.effectEnabled = component.enabled;
     entry.pickable = pickable;
     entry.selected = selected;
     entry.kind = component.effectKind;
-    entry.root.setEnabled(visible);
+    entry.root.setEnabled(visible && !this.modelEntranceHidden);
 
     if (entry.signature !== signature) {
       this.disposeResources(entry.resources);
@@ -170,7 +183,7 @@ export class PoiEffectRuntime {
     entry.pickMesh.metadata = {...entry.pickMesh.metadata, [EDITOR_ENTITY_ID_METADATA_KEY]:ownerId};
     this.applyPickState(entry);
     for (const mesh of entry.resources.meshes) mesh.metadata = {...mesh.metadata, [EDITOR_ENTITY_ID_METADATA_KEY]:ownerId};
-    this.applyParticlePlayback(entry, visible && component.enabled);
+    this.applyParticlePlayback(entry, visible && component.enabled && !this.modelEntranceHidden);
   }
 
   /** 在模型外观更新期间释放覆盖，避免将文档改动写到临时克隆材质。 */
@@ -291,6 +304,7 @@ export class PoiEffectRuntime {
       kind: 'alarm-pulse',
       resources: this.emptyResources(),
       visible: true,
+      effectEnabled: false,
       pickable: true,
       selected: false,
       seed: this.seedFromId(id),

@@ -79,6 +79,7 @@ export class LocatorFetchRuntime {
   private retainedCellKeys = new Set<string>();
   private lastApplyContext: ApplyRecordsContext | null = null;
   private disposed = false;
+  private modelEntranceHidden = false;
   private missingGeneratorReported = false;
   private applyGeneration = 0;
   private statisticsPhase: 'loading' | 'ready' | 'error' = 'ready';
@@ -100,6 +101,15 @@ export class LocatorFetchRuntime {
     this.scene = scene;
     this.locatorEntityId = locatorEntityId;
     this.onPushLog = onPushLog;
+  }
+
+  /** 入场隐藏只影响渲染，库存同步继续维护真实实例数量。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.disposed || this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const batch of this.batches.values()) {
+      for (const mesh of batch.meshes) mesh.setEnabled(!hidden && batch.instanceCount > 0);
+    }
   }
 
   /** 应用本排库存记录：防御性按排号过滤 → 规则匹配 → 全量重建 thinInstance 批次。 */
@@ -394,7 +404,7 @@ export class LocatorFetchRuntime {
       matrices[index].copyToArray(buffer, index * 16);
     }
     for (const mesh of batch.meshes) {
-      mesh.setEnabled(enabled);
+      mesh.setEnabled(enabled && !this.modelEntranceHidden);
       if (!enabled) {
         mesh.thinInstanceCount = 0;
         continue;

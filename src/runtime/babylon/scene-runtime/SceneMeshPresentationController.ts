@@ -56,6 +56,7 @@ export class SceneMeshPresentationController {
   public readonly meshes = new Map<string, Mesh>();
   public readonly conveyorTrajectories = new Map<string, ConveyorTrajectoryRuntimeEntry>();
   public _trajectoryVisible = false;
+  private modelEntranceHidden = false;
   public readonly lights = new Map<string, Light>();
   public lightMarkerRuntime!: EditorLightMarkerRuntime;
   private meshesDisposed = false;
@@ -105,12 +106,21 @@ export class SceneMeshPresentationController {
     this.lightMarkerRuntime.disable();
   }
 
+  /** 入场期间隐藏轨迹，结束时按当前实体可见性和全局开关恢复。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.trajectoriesDisposed || this.disposed || this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const [entityId, entry] of this.conveyorTrajectories) {
+      entry.root.setEnabled(!hidden && this._trajectoryVisible && this.dependencies.document.isEntityVisible(entityId));
+    }
+  }
+
   /** 设置输送线轨迹可视化的全局开关，控制所有已创建轨迹的显示/隐藏。 */
   setTrajectoryVisible(visible: boolean): void {
     if (this.trajectoriesDisposed || this.disposed) return;
     this._trajectoryVisible = visible;
     for (const [entityId, entry] of this.conveyorTrajectories) {
-      entry.root.setEnabled(visible && this.dependencies.document.isEntityVisible(entityId));
+      entry.root.setEnabled(!this.modelEntranceHidden && visible && this.dependencies.document.isEntityVisible(entityId));
     }
   }
 
@@ -327,7 +337,7 @@ export class SceneMeshPresentationController {
   /** 轨迹根的变换与显隐：跟随实体 Transform、实体可见性与全局开关。 */
   public refreshConveyorTrajectoryRoot(entity: Entity, root: TransformNode): void {
     this.applyTransform(root, entity.components.transform);
-    root.setEnabled(this._trajectoryVisible && this.dependencies.document.isEntityVisible(entity.id));
+    root.setEnabled(!this.modelEntranceHidden && this._trajectoryVisible && this.dependencies.document.isEntityVisible(entity.id));
   }
 
   /** 同步某源模型全部阵列实例的输送线轨迹：几何取自实例所在批次（参数变体或源模型）。 */

@@ -37,9 +37,19 @@ export class SceneCadReferenceController {
 
   public readonly cadReferences = new Map<string, CadReferenceRuntimeEntry>();
   private updatesStopped = false;
+  private modelEntranceHidden = false;
   private disposed = false;
   private readonly stoppedLoads = new WeakSet<CadReferenceRuntimeEntry>();
   private readonly disposedReferences = new WeakSet<CadReferenceRuntimeEntry>();
+
+  /** CAD 线稿异步挂在根节点下，入场门控不改变文档中的显隐。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.updatesStopped || this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const [entityId, reference] of this.cadReferences) {
+      this.applyCadReferenceInteractivity(reference, entityId);
+    }
+  }
 
   /** 先封闭新加载并取消在途任务，线稿保留到对应的资源释放阶段。 */
   stopUpdates(): void {
@@ -372,7 +382,7 @@ export class SceneCadReferenceController {
   /** CAD 参考图永远不参与鼠标拾取，只响应 Hierarchy 显隐。 */
   public applyCadReferenceInteractivity(cadReference: CadReferenceRuntimeEntry, entityId: string): void {
     const visible = this.dependencies.document.isEntityVisible(entityId);
-    cadReference.root.setEnabled(visible);
+    cadReference.root.setEnabled(visible && !this.modelEntranceHidden);
 
     for (const lineMesh of cadReference.lineMeshes) {
       lineMesh.isPickable = false;

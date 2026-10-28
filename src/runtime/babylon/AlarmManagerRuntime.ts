@@ -49,6 +49,12 @@ function alarmConditionSignature(manager: Entity, target: Entity): string {
 /** 颜色只覆盖当前设备的运行时材质；解除、停止预览与删除均恢复原材质引用。 */
 export class AlarmColorOverrides {
   private readonly entries = new Map<AbstractMesh, Tint>();
+  private modelEntranceHidden = false;
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const entry of this.entries.values()) entry.proxy?.setEnabled(entry.originalEnabled && !hidden);
+  }
   apply(desired: ReadonlyMap<AbstractMesh, string>, activeAlarms?: ReadonlySet<AbstractMesh>, breathingStrength = STATIC_EMISSIVE_STRENGTH): void {
     for (const [mesh, entry] of this.entries) {
       if (desired.has(mesh) && !mesh.isDisposed()) continue;
@@ -78,7 +84,7 @@ export class AlarmColorOverrides {
           proxy.material = material;
           proxy.isPickable = mesh.isPickable;
           proxy.metadata = mesh.metadata;
-          proxy.setEnabled(originalEnabled);
+          proxy.setEnabled(originalEnabled && !this.modelEntranceHidden);
           mesh.setEnabled(false);
         } else mesh.material = material;
         entry = { original, replacement: material, mesh, proxy, originalEnabled, color, releaseModelEffectLease };
@@ -118,9 +124,23 @@ export class AlarmManagerRuntime {
   private lastEvaluation = -Infinity;
   private generation = 0;
   private disposed = false;
+  private modelEntranceHidden = false;
 
   constructor(private readonly scene: Scene, private readonly host: Host) {
     this.effects = new PoiEffectRuntime(scene, id => this.host.node?.(id) ?? this.host.meshes(id)[0] ?? null, () => false, true);
+  }
+
+  /** 入场期间隐藏报警附属外观，不改变报警激活和遥测状态。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.disposed || this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    this.effects.setModelEntranceHidden(hidden);
+    this.colors.setModelEntranceHidden(hidden);
+    for (const entry of this.active.values()) {
+      entry.root.setEnabled(!hidden);
+      entry.marker?.setEnabled(!hidden);
+      if (entry.marker) this.presentation.update(entry.marker, entry.manager.components.alarmManager!.marker, !hidden, true);
+    }
   }
 
   sync(document: SceneDocument): void {
@@ -155,7 +175,7 @@ export class AlarmManagerRuntime {
       entry.root.position.set(center.x, bounds.maximum.y, center.z);
       if (entry.marker) {
         entry.marker.position.set(center.x, bounds.maximum.y + 1, center.z);
-        this.presentation.update(entry.marker, c.marker, true, true);
+        this.presentation.update(entry.marker, c.marker, !this.modelEntranceHidden, true);
       }
       if (c.appearanceEffect || !c.appearanceModel) {
         effectIds.add(key);
@@ -251,9 +271,11 @@ export class AlarmManagerRuntime {
     this.resumedActivations.delete(key);
     const entry: ActiveAlarm = { manager, target, trigger, activatedAt, activatedTimeText: new Date(activatedAt).toLocaleString(), root: new TransformNode(key, this.scene), generation: this.generation, modelEffectLeases: new Map(),
       style: getChartMarkerStyle({ ...c.marker, contentType: c.associationType === 'builtin' ? 'builtin' : 'screen' }) };
+    entry.root.setEnabled(!this.modelEntranceHidden);
     this.active.set(key, entry);
     if (c.showMarker) {
       entry.marker = MeshBuilder.CreateGround(key + '_chart', { width: 2, height: 2 }, this.scene);
+      entry.marker.setEnabled(!this.modelEntranceHidden);
       const upright = c.marker.geometryBasis === 'upright';
       entry.marker.scaling.set(2, upright ? 1.125 : 1, upright ? 1 : 1.125);
       entry.marker.rotation.x = upright ? 0 : Math.PI / 2;
