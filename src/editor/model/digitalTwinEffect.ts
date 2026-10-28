@@ -59,6 +59,7 @@ export const DIGITAL_TWIN_EFFECT_DEFINITIONS = [
   { kind: 'radar-sector', name: '雷达扫描 / 扇形扫描', category: '区域与范围', description: '绕中心旋转的扇形扫描面，范围由半径控制。', fields: ['radius', 'opacity', 'duration', 'amount'] },
   { kind: 'light-pillar', name: '定位光柱 / 光锥', category: '区域与范围', description: '垂直渐变光柱与底部定位圈。', fields: ['radius', 'height', 'width', 'opacity', 'duration'] },
   { kind: 'energy-dome', name: '半球罩 / 能量罩', category: '区域与范围', description: '半球形空间防护范围；半径控制底面，高度控制罩顶。', fields: ['radius', 'height', 'width', 'opacity', 'duration'] },
+  { kind: 'glow-strip', name: '发光灯带', category: '路径与物流', description: '沿局部路径显示连续发光灯带，可用于设备或建筑边缘。', fields: ['points', 'width', 'opacity'] },
   { kind: 'flow-path', name: '流光路径', category: '路径与物流', description: '沿配置路径流动，坐标以特效 Transform 为原点。', fields: [...path, 'amount'] },
   { kind: 'flow-arrows', name: '流动箭头', category: '路径与物流', description: '沿折线路径移动的方向箭头。', fields: [...path, 'amount'] },
   { kind: 'fly-line', name: '飞线', category: '路径与物流', description: '使用路径首尾点生成弧形飞线，高度控制拱高。', fields: [...path, 'height', 'amount'] },
@@ -87,7 +88,7 @@ export type DigitalTwinEffectKind = (typeof DIGITAL_TWIN_EFFECT_DEFINITIONS)[num
 const kinds = new Set<string>(DIGITAL_TWIN_EFFECT_DEFINITIONS.map(x => x.kind));
 export const MODEL_EFFECT_KINDS = new Set<string>(['model-color', 'model-flash', 'model-outline', 'model-edges', 'model-emissive', 'model-scan', 'height-gradient', 'hologram', 'xray', 'dissolve', 'floor-expand', 'explode', 'clip-section', 'roof-fade']);
 export const AREA_EFFECT_KINDS = new Set<string>(['boundary-flow', 'area-fill']);
-export const PATH_EFFECT_KINDS = new Set<string>(['alarm-route', 'flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow']);
+export const PATH_EFFECT_KINDS = new Set<string>(['alarm-route', 'glow-strip', 'flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow']);
 export const DATA_EFFECT_KINDS = new Set<string>(['heatmap', 'region-level', 'data-bars']);
 export function isDigitalTwinEffectKind(kind: unknown): kind is DigitalTwinEffectKind { return typeof kind === 'string' && kinds.has(kind); }
 
@@ -95,9 +96,9 @@ export function createDefaultDigitalTwinEffectConfig(kind: string): DigitalTwinE
   const isArea = AREA_EFFECT_KINDS.has(kind);
   return {
     targetEntityId: null, radius: kind === 'alarm-zone' ? 2.5 : kind === 'alarm-route' ? 0.45 : kind === 'light-pillar' || kind === 'flame' || kind === 'smoke-plume' ? 1 : kind === 'environment-fog' ? 20 : 5,
-    height: kind === 'alarm-icon' ? 0.9 : kind === 'alarm-label' ? 1.1 : kind === 'environment-fog' ? 80 : 6, width: kind === 'alarm-zone' ? 0.14 : kind === 'alarm-route' ? 0.12 : kind === 'heatmap' ? 2 : kind === 'data-bars' ? 0.8 : 0.15, opacity: kind.startsWith('alarm-') ? 0.9 : 0.55, duration: kind === 'day-night' ? 20 : 4,
+    height: kind === 'alarm-icon' ? 0.9 : kind === 'alarm-label' ? 1.1 : kind === 'environment-fog' ? 80 : 6, width: kind === 'glow-strip' ? 0.08 : kind === 'alarm-zone' ? 0.14 : kind === 'alarm-route' ? 0.12 : kind === 'heatmap' ? 2 : kind === 'data-bars' ? 0.8 : 0.15, opacity: kind === 'glow-strip' || kind.startsWith('alarm-') ? 0.9 : 0.55, duration: kind === 'day-night' ? 20 : 4,
     progress: kind === 'clip-section' ? 0.5 : kind === 'day-night' || kind === 'path-reveal' ? 0 : 1, loop: kind !== 'day-night' && kind !== 'dissolve', axis: 'y', amount: kind === 'radar-sector' ? 60 : kind === 'motion-trail' ? 64 : kind === 'rain' ? 24 : kind === 'snow' ? 16 : kind === 'flame' ? 20 : kind === 'smoke-plume' ? 12 : 3,
-    points: kind === 'alarm-route' ? [{x:-7,y:0,z:0},{x:-3,y:0,z:0},{x:0,y:0,z:0}] : isArea ? [{x:-5,y:0.03,z:-4},{x:5,y:0.03,z:-4},{x:5,y:0.03,z:4},{x:-5,y:0.03,z:4}]
+    points: kind === 'glow-strip' ? [{x:-2,y:0.05,z:0},{x:2,y:0.05,z:0},{x:2,y:0.05,z:2}] : kind === 'alarm-route' ? [{x:-7,y:0,z:0},{x:-3,y:0,z:0},{x:0,y:0,z:0}] : isArea ? [{x:-5,y:0.03,z:-4},{x:5,y:0.03,z:-4},{x:5,y:0.03,z:4},{x:-5,y:0.03,z:4}]
       : [{x:-4,y:0.05,z:0},{x:0,y:0.05,z:3},{x:4,y:0.05,z:0}],
     values: [3, 6, 4], labels: ['A区', 'B区', 'C区'],
   };

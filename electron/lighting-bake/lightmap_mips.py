@@ -43,6 +43,13 @@ def _cross(a, b, point):
     return (b[0] - a[0]) * (point[..., 1] - a[1]) - (b[1] - a[1]) * (point[..., 0] - a[0])
 
 
+def lightmap_mip_triangle_areas(uv: np.ndarray, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    pixel_uv = uv.astype(np.float64) * np.array([width, height])
+    area = ((pixel_uv[:, 1, 0] - pixel_uv[:, 0, 0]) * (pixel_uv[:, 2, 1] - pixel_uv[:, 0, 1])
+            - (pixel_uv[:, 1, 1] - pixel_uv[:, 0, 1]) * (pixel_uv[:, 2, 0] - pixel_uv[:, 0, 0]))
+    return pixel_uv, area
+
+
 def _triangles_overlap(a: np.ndarray, b: np.ndarray) -> bool:
     # 凸三角形 SAT；只接触边/点没有正面积交集。接近数值歧义的输入已在上游拒绝。
     for triangle in (a, b):
@@ -99,7 +106,7 @@ def _components(indices: np.ndarray, uv: np.ndarray) -> tuple[list[np.ndarray], 
 
 def certify_lightmap_mip_charts(meshes: list[dict], width: int, height: int, additional_levels: int, *,
                                max_working_bytes: int, max_pixel_tests: int | None = None,
-                               max_triangle_pairs: int = 2_000_000) -> tuple[dict, np.ndarray]:
+                               max_triangle_pairs: int = 2_000_000, allow_empty: bool = False) -> tuple[dict, np.ndarray]:
     """返回包含真实 pixel-center 种子的 chart 证明；owner=-1 不代表黑色无效。
 
     meshes 每项为 key、triangles(F,3 原顶点id)、bakeUvs(F,3,2 最终float32UV)。
@@ -107,10 +114,10 @@ def certify_lightmap_mip_charts(meshes: list[dict], width: int, height: int, add
     """
     _layout(width, height, additional_levels)
     maximum = _positive_budget(max_working_bytes, "maxWorkingBytes")
-    if not meshes or not isinstance(meshes, list) or not all(isinstance(mesh, dict) for mesh in meshes):
+    if not isinstance(meshes, list) or not all(isinstance(mesh, dict) for mesh in meshes) or (not meshes and not allow_empty):
         raise ValueError("光照 mip 缺少真实三角形 chart 输入。")
     face_count = sum(len(mesh.get("triangles", [])) for mesh in meshes)
-    _integer(face_count, 1, 1_000_000, "triangleCount")
+    _integer(face_count, 0 if allow_empty else 1, 1_000_000, "triangleCount")
     # 包括原始/候选 RGBA、种子owner、精确EDT、边排序与逐行scratch的保守峰值界。
     # 不只统计ndarray.nbytes：每chart/face还有Python对象、边界/排序记录和gamma double临时值。
     # 这是准入用的保守上界估计，不宣称等于进程RSS；达不到预算就拒绝该recipe。
@@ -136,12 +143,20 @@ def certify_lightmap_mip_charts(meshes: list[dict], width: int, height: int, add
             raise ValueError("光照 mip 需要最终逐角点 float32 UV，未知/非有限覆盖已拒绝。")
         if np.any(original_uv < 0) or np.any(original_uv > 1) or np.any(np.sort(indices, axis=1)[:, 1:] == np.sort(indices, axis=1)[:, :-1]):
             raise ValueError("光照 mip UV 越界或三角形退化。")
-        uv = original_uv.astype(np.float64)
-        uv *= np.array([width, height])
-        # 三角形批量面积明确指定角点轴，避免把 face 维误作坐标轴。
-        area = (uv[:, 1, 0] - uv[:, 0, 0]) * (uv[:, 2, 1] - uv[:, 0, 1]) - (uv[:, 1, 1] - uv[:, 0, 1]) * (uv[:, 2, 0] - uv[:, 0, 0])
-        if np.any(np.abs(area) < 1e-8):
-            raise ValueError("光照 mip chart 存在退化/数值歧义三角形。")
+        uv, area = lightmap_mip_triangle_areas(original_uv, width, height)
+        invalid = np.flatnonzero(np.abs(area) < 1e-8)
+        if len(invalid):
+            face = int(invalid[0])
+            face_indices = mesh.get("faceIndices")
+            original_face = int(face_indices[face]) if face_indices is not None and len(face_indices) == len(indices) else face
+            details = [f"meshKey={key}", f"面={original_face}", f"图集={mesh.get('atlasIndex', '未知')}",
+                       f"对象={mesh.get('name', '未知')}", f"实体={mesh.get('entityId', '未知')}",
+                       f"节点={mesh.get('nodeKey', '未知')}", f"UV={original_uv[face].tolist()}",
+                       f"像素空间双倍面积={float(area[face]):.17g}"]
+            geometry = mesh.get("invalidGeometry")
+            if isinstance(geometry, dict) and geometry.get("face") == face:
+                details.extend((f"局部顶点={geometry['positions']}", f"世界空间双倍面积={geometry['worldDoubleArea']:.17g}"))
+            raise ValueError("光照 mip chart 存在退化/数值歧义三角形；" + "；".join(details) + "。")
         components, outer_edges = _components(indices, uv)
         face_chart = np.empty(len(indices), dtype=np.int32)
         for faces in components:
@@ -360,7 +375,8 @@ def encode_lightmap_mip_container(levels: list[np.ndarray], rgbm_range: float, b
 
 
 def prepare_lightmap_mips(pixels: np.ndarray, width: int, height: int, meshes: list[dict], additional_levels: int,
-                         base_encoding: str, *, max_working_bytes: int, max_texture_bytes: int) -> dict:
+                         base_encoding: str, *, max_working_bytes: int, max_texture_bytes: int,
+                         allow_empty: bool = False) -> dict:
     """主py接线入口：完全认证后才返回新候选 bytes；异常时上层保留原结果。"""
     if base_encoding not in ("rgbm", "rgbm-gamma"):
         raise ValueError("光照 mip 未知 texel 编码。")
@@ -368,7 +384,8 @@ def prepare_lightmap_mips(pixels: np.ndarray, width: int, height: int, meshes: l
     texture_bytes = sum(w * h * 4 for w, h in layout)
     if texture_bytes > _positive_budget(max_texture_bytes, "maxTextureBytes"):
         raise ValueError("光照 mip 全链 RGBA 超过预算。")
-    certificate, owner = certify_lightmap_mip_charts(meshes, width, height, additional_levels, max_working_bytes=max_working_bytes)
+    certificate, owner = certify_lightmap_mip_charts(meshes, width, height, additional_levels, max_working_bytes=max_working_bytes,
+                                                     allow_empty=allow_empty)
     padded = pad_linear_lightmap(pixels, certificate, owner)
     levels = linear_mip_levels(padded, width, height, additional_levels)
     # 全atlas原线性范围保持不变，padding只复制既有值，filter也不增加最大值。

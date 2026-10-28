@@ -53,6 +53,7 @@ function numberLabel(kind: DigitalTwinEffectKind, key: NumberKey): string {
     if (['flow-path', 'fly-line', 'boundary-flow'].includes(kind)) return '流光波段数量';
   }
   if (key === 'width') {
+    if (kind === 'glow-strip') return '灯带宽度 (m)';
     if (kind === 'heatmap') return '热区影响半径 (m)';
     if (kind === 'data-bars') return '柱体宽度 (m)';
     if (kind === 'snow') return '雪片大小 (m)';

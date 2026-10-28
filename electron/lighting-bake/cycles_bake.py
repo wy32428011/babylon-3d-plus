@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from fractions import Fraction
 import sys as _binary_sys
 from array import array
 import csv
@@ -20,6 +22,7 @@ import hashlib
 from typing import Any
 
 import bpy
+import bmesh
 from mathutils import Matrix, Vector
 import numpy as np
 
@@ -761,33 +764,41 @@ def lightmap_metrics(obj: Any, density: float, gutter: int = 4) -> tuple[int, in
     maximum_u = max(entry.uv.x for entry in uv.data)
     maximum_v = max(entry.uv.y for entry in uv.data)
     world_per_uv = max((lightmap_face_world_per_uv(obj, face) for face in obj.data.polygons), default=0)
-    scale = world_per_uv * density * (1 + 1e-4)
+    scale = max(world_per_uv * density * (1 + 1e-4), float(obj.get("lighting_mip_repair_min_scale", 0)))
     return (max(16, math.ceil((maximum_u - minimum_u) * scale) + 2 * gutter),
             max(16, math.ceil((maximum_v - minimum_v) * scale) + 2 * gutter), scale, minimum_u, minimum_v)
 
 
-def repair_lightmap_uvs(obj: Any, density: float) -> int:
-    """仅为 SmartProject 量化塌缩的正面积面增建独立图块，不改原几何或材质 UV。"""
+def repair_lightmap_uvs(obj: Any, density: float, *, forced_faces: set[int] | None = None,
+                        mip_gutter: int | None = None, mip_min_chart_pixels: int = 6) -> int:
+    """仅为正面积缺失 UV 的面增建图块，不改原几何或材质 UV。"""
     mesh, transform = obj.data, obj.matrix_world.to_3x3()
     uv = mesh.uv_layers["LightmapUV"]
     invalid, world_per_uv = [], 0.0
+    forced = forced_faces or set()
     for face in mesh.polygons:
+        if face.index in forced:
+            invalid.append(face)
+            continue
         try:
             world_per_uv = max(world_per_uv, lightmap_face_world_per_uv(obj, face))
         except LightmapUvError:
             invalid.append(face)
     if not invalid:
         return 0
-    # 统一成世界米制 UV 后追加图块，原有效岛的采样密度和相对位置保持等价。
-    unit = world_per_uv if world_per_uv > 0 else 1.0
+    # 米制 UV 的下限使全被修复的小面也能保留足够的最终像素面积。
+    unit = max(world_per_uv, 1.0) if mip_gutter is not None else (world_per_uv if world_per_uv > 0 else 1.0)
     for entry in uv.data:
         entry.uv = (entry.uv.x * unit, entry.uv.y * unit)
-    minimum_u = min(entry.uv.x for entry in uv.data)
-    maximum_u = max(entry.uv.x for entry in uv.data)
-    maximum_v = max(entry.uv.y for entry in uv.data)
+    invalid_ids = {face.index for face in invalid}
+    retained = [uv.data[loop] for face in mesh.polygons if face.index not in invalid_ids for loop in face.loop_indices] if mip_gutter is not None else []
+    bounds = retained if mip_gutter is not None else uv.data
+    minimum_u = min((entry.uv.x for entry in bounds), default=0.0)
+    maximum_u = max((entry.uv.x for entry in bounds), default=0.0)
+    maximum_v = max((entry.uv.y for entry in bounds), default=0.0)
     precision = max(1.0, abs(minimum_u), abs(maximum_u), abs(maximum_v)) * 2 ** -20
-    minimum_height = max(1 / density, precision)
-    margin = max(2 / density, precision)
+    minimum_height = max((mip_min_chart_pixels if mip_gutter is not None else 1) / density, precision)
+    margin = max((2 * mip_gutter + 4 if mip_gutter is not None else 2) / density, precision)
     charts = []
     for face in invalid:
         loops = list(face.loop_indices)
@@ -801,9 +812,11 @@ def repair_lightmap_uvs(obj: Any, density: float) -> int:
         if length <= 0:
             raise LightmapUvError(f"{obj.name} 无法为正面积细面建立稳定光照 UV。")
         projection = offset.dot(edge) / length
+        width = max(length, minimum_height) if mip_gutter is not None else length
         height = max(edge.cross(offset).length / length, minimum_height)
         coordinates = [None, None, None]
-        coordinates[first], coordinates[second], coordinates[third] = (0, 0), (length, 0), (projection, height)
+        projected = projection * width / length if mip_gutter is not None else projection
+        coordinates[first], coordinates[second], coordinates[third] = (0, 0), (width, 0), (projected, height)
         low_u = min(value[0] for value in coordinates)
         width = max(value[0] for value in coordinates) - low_u
         charts.append((loops, coordinates, low_u, width, height))
@@ -817,7 +830,13 @@ def repair_lightmap_uvs(obj: Any, density: float) -> int:
         cursor_x += width + margin
         row_height = max(row_height, height)
     mesh.update()
-    obj["lighting_uv_repair_count"] = len(invalid)
+    if mip_gutter is not None:
+        repaired = set(obj.get("lighting_uv_repaired_face_indices", [])) | invalid_ids
+        obj["lighting_uv_repaired_face_indices"] = sorted(repaired)
+        obj["lighting_uv_repair_count"] = len(repaired)
+        obj["lighting_mip_repair_min_scale"] = density * (1 + 1e-4)
+    else:
+        obj["lighting_uv_repair_count"] = len(invalid)
     return len(invalid)
 
 
@@ -833,7 +852,13 @@ def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list
         try:
             width, height, _, _, _ = lightmap_metrics(obj, density, gutter) if source.get("receiver", True) else (0, 0, 0, 0, 0)
         except LightmapUvError:
-            repair_lightmap_uvs(obj, density)
+            if settings.get("lightmapMipLevels", 0):
+                for face in obj.data.polygons:
+                    try:
+                        lightmap_face_world_per_uv(obj, face)
+                    except LightmapUvError:
+                        _require_mip_positive_face(obj, source, face)
+            repair_lightmap_uvs(obj, density, mip_gutter=gutter if settings.get("lightmapMipLevels", 0) else None)
             # 修复后仍执行相同严格校验；失败时不能跳面或降低目标密度。
             width, height, _, _, _ = lightmap_metrics(obj, density, gutter)
         if source.get("receiver", True) and max(width, height) > size:
@@ -854,7 +879,8 @@ def prepare_meshes(meshes: list[dict], root: Path, settings: dict) -> tuple[list
     return sources, objects
 
 
-def pack_atlases(objects: list[Any], size: int, density: float, budget: int, gutter: int = 4) -> list[list[Any]]:
+def pack_atlases(objects: list[Any], size: int, density: float, budget: int, gutter: int = 4, *,
+                 preview: bool = False) -> Any:
     metrics = {obj.name: lightmap_metrics(obj, density, gutter) for obj in objects}
     ordered = sorted(objects, key=lambda obj: metrics[obj.name][1], reverse=True)
     pages: list[list[Any]] = []
@@ -882,6 +908,8 @@ def pack_atlases(objects: list[Any], size: int, density: float, budget: int, gut
     if required_bytes > budget:
         raise ValueError(f"光照图集超过纹理预算：需要 {len(pages)} 张图集、{required_bytes / 1048576:.2f} MiB，"
                          f"当前预算 {budget / 1048576:.2f} MiB；没有丢弃对象或自动降低贴图密度。")
+    if preview:
+        return pages, placements
     for obj, x, y, scale, minimum_u, minimum_v, atlas in placements:
         for entry in obj.data.uv_layers["LightmapUV"].data:
             entry.uv = ((x + gutter + (entry.uv.x - minimum_u) * scale) / size,
@@ -1240,24 +1268,263 @@ def lightmap_mip_module():
     return _LIGHTMAP_MIP_MODULE
 
 
-def lightmap_mip_meshes(page: list[Any], sources: list[dict]) -> list[dict]:
-    """认证使用真实原拓扑与最终float32逐角点LightmapUV，不从导出焊接结果猜chart。"""
+def _cross3(first: tuple, second: tuple) -> tuple:
+    return (first[1] * second[2] - first[2] * second[1],
+            first[2] * second[0] - first[0] * second[2],
+            first[0] * second[1] - first[1] * second[0])
+
+
+def _linear_edges(points: list[tuple], linear: tuple | None = None) -> tuple:
+    edges = [tuple(point[axis] - points[0][axis] for axis in range(3)) for point in points[1:]]
+    if linear is not None:
+        edges = [tuple(sum(linear[row][column] * edge[column] for column in range(3)) for row in range(3)) for edge in edges]
+    return tuple(edges)
+
+
+def _exact_zero_triangle(points: list[tuple], linear: tuple | None = None, *, force_exact: bool = False) -> bool:
+    if any(not math.isfinite(value) for point in points for value in point) or (linear is not None and any(not math.isfinite(value) for row in linear for value in row)):
+        raise ValueError("有限mip三角形坐标或变换不是有限数。")
+    if not force_exact:
+        extent = max(abs(value) for point in points for value in point)
+        if linear is not None:
+            extent *= max(sum(abs(value) for value in row) for row in linear)
+        tolerance = 64 * sys.float_info.epsilon * extent * extent
+        if any(abs(value) > tolerance for value in _cross3(*_linear_edges(points, linear))):
+            return False
+    exact_points = [tuple(Fraction(value) for value in point) for point in points]
+    exact_linear = tuple(tuple(Fraction(value) for value in row) for row in linear) if linear is not None else None
+    return all(value == 0 for value in _cross3(*_linear_edges(exact_points, exact_linear)))
+
+
+def _exact_singular_matrix(linear: tuple) -> bool:
+    def determinant(rows: tuple):
+        return sum(rows[0][column] * value for column, value in enumerate(_cross3(rows[1], rows[2])))
+
+    if any(not math.isfinite(value) for row in linear for value in row):
+        return False
+    scale = max(abs(value) for row in linear for value in row)
+    if abs(determinant(linear)) > 64 * sys.float_info.epsilon * scale * scale * scale:
+        return False
+    return determinant(tuple(tuple(Fraction(value) for value in row) for row in linear)) == 0
+
+
+def lightmap_mip_meshes(page: list[Any], sources: list[dict], size: int, *,
+                        placements: dict | None = None, gutter: int = 0) -> list[dict]:
+    """仅排除源输入和 Blender 接收几何均可精确证明零面积的面。"""
     result = []
     for obj in page:
-        mesh = obj.data
+        source, mesh = sources[obj["input_index"]], obj.data
+        placement = placements[obj.name] if placements is not None else None
         layer = mesh.uv_layers.get("LightmapUV")
         if layer is None:
             raise ValueError("有限mip缺少最终LightmapUV。")
+        source_matrix = source["worldMatrix"]
+        source_linear = tuple(tuple(float(source_matrix[column * 4 + row]) for column in range(3)) for row in range(3))
+        blender_linear = tuple(tuple(float(obj.matrix_world[row][column]) for column in range(3)) for row in range(3))
+        singular = _exact_singular_matrix(source_linear) and _exact_singular_matrix(blender_linear)
         indices = np.empty((len(mesh.polygons), 3), dtype=np.uint32)
         uvs = np.empty((len(mesh.polygons), 3, 2), dtype=np.float32)
+        face_indices = np.empty(len(mesh.polygons), dtype=np.uint32)
+        count = 0
         for face in mesh.polygons:
             if len(face.loop_indices) != 3:
                 raise ValueError("有限mip只接受已存在的真实三角拓扑；未自动改面或重排UV。")
+            vertices = [mesh.loops[index].vertex_index for index in face.loop_indices]
+            source_points = [tuple(float(value) for value in source["positions"][index * 3:index * 3 + 3]) for index in vertices]
+            blender_points = [tuple(float(value) for value in mesh.vertices[index].co) for index in vertices]
+            local_zero = _exact_zero_triangle(source_points) and _exact_zero_triangle(blender_points)
+            world_zero = singular and _exact_zero_triangle(source_points, source_linear) and _exact_zero_triangle(blender_points, blender_linear)
+            if local_zero or world_zero:
+                continue
+            face_indices[count] = face.index
+            indices[count] = vertices
             for corner, loop_index in enumerate(face.loop_indices):
-                indices[face.index, corner] = mesh.loops[loop_index].vertex_index
-                uvs[face.index, corner] = layer.data[loop_index].uv
-        result.append({"key": sources[obj["input_index"]]["key"], "triangles": indices, "bakeUvs": uvs})
+                value = layer.data[loop_index].uv
+                if placement is None:
+                    uvs[count, corner] = value
+                else:
+                    _, x, y, scale, minimum_u, minimum_v, _ = placement
+                    uvs[count, corner] = ((x + gutter + (value.x - minimum_u) * scale) / size,
+                                          (y + gutter + (value.y - minimum_v) * scale) / size)
+            count += 1
+        if count:
+            _, areas = lightmap_mip_module().lightmap_mip_triangle_areas(uvs[:count], size, size)
+            invalid = np.flatnonzero(np.abs(areas) < 1e-8)
+            invalid_geometry = None
+            if len(invalid):
+                face = int(invalid[0])
+                points = [tuple(float(value) for value in source["positions"][index * 3:index * 3 + 3]) for index in indices[face]]
+                invalid_geometry = {"face": face, "positions": points,
+                                    "worldDoubleArea": math.hypot(*_cross3(*_linear_edges(points, source_linear)))}
+            result.append({"key": source["key"], "name": source.get("name", "未知"), "entityId": source.get("entityId", "未知"),
+                           "nodeKey": source.get("nodeKey", "未知"), "atlasIndex": int(placement[6] if placement is not None else obj["atlas"]),
+                           "triangles": indices[:count], "bakeUvs": uvs[:count], "faceIndices": face_indices[:count], "invalidGeometry": invalid_geometry})
     return result
+
+
+def _require_mip_positive_face(obj: Any, source: dict, face: Any) -> None:
+    vertices = [obj.data.loops[index].vertex_index for index in face.loop_indices]
+    source_points = [tuple(float(value) for value in source["positions"][index * 3:index * 3 + 3]) for index in vertices]
+    blender_points = [tuple(float(value) for value in obj.data.vertices[index].co) for index in vertices]
+    matrix = source["worldMatrix"]
+    source_linear = tuple(tuple(float(matrix[column * 4 + row]) for column in range(3)) for row in range(3))
+    blender_linear = tuple(tuple(float(obj.matrix_world[row][column]) for column in range(3)) for row in range(3))
+    if (_exact_zero_triangle(source_points, source_linear, force_exact=True)
+            or _exact_zero_triangle(blender_points, blender_linear, force_exact=True)):
+        raise ValueError(f"有限mip不能确认正面积面，无法修复 UV：meshKey={source['key']}；对象={source.get('name', '未知')}；"
+                         f"实体={source.get('entityId', '未知')}；节点={source.get('nodeKey', '未知')}；面={face.index}；局部顶点={source_points}。")
+
+
+def pack_lightmap_mip_atlases(objects: list[Any], sources: list[dict], settings: dict) -> list[list[Any]]:
+    size, density = settings["atlasSize"], settings["texelsPerMeter"]
+    gutter = lightmap_gutter(settings)
+    texture_budget = settings["maxTextureMiB"] * 1024 * 1024
+    working_limit = settings.get("lightmapMipWorkingBytesLimit")
+    if isinstance(working_limit, bool) or not isinstance(working_limit, int) or working_limit <= 0 or working_limit > 2 * 1024 ** 3:
+        raise ValueError("有限mip缺少明确且不超过2GiB的临时工作数组预算。")
+    module = lightmap_mip_module()
+    by_key = {sources[obj["input_index"]]["key"]: obj for obj in objects}
+    previous_invalid = None
+    for attempt in range(4):
+        try:
+            pages, planned = pack_atlases(objects, size, density, texture_budget, gutter, preview=True)
+        except ValueError as error:
+            if previous_invalid is None:
+                raise
+            raise ValueError(f"{error}；上次检测到的 UV 问题：{previous_invalid}。") from error
+        placements = {entry[0].name: entry for entry in planned}
+        invalid: dict[str, set[int]] = {}
+        first_invalid, count = None, 0
+        for page in pages:
+            estimated = sum(len(obj.data.polygons) for obj in page) * 128
+            if estimated > working_limit:
+                raise ValueError(f"有限mip UV 修复扫描工作集超过预算：{estimated}>{working_limit}。")
+            meshes = lightmap_mip_meshes(page, sources, size, placements=placements, gutter=gutter)
+            for mesh in meshes:
+                _, areas = module.lightmap_mip_triangle_areas(mesh["bakeUvs"], size, size)
+                bad = np.flatnonzero(np.abs(areas) < 1e-8)
+                if len(bad):
+                    faces = invalid.setdefault(mesh["key"], set())
+                    before = len(faces)
+                    faces.update(int(mesh["faceIndices"][index]) for index in bad)
+                    count += len(faces) - before
+                    if count * 4096 > working_limit:
+                        raise ValueError(f"有限mip UV 修复面数超过工作集预算：{count} 面，预算 {working_limit} 字节。")
+                    if first_invalid is None:
+                        index = int(bad[0])
+                        first_invalid = (f"meshKey={mesh['key']}；对象={mesh['name']}；实体={mesh['entityId']}；"
+                                         f"节点={mesh['nodeKey']}；图集={mesh['atlasIndex']}；面={int(mesh['faceIndices'][index])}；"
+                                         f"UV={mesh['bakeUvs'][index].tolist()}；像素空间双倍面积={float(areas[index]):.17g}")
+                        geometry = mesh.get("invalidGeometry")
+                        if geometry is not None:
+                            first_invalid += f"；局部顶点={geometry['positions']}；世界空间双倍面积={geometry['worldDoubleArea']:.17g}"
+        if not invalid:
+            packed = pack_atlases(objects, size, density, texture_budget, gutter)
+            for obj in objects:
+                required = max((lightmap_face_world_per_uv(obj, face) for face in obj.data.polygons), default=0) * density
+                if not math.isfinite(required) or required > size * (1 + 1e-6):
+                    source = sources[obj["input_index"]]
+                    raise ValueError(f"有限mip最终光照 UV 未达到目标采样密度：meshKey={source['key']}；对象={source.get('name', '未知')}。")
+            return packed
+        if attempt == 3:
+            raise ValueError(f"有限mip重装图集后仍存在数值歧义三角形：{first_invalid}；已尝试 {attempt} 次修复。")
+        total_repaired = sum(len(set(obj.get("lighting_uv_repaired_face_indices", [])) | invalid.get(key, set()))
+                             for key, obj in by_key.items())
+        if total_repaired * 4096 > working_limit:
+            raise ValueError(f"有限mip UV 修复面数超过工作集预算：{total_repaired} 面，预算 {working_limit} 字节。")
+        for key, faces in invalid.items():
+            obj = by_key[key]
+            source = sources[obj["input_index"]]
+            for face_index in sorted(faces):
+                try:
+                    _require_mip_positive_face(obj, source, obj.data.polygons[face_index])
+                except ValueError as error:
+                    raise ValueError(f"{error} 首个最终 UV 问题：{first_invalid}。") from error
+        for key, faces in invalid.items():
+            obj = by_key[key]
+            try:
+                repair_lightmap_uvs(obj, density, forced_faces=faces, mip_gutter=gutter, mip_min_chart_pixels=6 * (1 << attempt))
+                lightmap_metrics(obj, density, gutter)
+            except ValueError as error:
+                raise ValueError(f"{error}；首次最终 UV 问题：{first_invalid}。") from error
+        previous_invalid = first_invalid
+        progress("unwrap", attempt + 1, 3, f"正在修复 {count} 个最终光照 UV 细面并重新装箱")
+    raise ValueError("有限mip UV 修复未完成。")
+
+
+def _same_mip_bake_mesh(original: Any, candidate: Any, faces: list[int]) -> bool:
+    if len(original.vertices) != len(candidate.vertices) or len(candidate.polygons) != len(faces):
+        return False
+    for old, new in zip(original.vertices, candidate.vertices):
+        if tuple(old.co) != tuple(new.co):
+            return False
+    if list(original.uv_layers.keys()) != list(candidate.uv_layers.keys()):
+        return False
+    if list(original.color_attributes.keys()) != list(candidate.color_attributes.keys()):
+        return False
+    for old, new in zip(original.color_attributes, candidate.color_attributes):
+        if old.domain != new.domain or old.data_type != new.data_type or len(old.data) != len(new.data):
+            return False
+        if any(tuple(a.color) != tuple(b.color) for a, b in zip(old.data, new.data)):
+            return False
+    for mesh in (original, candidate):
+        if hasattr(mesh, "calc_normals_split"):
+            mesh.calc_normals_split()
+    for new_face, original_index in zip(candidate.polygons, faces):
+        old_face = original.polygons[original_index]
+        if tuple(old_face.vertices) != tuple(new_face.vertices) or old_face.material_index != new_face.material_index or old_face.use_smooth != new_face.use_smooth:
+            return False
+        for old_loop, new_loop in zip(old_face.loop_indices, new_face.loop_indices):
+            if any(tuple(original.uv_layers[name].data[old_loop].uv) != tuple(candidate.uv_layers[name].data[new_loop].uv)
+                   for name in original.uv_layers.keys()):
+                return False
+            old_normal = original.corner_normals[old_loop].vector if hasattr(original, "corner_normals") else original.loops[old_loop].normal
+            new_normal = candidate.corner_normals[new_loop].vector if hasattr(candidate, "corner_normals") else candidate.loops[new_loop].normal
+            if tuple(old_normal) != tuple(new_normal):
+                return False
+    return True
+
+
+@contextmanager
+def lightmap_mip_bake_page(page: list[Any], sources: list[dict], chart_meshes: list[dict]):
+    """临时副本与 chart 使用同一组面；场景和导出继续持有原网格。"""
+    charts = {entry["key"]: entry for entry in chart_meshes}
+    active, temporary = [], []
+    try:
+        for obj in page:
+            source = sources[obj["input_index"]]
+            entry = charts.get(source["key"])
+            if entry is None:
+                continue
+            faces = [int(index) for index in entry["faceIndices"]]
+            original = obj.data
+            if len(faces) == len(original.polygons):
+                active.append(obj)
+                continue
+            candidate = original.copy()
+            temporary.append((obj, original, candidate))
+            bm = bmesh.new()
+            try:
+                bm.from_mesh(candidate)
+                bm.faces.ensure_lookup_table()
+                bm.faces.index_update()
+                keep = set(faces)
+                bmesh.ops.delete(bm, geom=[face for face in bm.faces if face.index not in keep], context="FACES_ONLY")
+                bm.to_mesh(candidate)
+            finally:
+                bm.free()
+            candidate.update()
+            candidate.normals_split_custom_set_from_vertices([vector(source["normals"][index:index + 3])
+                                                               for index in range(0, len(source["normals"]), 3)])
+            if not _same_mip_bake_mesh(original, candidate, faces):
+                raise ValueError(f"有限mip无法保真建立临时烘焙网格：{source['key']}；未更改原几何或提交结果。")
+            obj.data = candidate
+            active.append(obj)
+        yield active
+    finally:
+        for obj, original, candidate in reversed(temporary):
+            obj.data = original
+            bpy.data.meshes.remove(candidate)
 
 
 def lightmap_mip_certificate_summary(certificate: dict) -> dict:
@@ -1724,9 +1991,12 @@ def validate_packed_lightmaps(pages: list[list[Any]], sources: list[dict], setti
         if texture_bytes > settings["maxTextureMiB"] * 1024 * 1024:
             raise ValueError("有限mip全部RGBA级超出GPU纹理预算，未降低层级/尺寸。")
         for page in pages:
-            chart_meshes = lightmap_mip_meshes(page, sources)
-            certificate, owner = mip_module.certify_lightmap_mip_charts(chart_meshes, size, size, levels, max_working_bytes=mip_working_limit)
-            certificates.append(lightmap_mip_certificate_summary(certificate))
+            chart_meshes = lightmap_mip_meshes(page, sources, size)
+            certificate, owner = mip_module.certify_lightmap_mip_charts(chart_meshes, size, size, levels,
+                max_working_bytes=mip_working_limit, allow_empty=not chart_meshes)
+            summary = lightmap_mip_certificate_summary(certificate)
+            summary["excludedZeroAreaFaces"] = sum(len(obj.data.polygons) for obj in page) - sum(len(mesh["triangles"]) for mesh in chart_meshes)
+            certificates.append(summary)
             del owner, certificate, chart_meshes
     return texture_bytes, mip_module, mip_working_limit, per_atlas, certificates
 
@@ -1806,7 +2076,10 @@ def main() -> None:
         prepare_started = time.monotonic()
         data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
         receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
-        pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024, lightmap_gutter(settings))
+        if lightmap_mip_levels:
+            pages = pack_lightmap_mip_atlases(receivers, data["meshes"], settings)
+        else:
+            pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024, lightmap_gutter(settings))
         validation = validate_packed_lightmaps(pages, data["meshes"], settings)
         if cache:
             cache.save(data["meshes"], objects, pages, round((time.monotonic() - prepare_started) * 1000))
@@ -1835,15 +2108,24 @@ def main() -> None:
             progress("baking", index + 1, len(pages), "复用同输入且已校验的完整图集")
             continue
         bake_started = time.monotonic()
-        pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
-        cycles_bake_duration_ms += round((time.monotonic() - bake_started) * 1000)
         if lightmap_mip_levels:
-            payload = mip_module.prepare_lightmap_mips(pixels, size, size, lightmap_mip_meshes(page, data["meshes"]), lightmap_mip_levels,
-                lightmap_encoding, max_working_bytes=mip_working_limit, max_texture_bytes=per_atlas)
+            chart_meshes = lightmap_mip_meshes(page, data["meshes"], size)
+            with lightmap_mip_bake_page(page, data["meshes"], chart_meshes) as bake_page:
+                if bake_page:
+                    pixels = bake_irradiance(bake_page, lights, size, f"Atlas-{index}")
+                else:
+                    pixels = np.zeros(size * size * 4, dtype=np.float32)
+                    pixels[3::4] = 1
+                cycles_bake_duration_ms += round((time.monotonic() - bake_started) * 1000)
+                payload = mip_module.prepare_lightmap_mips(pixels, size, size, chart_meshes, lightmap_mip_levels,
+                    lightmap_encoding, max_working_bytes=mip_working_limit, max_texture_bytes=per_atlas, allow_empty=not chart_meshes)
+            del chart_meshes
             name = f"lightmap-{index}.bin"
             (root / name).write_bytes(payload["data"])
             atlas_results.append({"file": name, **{key: payload[key] for key in ("width", "height", "encoding", "rgbmRange", "levelCount", "textureBytes")}, "mipRecipe": LIGHTMAP_MIP_RECIPE})
         else:
+            pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
+            cycles_bake_duration_ms += round((time.monotonic() - bake_started) * 1000)
             name = f"lightmap-{index}.png"
             dynamic_range = save_rgbm(pixels, size, root / name, lightmap_encoding)
             atlas_results.append({"file": name, "width": size, "height": size, "encoding": lightmap_encoding, "rgbmRange": dynamic_range})

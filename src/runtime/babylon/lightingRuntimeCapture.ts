@@ -70,7 +70,7 @@ export function captureLightingEnvironment(scene: Scene, document: SceneDocument
   const lights: LightingBakeLightInput[] = [];
   const ambient: [number, number, number] = [0, 0, 0];
   for (const light of scene.lights) {
-    if (!light.isEnabled() || light.intensity <= 0 || isDynamicLight(document, light)) continue;
+    if (!light.isEnabled() || light.intensity <= 0 || light.metadata?.glowStripLight === true || isDynamicLight(document, light)) continue;
     if (light instanceof HemisphericLight) {
       for (const [index, value] of [light.diffuse.r + light.groundColor.r, light.diffuse.g + light.groundColor.g, light.diffuse.b + light.groundColor.b].entries()) ambient[index] += value * light.intensity / 2;
       continue;

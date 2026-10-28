@@ -20,7 +20,7 @@ const NUMBER_FIELDS: readonly NumberField[] = [
   { key: 'speed', label: '速度', min: POI_EFFECT_SPEED_MIN, max: POI_EFFECT_SPEED_MAX, step: 0.1 },
   { key: 'density', label: '密度', min: POI_EFFECT_DENSITY_MIN, max: POI_EFFECT_DENSITY_MAX, step: 0.1 },
 ];
-const STATIC_EFFECTS = new Set(['model-color', 'alarm-label', 'alarm-zone', 'model-outline', 'model-edges', 'model-emissive', 'height-gradient', 'xray', 'floor-expand', 'explode', 'clip-section', 'roof-fade', 'heatmap', 'region-level', 'data-bars', 'camera-frustum', 'environment-fog']);
+const STATIC_EFFECTS = new Set(['glow-strip', 'model-color', 'alarm-label', 'alarm-zone', 'model-outline', 'model-edges', 'model-emissive', 'height-gradient', 'xray', 'floor-expand', 'explode', 'clip-section', 'roof-fade', 'heatmap', 'region-level', 'data-bars', 'camera-frustum', 'environment-fog']);
 const DENSITY_EFFECTS = new Set(['rain', 'snow', 'flame', 'smoke-plume', 'flow-arrows', 'pipe-flow']);
 
 function commonFieldVisible(kind: PoiEffectKind, field: NumberField['key']): boolean {
@@ -40,10 +40,10 @@ export function PoiEffectAppearanceFields({ component, disabled, onChange, insta
         <input aria-label="主颜色" disabled={disabled} type="color" value={component.primaryColor}
           onChange={event => commit({ ...component, primaryColor: event.target.value }, '更新特效主颜色')} />
       </label>
-      <label className="inspector-row"><span>辅助颜色</span>
+      {component.effectKind !== 'glow-strip' && <label className="inspector-row"><span>辅助颜色</span>
         <input aria-label="辅助颜色" disabled={disabled} type="color" value={component.secondaryColor}
           onChange={event => commit({ ...component, secondaryColor: event.target.value }, '更新特效辅助颜色')} />
-      </label>
+      </label>}
       {NUMBER_FIELDS.filter(field => conveyorArrow ? field.key !== 'density' : !digitalTwin || commonFieldVisible(component.effectKind, field.key)).map(field => {
         const min = (digitalTwin || conveyorArrow) && field.key === 'speed' ? 0 : field.min;
         return <label className="number-row" key={field.key}><span>{field.label}</span>
