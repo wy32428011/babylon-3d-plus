@@ -163,6 +163,27 @@ export class ModelEntranceRuntime {
       meshCount: this.bindings.length, unsupportedMeshCount: this.unsupported, interruptedMeshCount: this.interrupted, cycle: this.cycle,
       preparedBindingCount: this.preparedBindingCount, totalBindingCount: this.totalBindingCount };
   }
+  /** 返回当前没有入场材质覆盖的目标，供渲染门控暂时隐藏，不改写业务显隐。 */
+  getUncoveredTargetMeshes(): AbstractMesh[] {
+    if (!this.isActive) return [];
+    const covered = new Set<AbstractMesh>();
+    for (const binding of this.bindings) {
+      if (binding.mesh.isDisposed() || binding.mesh.material !== binding.replacement) continue;
+      for (const mesh of binding.targets.keys()) covered.add(mesh);
+    }
+    const uncovered = new Set<AbstractMesh>();
+    for (const target of this.targets) {
+      if (target.node.isDisposed()) continue;
+      const meshes = target.meshes ?? [...(target.node instanceof AbstractMesh ? [target.node] : []), ...target.node.getChildMeshes(false)];
+      for (const mesh of meshes) {
+        if (!(mesh instanceof Mesh || mesh instanceof InstancedMesh) || mesh.isDisposed()
+          || mesh.getTotalVertices() === 0 || mesh.metadata?.digitalTwinEffectProxy || covered.has(mesh)) continue;
+        if (mesh instanceof InstancedMesh && mesh.sourceMesh.isDisposed()) continue;
+        uncovered.add(mesh);
+      }
+    }
+    return [...uncovered];
+  }
   async prepare(settings: SceneModelEntranceSettings, targets: Target[], signal?: AbortSignal): Promise<void> {
     this.cancel(); this.elapsed = 0; this.progress = 0; this.cycle = 0; this.unsupported = 0; this.interrupted = 0;
     const generation = this.preparationGeneration;

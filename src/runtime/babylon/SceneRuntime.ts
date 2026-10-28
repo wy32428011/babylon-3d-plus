@@ -210,7 +210,9 @@ export class SceneRuntime {
       get presentation() { return owner().presentation; },
       get variants() { return owner().variants; },
       get readiness() { return owner().readiness; },
-      get bounds() { return owner().bounds; }
+      get bounds() { return owner().bounds; },
+      get locators() { return owner().locators; },
+      get cad() { return owner().cad; }
     });
     this.outputs = new GeneratedModelOutputController(context, {
       get telemetry() { return owner().telemetry; },

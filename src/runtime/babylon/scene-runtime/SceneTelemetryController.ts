@@ -79,8 +79,14 @@ export class SceneTelemetryController {
   public telemetryFrameTimeMs: number | null = null;
   public readonly telemetryOuterStages = { diagnosticsMs: 0, baselineMs: 0, alarmsMs: 0 };
   public telemetryMaxFrameTimeMs: number | null = null;
+  private modelEntranceHidden = false;
   private updatesStopped = false;
   private disposed = false;
+
+  /** 入场仅影响运动箭头显示，遥测和原有箭头开关继续运行。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (!this.updatesStopped) this.modelEntranceHidden = hidden;
+  }
 
   /** 最终销毁的第一阶段；先停帧回调并归还合批接管的原件，光照与模型资源此时仍须存活。 */
   stopUpdates(): void {
@@ -374,7 +380,7 @@ export class SceneTelemetryController {
         lift: wants('lift', this.hasLiftMotionArrows),
       },
       (model) => this.specializedTelemetryRuntime.resolveDeviceType(model),
-      (entityId) => this.dependencies.document.isEntityVisible(entityId),
+      (entityId) => !this.modelEntranceHidden && this.dependencies.document.isEntityVisible(entityId),
     );
   }
 

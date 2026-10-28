@@ -99,6 +99,65 @@ export class GeneratedModelOutputController {
   public defaultCargoGeneratorId: string | null = null;
   public readonly generatedOutputOwners = new Map<string, GeneratedOutputOwnerRuntimeEntry>();
   public readonly reportedCargoIssues = new Set<string>();
+  private modelEntranceOutputsHidden = false;
+  private readonly modelEntranceLayerMasks = new Map<AbstractMesh, number>();
+  private removeModelEntranceRenderObservers: (() => void) | null = null;
+
+  /** 入场期间只在渲染帧屏蔽动态产物，避免改变脚本和遥测所依赖的业务显隐状态。 */
+  public setModelEntranceOutputsHidden(hidden: boolean): void {
+    if (this.updatesStopped || this.modelEntranceOutputsHidden === hidden) return;
+    this.modelEntranceOutputsHidden = hidden;
+    if (!hidden) {
+      this.removeModelEntranceRenderObservers?.();
+      this.removeModelEntranceRenderObservers = null;
+      this.restoreModelEntranceLayerMasks();
+      return;
+    }
+    const scene = this.context.scene;
+    const before = scene.onBeforeRenderObservable.add(() => {
+      // 上一帧意外中断时先恢复，再读取本帧业务状态。
+      this.restoreModelEntranceLayerMasks();
+      const meshes = new Set<AbstractMesh>();
+      for (const owner of this.generatedOutputOwners.values()) {
+        const output = owner.output;
+        if (output?.kind === 'mesh') meshes.add(output.mesh);
+        else if (output?.kind === 'model') {
+          for (const mesh of output.model.meshes) meshes.add(mesh);
+          for (const mesh of output.model.modelArrayBatch?.meshes ?? []) meshes.add(mesh);
+        } else if (output?.kind === 'composition') {
+          for (const member of output.members) {
+            for (const mesh of member.model?.meshes ?? []) meshes.add(mesh);
+            for (const mesh of member.model?.modelArrayBatch?.meshes ?? []) meshes.add(mesh);
+            if (member.mesh) meshes.add(member.mesh);
+            for (const mesh of member.arrayBatch?.meshes ?? []) meshes.add(mesh);
+          }
+        }
+      }
+      for (const mesh of this.dependencies.readiness.modelStatisticsFallbackMeshes) meshes.add(mesh);
+      for (const model of this.spawnedDeviceModels.values()) {
+        for (const mesh of model.meshes) meshes.add(mesh);
+        for (const mesh of model.modelArrayBatch?.meshes ?? []) meshes.add(mesh);
+      }
+      for (const mesh of meshes) {
+        if (mesh.isDisposed()) continue;
+        this.modelEntranceLayerMasks.set(mesh, mesh.layerMask);
+        mesh.layerMask = 0;
+      }
+    });
+    const after = scene.onAfterRenderObservable.add(() => this.restoreModelEntranceLayerMasks());
+    this.removeModelEntranceRenderObservers = () => {
+      scene.onBeforeRenderObservable.remove(before);
+      scene.onAfterRenderObservable.remove(after);
+    };
+  }
+
+  private restoreModelEntranceLayerMasks(): void {
+    for (const [mesh, layerMask] of this.modelEntranceLayerMasks) {
+      if (!mesh.isDisposed()) mesh.layerMask = layerMask;
+    }
+    this.modelEntranceLayerMasks.clear();
+  }
+
   private deviceSpawningStopped = false;
   private updatesStopped = false;
   private disposed = false;
@@ -132,6 +191,7 @@ export class GeneratedModelOutputController {
   /** 最终销毁前停止预取与新设备；先关闭复用池，使后续归还的活动句柄直接释放。 */
   stopUpdates(): void {
     if (this.updatesStopped) return;
+    this.setModelEntranceOutputsHidden(false);
     this.updatesStopped = true;
     runSceneRuntimeCleanup(this.context, '生成器资产预取', () => this.generatorAssetPreloader.dispose());
     runSceneRuntimeCleanup(this.context, '生成货物复用池', () => this.generatedCargoInstancePool.setEnabled(false));

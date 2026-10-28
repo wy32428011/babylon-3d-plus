@@ -41,6 +41,14 @@ export class SceneLocatorFetchController {
 
   /** fetch 数据驱动的定位线框渲染运行时，按定位线框实体组织。 */
   public readonly locatorFetchRuntimes = new Map<string, LocatorFetchRuntime>();
+  public modelEntranceHidden = false;
+
+  /** 新旧库存批次共用门控，新建实例也会继承当前状态。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    for (const runtime of this.locatorFetchRuntimes.values()) runtime.setModelEntranceHidden(hidden);
+  }
   /** fetch 请求代际戳与每排最新请求序号：响应仅在仍是该排最新请求时应用，防止乱序覆盖。 */
   public fetchRequestGeneration = 0;
   public readonly latestFetchRequestByRow = new Map<number, number>();

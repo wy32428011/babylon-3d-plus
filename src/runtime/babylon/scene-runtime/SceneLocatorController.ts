@@ -3,6 +3,7 @@ import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js'
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
@@ -41,7 +42,7 @@ type Dependencies = {
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariantByEntityId'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'selectedEntityIds' | 'localSlotHighlight' | 'externalSlotHighlight' | 'localSlotHighlightOverlay' | 'externalSlotHighlightOverlay' | 'isEntityHighlighted' | 'externalHighlightedEntityIds'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'resolveModelArrayRenderModel'>;
-  readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes' | 'disposeLocatorFetchRuntime'>;
+  readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes' | 'disposeLocatorFetchRuntime' | 'modelEntranceHidden'>;
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'clearEntityArrayPreviewIfSource'>;
   readonly telemetry: Pick<SceneTelemetryController, 'specializedTelemetryRuntime' | 'telemetryPreviewActive'>;
@@ -60,7 +61,38 @@ export class SceneLocatorController {
   public readonly reportedDuplicateLocatorTargets = new Set<string>();
   public readonly reportedOverlappingLocatorRanges = new Set<string>();
   private disposed = false;
+  private modelEntranceHidden = false;
+  private readonly entranceLayerMasks = new Map<AbstractMesh, number>();
   private readonly disposedLocators = new WeakSet<LocatorRuntimeEntry>();
+
+  /** 仅遮蔽定位器自身几何，避免禁用根节点影响挂载的货物和遥测。 */
+  setModelEntranceHidden(hidden: boolean): void {
+    if (this.disposed || this.modelEntranceHidden === hidden) return;
+    this.modelEntranceHidden = hidden;
+    if (!hidden) {
+      for (const [mesh, mask] of this.entranceLayerMasks) {
+        if (!mesh.isDisposed()) mesh.layerMask = mask;
+      }
+      this.entranceLayerMasks.clear();
+      return;
+    }
+    for (const locator of this.locators.values()) {
+      this.hideEntranceMesh(locator.fillMesh);
+      this.hideEntranceMesh(locator.edgeLines);
+      for (const label of locator.columnLabels) this.hideEntranceMesh(label.mesh);
+    }
+    for (const overlay of [this.dependencies.selection.localSlotHighlightOverlay, this.dependencies.selection.externalSlotHighlightOverlay]) {
+      if (!overlay) continue;
+      this.hideEntranceMesh(overlay.fillMesh);
+      for (const mesh of overlay.edgeFrame.getChildMeshes(false)) this.hideEntranceMesh(mesh);
+    }
+  }
+
+  private hideEntranceMesh(mesh: AbstractMesh): void {
+    if (!this.modelEntranceHidden || this.entranceLayerMasks.has(mesh)) return;
+    this.entranceLayerMasks.set(mesh, mesh.layerMask);
+    mesh.layerMask = 0;
+  }
 
   /** Fetch、暂存货物与选区 overlay 由各自所有者先清理；这里只释放定位器及其索引。 */
   dispose(): void {
@@ -75,6 +107,7 @@ export class SceneLocatorController {
       runSceneRuntimeCleanup(this.context, `定位器 ${entityId}`, () => this.disposeLocator(entityId, locator));
     }
     this.locators.clear();
+    this.entranceLayerMasks.clear();
   }
 
   /** 货箱运行问题按稳定 key 只写一次 Console。 */
@@ -572,6 +605,7 @@ export class SceneLocatorController {
     if (locator.fetchDrive?.enabled) {
       if (!this.dependencies.fetch.locatorFetchRuntimes.has(entity.id)) {
         const fetchRuntime = new LocatorFetchRuntime(this.context.scene, entity.id, (message) => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]));
+        fetchRuntime.setModelEntranceHidden(this.dependencies.fetch.modelEntranceHidden);
         fetchRuntime.onStatisticsChanged = () => { if (!this.disposed) this.dependencies.readiness.invalidateModelStatistics(); };
         this.dependencies.fetch.locatorFetchRuntimes.set(entity.id, fetchRuntime);
       }
@@ -626,6 +660,7 @@ export class SceneLocatorController {
     edgeLinesMesh.color = Color3.FromHexString(LOCATOR_EDGE_COLOR);
     edgeLinesMesh.alpha = 1;
     edgeLinesMesh.isPickable = false;
+    this.hideEntranceMesh(edgeLinesMesh);
     return { fillMesh, edgeLines: edgeLinesMesh };
   }
 
@@ -649,6 +684,7 @@ export class SceneLocatorController {
       const spanY = (layers - 1) * cellSteps.layerStepY + height;
       const fillMesh = MeshBuilder.CreateBox(`${entityId}_locatorFill`, { width: spanX, height: spanY, depth: width }, this.context.scene);
       fillMesh.position.set((columns - 1) * cellSteps.columnStepX / 2, spanY / 2, 0);
+      this.hideEntranceMesh(fillMesh);
       return fillMesh;
     }
 
@@ -663,6 +699,7 @@ export class SceneLocatorController {
     }
     fillMesh.thinInstanceSetBuffer('matrix', matrices, 16, true);
     fillMesh.thinInstanceRefreshBoundingInfo(true);
+    this.hideEntranceMesh(fillMesh);
     return fillMesh;
   }
 
@@ -819,6 +856,7 @@ export class SceneLocatorController {
       material.emissiveColor = Color3.White();
 
       const plane = MeshBuilder.CreatePlane(`${entityId}_locatorColumnLabelPlane_${col}`, { size: 1 }, this.context.scene);
+      this.hideEntranceMesh(plane);
       plane.parent = labelsRoot;
       plane.scaling.setAll(size);
       plane.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
@@ -1065,6 +1103,7 @@ export class SceneLocatorController {
     fillMesh.material = material;
     fillMesh.isPickable = false;
     fillMesh.renderingGroupId = 1;
+    this.hideEntranceMesh(fillMesh);
 
     const hx = sizeX / 2;
     const hy = sizeY / 2;
@@ -1104,6 +1143,7 @@ export class SceneLocatorController {
       edge.material = edgeMaterial;
       edge.isPickable = false;
       edge.renderingGroupId = 1;
+      this.hideEntranceMesh(edge);
     });
 
     const overlay: LocatorSlotHighlightOverlay = {

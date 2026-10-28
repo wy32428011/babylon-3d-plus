@@ -23,18 +23,22 @@ import type { SceneMeshPresentationController } from './SceneMeshPresentationCon
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
 import type { SceneTriangleAndReadinessController } from './SceneTriangleAndReadinessController';
 import type { SceneWorldBoundsController } from './SceneWorldBoundsController';
+import type { SceneLocatorController } from './SceneLocatorController';
+import type { SceneCadReferenceController } from './SceneCadReferenceController';
 import { type DataPlatformScreenOverlayItem } from './sceneRuntimeTypes';
 import { awaitLightingTaskStep } from '../lightingBakeTask';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
-  readonly telemetry: Pick<SceneTelemetryController, 'telemetryPreviewActive'>;
-  readonly outputs: Pick<GeneratedModelOutputController, 'generatedOutputOwners'>;
-  readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes'>;
+  readonly telemetry: Pick<SceneTelemetryController, 'telemetryPreviewActive' | 'setModelEntranceHidden'>;
+  readonly outputs: Pick<GeneratedModelOutputController, 'generatedOutputOwners' | 'setModelEntranceOutputsHidden'>;
+  readonly fetch: Pick<SceneLocatorFetchController, 'locatorFetchRuntimes' | 'setModelEntranceHidden'>;
   readonly environment: Pick<EnvironmentAndSkyboxController, 'environmentRuntime' | 'lightingRuntime'>;
   readonly document: Pick<SceneDocumentController, 'syncedEntities' | 'isEntityVisible'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
-  readonly presentation: Pick<SceneMeshPresentationController, 'meshes'>;
+  readonly presentation: Pick<SceneMeshPresentationController, 'meshes' | 'setModelEntranceHidden'>;
+  readonly locators: Pick<SceneLocatorController, 'setModelEntranceHidden'>;
+  readonly cad: Pick<SceneCadReferenceController, 'setModelEntranceHidden'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants'>;
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'loadDiagnostics'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'getEntityWorldBounds'>;
@@ -63,6 +67,8 @@ export class ScenePoiAndEffectsController {
   private effectsDisposed = false;
   private disposed = false;
   private entrancePreparationGeneration = 0;
+  private modelEntranceOverlaysHidden = false;
+  private removeEntranceCompletionObserver: (() => void) | null = null;
   private readonly updatesAbortController = new AbortController();
 
   /** 入场材质必须在模型、光照释放前还原；同时封闭等待光照就绪后的迟到准备。 */
@@ -70,6 +76,7 @@ export class ScenePoiAndEffectsController {
     if (this.updatesStopped) return;
     this.updatesStopped = true;
     this.entrancePreparationGeneration += 1;
+    this.restoreEntranceSupplementalVisibility();
     runSceneRuntimeCleanup(this.context, '入场准备等待', () => this.updatesAbortController.abort());
     runSceneRuntimeCleanup(this.context, '模型入场运行时', () => this.modelEntranceRuntime?.dispose());
     this.modelEntranceIncludesEnvironment = false;
@@ -144,6 +151,58 @@ export class ScenePoiAndEffectsController {
     if (this.updatesStopped) return;
     const generation = ++this.entrancePreparationGeneration;
     const config = normalizeSceneModelEntranceSettings(settings);
+    this.restoreEntranceSupplementalVisibility();
+    let firstCompletion: number | null = null;
+    if (config.enabled && config.scope === 'all') {
+      this.setEntranceSupplementalHidden(true);
+      // 未能使用入场材质的目标也不得提前出现；仅在绘制帧屏蔽，保留业务显隐。
+      const hiddenMeshes = new Map<AbstractMesh, number>();
+      const restoreMasks = () => {
+        for (const [mesh, mask] of hiddenMeshes) if (!mesh.isDisposed()) mesh.layerMask = mask;
+        hiddenMeshes.clear();
+      };
+      // 播放进度由已有渲染循环推进，后台隐藏时不会提前结束。
+      const observer = this.context.scene.onBeforeRenderObservable.add(() => {
+        restoreMasks();
+        if (generation !== this.entrancePreparationGeneration) return;
+        this.syncEntranceSupplementalHidden(true);
+        const current = this.modelEntranceRuntime.getSnapshot();
+        if (firstCompletion !== null && (current.status === 'completed' || current.status === 'cancelled' || current.status === 'idle'
+          || (current.status === 'playing' && current.elapsedSeconds >= firstCompletion - 1e-7))) {
+          this.restoreEntranceSupplementalVisibility();
+          return;
+        }
+        for (const mesh of this.modelEntranceRuntime.getUncoveredTargetMeshes()) {
+          hiddenMeshes.set(mesh, mesh.layerMask);
+          mesh.layerMask = 0;
+        }
+      });
+      const after = this.context.scene.onAfterRenderObservable.add(restoreMasks);
+      this.removeEntranceCompletionObserver = () => {
+        this.context.scene.onBeforeRenderObservable.remove(observer);
+        this.context.scene.onAfterRenderObservable.remove(after);
+        restoreMasks();
+      };
+    }
+    const abort = () => { if (generation === this.entrancePreparationGeneration) this.cancelModelEntrance(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      signal?.throwIfAborted();
+      await this.prepareModelEntranceTargets(config, generation, signal);
+      if (generation !== this.entrancePreparationGeneration || this.updatesStopped) return;
+      const snapshot = this.modelEntranceRuntime.getSnapshot();
+      if (snapshot.status !== 'prepared') this.restoreEntranceSupplementalVisibility();
+      else firstCompletion = config.delaySeconds + config.durationSeconds
+        + (config.effect === 'stagger' ? Math.max(0, snapshot.targetCount - 1) * config.staggerSeconds : 0);
+    } catch (error) {
+      if (generation === this.entrancePreparationGeneration) this.restoreEntranceSupplementalVisibility();
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', abort);
+    }
+  }
+
+  private async prepareModelEntranceTargets(config: SceneModelEntranceSettings, generation: number, signal?: AbortSignal): Promise<void> {
     // 只对显式入口等待真实GI提交；否则会克隆隐藏源而让可见代理跳过动画。
     if (config.enabled) {
       const ready = this.dependencies.environment.lightingRuntime.whenReady();
@@ -188,9 +247,31 @@ export class ScenePoiAndEffectsController {
     if (this.updatesStopped) return;
     this.entrancePreparationGeneration += 1;
     this.modelEntranceIncludesEnvironment = false;
+    this.restoreEntranceSupplementalVisibility();
     this.modelEntranceRuntime.cancel();
   }
   setModelEntranceVisible(visible: boolean): void { if (!this.updatesStopped) this.modelEntranceVisible = visible; }
+  /** 场景媒体是独立 DOM 层，准备及首轮入场期间不能先于模型显示。 */
+  setModelEntranceOverlaysHidden(hidden: boolean): void { this.modelEntranceOverlaysHidden = hidden; }
+  private syncEntranceSupplementalHidden(hidden: boolean): void {
+    this.dependencies.outputs.setModelEntranceOutputsHidden(hidden);
+    this.dependencies.telemetry.setModelEntranceHidden(hidden);
+    this.poiEffectRuntime?.setModelEntranceHidden(hidden);
+    this.alarmRuntime?.setModelEntranceHidden(hidden);
+    this.dependencies.fetch.setModelEntranceHidden(hidden);
+    this.dependencies.presentation.setModelEntranceHidden(hidden);
+    this.dependencies.locators.setModelEntranceHidden(hidden);
+    this.dependencies.cad.setModelEntranceHidden(hidden);
+  }
+  private setEntranceSupplementalHidden(hidden: boolean): void {
+    this.setModelEntranceOverlaysHidden(hidden);
+    this.syncEntranceSupplementalHidden(hidden);
+  }
+  private restoreEntranceSupplementalVisibility(): void {
+    this.removeEntranceCompletionObserver?.();
+    this.removeEntranceCompletionObserver = null;
+    this.setEntranceSupplementalHidden(false);
+  }
   isModelEntranceReady(): boolean { return this.context.scene.isReady(); }
   getModelEntranceSnapshot() { return this.modelEntranceRuntime.getSnapshot(); }
 
@@ -205,8 +286,8 @@ export class ScenePoiAndEffectsController {
       const marker = entity.components.chartMarker;
       const markerStyle = marker ? getChartMarkerStyle(marker) : undefined;
       const visible = this.dependencies.document.isEntityVisible(entityId);
-      if (marker) this.chartMarkerPresentation.update(mesh, marker, visible);
-      if (!visible) continue;
+      if (marker) this.chartMarkerPresentation.update(mesh, marker, visible && !this.modelEntranceOverlaysHidden);
+      if (!visible || this.modelEntranceOverlaysHidden) continue;
       if (!entity.components.chartMarker && (!screen || screen.renderMode !== 'iframe' || !screen.screenUrl)) continue;
       items.push({
         entityId,
@@ -225,7 +306,7 @@ export class ScenePoiAndEffectsController {
         } : {}),
       });
     }
-    if (this.dependencies.telemetry.telemetryPreviewActive) items.push(...this.alarmRuntime.getOverlayItems());
+    if (!this.modelEntranceOverlaysHidden && this.dependencies.telemetry.telemetryPreviewActive) items.push(...this.alarmRuntime.getOverlayItems());
     return items;
   }
   /** 按原构造顺序连接此领域的资源与回调。 */
