@@ -139,12 +139,12 @@ export function getHybridShadowProjectionFallback(generator: ShadowGenerator): H
   if (!(light instanceof PointLight || light instanceof SpotLight)
     || !Number.isFinite(light.shadowMinZ) || !Number.isFinite(light.shadowMaxZ)
     || light.shadowMinZ! <= 0 || light.shadowMaxZ! <= light.shadowMinZ!
-    || light.customProjectionMatrixBuilder || !scene.floatingOriginOffset.equalsToFloats(0, 0, 0)) return 'unsupported-projection';
-  if (generator.constructor !== ShadowGenerator || generator.customShaderOptions || generator.customAllowRendering
+    || Boolean(light.customProjectionMatrixBuilder) || !scene.floatingOriginOffset.equalsToFloats(0, 0, 0)) return 'unsupported-projection';
+  if (generator.constructor !== ShadowGenerator || generator.customShaderOptions || Boolean(generator.customAllowRendering)
     || generator.onBeforeShadowMapRenderObservable.hasObservers() || generator.onBeforeShadowMapRenderMeshObservable.hasObservers()
-    || scene.customLODSelector) return 'custom-shadow-rendering';
+    || Boolean(scene.customLODSelector)) return 'custom-shadow-rendering';
   const map = generator.getShadowMap();
-  if (!map?.renderList || map.getCustomRenderList || map.renderListPredicate || map.forceLayerMaskCheck) return 'submission-mismatch';
+  if (!map?.renderList || map.getCustomRenderList || Boolean(map.renderListPredicate) || map.forceLayerMaskCheck) return 'submission-mismatch';
   return null;
 }
 
