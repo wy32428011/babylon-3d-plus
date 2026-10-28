@@ -51,6 +51,9 @@ import {
 /** 输送线运行时单货物固定身份键：刷出与走行不依赖光电信号，位置只由 movement_x 方向决定。 */
 const CONVEYOR_CARGO_IDENTITY = 'cargo';
 
+/** 单设备尚未被渲染帧消费的 task 脉冲上限，防止模型长期未就绪时无限累积。 */
+const CONVEYOR_TASK_PULSE_QUEUE_LIMIT = 64;
+
 /** 行程终点判定容差（米）：自驱续行登记时认为货箱已抵端点的剩余距离。 */
 const CONVEYOR_TRAVEL_ENDPOINT_EPSILON = 1e-3;
 
@@ -112,8 +115,55 @@ export class ConveyorTelemetryDriver {
   private modelIndex: Map<string, ModelRuntimeEntry> | null = null;
   /** 专用邻居模型的就绪快照：仅在集合或 ready 变化时重建几何拓扑。 */
   private linkTopology: Map<ModelRuntimeEntry, boolean> | null = null;
+  /** store 已接受但尚未被帧消费的非零 task，按完整设备主键隔离。 */
+  private readonly taskPulseQueues = new Map<string, string[]>();
 
   constructor(private readonly context: SpecializedTelemetryDriverContext) {}
+
+  bufferTaskPulse(snapshot: DeviceTelemetrySnapshot): void {
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, 'task'));
+    if (!task) return;
+    const key = this.getTaskPulseKey(snapshot);
+    const queue = this.taskPulseQueues.get(key) ?? [];
+    if (queue.length >= CONVEYOR_TASK_PULSE_QUEUE_LIMIT) queue.shift();
+    queue.push(task);
+    this.taskPulseQueues.set(key, queue);
+  }
+
+  clearTaskPulseQueues(): void {
+    this.taskPulseQueues.clear();
+  }
+
+  private getTaskPulseKey(snapshot: DeviceTelemetrySnapshot): string {
+    return `${snapshot.sourceId}:${snapshot.deviceType.toLowerCase()}:${snapshot.assetCode}`;
+  }
+
+  private consumeTaskPulseQueues(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, movementDirection: number, mode: number | null): void {
+    const key = this.getTaskPulseKey(snapshot);
+    const queue = this.taskPulseQueues.get(key);
+    if (!queue) return;
+    this.taskPulseQueues.delete(key);
+    for (const task of queue) this.registerTaskEdge(model, task, movementDirection, mode);
+  }
+
+  private registerTaskEdge(model: ModelRuntimeEntry, task: string, movementDirection: number, mode: number | null): void {
+    const state = model.conveyorTelemetry;
+    if (!task || task === state.lastTask) return;
+    this.trace(`${model.assetCode} 任务边沿 task=${task} 上一=${state.lastTask || '-'} dir=${movementDirection} mode=${mode ?? '-'} 持货=${state.cargoCode ?? '-'} 等待=${state.waitingTask ?? '-'} 过境=${state.transitedTasks.has(task) ? 'Y' : 'N'}`);
+    const previousWaitingTask = state.waitingTask;
+    const previousLastTask = state.lastTask;
+    state.lastTask = task;
+    if (state.transitedTasks.has(task)) return;
+    // 新 task 取代旧等待：先沿链退订旧 task，再走新 task 的刷出/订阅判定
+    if (previousWaitingTask !== null) {
+      this.sendUnsubscribe(model, previousWaitingTask, this.resolveFlowDirection(model));
+    }
+    state.currentTask = task;
+    state.pendingTask = task;
+    state.pendingTaskAgeSeconds = 0;
+    state.pendingPreviousTask = previousLastTask;
+    state.waitingTask = null;
+  }
 
   /** 临时链路诊断：仅在 CONVEYOR_LINK_TRACE 打开时输出到浏览器 console，带相对毫秒便于对齐消息记录。 */
   private trace(message: string): void {
@@ -279,23 +329,8 @@ export class ConveyorTelemetryDriver {
     const taskMode = taskValue !== null;
     const task = normalizeCargoTask(taskValue);
     state.snapshotTask = taskMode ? task : null;
-    if (taskMode && task !== '' && task !== state.lastTask) {
-      this.trace(`${model.assetCode} 任务边沿 task=${task} 上一=${state.lastTask || '-'} dir=${movementDirection} mode=${mode ?? '-'} 持货=${state.cargoCode ?? '-'} 等待=${state.waitingTask ?? '-'} 过境=${state.transitedTasks.has(task) ? 'Y' : 'N'}`);
-      const previousWaitingTask = state.waitingTask;
-      const previousLastTask = state.lastTask;
-      state.lastTask = task;
-      if (!state.transitedTasks.has(task)) {
-        // 新 task 取代旧等待：先沿链退订旧 task，再走新 task 的刷出/订阅判定
-        if (previousWaitingTask !== null) {
-          this.sendUnsubscribe(model, previousWaitingTask, this.resolveFlowDirection(model));
-        }
-        state.currentTask = task;
-        state.pendingTask = task;
-        state.pendingTaskAgeSeconds = 0;
-        state.pendingPreviousTask = previousLastTask;
-        state.waitingTask = null;
-      }
-    }
+    this.consumeTaskPulseQueues(model, snapshot, movementDirection, mode);
+    if (taskMode) this.registerTaskEdge(model, task, movementDirection, mode);
 
     // 流向翻转：链路全部失效清空（探测缓存保留），等待中的订阅先退订再以新方向重订。
     const previousDirection = state.lastMovementDirection;

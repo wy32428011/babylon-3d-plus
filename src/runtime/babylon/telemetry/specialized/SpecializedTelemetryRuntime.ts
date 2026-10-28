@@ -79,6 +79,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   readonly host: SpecializedTelemetryHost;
   private readonly stackerDriver: StackerTelemetryDriver;
   private readonly conveyorDriver: ConveyorTelemetryDriver;
+  private readonly unsubscribeDeviceTelemetry: () => void;
   private readonly rgvDriver: RgvTelemetryDriver;
   private readonly shuttleDriver: ShuttleTelemetryDriver;
   private readonly liftDriver: LiftTelemetryDriver;
@@ -154,6 +155,13 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     for (const driver of this.drivers) {
       this.candidateGroups.set(driver.deviceType, { candidates: [], conflictKeys: new Set(), count: 0, changed: false });
     }
+    this.unsubscribeDeviceTelemetry = deviceTelemetryStore.subscribe((snapshot) => {
+      if (!snapshot) {
+        this.conveyorDriver.clearTaskPulseQueues();
+        return;
+      }
+      if (snapshot.deviceType === 'conveyor') this.conveyorDriver.bufferTaskPulse(snapshot);
+    });
   }
 
   /** 每帧把最新 MQTT 专用遥测应用到完整主键匹配且无冲突的模型实例；断流设备默认停摆，仅驱动声明 applyWhenStale 的例外（输送线接管自驱）。 */
@@ -250,6 +258,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
 
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
   clearReportedState(): void {
+    this.conveyorDriver.clearTaskPulseQueues();
     this.contextCache = new WeakMap();
     this.bindingCache = new WeakMap();
     this.injectedModels = new WeakMap();
@@ -363,6 +372,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
 
   /** 释放门面持有的全部运行时资源。 */
   dispose(): void {
+    this.unsubscribeDeviceTelemetry();
+    this.conveyorDriver.clearTaskPulseQueues();
     this.disposeAllCargo();
     this.contextCache = new WeakMap();
     this.bindingCache = new WeakMap();

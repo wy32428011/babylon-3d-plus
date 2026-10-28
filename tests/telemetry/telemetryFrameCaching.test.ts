@@ -15,7 +15,7 @@ function snapshot(fields: Record<string, unknown> = { movement_x: 0 }, receivedA
     sequence: null, currentLocationKey: null, targetLocationKey: null, hasTargetLocation: false };
 }
 
-function harness() {
+function harness(options: { realConveyorDriver?: boolean } = {}) {
   deviceTelemetryStore.clear();
   telemetryRuntimeDiagnosticsStore.clear();
   const engine = new NullEngine();
@@ -39,9 +39,11 @@ function harness() {
   // 只替换运动回调来记录调度，帧分组、快照解析、断流、脚本注入和诊断均执行真实代码。
   const calls: { id: string; delta: number; fields: Record<string, unknown> }[] = [];
   const drivers = (runtime as unknown as { drivers: { deviceType: string; apply: (model: ModelRuntimeEntry, data: DeviceTelemetrySnapshot, delta: number) => void }[] }).drivers;
-  drivers.find((driver) => driver.deviceType === 'conveyor')!.apply = (target, data, delta) => {
-    calls.push({ id: target.root.name, delta, fields: { ...data.fields } });
-  };
+  if (!options.realConveyorDriver) {
+    drivers.find((driver) => driver.deviceType === 'conveyor')!.apply = (target, data, delta) => {
+      calls.push({ id: target.root.name, delta, fields: { ...data.fields } });
+    };
+  }
   return { model, entries, makeModel, runtime, calls, injections: () => injections,
     frame: (delta = 1 / 60) => { runtime.clearInactiveDiagnostics(); runtime.applyFrame(delta); },
     dispose: () => { runtime.dispose(); scene.dispose(); engine.dispose(); deviceTelemetryStore.clear(); telemetryRuntimeDiagnosticsStore.clear(); } };
@@ -63,6 +65,58 @@ test('连续帧复用绑定、上下文和诊断，同时每帧保留相同 delt
     assert.equal(after.candidateRebuilds, before.candidateRebuilds);
     assert.equal(after.contextSignatureBuilds, before.contextSignatureBuilds);
     assert.equal(after.diagnosticWrites, before.diagnosticWrites);
+  } finally { h.dispose(); }
+});
+
+test('帧间短 task 脉冲被最新归零快照覆盖后仍登记等待', () => {
+  const h = harness({ realConveyorDriver: true });
+  try {
+    const receivedAt = Date.now();
+    deviceTelemetryStore.upsert(snapshot({ task: 18948, mode: 2, movement_x: 0, front_has_goods: 0, back_has_goods: 0 }, receivedAt));
+    deviceTelemetryStore.upsert(snapshot({ task: 0, mode: 2, movement_x: 0, front_has_goods: 0, back_has_goods: 0 }, receivedAt + 1));
+    h.frame();
+    const state = h.model.conveyorTelemetry;
+    assert.equal(state.lastTask, '18948');
+    assert.equal(state.pendingTask, '18948');
+    assert.equal(state.waitingTask, '18948');
+    assert.equal(state.snapshotTask, '');
+  } finally { h.dispose(); }
+});
+
+test('同帧前连续 task 脉冲按 FIFO 登记并保留上一任务', () => {
+  const h = harness({ realConveyorDriver: true });
+  try {
+    const receivedAt = Date.now();
+    deviceTelemetryStore.upsert(snapshot({ task: 18948, mode: 2, movement_x: 0 }, receivedAt));
+    deviceTelemetryStore.upsert(snapshot({ task: 18949, mode: 2, movement_x: 0 }, receivedAt + 1));
+    deviceTelemetryStore.upsert(snapshot({ task: 0, mode: 2, movement_x: 0 }, receivedAt + 2));
+    h.frame();
+    const state = h.model.conveyorTelemetry;
+    assert.equal(state.lastTask, '18949');
+    assert.equal(state.pendingPreviousTask, '18948');
+    assert.equal(state.pendingTask, '18949');
+    assert.equal(state.waitingTask, '18949');
+  } finally { h.dispose(); }
+});
+
+test('预览清理丢弃未消费脉冲，dispose 后不再采集', () => {
+  const h = harness({ realConveyorDriver: true });
+  try {
+    const receivedAt = Date.now();
+    deviceTelemetryStore.upsert(snapshot({ task: 18948, mode: 2, movement_x: 0 }, receivedAt));
+    deviceTelemetryStore.upsert(snapshot({ task: 0, mode: 2, movement_x: 0 }, receivedAt + 1));
+    h.runtime.clearReportedState();
+    h.frame();
+    assert.equal(h.model.conveyorTelemetry.lastTask, null);
+    assert.equal(h.model.conveyorTelemetry.pendingTask, null);
+    assert.equal(h.model.conveyorTelemetry.waitingTask, null);
+
+    const driver = (h.runtime as unknown as { conveyorDriver: { bufferTaskPulse: (data: DeviceTelemetrySnapshot) => void } }).conveyorDriver;
+    let captures = 0;
+    driver.bufferTaskPulse = () => { captures++; };
+    h.runtime.dispose();
+    deviceTelemetryStore.upsert(snapshot({ task: 18949, mode: 2, movement_x: 0 }, receivedAt + 2));
+    assert.equal(captures, 0);
   } finally { h.dispose(); }
 });
 
