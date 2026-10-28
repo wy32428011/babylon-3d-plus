@@ -19,10 +19,14 @@ import { isLightingLightmapMipEncoding, validateLightingLightmapMipAsset } from 
 import type { LightingBakePreparedInput } from '../shared/sceneLightingBakeStream.ts';
 import { freemem } from 'node:os';
 import { assertLightingWorkingBytes, lightingBakeResourceBudget } from '../shared/sceneLightingBakeResources.ts';
+import { prepareLightingBakePreprocessCache } from './lightingBakePreprocessCache.ts';
+import { isLightingBakePreprocessDiagnostic, type LightingBakePreprocessDiagnostic } from '../shared/sceneLightingBakeTasks.ts';
 
 const SOURCE_TEXTURE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tga', '.hdr', '.exr']);
 const engineDeviceCache = new Map<string, Promise<LightingBakeDevice[]>>();
 const engineVersionCache = new Map<string, Promise<LightingBakeEngineStatus>>();
+// 同工程同时只预留一个可选缓存写入任务，避免并发任务用同一份剩余磁盘额度。
+const preprocessCacheProjects = new Set<string>();
 type LightingBakeServiceBase = {
   projectRoot: string;
   enginePath: string;
@@ -39,6 +43,9 @@ type LightingBakeServiceBase = {
   onEngineSpawn?: (pid: number) => void;
   onDevice?: (selection: LightingBakeDeviceSelection) => void;
   onMemory?: (bytes: number | null) => void;
+  onPreprocess?: (diagnostic: LightingBakePreprocessDiagnostic) => void;
+  /** 仅本服务完成受控暂存后设置；不能由 input/场景自行启用。 */
+  preprocessCacheEnabled?: boolean;
   logName?: 'cycles.log' | 'cycles-cpu.log';
 };
 export type LightingBakeServiceOptions = LightingBakeServiceBase & (
@@ -234,7 +241,7 @@ async function prepareInput(options: LightingBakeServiceBase & { input: Lighting
 /** 准备/预检共用 15% 边界；同一进程的切分总量变化也不能让进度倒退。 */
 export function mapLightingBakeEngineProgress(value: { phase: string; completed: number; total: number }, previous = 0): number {
   const ratio = Math.max(0, Math.min(1, value.completed / Math.max(1, value.total)));
-  const progress = value.phase === 'unwrap' ? ratio * 0.15 : value.phase === 'preflight' ? 0.15
+  const progress = value.phase === 'unwrap' || value.phase === 'preprocess' ? ratio * 0.15 : value.phase === 'preflight' ? 0.15
     : value.phase === 'probes' ? 0.75 + ratio * 0.2 : value.phase === 'completed' ? 0.96 : 0.15 + ratio * 0.6;
   return Math.max(previous, progress);
 }
@@ -247,7 +254,8 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
     const log = createWriteStream(path.join(directory, options.logName ?? 'cycles.log'), { flags: 'wx' });
     let errorMessage = '', gpuFallback = false, previousProgress = 0, settled = false, terminationError: Error | null = null;
     const child = spawn(options.enginePath, ['--background', '--factory-startup', '--disable-autoexec',
-      '--python-exit-code', '1', '--python', script, '--', '--input', path.join(directory, 'input.json')],
+      '--python-exit-code', '1', '--python', script, '--', '--input', path.join(directory, 'input.json'),
+      ...(options.preprocessCacheEnabled && process.env.LIGHTING_BAKE_PREPROCESS_CACHE === '1' ? ['--preprocess-cache'] : [])],
     { cwd: directory, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1' } });
     if (child.pid) options.onEngineSpawn?.(child.pid);
     let forceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -285,6 +293,12 @@ export async function runLightingBakeProcess(options: LightingBakeServiceOptions
           try { const device = JSON.parse(line.slice('LIGHTING_BAKE_DEVICE '.length)) as LightingBakeDeviceSelection;
             if (['cpu','auto','gpu'].includes(device.requested) && ['CPU','GPU'].includes(device.actual) && typeof device.name === 'string' && typeof device.backend === 'string') options.onDevice?.(device);
           } catch { /* 只接收受控协议；其余文字保留在日志。 */ }
+        }
+        if (line.startsWith('LIGHTING_BAKE_PREPROCESS ')) {
+          try {
+            const diagnostic: unknown = JSON.parse(line.slice('LIGHTING_BAKE_PREPROCESS '.length));
+            if (isLightingBakePreprocessDiagnostic(diagnostic)) options.onPreprocess?.(diagnostic);
+          } catch { /* 可选诊断不是产物成功依据；无效行只留在日志。 */ }
         }
         if (line.startsWith('LIGHTING_BAKE_MEMORY ')) {
           const bytes = Number(line.slice('LIGHTING_BAKE_MEMORY '.length)); options.onMemory?.(Number.isFinite(bytes) && bytes > 0 ? bytes : null);
@@ -411,8 +425,9 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
   const assets = await ensureProjectDirectory(project, ['Assets', 'LightingBakes']);
   const task = options.prepared?.task ?? await createLightingBakeTask(project, options.input, options.engineVersion ?? '', preflight);
   const staging = task.directory, script = path.join(staging, 'cycles_bake.py');
-  let lastPersist = 0, lastPhase = '', lastMemoryPersist = 0;
-  const tracked: LightingBakeServiceOptions = { ...options,
+  let lastPersist = 0, lastPhase = '', lastMemoryPersist = 0, ownsCacheReservation = false;
+  const tracked: LightingBakeServiceOptions = { ...options, preprocessCacheEnabled: false,
+    onPreprocess: diagnostic => { void task.update({ preprocessCache: diagnostic }); options.onPreprocess?.(diagnostic); },
     onDevice: device => { void task.update({ device }); options.onDevice?.(device); },
     onMemory: bytes => {
       const metrics = task.record.phaseMetrics, current = metrics?.[metrics.length - 1];
@@ -435,6 +450,25 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
     await fs.copyFile(fileURLToPath(new URL('../lighting-bake/rgbm_gamma_codec.py', import.meta.url)), path.join(staging, 'rgbm_gamma_codec.py'));
     if (getRequestedLightingLightmapMipLevels(options.input.settings.lightmapMipLevels)) await fs.copyFile(fileURLToPath(new URL('../lighting-bake/lightmap_mips.py', import.meta.url)), path.join(staging, 'lightmap_mips.py'));
     if (!options.prepared) await prepareInput(options, staging);
+    if (process.env.LIGHTING_BAKE_PREPROCESS_CACHE === '1' && preprocessCacheProjects.has(project)) {
+      const diagnostic: LightingBakePreprocessDiagnostic = { status: 'skipped', reason: '同工程已有缓存任务预留磁盘额度，本任务沿原路径', lookupDurationMs: 0 };
+      tracked.onPreprocess?.(diagnostic);
+      tracked.onProgress({ jobId: options.input.jobId, phase: 'preparing', progress: 0, message: 'UV/布局缓存：' + diagnostic.reason });
+    } else if (process.env.LIGHTING_BAKE_PREPROCESS_CACHE === '1') {
+      preprocessCacheProjects.add(project); ownsCacheReservation = true;
+      await fs.copyFile(fileURLToPath(new URL('../lighting-bake/preprocess_cache.py', import.meta.url)), path.join(staging, 'preprocess_cache.py'));
+      const cache = await prepareLightingBakePreprocessCache({ projectRoot: project, directory: staging,
+        resourceBudget: preflight.resourceBudget ?? lightingBakeResourceBudget(freemem()),
+        backendEstimateBytes: preflight.backendEstimateBytes ?? preflight.geometryBytes * 4,
+        engineVersion: options.engineVersion, assertActive: () => assertActive(options) });
+      assertActive(options);
+      if (cache.input) {
+        await fs.writeFile(path.join(staging, 'input.json'), JSON.stringify(cache.input), { signal: options.signal });
+        tracked.preprocessCacheEnabled = true;
+      }
+      tracked.onPreprocess?.(cache.diagnostic);
+      tracked.onProgress({ jobId: options.input.jobId, phase: 'preparing', progress: 0, message: 'UV/布局缓存：' + cache.diagnostic.reason });
+    }
     await task.flush();
     let inputBytes = 0;
     for (const name of await fs.readdir(staging)) if (name === 'input.json' || name.startsWith('geometry-input-') || name.startsWith('source-texture-')) inputBytes += (await fs.stat(path.join(staging, name))).size;
@@ -466,5 +500,7 @@ export async function runLightingBakeJob(options: LightingBakeServiceOptions): P
     try { await task.finish(options.signal.aborted ? 'cancelled' : 'error', message); }
     catch (recordError) { throw new AggregateError([error, recordError], '烘焙失败且任务记录未能保存。', { cause: recordError }); }
     throw error;
+  } finally {
+    if (ownsCacheReservation) preprocessCacheProjects.delete(project);
   }
 }

@@ -27,6 +27,8 @@ export type LightingRuntimeSource = {
   /** 薄批render carrier与业务原mesh不同时，保留既有resolvedSource的精确对象身份。 */
   logicalMesh?: AbstractMesh;
   entry: LightingClassificationEntry;
+  /** 仅供全自动阴影使用；不改变烘焙分类及其签名。 */
+  automaticShadowMobility?: 'static' | 'dynamic';
   getWorldMatrix: () => Matrix | null;
   instance?: { batch: LightingInstanceBatch; mesh: AbstractMesh; sourceIndex: number };
 };
@@ -439,7 +441,9 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
   const models = [...context.models];
   const createNodeKey = createLightingNodeKeyPass();
   const modelsByEntity = new Map(models);
-  const policy = normalizeSceneLightingPolicy(getSceneLightingConfig(document).policy) ?? { version: 1 as const, defaults: {}, rules: [] };
+  const lightingConfig = getSceneLightingConfig(document);
+  const automaticShadows = lightingConfig.shadows.managementMode === 'automatic';
+  const policy = normalizeSceneLightingPolicy(lightingConfig.policy) ?? { version: 1 as const, defaults: {}, rules: [] };
   const policyScopes = new Map<string, (context: LightingPolicyContext) => ResolvedLightingPolicy>();
   const resolvePolicy = (input: LightingPolicyContext): ResolvedLightingPolicy => {
     // 此次目录收集中的规则快照固定；只按实际匹配规则序列复用 resolver，避免每个薄实例遍历完整参数元数据。
@@ -456,6 +460,18 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
   for (const [entityId, model] of models) {
     for (const mesh of new Set([...model.meshes, ...model.contentRoot.getChildMeshes(false)])) modelsByMesh.set(mesh, { model, entityId });
   }
+  const automaticParentDynamicCache = new Map<string, boolean>();
+  const automaticParentIsDynamic = (entity: Entity | undefined): boolean => {
+    if (!entity) return false;
+    if (!automaticParentDynamicCache.has(entity.id)) {
+      automaticParentDynamicCache.set(entity.id, ancestorIds(document, entity).some(id => {
+        const parent = document.entities[id];
+        return !!parent && classifyEntityMobility({ components: { ...automaticEntity(parent).components,
+          modelAsset: resolvedModelAsset(modelsByEntity.get(id), parent) } }).mobility === 'dynamic';
+      }));
+    }
+    return automaticParentDynamicCache.get(entity.id)!;
+  };
   const parentIsDynamic = (entity: Entity | undefined): boolean => {
     if (!entity) return false;
     if (!parentDynamicCache.has(entity.id)) {
@@ -572,6 +588,8 @@ export function collectLightingRuntimeSources(context: LightingClassificationCon
     const key = `${entityId}/${nodeKey}`;
     output.push({
       mesh, ...(actualNode instanceof AbstractMesh && actualNode !== mesh ? { logicalMesh: actualNode } : {}),
+      ...(automaticShadows ? { automaticShadowMobility: automatic.mobility === 'dynamic' || parentDynamic || automaticParentIsDynamic(entity)
+        || Boolean(mesh.skeleton || mesh.morphTargetManager?.numTargets) ? 'dynamic' as const : 'static' as const } : {}),
       entry: { key, entityId, nodeKey, name: actualNode.name || mesh.name, ...effective.settings, reason: effective.reason,
         parentDynamic: effective.parentDynamic, ...(identity ? { resourceIdentity: identity } : {}),
         automaticMobility: automatic.mobility, automaticReason: automatic.reason, motionRole: effective.motionRole,

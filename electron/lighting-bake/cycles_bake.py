@@ -92,7 +92,8 @@ class BakeCheckpoint:
     """只复用同工程、同输入字节/脚本/引擎/设备的已完成阶段；损坏缓存不算成功。"""
     def __init__(self, root: Path, data: dict) -> None:
         self.root = root
-        identity = {key: value for key, value in data.items() if key not in ("jobId", "captureMetrics")}
+        # preprocessCache 只含本次受控缓存凭据/预算，不属于物理输入；完整灯光、材质和场景签名仍保留。
+        identity = {key: value for key, value in data.items() if key not in ("jobId", "captureMetrics", "preprocessCache")}
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
         files = set()
         for mesh in data["meshes"]:
@@ -105,7 +106,7 @@ class BakeCheckpoint:
             files.add(data["environment"]["textureFile"])
         for name in sorted(files):
             digest.update(name.encode()); digest.update(file_digest(Path(source_path(root, name))).encode())
-        for name in ("cycles_bake.py", "rgbm_gamma_codec.py", "lightmap_mips.py"):
+        for name in ("cycles_bake.py", "rgbm_gamma_codec.py", "lightmap_mips.py", "preprocess_cache.py"):
             if (root / name).is_file():
                 digest.update(file_digest(root / name).encode())
         digest.update(bpy.app.version_string.encode())
@@ -453,21 +454,33 @@ def can_skip_nonreceiver_lightmap_uv(data: dict) -> bool:
     return True
 
 
-def make_mesh(data: dict, root: Path, index: int) -> Any:
+def bind_mesh_material(obj: Any, data: dict, root: Path, index: int) -> None:
+    """缓存只带几何/UV；材质与纹理始终绑定本次权威输入，失败不能当作缓存未命中。"""
+    obj.data.materials.append(make_material(data["material"], root, f"Material-{index}"))
+    if "colors" in data:
+        apply_vertex_colors(obj, data)
+
+
+def make_mesh(data: dict, root: Path, index: int, *, packed: dict | None = None, build_material: bool = True) -> Any:
     positions = data["positions"]
     vertices = [vector(positions[i:i + 3]) for i in range(0, len(positions), 3)]
     normals = [vector(data["normals"][i:i + 3]) for i in range(0, len(data["normals"]), 3)]
     indices = data["indices"]
     faces, flipped_faces = [], []
-    for offset in range(0, len(indices), 3):
-        first, second, third = indices[offset:offset + 3]
-        geometric_normal = (vertices[second] - vertices[first]).cross(vertices[third] - vertices[first])
-        authored_normal = normals[first] + normals[second] + normals[third]
-        # Babylon 左手绕序与 glTF/自定义几何的绕序可能不同。坐标反射之后按实际法线
-        # 确定 Cycles 的正面，不能再无条件翻转，否则单面材质会把整个模型当成背面。
-        flipped = geometric_normal.dot(authored_normal) < 0
-        faces.append((first, third, second) if flipped else (first, second, third))
-        flipped_faces.append(int(flipped))
+    if packed is not None:
+        # packed 载荷存储的是已修正的 Blender loop 顺序；禁止再次推导绕序或应用 atlas 变换。
+        faces = [tuple(packed["loopVertices"][offset:offset + 3]) for offset in range(0, len(packed["loopVertices"]), 3)]
+        flipped_faces = list(packed["winding"])
+    else:
+        for offset in range(0, len(indices), 3):
+            first, second, third = indices[offset:offset + 3]
+            geometric_normal = (vertices[second] - vertices[first]).cross(vertices[third] - vertices[first])
+            authored_normal = normals[first] + normals[second] + normals[third]
+            # Babylon 左手绕序与 glTF/自定义几何的绕序可能不同。坐标反射之后按实际法线
+            # 确定 Cycles 的正面，不能再无条件翻转，否则单面材质会把整个模型当成背面。
+            flipped = geometric_normal.dot(authored_normal) < 0
+            faces.append((first, third, second) if flipped else (first, second, third))
+            flipped_faces.append(int(flipped))
     mesh = bpy.data.meshes.new(f"Mesh-{index}")
     mesh.from_pydata(vertices, [], faces)
     mesh.update()
@@ -482,14 +495,21 @@ def make_mesh(data: dict, root: Path, index: int) -> Any:
     values = data["worldMatrix"]
     matrix = Matrix(tuple(tuple(values[column * 4 + row] for column in range(4)) for row in range(4)))
     obj.matrix_world = COORDINATES @ matrix @ REVERSE_COORDINATES
-    obj.data.materials.append(make_material(data["material"], root, f"Material-{index}"))
-    if "colors" in data:
-        apply_vertex_colors(obj, data)
+    if build_material:
+        bind_mesh_material(obj, data, root, index)
     obj["input_index"] = index
     obj["source_winding_flipped"] = flipped_faces
     activate([obj])
     uv = mesh.uv_layers.new(name="LightmapUV")
     mesh.uv_layers.active = uv
+    if packed is not None:
+        uv.data.foreach_set("uv", packed["lightmapUvs"])
+        if packed["atlas"] is not None:
+            obj["atlas"] = packed["atlas"]
+        if packed["repairCount"]:
+            obj["lighting_uv_repair_count"] = packed["repairCount"]
+        mesh.update()
+        return obj
     # 展开使用真实世界线性尺度；原始局部坐标与全部属性仍原样导出。
     world_linear = obj.matrix_world.to_3x3()
     for vertex, original in zip(mesh.vertices, vertices):
@@ -1687,10 +1707,58 @@ def bake_diffuse() -> None:
             print("LIGHTING_BAKE_GPU_FALLBACK " + str(error), file=sys.stderr, flush=True)
         raise
 
+def validate_packed_lightmaps(pages: list[list[Any]], sources: list[dict], settings: dict) -> tuple:
+    """冷路径/缓存命中共用真实图集和 mip chart 预算；不重新排版或修改 UV。"""
+    size, levels = settings["atlasSize"], settings.get("lightmapMipLevels", 0)
+    texture_bytes = len(pages) * size * size * 4
+    if texture_bytes > settings["maxTextureMiB"] * 1024 * 1024:
+        raise ValueError("光照图集超过纹理预算；没有丢弃对象或自动降低贴图密度。")
+    mip_module, mip_working_limit, per_atlas, certificates = None, None, size * size * 4, []
+    if levels:
+        mip_module = lightmap_mip_module()
+        mip_working_limit = settings.get("lightmapMipWorkingBytesLimit")
+        if isinstance(mip_working_limit, bool) or not isinstance(mip_working_limit, int) or mip_working_limit <= 0 or mip_working_limit > 2 * 1024 ** 3:
+            raise ValueError("有限mip缺少明确且不超过2GiB的临时工作数组预算。")
+        per_atlas = sum(max(1, size >> level) ** 2 * 4 for level in range(levels + 1))
+        texture_bytes = len(pages) * per_atlas
+        if texture_bytes > settings["maxTextureMiB"] * 1024 * 1024:
+            raise ValueError("有限mip全部RGBA级超出GPU纹理预算，未降低层级/尺寸。")
+        for page in pages:
+            chart_meshes = lightmap_mip_meshes(page, sources)
+            certificate, owner = mip_module.certify_lightmap_mip_charts(chart_meshes, size, size, levels, max_working_bytes=mip_working_limit)
+            certificates.append(lightmap_mip_certificate_summary(certificate))
+            del owner, certificate, chart_meshes
+    return texture_bytes, mip_module, mip_working_limit, per_atlas, certificates
+
+
+def create_preprocess_cache(root: Path, data: dict):
+    if "preprocessCache" not in data:
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lighting_preprocess_cache", Path(__file__).with_name("preprocess_cache.py"))
+        module = importlib.util.module_from_spec(spec)
+        previous_bytecode = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_bytecode
+        return module.PreprocessCache(root, data["preprocessCache"], data["meshes"], data["settings"], LIGHTMAP_MIP_RECIPE, file_digest, progress)
+    except Exception as error:
+        # 这里只处理可选索引/身份构造；权威几何加载及冷路径的真实失败仍在捕获域外。
+        reason = ("UV/布局缓存已跳过：" + str(error))[:1024]
+        progress("preprocess", 0, 1, reason)
+        print("LIGHTING_BAKE_PREPROCESS " + json.dumps({"status": "skipped", "reason": reason,
+            "lookupDurationMs": data.get("preprocessCache", {}).get("lookupDurationMs", 0)}, ensure_ascii=False), flush=True)
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input")
     parser.add_argument("--devices", action="store_true")
+    parser.add_argument("--preprocess-cache", action="store_true")
     arguments = parser.parse_args(sys.argv[sys.argv.index("--") + 1:])
     if arguments.devices:
         print("LIGHTING_BAKE_DEVICES " + json.dumps(discover_bake_devices(), ensure_ascii=False), flush=True)
@@ -1701,6 +1769,9 @@ def main() -> None:
     root = file.parent
     with file.open(encoding="utf-8") as stream:
         data = json.load(stream)
+    # 仅主进程环境开关派生的启动参数能启用；输入/旧场景不能自行打开可选缓存。
+    if not arguments.preprocess_cache:
+        data.pop("preprocessCache", None)
     started = time.monotonic()
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
@@ -1724,29 +1795,25 @@ def main() -> None:
     if isinstance(lightmap_mip_levels, bool) or not isinstance(lightmap_mip_levels, int) or lightmap_mip_levels not in (0, 1, 2, 3, 4):
         raise ValueError("不支持的有限mip层级。")
     input_bounds = source_probe_bounds(data["meshes"])
-    data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
-    lights = setup_lights(data, root)
     size = settings["atlasSize"]
+    cache = create_preprocess_cache(root, data)
+    restored_layout = cache.restore(make_mesh, validate_packed_lightmaps, lightmap_face_world_per_uv) if cache else None
+    if restored_layout is not None:
+        data["meshes"], objects, pages, validation = restored_layout
+        for index, obj in enumerate(objects):
+            bind_mesh_material(obj, data["meshes"][index], root, index)
+    else:
+        prepare_started = time.monotonic()
+        data["meshes"], objects = prepare_meshes(data["meshes"], root, settings)
+        receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
+        pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024, lightmap_gutter(settings))
+        validation = validate_packed_lightmaps(pages, data["meshes"], settings)
+        if cache:
+            cache.save(data["meshes"], objects, pages, round((time.monotonic() - prepare_started) * 1000))
     receivers = [obj for obj in objects if data["meshes"][obj["input_index"]].get("receiver", True)]
-    pages = pack_atlases(receivers, size, settings["texelsPerMeter"], settings["maxTextureMiB"] * 1024 * 1024, lightmap_gutter(settings))
-    texture_bytes = len(pages) * size * size * 4
-    mip_module = None
-    mip_working_limit = None
+    lights = setup_lights(data, root)
+    texture_bytes, mip_module, mip_working_limit, per_atlas, certificates = validation
     if lightmap_mip_levels:
-        mip_module = lightmap_mip_module()
-        mip_working_limit = settings.get("lightmapMipWorkingBytesLimit")
-        if isinstance(mip_working_limit, bool) or not isinstance(mip_working_limit, int) or mip_working_limit <= 0 or mip_working_limit > 2 * 1024 ** 3:
-            raise ValueError("有限mip缺少明确且不超过2GiB的临时工作数组预算。")
-        per_atlas = sum(max(1, size >> level) ** 2 * 4 for level in range(lightmap_mip_levels + 1))
-        texture_bytes = len(pages) * per_atlas
-        if texture_bytes > settings["maxTextureMiB"] * 1024 * 1024:
-            raise ValueError("有限mip全部RGBA级超出GPU纹理预算，未降低层级/尺寸。")
-        certificates = []
-        for page in pages:
-            chart_meshes = lightmap_mip_meshes(page, data["meshes"])
-            certificate, owner = mip_module.certify_lightmap_mip_charts(chart_meshes, size, size, lightmap_mip_levels, max_working_bytes=mip_working_limit)
-            certificates.append(lightmap_mip_certificate_summary(certificate))
-            del owner, certificate, chart_meshes
         write_json(root / "lightmap-mip-certificates.json", {"version": 1, "recipe": LIGHTMAP_MIP_RECIPE, "maxWorkingBytes": mip_working_limit,
                    "workingScope": "per atlas receiver triangles after UV/packing; not process RSS", "atlases": certificates})
     # 先做全部可判定检查，避免全部图集完成后才发现探针超限。
@@ -1758,6 +1825,7 @@ def main() -> None:
                                        "sourceBounds": input_bounds})
     progress("preflight", 1, 1, f"预检通过：{len(pages)} 张图集，{len(positions)} 个探针")
     atlas_results = []
+    cycles_bake_duration_ms = 0
     for index, page in enumerate(pages):
         progress("baking", index, len(pages), "正在烘焙间接光与环境漫反射")
         checkpoint_key = f"atlas-{index}:" + lightmap_layout_signature(page) if checkpoint else ""
@@ -1766,7 +1834,9 @@ def main() -> None:
             atlas_results.append(restored)
             progress("baking", index + 1, len(pages), "复用同输入且已校验的完整图集")
             continue
+        bake_started = time.monotonic()
         pixels = bake_irradiance(page, lights, size, f"Atlas-{index}")
+        cycles_bake_duration_ms += round((time.monotonic() - bake_started) * 1000)
         if lightmap_mip_levels:
             payload = mip_module.prepare_lightmap_mips(pixels, size, size, lightmap_mip_meshes(page, data["meshes"]), lightmap_mip_levels,
                 lightmap_encoding, max_working_bytes=mip_working_limit, max_texture_bytes=per_atlas)
@@ -1801,9 +1871,14 @@ def main() -> None:
     probe_key = "probes:" + probe_signature.hexdigest()
     count = checkpoint.restore(probe_key) if checkpoint else None
     if count is None:
+        bake_started = time.monotonic()
         count = bake_probes(objects, lights, settings["probeSpacing"], root, positions)
+        cycles_bake_duration_ms += round((time.monotonic() - bake_started) * 1000)
         if checkpoint:
             checkpoint.save(probe_key, ["probes.json"], count)
+    if cache:
+        cache.diagnostic["bakeDurationMs"] = cycles_bake_duration_ms
+        cache.emit()
     write_json(root / "result.json", {"version": 1, "signature": data["signature"], "engineVersion": bpy.app.version_string,
                                     "atlases": atlas_results, "meshes": mesh_results, "probesFile": "probes.json",
                                     "statistics": {"meshCount": len(objects), "triangleCount": sum(len(entry["indices"]) // 3 for entry in data["meshes"]),

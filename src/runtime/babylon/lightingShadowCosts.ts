@@ -1,6 +1,7 @@
 import type { HybridShadowMetrics } from './HybridShadowCache.ts';
+import type { HybridShadowInvalidationMetrics } from './hybridShadowInvalidation.ts';
 
-export type LightingShadowLightCost = {
+export type LightingShadowLightCost = HybridShadowInvalidationMetrics & {
   lightId: string;
   entityId?: string;
   name: string;

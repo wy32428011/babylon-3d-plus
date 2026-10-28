@@ -21,6 +21,7 @@ import {
   type HybridShadowMeshRole, type HybridShadowOptions,
 } from './HybridShadowCache.ts';
 import type { LightingSamplerDiagnostic, LightingShadowLightCost, LightingShadowMetrics } from './lightingShadowCosts.ts';
+import type { HybridShadowFallbackReason, HybridShadowInvalidationMode } from './hybridShadowInvalidation.ts';
 
 export const SCENE_SHADOW_SUN_NAME = '__SceneShadowSun';
 export const SCENE_SHADOW_CATCHER_NAME = '__SceneShadowCatcher';
@@ -175,13 +176,18 @@ export class SceneShadowRuntime {
   private readonly hybridMeshState = new HybridShadowMeshState();
   private hybridMeshRoles = new Map<AbstractMesh, HybridShadowMeshRole>();
   private hybridOptions: Required<HybridShadowOptions> = { cacheStaticShadows: true, dynamicShadows: true };
+  private cacheInvalidationMode: HybridShadowInvalidationMode = 'global';
   private readonly hybridMaterialLightLimits = new Map<PBRMaterial | StandardMaterial, number>();
   private hybridValidationErrors: string[] = [];
   private hybridValidationSignature = '';
   private hybridLightingSignature = '';
   private hybridMaterialsDirty = true;
   private readonly hybridMaterialObservers = new Map<AbstractMesh, Observer<AbstractMesh>>();
-  private readonly retiredHybridMetrics = { staticRenders: 0, dynamicRenders: 0, cacheInvalidations: 0, cacheHits: 0 };
+  private readonly retiredHybridMetrics = {
+    staticRenders: 0, dynamicRenders: 0, cacheInvalidations: 0, cacheHits: 0,
+    localInvalidations: 0, localCacheHits: 0, globalFallbacks: 0,
+    globalFallbackReasons: {} as Partial<Record<HybridShadowFallbackReason, number>>,
+  };
   private receiverLightBindings = new Map<Light, ShadowGenerator | null>();
   private readonly knownMeshes = new Set<AbstractMesh>();
   private renderSuppressedMeshes = new Set<AbstractMesh>();
@@ -212,6 +218,13 @@ export class SceneShadowRuntime {
       }
       if (!this.isCachedProfile() || this.isHybrid()) this.updateShadowDistance();
     });
+  }
+
+  /** 独立运行期诊断开关，后续新建缓存继承；不写回场景配置。 */
+  setCacheInvalidationMode(mode: HybridShadowInvalidationMode): void {
+    if (this.disposed || this.cacheInvalidationMode === mode) return;
+    this.cacheInvalidationMode = mode;
+    for (const cache of this.hybridCaches.values()) cache.setInvalidationMode(mode);
   }
 
   /** 注入完整业务角色集合；未标注网格按动态处理，避免把未来运动姿态冻结。 */
@@ -267,6 +280,7 @@ export class SceneShadowRuntime {
       ...this.retiredHybridMetrics, staticCasterCount: 0, dynamicCasterCount: 0, textureBytes: 0,
       cachedFaces: 0, unsupportedCacheReason: null, validationErrors: [...this.hybridValidationErrors],
       shadowMapBytes: 0, cacheBytes: 0, lights: [], samplerDiagnostics: this.getSamplerDiagnostics(),
+      invalidationMode: this.cacheInvalidationMode, globalFallbackReasons: { ...this.retiredHybridMetrics.globalFallbackReasons },
     };
     const generators = new Set([...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()]);
     if (this.primaryGenerator) generators.add(this.primaryGenerator);
@@ -275,7 +289,12 @@ export class SceneShadowRuntime {
       metrics.lights.push(cost);
       metrics.shadowMapBytes += cost.shadowMapBytes; metrics.cacheBytes += cost.cacheBytes;
       if (!cache) continue;
-      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) metrics[key] += cache.metrics[key];
+      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
+        metrics[key] = (metrics[key] ?? 0) + cache.metrics[key];
+      }
+      for (const reason of Object.keys(cache.metrics.globalFallbackReasons) as HybridShadowFallbackReason[]) {
+        metrics.globalFallbackReasons![reason] = (metrics.globalFallbackReasons![reason] ?? 0) + cache.metrics.globalFallbackReasons[reason]!;
+      }
       metrics.cachedFaces += cache.cachedFaces;
       metrics.unsupportedCacheReason ??= cache.metrics.unsupportedCacheReason;
     }
@@ -308,6 +327,9 @@ export class SceneShadowRuntime {
       mapWidth: size?.width ?? 0, mapHeight: size?.height ?? 0, faces, cascades, cubeFaces,
       shadowMapBytes, cacheBytes: cache?.textureBytes ?? 0, cachedFaces: cache?.cachedFaces ?? 0,
       staticRenders: cache?.metrics.staticRenders ?? 0, dynamicRenders: cache?.metrics.dynamicRenders ?? 0, cacheHits: cache?.metrics.cacheHits ?? 0,
+      invalidationMode: cache?.getInvalidationMode() ?? this.cacheInvalidationMode,
+      localInvalidations: cache?.metrics.localInvalidations ?? 0, localCacheHits: cache?.metrics.localCacheHits ?? 0,
+      globalFallbacks: cache?.metrics.globalFallbacks ?? 0, globalFallbackReasons: { ...cache?.metrics.globalFallbackReasons },
     };
   }
 
@@ -762,6 +784,7 @@ export class SceneShadowRuntime {
   private attachHybridCache(generator: ShadowGenerator): void {
     if (!this.isHybrid() || this.hybridCaches.has(generator)) return;
     const cache = new HybridShadowCache(generator, this.hybridMeshState);
+    cache.setInvalidationMode(this.cacheInvalidationMode);
     cache.setEnabled(this.hybridOptions.cacheStaticShadows);
     this.hybridCaches.set(generator, cache);
   }
@@ -769,8 +792,12 @@ export class SceneShadowRuntime {
   private disposeGenerator(generator: ShadowGenerator): void {
     const cache = this.hybridCaches.get(generator);
     if (cache) {
-      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits'] as const) {
+      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
         this.retiredHybridMetrics[key] += cache.metrics[key];
+      }
+      for (const reason of Object.keys(cache.metrics.globalFallbackReasons) as HybridShadowFallbackReason[]) {
+        this.retiredHybridMetrics.globalFallbackReasons[reason] = (this.retiredHybridMetrics.globalFallbackReasons[reason] ?? 0)
+          + cache.metrics.globalFallbackReasons[reason]!;
       }
       cache.dispose();
       this.hybridCaches.delete(generator);

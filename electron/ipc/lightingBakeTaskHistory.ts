@@ -3,10 +3,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { LightingBakeInput } from '../shared/sceneLightingBakeContract.ts';
 import type { LightingBakePreflight } from '../shared/sceneLightingBakePreflight.ts';
-import type { LightingBakeTaskRecord, LightingBakeTaskStatus, LightingBakeTaskHistory, LightingBakeTaskCleanup } from '../shared/sceneLightingBakeTasks.ts';
+import { isLightingBakePreprocessDiagnostic, type LightingBakeTaskRecord, type LightingBakeTaskStatus, type LightingBakeTaskHistory, type LightingBakeTaskCleanup } from '../shared/sceneLightingBakeTasks.ts';
 const activeTasks = new Set<string>();
 const terminal = new Set<LightingBakeTaskStatus>(['completed', 'cancelled', 'error', 'interrupted']);
 const taskIdPattern = /^[A-Za-z0-9_-]{1,160}$/;
+export const LIGHTING_BAKE_PREPROCESS_FILES = ['preprocess-cache.json', 'preprocess-cache.bin', 'preprocess-cache.json.tmp', 'preprocess-cache.bin.tmp'] as const;
 function missing(error: unknown): boolean { return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT'); }
 function isKnownMemory(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) && value >= 0; }
 /** 内存计量不是任务前置条件；平台不支持或采样异常时明确记录未知。 */
@@ -52,6 +53,7 @@ async function readRecord(directory: string): Promise<LightingBakeTaskRecord> {
     || record.error !== undefined && typeof record.error !== 'string'
     || record.device !== undefined && (!record.device || typeof record.device !== 'object' || !['cpu','auto','gpu'].includes(record.device.requested) || !['CPU','GPU'].includes(record.device.actual) || typeof record.device.name !== 'string' || typeof record.device.backend !== 'string' || record.device.fallbackReason !== undefined && typeof record.device.fallbackReason !== 'string')
     || record.captureMetrics !== undefined && (!record.captureMetrics || typeof record.captureMetrics !== 'object' || record.captureMetrics.durationMs !== null && (!Number.isFinite(record.captureMetrics.durationMs) || record.captureMetrics.durationMs < 0) || !['performance.memory.usedJSHeapSize','unavailable'].includes(record.captureMetrics.rendererHeapBasis) || record.captureMetrics.rendererHeapMaxObservedBytes !== null && (!Number.isFinite(record.captureMetrics.rendererHeapMaxObservedBytes) || record.captureMetrics.rendererHeapMaxObservedBytes < 0))
+    || record.preprocessCache !== undefined && !isLightingBakePreprocessDiagnostic(record.preprocessCache)
     || record.inputBytes !== undefined && (!Number.isFinite(record.inputBytes) || record.inputBytes < 0)
     || record.expandedGeometryBytes !== undefined && (!Number.isFinite(record.expandedGeometryBytes) || record.expandedGeometryBytes < 0)
     || typeof record.logAvailable !== 'boolean'
@@ -73,7 +75,7 @@ async function inspectFiles(directory: string, forCleanup = false): Promise<{ by
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
     const stat = await fs.lstat(path.join(directory, entry.name));
     if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('任务目录含非普通文件，无法证明清理归属。');
-    if (forCleanup && !/^(?:task\.json(?:\.tmp)?|checkpoint\.json(?:\.tmp)?|cycles(?:-cpu)?\.log|(?:cycles_bake|rgbm_gamma_codec|lightmap_mips)\.py|input\.json|result\.json|preflight\.json|probes\.json|probe-batches\.json|lightmap-mip-certificates\.json|(?:geometry|lightmap)-\d+\.(?:json|png|bin)|source-texture-\d+\.[A-Za-z0-9]+|geometry-(?:input-)?\d+\.bin)$/.test(entry.name)) throw new Error('任务目录含未知文件，无法证明清理归属。');
+    if (forCleanup && !LIGHTING_BAKE_PREPROCESS_FILES.includes(entry.name as typeof LIGHTING_BAKE_PREPROCESS_FILES[number]) && !/^(?:task\.json(?:\.tmp)?|checkpoint\.json(?:\.tmp)?|cycles(?:-cpu)?\.log|(?:cycles_bake|rgbm_gamma_codec|lightmap_mips|preprocess_cache)\.py|input\.json|result\.json|preflight\.json|probes\.json|probe-batches\.json|lightmap-mip-certificates\.json|(?:geometry|lightmap)-\d+\.(?:json|png|bin)|source-texture-\d+\.[A-Za-z0-9]+|geometry-(?:input-)?\d+\.bin)$/.test(entry.name)) throw new Error('任务目录含未知文件，无法证明清理归属。');
     bytes += stat.size; if (entry.name === 'cycles.log') logAvailable = true;
   }
   return { bytes, logAvailable };
@@ -81,6 +83,47 @@ async function inspectFiles(directory: string, forCleanup = false): Promise<{ by
 function engineAlive(pid: number | undefined): boolean {
   if (!pid || !Number.isSafeInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return !(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH'); }
+}
+/** 缓存读取与清理共用目录/记录边界；不把历史目录路径交给 Python。 */
+export async function revalidateLightingBakePreprocessCandidate(projectRoot: string, taskId: string): Promise<string> {
+  const directory = await taskDirectory(projectRoot, taskId), record = await readRecord(directory);
+  if (record.status !== 'completed' || activeTasks.has(directory)
+    || record.enginePid !== undefined && (!Number.isSafeInteger(record.enginePid) || record.enginePid <= 0)
+    || engineAlive(record.enginePid)) throw new Error('UV 缓存来源不是无活动引擎的已完成任务。');
+  return directory;
+}
+export async function inspectLightingBakePreprocessHistory(projectRoot: string, currentDirectory: string, maxReadBytes: number, assertActive: () => void = () => {}): Promise<{
+  candidates: Array<{ taskId: string; directory: string }>; cacheBytes: number; readBytes: number;
+}> {
+  const root = await tasksRoot(projectRoot), eligible: Array<{ taskId: string; directory: string; updatedAt: number }> = [];
+  if (await taskDirectory(projectRoot, path.basename(currentDirectory)) !== currentDirectory) throw new Error('当前 UV 缓存任务归属无效。');
+  let cacheBytes = 0, readBytes = 0;
+  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+    assertActive();
+    if (!taskIdPattern.test(entry.name)) continue;
+    // 项目缓存额度包含失败/取消/活动任务和临时载荷；未知链接不按零字节处理。
+    const directory = await taskDirectory(projectRoot, entry.name);
+    for (const name of LIGHTING_BAKE_PREPROCESS_FILES) {
+      const file = path.join(directory, name);
+      try {
+        const stat = await fs.lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || await fs.realpath(file) !== file) throw new Error('UV 缓存文件归属无效。');
+        cacheBytes += stat.size;
+        if (!Number.isSafeInteger(cacheBytes)) throw new Error('UV 缓存项目字节计量溢出。');
+      } catch (error) { if (!missing(error)) throw error; }
+    }
+    if (directory === currentDirectory || activeTasks.has(directory)) continue;
+    const recordStat = await fs.lstat(path.join(directory, 'task.json'));
+    readBytes += recordStat.size;
+    if (readBytes > maxReadBytes) throw new Error('UV 缓存历史记录超过读取预算。');
+    const record = await readRecord(directory);
+    if (record.status === 'completed' && !engineAlive(record.enginePid)
+      && (record.enginePid === undefined || Number.isSafeInteger(record.enginePid) && record.enginePid > 0)) {
+      eligible.push({ taskId: record.taskId, directory, updatedAt: Date.parse(record.updatedAt) });
+    }
+  }
+  eligible.sort((left, right) => right.updatedAt - left.updatedAt || left.taskId.localeCompare(right.taskId));
+  return { candidates: eligible.slice(0, 20).map(({ taskId, directory }) => ({ taskId, directory })), cacheBytes, readBytes };
 }
 export async function createLightingBakeTask(projectRoot: string, input: Pick<LightingBakeInput, 'jobId' | 'sceneName' | 'signature' | 'captureMetrics'>, engineVersion: string, preflight: LightingBakePreflight) {
   const root = await tasksRoot(projectRoot, true), directory = await fs.mkdtemp(path.join(root, taskDirectoryPrefix(input.jobId)));

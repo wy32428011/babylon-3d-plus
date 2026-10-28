@@ -31,6 +31,7 @@ export type LoadSceneResult = {
   content: string | null;
   /** 成功读取后由主进程签发，待场景格式校验通过再确认发布归属。 */
   sceneOpenToken?: number;
+  warning?: string;
 };
 
 export type ReadTextFileRequest = {
