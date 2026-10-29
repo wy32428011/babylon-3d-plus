@@ -60,6 +60,16 @@ test('内置虚拟货格搜索沿用宿主的点击单元绑定并传递格子�
   assert.deepEqual(f.focuses, []);
 });
 
+test('换层站台不属于点击单元，不触发高亮或库位事件', () => {
+  const f = fixture(['highlight', 'focus'], true);
+  f.scene.entities.locator.components.locator!.builtInBinding!.kind = 'layerChangePlatform';
+  f.handler('locator', { locatorEntityId: 'locator', row: 1, column: -1, layer: 2 });
+  assert.deepEqual(f.selections, []);
+  assert.deepEqual(f.highlights, []);
+  assert.deepEqual(f.events, []);
+  assert.deepEqual(f.focuses, []);
+});
+
 test('无绑定沿用默认点击；接管时未注册目标忽略，空白清除选中', () => {
   const plain = fixture();
   plain.handler('model', null, { focus: false });

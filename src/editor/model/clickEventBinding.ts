@@ -294,9 +294,9 @@ export type ClickEventBindingClickResolution =
  * conveyor 类模型的站台（如 enablePlatform）也是内置绑定但只有单一台面，不算单元。
  */
 function isShelfCellLocator(scene: SceneDocument, locatorEntityId: string): boolean {
-  const hostEntityId = scene.entities[locatorEntityId]?.components.locator?.builtInBinding?.hostEntityId;
-  if (!hostEntityId) return false;
-  const config = scene.entities[hostEntityId]?.components.modelAsset?.builtInSlotBindingConfig;
+  const binding = scene.entities[locatorEntityId]?.components.locator?.builtInBinding;
+  if (!binding || binding.kind === 'layerChangePlatform') return false;
+  const config = scene.entities[binding.hostEntityId]?.components.modelAsset?.builtInSlotBindingConfig;
   return Boolean(config?.dimensionMapping.columns && config.dimensionMapping.layers);
 }
 

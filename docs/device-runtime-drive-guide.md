@@ -61,6 +61,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 ### 点击事件高亮与固定轨道
 
 - 点击事件绑定有两种挂载，共用同一 `ClickEventBindingComponent`（序列化零新增字段）：**POI 标记**（`deviceSlots` 按 `modelAsset.sourceUrl` 全场匹配设备类型）与**生成器自带**（`deviceSlots` 恒空，作用域是本生成器的产物，见第 10 章）。
+- 「点击单元」只拾取并决议普通内置货格（`builtInBinding.kind` 缺省或为 `'slot'`）；`layerChangePlatform` 换层站台不参与单格射线拾取、高亮或库位事件上报。
 - 点击事件绑定的「高亮选中」效果支持「忽略固定轨道」参数（`ClickEventBindingEvent.highlight.excludeFixedTrack`）：命中 stacker/RGV 时轨道子树网格不参与描边，只描设备本体。
 - 轨道识别与遥测驱动同一套语义（`fixedTrackHighlightNodes.ts`）：`dataDriven.fixedNodes` 声明优先，缺失按 capable 标志回退（stacker 固定名 / RGV A37~A46 正则）。modelArrayBatch 薄实例批次路径无法按实体剔除网格，该参数不生效。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。

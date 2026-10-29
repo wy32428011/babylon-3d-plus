@@ -216,7 +216,8 @@ export class ScenePickingAndSelectionController {
 
     for (const [entityId, entry] of this.dependencies.locators.locators) {
       if (entry.fillMesh.isDisposed()) continue;
-      // 只有内置绑定货格参与点击单元拾取；独立摆放的货格线框不算单元。
+      // 只有普通内置绑定货格参与点击单元拾取；独立线框与换层站台都不算单元。
+      if (entry.kind === 'layerChangePlatform') continue;
       const hostEntityId = this.dependencies.document.syncedEntities.get(entityId)?.components.locator?.builtInBinding?.hostEntityId;
       if (!hostEntityId) continue;
 
