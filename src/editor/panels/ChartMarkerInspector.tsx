@@ -286,7 +286,11 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
           {videoUrlError ? <p className="chart-marker-error" role="alert">{videoUrlError}</p> : null}
           <label className="inspector-row"><span>循环播放</span><input type="checkbox" checked={marker.videoLoop} onChange={event => commit({ videoLoop: event.target.checked })} /></label>
           <label className="inspector-row"><span>显示控制条</span><input type="checkbox" checked={marker.videoControls} onChange={event => commit({ videoControls: event.target.checked })} /></label>
-          <label className="inspector-row"><span>画面适配</span><select value={marker.videoFit} onChange={event => commit({ videoFit: event.target.value as 'contain' | 'cover' })}><option value="contain">完整显示</option><option value="cover">铺满裁剪</option></select></label>
+          <label className="inspector-row"><span>画面适配</span><select value={marker.videoFit} onChange={event => commit({ videoFit: event.target.value as NonNullable<ChartMarkerComponent['videoFit']> })}><option value="contain">完整显示</option><option value="cover">铺满裁剪</option><option value="fill">拉伸铺满</option></select></label>
+          <ChartMarkerNumberField label="画面宽度拉伸（%）" value={marker.videoStretchX} min={10} max={2000} step={1} onCommit={(videoStretchX) => commit({ videoStretchX })} />
+          <ChartMarkerNumberField label="画面高度拉伸（%）" value={marker.videoStretchY} min={10} max={2000} step={1} onCommit={(videoStretchY) => commit({ videoStretchY })} />
+          <p className="muted">拉伸比例以当前画面适配方式为基准，100% 为不额外拉伸。选择“拉伸铺满”可填满画面；不等比拉伸会使内容变形，超过边界的部分会被裁切。</p>
+          {marker.panelShape === 'plane' && marker.videoControls && (marker.videoStretchX !== 100 || marker.videoStretchY !== 100) ? <p className="muted">矩形视频的播放控制条会跟随画面拉伸，超出面板的部分会被裁切。</p> : null}
           <p className="muted">运行或发布后静音自动播放，可通过控制条开启声音。支持浏览器可解码的 HTTP(S) 视频直链；视频文件不随发布包上传，播放端需能访问该地址。请勿填写含长期凭据的地址。</p>
         </> : null}
         {marker.contentType !== 'video' || alarmAppearance ? <><label className="inspector-row">
@@ -345,10 +349,15 @@ export function ChartMarkerInspector({ entity, disabled, alarmAppearance = false
           </select>
         </label>
         <ChartMarkerNumberField label="指示器大小" value={marker.indicatorSize} min={0.01} max={100} step={0.1} onCommit={(indicatorSize) => commit({ indicatorSize })} />
-        <label className="inspector-row">
+        <div className="inspector-row">
           <span>外观颜色</span>
-          <input type="color" value={marker.appearanceColor} onChange={(event) => commit({ appearanceColor: event.target.value })} />
-        </label>
+          <div className="chart-marker-color-picker" role="group" aria-label="外观颜色选择器">
+            <label className="chart-marker-color-swatch" style={{ backgroundColor: marker.appearanceColor, backgroundImage: marker.appearanceColor === 'transparent' ? undefined : 'none' }}>
+              <input aria-label="外观颜色" type="color" value={marker.appearanceColor === 'transparent' ? '#00cbe6' : marker.appearanceColor} onChange={(event) => commit({ appearanceColor: event.target.value })} />
+            </label>
+            <button type="button" aria-pressed={marker.appearanceColor === 'transparent'} onClick={() => commit({ appearanceColor: 'transparent' })}>无色</button>
+          </div>
+        </div>
         {!alarmAppearance && marker.panelShape === 'ring' ? <>
           <ChartMarkerNumberField label="环形半径（m）" value={marker.ringRadius} min={0.1} max={10000} step={0.1} onCommit={(ringRadius) => commit({ ringRadius })} />
           <ChartMarkerNumberField label="内容平铺次数" integer value={marker.ringRepeat} min={1} max={32} step={1} onCommit={(ringRepeat) => commit({ ringRepeat })} />

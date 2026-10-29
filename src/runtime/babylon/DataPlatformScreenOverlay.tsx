@@ -296,6 +296,8 @@ function createOverlayEntry(root: HTMLElement, item: DataPlatformScreenOverlayIt
       loop: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoLoop : true,
       controls: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoControls : true,
       fit: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoFit : 'contain',
+      stretchX: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoStretchX : 100,
+      stretchY: item.markerStyle?.contentType === 'video' ? item.markerStyle.videoStretchY : 100,
     });
   } else if (item.screenUrl && canEmbed) {
     iframe = document.createElement('iframe');
@@ -501,6 +503,7 @@ export function DataPlatformScreenOverlay({
           entry.builtin?.update(style, item.markerText ?? style.text);
           if (entry.videoContent && style.contentType === 'video') entry.videoContent.update({
             url: item.screenUrl ?? '', loop: style.videoLoop, controls: style.videoControls, fit: style.videoFit,
+            stretchX: style.videoStretchX, stretchY: style.videoStretchY,
           });
         }
         if (entry.iframe) {

@@ -19,6 +19,8 @@ export const CHART_MARKER_DEFAULTS: Readonly<Required<ChartMarkerComponent>> = O
   videoLoop: true,
   videoControls: true,
   videoFit: 'contain',
+  videoStretchX: 100,
+  videoStretchY: 100,
   text: '图表立标',
   fontSize: 36,
   marquee: false,
@@ -157,11 +159,11 @@ function normalizeClickEvents(value: unknown): ChartMarkerClickEvent[] {
 const STRING_LIMITS = { screenName: 128, text: 4096, dataSourceEntityId: 128, dataField: 256 } as const;
 const NUMBER_LIMITS = {
   fontSize: [8, 256], indicatorSize: [0.01, 100], width: [16, 4096], height: [16, 4096], floatHeight: [0, 10000],
-  ringRadius: [0.1, 10000], ringRepeat: [1, 32],
+  ringRadius: [0.1, 10000], ringRepeat: [1, 32], videoStretchX: [10, 2000], videoStretchY: [10, 2000],
 } as const;
 const ENUM_VALUES = {
   geometryBasis: ['ground', 'upright'], panelShape: ['plane', 'ring'],
-  contentType: ['builtin', 'screen', 'video'], videoFit: ['contain', 'cover'], appearance: ['line', 'column', 'none'],
+  contentType: ['builtin', 'screen', 'video'], videoFit: ['contain', 'cover', 'fill'], appearance: ['line', 'column', 'none'],
   driveMode: ['none', 'data'], clickAction: ['none', 'focus', 'refresh'],
 } as const;
 
@@ -211,7 +213,7 @@ export function normalizeChartMarker(value: unknown): ChartMarkerComponent {
     } else if (key in ENUM_VALUES) {
       valid = typeof field === 'string' && (ENUM_VALUES[key as keyof typeof ENUM_VALUES] as readonly string[]).includes(field);
     } else if (key === 'backgroundColor' || key === 'appearanceColor') {
-      valid = typeof field === 'string' && (/^#[0-9a-f]{6}$/i.test(field) || (key === 'backgroundColor' && field === 'transparent'));
+      valid = typeof field === 'string' && (/^#[0-9a-f]{6}$/i.test(field) || field === 'transparent');
     } else if (key === 'backgroundImage') {
       valid = typeof field === 'string' && (field === '' || (
         field.length <= CHART_MARKER_MAX_IMAGE_LENGTH

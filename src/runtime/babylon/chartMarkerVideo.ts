@@ -2,13 +2,16 @@ export type ChartMarkerVideoOptions = {
   url: string;
   loop: boolean;
   controls: boolean;
-  fit: 'contain' | 'cover';
+  fit: 'contain' | 'cover' | 'fill';
+  stretchX?: number;
+  stretchY?: number;
   /** 曲面纹理需要媒体服务器允许 CORS；普通平面保持原加载方式。 */
   textureSource?: boolean;
 };
 
 /** 视频自身管理媒体状态；几何更新只传入可见性，不逐帧调用 play 或重建视频。 */
 export function createChartMarkerVideo(parent: HTMLElement, options: ChartMarkerVideoOptions) {
+  parent.style.backgroundColor = '#000';
   const video = document.createElement('video');
   video.dataset.chartMarkerVideo = '';
   video.muted = true;
@@ -143,6 +146,9 @@ export function createChartMarkerVideo(parent: HTMLElement, options: ChartMarker
     video.loop = next.loop;
     video.controls = next.controls;
     video.style.objectFit = next.fit;
+    const stretchX = next.stretchX ?? 100, stretchY = next.stretchY ?? 100;
+    const transform = options.textureSource || (stretchX === 100 && stretchY === 100) ? '' : 'scale(' + stretchX / 100 + ', ' + stretchY / 100 + ')';
+    if (video.style.transform !== transform) video.style.transform = transform;
     video.style.pointerEvents = active && interactive && next.controls ? 'auto' : 'none';
   }
   update(options);

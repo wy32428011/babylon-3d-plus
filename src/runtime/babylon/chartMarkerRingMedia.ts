@@ -15,6 +15,7 @@ export function createChartMarkerRingMedia(iframe: HTMLIFrameElement | null, vid
   let lastRequest = -Infinity;
   let lastVideoTime = -1;
   let lastVideoFrame = -Infinity;
+  let lastVideoSettings = '';
   let status = '';
   let disposed = false;
   let generation = 0;
@@ -108,16 +109,19 @@ export function createChartMarkerRingMedia(iframe: HTMLIFrameElement | null, vid
         if (!active) { drawStatus('视频已配置，运行后自动播放'); return frame; }
         if (failedVideo) return frame;
         if (video.error) { drawStatus('视频加载失败\n请检查地址、编码与服务器跨域许可'); return frame; }
-        if (video.readyState < 2) { drawStatus(url ? '视频加载中…\n双击打开播放窗口' : '请在属性面板配置视频地址'); return frame; }
-        if (video.currentTime === lastVideoTime || now - lastVideoFrame < 1000 / 30) return frame;
+        if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) { drawStatus(url ? '视频加载中…\n双击打开播放窗口' : '请在属性面板配置视频地址'); return frame; }
+        const videoSettings = [style.videoFit, style.videoStretchX, style.videoStretchY].join(',');
+        if ((video.currentTime === lastVideoTime && videoSettings === lastVideoSettings) || now - lastVideoFrame < 1000 / 30) return frame;
         lastVideoTime = video.currentTime;
+        lastVideoSettings = videoSettings;
         lastVideoFrame = now;
         try {
           context.fillStyle = '#000';
           context.fillRect(0, 0, canvas.width, canvas.height);
           const factor = style.videoFit === 'cover' ? Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight)
             : Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
-          const width = video.videoWidth * factor, height = video.videoHeight * factor;
+          const width = (style.videoFit === 'fill' ? canvas.width : video.videoWidth * factor) * style.videoStretchX / 100;
+          const height = (style.videoFit === 'fill' ? canvas.height : video.videoHeight * factor) * style.videoStretchY / 100;
           context.drawImage(video, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
           status = '';
           hasFrame = true;

@@ -102,9 +102,10 @@ export class ChartMarkerPresentation {
       // 立标属于显示辅助内容，不应触发或抬高场景的物理阴影地面。
       mesh.metadata = { ...mesh.metadata, editorChartMarker: true };
     }
-    entry.stem?.setEnabled(visible && style.appearance !== 'none');
-    entry.base?.setEnabled(visible && style.appearance !== 'none');
-    for (const rim of entry.rims ?? []) rim.setEnabled(visible && style.panelShape === 'ring');
+    const hasAppearanceColor = style.appearanceColor !== 'transparent';
+    entry.stem?.setEnabled(visible && style.appearance !== 'none' && hasAppearanceColor);
+    entry.base?.setEnabled(visible && style.appearance !== 'none' && hasAppearanceColor);
+    for (const rim of entry.rims ?? []) rim.setEnabled(visible && style.panelShape === 'ring' && hasAppearanceColor);
     if (!visible) return;
     const world = mesh.computeWorldMatrix(true);
     const camera = mesh.getScene().activeCamera;
@@ -152,7 +153,7 @@ export class ChartMarkerPresentation {
     }
     setPositionsAndNormals(mesh, positions, entry.indices);
     cornersByMesh.set(mesh, LOCAL_CORNERS.map(point => Vector3.TransformCoordinates(point, toLocal)));
-    if (style.appearance === 'none') return;
+    if (style.appearance === 'none' || !hasAppearanceColor) return;
     const anchor = Vector3.TransformCoordinates(new Vector3(0, 0, 1), geometryWorld);
     const bottom = Vector3.TransformCoordinates(new Vector3(0, 0, 1), displayWorld);
     this.updateIndicator(mesh, entry, style, anchor, bottom, polygonal);
@@ -163,7 +164,7 @@ export class ChartMarkerPresentation {
       entry.material = new StandardMaterial(`${mesh.name}_indicator_material`, mesh.getScene());
       entry.material.disableLighting = true;
     }
-    entry.material.emissiveColor = Color3.FromHexString(style.appearanceColor);
+    if (style.appearanceColor !== 'transparent') entry.material.emissiveColor = Color3.FromHexString(style.appearanceColor);
     return entry.material;
   }
 
@@ -207,10 +208,11 @@ export class ChartMarkerPresentation {
       rim.parent = mesh;
       rim.material = material;
       rim.isPickable = false;
+      rim.setEnabled(style.appearanceColor !== 'transparent');
       rim.metadata = { editorChartMarker: true };
       entry.rims[index] = rim;
     }
-    if (style.appearance === 'none') return;
+    if (style.appearance === 'none' || style.appearanceColor === 'transparent') return;
     const geometryWorld = style.geometryBasis === 'upright' ? UPRIGHT_BASIS.multiply(world) : world;
     const anchor = Vector3.TransformCoordinates(new Vector3(0, 0, 1), geometryWorld);
     this.updateIndicator(mesh, entry, style, anchor, Vector3.TransformCoordinates(bottom[RING_SEGMENTS / 2], world), polygonal);

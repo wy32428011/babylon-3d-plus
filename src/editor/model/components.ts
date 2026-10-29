@@ -512,7 +512,10 @@ export type ChartMarkerComponent = {
   videoUrl?: string;
   videoLoop?: boolean;
   videoControls?: boolean;
-  videoFit?: 'contain' | 'cover';
+  videoFit?: 'contain' | 'cover' | 'fill';
+  /** 相对画面适配结果的宽、高拉伸百分比。 */
+  videoStretchX?: number;
+  videoStretchY?: number;
   text?: string;
   fontSize?: number;
   marquee?: boolean;
