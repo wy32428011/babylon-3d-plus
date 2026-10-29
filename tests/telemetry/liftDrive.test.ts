@@ -506,6 +506,35 @@ test('task_num_fin_first_up/second_up 仅标注对应工位 cargo.task：字段�
   }
 });
 
+test('现场回归：second 接标先于旧货出机时不得把 18948 改标为 18949', () => {
+  const h = makeHarness();
+  try {
+    const { a, b } = adoptTwoCargos(h);
+    const incoming = { reference_upper_step: 1, level_upper: 1, work_state: 1 };
+    h.applyLift({ ...incoming, task_num_fin_first_up: 18949, task_num_fin_second_up: 18948 });
+    h.applyConveyor('COUT', { task: 18948, mode: 2, movement_x: 0, front_has_goods: 0, back_has_goods: 0 });
+
+    const outgoing = { reference_upper_step: 2, level_upper: 2, work_state: 3 };
+    const shifting = { ...outgoing, task_num_fin_first_up: 0, task_num_fin_second_up: 18949 };
+    h.applyLift(shifting);
+    assert.equal(a.task, '18948', 'step1 已持有 18949 时不得重复改标 step2 旧货');
+    assert.equal(b.task, '18949');
+
+    runUntil(h, shifting, () => h.delivered.length === 1);
+    assert.deepEqual(h.delivered, [a], '旧货 18948 必须先出机');
+    assert.equal(a.task, '18948');
+    assert.equal(h.models.COUT.conveyorTelemetry.waitingTask, null, '18948 等待必须由原货兑现');
+
+    ejectConveyorCargo(h);
+    runUntil(h, shifting, () => h.delivered.length === 2);
+    assert.deepEqual(h.delivered, [a, b], '18949 必须平移后接续出机');
+    assert.equal(b.task, '18949');
+    assert.equal(h.state.liftCargoMeshes.size, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
 test('现场回归：出料占用延迟交付时标注归零，第二箱腾空后仍按原 task 交付', () => {
   const h = makeHarness();
   try {

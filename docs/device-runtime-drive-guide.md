@@ -347,7 +347,7 @@ RGV 的垂直版：RGV 水平绑定「列」（columnBindings），lift 垂直�
 - `work_state`：工作状态（0 空闲待机；1 取货中；2 取货完成；3 卸货中；5 卸货完成；6 移动中；7 移动完成；10 急停；11 未知）。**字段缺失时整条状态机不启用**，回落旧「目标键边沿 + 到位自动交接」兼容路径。
 - `reference_upper_step`：1=来料侧（选 incomingLayerBindings），2=送料侧（选 outgoingLayerBindings）；其它值忽略。用于确定 `level_upper` 指来料端还是送料端。
 - `level_upper`：该侧目标层号（正整数），与绑定表键匹配；**不在绑定表内时不响应、不移动**，一次性 log 提示。
-- `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），双用途：非零值给对应工位货物标注 `cargo.task`；兼作 **PLC 侧「工位有货」真值对账**——工位有货且曾见过非零标注、当前标注归零（PLC 已卸出）时触发强制补交付（见时序节）。字段缺失或归零均不清除既有货物身份，归零仅由对账路径读取原始快照；货物交付后由接收方继续携带原 task，避免匿名货永久占用出料输送线。
+- `task_num_fin_first_up` / `task_num_fin_second_up`：step1/step2 工位当前任务号（与输送线 task 无必然联系），双用途：非零值给对应工位货物标注 `cargo.task`；兼作 **PLC 侧「工位有货」真值对账**——工位有货且曾见过非零标注、当前标注归零（PLC 已卸出）时触发强制补交付（见时序节）。同一非零 task 同时只能归属一个工位货物：另一工位已持有该 task 时，当前工位不重复标注也不登记有货见证，避免 PLC 标注先于孪生交接时把尚未出机的旧货改成新货 task。字段缺失或归零均不清除既有货物身份，归零仅由对账路径读取原始快照；货物交付后由接收方继续携带原 task，避免匿名货永久占用出料输送线。
 - `reference_upper_step/level_upper` 两字段经 `normalizeLiftCompatibleFields`（deviceTelemetry.ts）原地 `Math.trunc` 归一为整数。
 - **`movement_y` 不存在于协议**：载货台运动完全由目标层驱动，脚本 `motion.lift` 仅保留 speed/nodes/travelAxis 供驱动读取。
 - **lift 放货无视 task 匹配**：lift 的 task 号与输送线无关，送料层交付只要求目标 conveyor 当前无货（`cargoCode === null`），等待中的 `pendingTask/waitingTask` 不挡交付。**兑现等待仅限：货物自带同 task，或货物匿名且接收方当前报文仍在上报该等待 task**（`ConveyorModelTelemetryState.snapshotTask`，证明 PLC 仍持有它）；货物自带异 task、或匿名但 PLC 已不再上报该等待 task（启动晚残留的旧等待）时**不得给新货改号补位**——否则新货会被旧 task 订阅链劫走并越级拽走（与站台放入异 task 货物同一规则）。此时保留货物自身 task（`task_num_fin_*` 标注，可能为空）落机、退订并清除残留等待，后续本机上报该 task 时形成新 task 边沿，走滞留箱复用盖号驶离；接收方未挂单时同样保留自身 task，避免匿名货无法沿 task 链路继续交付。
