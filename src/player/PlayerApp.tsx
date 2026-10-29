@@ -587,9 +587,6 @@ export function PlayerApp() {
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
         configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
-        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal,
-          state => { if (!disposed) setReleaseCacheState(state); });
-        if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
         openingBridge = new GeographicOpeningBridge({
           enabled: true, embedded: window.parent !== window, parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -622,6 +619,9 @@ export function PlayerApp() {
           projectRuntimeConfig ? parseDigitalTwinAllowedParentOrigins(projectRuntimeConfig.config) : [],
         );
         interactionController.markInitialLoadStarted();
+        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal,
+          state => { if (!disposed) setReleaseCacheState(state); });
+        if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
         setDismissedStatusIssue(null);

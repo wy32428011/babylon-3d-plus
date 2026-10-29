@@ -15,7 +15,7 @@ export type EffectPathDrawingSession = {
   readonly error: string | null;
 };
 
-const pathKinds = new Set(['glow-strip', 'flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow', 'evacuation-route']);
+const pathKinds = new Set(['flow-path', 'flow-arrows', 'fly-line', 'motion-trail', 'path-reveal', 'pipe-flow', 'evacuation-route']);
 const areaKinds = new Set(['boundary-flow', 'area-fill', 'water-surface', 'region-level']);
 let session: EffectPathDrawingSession | null = null;
 const listeners = new Set<() => void>();
@@ -68,8 +68,7 @@ export function getEffectPathDrawingValidation(component: PoiEffectComponent): s
   if (closed) {
     const error = validateLightWallPoints(session.points.map(point => point.local));
     if (error) return error;
-  } else if (session.effectKind !== 'glow-strip') {
-    // 灯带允许三维路径；XZ 投影可能重叠，不能用平面交叉判定拒绝。
+  } else {
     const points = session.points.map(point => point.world);
     for (let i = 0; i < points.length - 1; i++) {
       if (i + 2 < points.length) {

@@ -166,6 +166,17 @@ export function DigitalTwinEffectInspector({ component, disabled, onChange, hide
       {missingTarget && <p className="digital-twin-effect-error" role="status">{environmentTarget ? '当前场景尚未配置适用的环境模型；添加环境后此绑定会自动恢复。' : '绑定目标已删除或不再适用，请重新选择。原绑定 ID 已保留。'}</p>}
       {!config.targetEntityId && <p className="muted">{definition.kind === 'motion-trail' ? '未绑定目标时沿下方配置路径演示；绑定后记录目标实际运动轨迹。' : supportsEnvironment ? '请选择环境模型、独立模型或基础网格。' : '请先绑定场景中的独立模型或基础网格。'}</p>}
     </>}
+    {definition.kind === 'glow-strip' && config.stripSize && (['length', 'width', 'height'] as const).map(key => {
+      const labels = { length: '灯带长度 (m)', width: '灯带宽度 (m)', height: '灯带高度 (m)' };
+      return <label className="number-row" key={key}><span>{labels[key]}</span>
+        <input type="number" aria-label={labels[key]} disabled={disabled} value={config.stripSize![key]}
+          min={key === 'length' ? 0.05 : 0.005} max={key === 'length' ? 10000 : 10} step={0.01}
+          onChange={event => {
+            if (!event.target.value || !Number.isFinite(Number(event.target.value))) return;
+            commit({ stripSize: { ...config.stripSize!, [key]: Number(event.target.value) } }, `更新特效${labels[key]}`);
+          }} />
+      </label>;
+    })}
     {(Object.keys(DIGITAL_TWIN_EFFECT_NUMBER_LIMITS) as NumberKey[]).filter(key => fields.includes(key)).map(key => {
       const multiplier = key === 'opacity' || key === 'progress' ? 100 : 1;
       const limits = DIGITAL_TWIN_EFFECT_NUMBER_LIMITS[key];

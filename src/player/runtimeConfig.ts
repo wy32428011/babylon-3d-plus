@@ -339,7 +339,11 @@ export function parseDeploymentAssetManifest(value: unknown, assetBaseUrl: URL):
       if (!pathKey || !sourceKey) throw new Error(`asset-manifest.${collectionKey}[${index}] 缺少资源 URL 或路径。`);
       const sourceUrl = assertString(entry[sourceKey], `asset-manifest.${collectionKey}[${index}].${sourceKey}`, 8192);
       const relativePath = assertString(entry[pathKey], `asset-manifest.${collectionKey}[${index}].${pathKey}`, 2048);
-      mappings[sourceUrl] = new URL(relativePath, assetBaseUrl).href;
+      const virtualPath = 'project/assets/' + relativePath.slice(2);
+      const isPackagedPath = relativePath.startsWith('./')
+        && sourceUrl === 'editor-asset://local/' + encodeURIComponent(virtualPath);
+      const urlPath = isPackagedPath ? relativePath.split('/').map(encodeURIComponent).join('/') : relativePath;
+      mappings[sourceUrl] = new URL(urlPath, assetBaseUrl).href;
     });
   } else {
     const assets = assertObject(collection, `asset-manifest.${collectionKey}`);

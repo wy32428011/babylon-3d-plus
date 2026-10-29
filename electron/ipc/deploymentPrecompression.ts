@@ -71,7 +71,8 @@ export async function precompressDeploymentFiles(stagingRoot: string, manifest: 
     originalExceedsLimit: originalBytes > maxUnpackedBytes || originalEntries > maxFiles,
     finalBytes: originalBytes, finalFiles: originalFiles, finalEntries: originalEntries };
   const result: DeploymentPrecompressionResult = { files: [], skipped: [], diagnostics: [], budget };
-  const byPath = new Map(sources.map(file => [toLocalPathKey(file.sourcePath), file]));
+  // 清单使用暂存区逻辑路径；父目录别名不应改变同一文件的匹配结果。
+  const byPath = new Map(sources.map(file => [toLocalPathKey(resolveDeploymentDestination(stagingRoot, file.relativePath)), file]));
   const seen = new Set<string>(), work: Work[] = [];
   for (const entry of manifest.files) {
     throwIfDeploymentExportAborted(signal);
@@ -80,7 +81,9 @@ export async function precompressDeploymentFiles(stagingRoot: string, manifest: 
     if (seen.has(key)) throw new Error('预压缩清单包含重复路径。');
     seen.add(key);
     const file = byPath.get(key);
-    if (!file || file.size !== entry.size || !/^[a-f0-9]{64}$/i.test(entry.sha256)) throw new Error('预压缩原文件与清单大小或校验信息不一致。');
+    if (!file) throw new Error(`预压缩清单中的原文件不存在：${relativePath}。`);
+    if (file.size !== entry.size) throw new Error(`预压缩原文件与清单大小不一致：${relativePath}（清单 ${entry.size} 字节，实际 ${file.size} 字节）。`);
+    if (!/^[a-f0-9]{64}$/i.test(entry.sha256)) throw new Error(`预压缩清单校验信息无效：${relativePath}。`);
     // B7 的原精度 binary 几何也需要可选传输压缩；解压后的原文仍按原清单校验。
     // GLB 只改传输编码，浏览器解压后字节与原清单 SHA 相同；未压缩环境模型实测可省约 20%。
     if (CONTROL_FILES.has(relativePath.toLowerCase()) || !/\.(?:m?js|css|json|wasm|bin|glb)$/i.test(relativePath)) continue;
