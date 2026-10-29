@@ -50,11 +50,13 @@ import {
   useSyncExternalStore,
 } from 'react';
 import {
-  createBabylonViewport,
+  createBabylonViewportAsync,
   isSoftwareWebGLFallbackAllowed,
   type BabylonViewport,
   type BabylonViewportRuntimeStatus,
 } from '../../runtime/babylon/createEngine';
+import { readRequestedViewportBackend, resolveViewportBackend } from '../../runtime/babylon/viewportBackend';
+import { useViewportCanvas } from '../../runtime/babylon/useViewportCanvas';
 
 import { type SceneModelSelectionPointerSnapshot } from '../../shared/sceneModelSelectionPointer';
 
@@ -252,6 +254,13 @@ type SceneViewPanelProps = {
 
 export function SceneViewPanel(props: SceneViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const { revision: canvasRevision, attachCanvas, replaceCanvas } = useViewportCanvas(canvasRef);
+  const [runtimeReadyGeneration, setRuntimeReadyGeneration] = useState(0);
+  const [runtimeSyncedGeneration, setRuntimeSyncedGeneration] = useState(0);
+  const runtimeSynchronizedGenerationRef = useRef(0);
+  const runtimeReadyKeyRef = useRef<string | null>(null);
+  const preservedViewportViewRef = useRef<{ sceneSessionId: string; view: ReturnType<BabylonViewport['getCameraView']> } | null>(null);
+  const [requestedBackend] = useState(readRequestedViewportBackend);
   const viewportRef = useRef<BabylonViewport | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   useEffect(() => subscribeCadReferenceLoadStatus(status => {
@@ -325,6 +334,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const [autoPatrolRecordStore, setAutoPatrolRecordStore] = useState<AutoPatrolInspectionRecordStore | null>(null);
   const sceneDocument = useEditorStore((state) => state.scene);
   const sceneSessionId = useEditorStore((state) => state.sceneSessionId);
+  // 运行预览在业务启动前就固定为 WebGL，避免稍后打开光照管理器重建运行时并重放 MQTT/设备状态。
+  const webGLPreviewRequired = useEditorStore(state => state.runtimeMode === 'preview' || state.lightingManagerOpen || Boolean(state.lightingBakeRequest)
+    || Boolean(state.lightingBakePreflightRequest) || Boolean(state.lightingManagerPreviewRequest) || Boolean(state.lightingDraftPreview) || state.lightingComparisonEnabled || state.lightingDebugVisible);
+  const backendDecision = useMemo(() => {
+    const decision = resolveViewportBackend(sceneDocument, requestedBackend);
+    return requestedBackend === 'webgpu' && webGLPreviewRequired
+      ? { requested: requestedBackend, backend: 'webgl' as const, reasons: [...decision.reasons, '运行预览或光照管理保留完整 WebGL 路径'] }
+      : decision;
+  }, [sceneDocument, requestedBackend, webGLPreviewRequired]);
+  const [backendSession, setBackendSession] = useState(() => ({ sceneSessionId, decision: backendDecision }));
+  // 同一显式 WebGPU 会话只允许降级；解除不兼容功能后不重建业务运行时，重新打开场景才重新选择。
+  if (backendSession.sceneSessionId !== sceneSessionId
+    || (backendSession.decision.backend === 'webgpu' && backendDecision.backend === 'webgl')) {
+    setBackendSession({ sceneSessionId, decision: backendDecision });
+  }
+  const viewportBackendDecision = backendSession.sceneSessionId === sceneSessionId ? backendSession.decision : backendDecision;
+  // 默认 WebGL 沿用跨文档复用行为；仅显式双后端会话切换时换新画布，禁止跨 context 类型复用。
+  const viewportSessionKey = requestedBackend === 'webgpu' ? `${sceneSessionId}:${viewportBackendDecision.backend}` : 'webgl';
+  const runtimeReady = runtimeReadyKeyRef.current === viewportSessionKey && runtimeRef.current !== null;
   const sceneStartupResourceSessionId = useEditorStore((state) => state.sceneStartupResourceSessionId);
   const sceneRuntimeStartupDeferred = sceneStartupResourceSessionId === sceneSessionId;
   const performanceRunSceneSessionIdRef = useRef(sceneSessionId);
@@ -908,7 +936,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   });
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    const initialCanvas = canvasRef.current;
+    if (!initialCanvas) return;
+    const abortController = new AbortController();
+    let disposed = false;
+    let cleaned = false;
 
     let viewport: BabylonViewport | null = null;
     let runtime: SceneRuntime | null = null;
@@ -925,8 +957,31 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       void environmentPreparationStore.retry();
     });
 
+    let teardown = (): void => {
+      performanceMonitor?.dispose();
+      mqttTelemetryClient?.dispose();
+      unsubscribeManualRoamSnapshot?.();
+      manualRoam?.dispose();
+      unsubscribeAutoPatrolSnapshot?.();
+      autoPatrolPlayback?.dispose();
+      autoPatrolIntegration?.dispose();
+      gizmo?.dispose();
+      skyboxStatus.dispose();
+      runtime?.dispose();
+      viewport?.dispose();
+      if (viewport && viewportRef.current === viewport) { viewportRef.current = null; setViewportCamera(null); }
+      if (runtime && runtimeRef.current === runtime) runtimeRef.current = null;
+      if (gizmo && gizmoRef.current === gizmo) gizmoRef.current = null;
+      if (manualRoam && manualRoamRef.current === manualRoam) manualRoamRef.current = null;
+      if (autoPatrolPlayback && autoPatrolPlaybackRef.current === autoPatrolPlayback) autoPatrolPlaybackRef.current = null;
+      if (mqttTelemetryClient && mqttTelemetryClientRef.current === mqttTelemetryClient) mqttTelemetryClientRef.current = null;
+      if (performanceMonitor && performanceMonitorRef.current === performanceMonitor) performanceMonitorRef.current = null;
+    };
+    const cleanup = (): void => { if (cleaned) return; cleaned = true; teardown(); };
+
     /** 处理 Babylon 运行状态回调，让渲染异常复用现有 scene-error 遮罩并在恢复时写入 Console。 */
     const handleRuntimeStatus = (status: BabylonViewportRuntimeStatus): void => {
+      if (disposed) return;
       switch (status.type) {
         case 'context-lost':
           setViewportError(status.message);
@@ -945,10 +1000,16 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       }
     };
 
+    const initialize = async (): Promise<void> => {
+    runtimeReadyKeyRef.current = null;
+    setSceneRuntimeNaturallyReady(false);
     setViewportError(null);
 
     try {
-      viewport = createBabylonViewport(canvasRef.current, handleRuntimeStatus, {
+      viewport = await createBabylonViewportAsync(initialCanvas, handleRuntimeStatus, {
+        backendDecision: viewportBackendDecision,
+        signal: abortController.signal,
+        replaceCanvas,
         depthPrecisionCompensation: true,
         requireHardwareAcceleration: !isSoftwareWebGLFallbackAllowed(),
         onLog: pushLog,
@@ -956,6 +1017,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         isScenePreparing: () => isScenePreparationActive() && useEditorStore.getState().runtimeMode !== 'preview',
         adaptiveResolution: adaptiveResolutionEnabledRef.current,
       });
+      if (disposed || abortController.signal.aborted) { viewport.dispose(); return; }
+      const preservedView = preservedViewportViewRef.current;
+      viewport.applyCameraView(preservedView?.sceneSessionId === useEditorStore.getState().sceneSessionId
+        ? { ...useEditorStore.getState().scene.sceneSettings.camera, ...preservedView.view }
+        : useEditorStore.getState().scene.sceneSettings.camera, { animate: false });
+      runtimeModeRef.current = 'edit';
       runtime = new SceneRuntime(
         viewport.scene,
         pushLog,
@@ -1044,7 +1111,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         scene: viewport.scene,
         engine: viewport.engine,
         camera: viewport.camera,
-        canvas: canvasRef.current,
+        canvas: viewport.canvas,
         avatarUrl: resolveManualRoamAvatarSource(useEditorStore.getState().scene),
         preloadAvatar: hasManualRoamSpawnEntity(useEditorStore.getState().scene),
         resolveSpawnPose: () => resolveManualRoamSpawnPose(
@@ -1352,18 +1419,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       });
       mqttTelemetryClient = new MqttStackerTelemetryClient(pushLog);
     } catch (error) {
+      cleanup();
+      if (disposed || abortController.signal.aborted) return;
       console.error('Scene View 渲染引擎初始化失败。', error);
-      mqttTelemetryClient?.dispose();
-      unsubscribeManualRoamSnapshot?.();
-      manualRoam?.dispose();
-      unsubscribeAutoPatrolSnapshot?.();
-      autoPatrolPlayback?.dispose();
-      autoPatrolIntegration?.dispose();
       setAutoPatrolRecordStore(null);
-      gizmo?.dispose();
-      skyboxStatus.dispose();
-      runtime?.dispose();
-      viewport?.dispose();
       setViewportCamera(null);
       setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
       const failedState = useEditorStore.getState();
@@ -1404,6 +1463,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
     try {
       performanceMonitor = new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
+        withControlledSceneObservers: initialize => initializedRuntime.withControlledSceneObservers(initialize),
         collectDetailedGpuWorkloads: () => detailedGpuWorkloadsEnabledRef.current,
         captureGpuFrameTime: () => detailedGpuWorkloadsEnabledRef.current || performanceRunSessionRef.current !== null,
         getRuntimeMetrics: () => runtimeRef.current?.getPerformanceMetrics() ?? initializedRuntime.getPerformanceMetrics(),
@@ -1437,12 +1497,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const cancelGizmoOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') initializedGizmo.cancelActiveDrag();
     };
-    window.addEventListener('resize', resize);
-    window.addEventListener('blur', cancelActiveGizmoDrag);
-    window.addEventListener('keydown', cancelGizmoOnEscape);
-    resize();
-
-    return () => {
+    teardown = () => {
+      preservedViewportViewRef.current = { sceneSessionId, view: initializedViewport.getCameraView() };
       skyboxStatus.dispose();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
@@ -1460,13 +1516,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       setAutoPatrolRecordStore(null);
       initializedGizmo.dispose();
       initializedRuntime.onModelStatisticsChanged = undefined;
+      const closingSessionId = statisticsSceneSessionRef.current ?? sceneSessionId;
       statisticsSceneSessionRef.current = null;
       const currentState = useEditorStore.getState();
-      currentState.setSceneModelStatistics(null, currentState.sceneSessionId);
-      const closingTrace = getSceneProjectOpenContext(currentState.sceneSessionId);
-      if (closingTrace && getSceneProjectOpenRecorder(currentState.sceneSessionId)) {
+      if (currentState.sceneSessionId === closingSessionId) currentState.setSceneModelStatistics(null, closingSessionId);
+      const closingTrace = getSceneProjectOpenContext(closingSessionId);
+      if (closingTrace && getSceneProjectOpenRecorder(closingSessionId)) {
         try { initializedRuntime.completeProjectOpenRuntime('cancelled', 'aborted'); }
-        catch { getSceneProjectOpenRecorder(currentState.sceneSessionId)?.noteDiagnosticFailure(); }
+        catch { getSceneProjectOpenRecorder(closingSessionId)?.noteDiagnosticFailure(); }
         finishProjectOpenTrace(closingTrace, 'cancelled');
       }
       initializedRuntime.dispose();
@@ -1483,7 +1540,25 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       setSelectedModelMeasurement(null);
       setSelectedGroupSpatialInfo(null);
     };
+    window.addEventListener('resize', resize);
+    window.addEventListener('blur', cancelActiveGizmoDrag);
+    window.addEventListener('keydown', cancelGizmoOnEscape);
+    resize();
+    runtimeReadyKeyRef.current = viewportSessionKey;
+    setRuntimeReadyGeneration(generation => generation + 1);
+    };
+    void initialize().catch(error => {
+      cleanup();
+      if (disposed || abortController.signal.aborted) return;
+      console.error('Scene View 初始化收尾失败。', error);
+      setViewportError(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
+      pushLog(`Scene View 渲染引擎初始化失败：${getErrorMessage(error)}`);
+      stopRuntimePreview();
+    });
+    return () => { disposed = true; abortController.abort(); cleanup(); };
   }, [
+    viewportSessionKey,
+    replaceCanvas,
     previewEntityTransform,
     commitEntityTransform,
     previewEnvironmentTransform,
@@ -1518,13 +1593,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   /** 执行 Store 发起的候选环境事务；旧环境会保留到候选加载成功。 */
   useEffect(() => {
-    if (!environmentApplyRequest) return;
+    if (!environmentApplyRequest || !runtimeReady) return;
 
     const runtime = runtimeRef.current;
-    if (!runtime) {
-      failEnvironmentApply(environmentApplyRequest.id, 'Scene View 尚未就绪，无法加载环境模型。');
-      return;
-    }
+    if (!runtime) return;
 
     let active = true;
     void runtime.applyEnvironment(environmentApplyRequest.runtimeEnvironment ?? environmentApplyRequest.environment, {
@@ -1541,10 +1613,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     return () => {
       active = false;
     };
-  }, [environmentApplyRequest, completeEnvironmentApply, failEnvironmentApply]);
+  }, [runtimeReady, runtimeReadyGeneration, environmentApplyRequest, completeEnvironmentApply, failEnvironmentApply]);
 
   useSceneLightingPreview({
     lightingBakeRequest, runtimeRef, isRuntimePreview, sceneSessionId, lightingDebugVisible, lightingComparisonEnabled, lightingNodeFocusRequest, lightingManagerOpen, viewportRef, statisticsSceneSessionRef, lightingManagerPreviewRequest, sceneDocument,
+    runtimeReady: runtimeReady && runtimeSyncedGeneration === runtimeReadyGeneration, runtimeReadyGeneration,
   });
 
   /** 参数值变化走单实体同步；计划无关的少量实体变更先尝试局部同步；其它文档内容变化才进入完整 SceneRuntime 同步。 */
@@ -1553,21 +1626,22 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const gizmo = gizmoRef.current;
     // 前序快照effect先发布当前文档；结构同步保持实体/会话门控。
     const currentDocument = editRuntimeSceneDocumentRef.current;
-    if (!runtime || !gizmo || !currentDocument) return;
-    if (isRuntimePreview || runtimeModeRef.current !== 'edit') return;
+    if (!runtime || !gizmo || !currentDocument || !runtimeReady) return;
+    const firstSync = runtimeSynchronizedGenerationRef.current !== runtimeReadyGeneration;
+    if (!firstSync && (isRuntimePreview || runtimeModeRef.current !== 'edit')) return;
     if (sceneRuntimeStartupDeferred) return;
 
     statisticsSceneSessionRef.current = sceneSessionId;
     runtime.beginSceneSession(sceneSessionId, getSceneProjectOpenRecorder(sceneSessionId));
     gizmo.cancelActiveGroupDrag();
-    if (modelParameterSyncEntityId) {
+    if (!firstSync && modelParameterSyncEntityId) {
       runtime.syncModelParameters(
         currentDocument,
         modelParameterSyncEntityId,
         useEditorStore.getState().hierarchySelectionIds,
         { modelArrayIdentityMode: 'visual' },
       );
-    } else if (!(localSyncEntityIds && runtime.syncEntitiesLocally(
+    } else if (firstSync || !(localSyncEntityIds && runtime.syncEntitiesLocally(
       currentDocument,
       localSyncEntityIds,
       useEditorStore.getState().hierarchySelectionIds,
@@ -1579,11 +1653,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         { modelArrayIdentityMode: 'visual' },
       );
     }
+    runtimeSynchronizedGenerationRef.current = runtimeReadyGeneration;
+    if (firstSync) setRuntimeSyncedGeneration(runtimeReadyGeneration);
     // 同一文档重开时运行时可能复用相同统计；新会话仍需主动发布首份快照。
     useEditorStore.getState().setSceneModelStatistics(runtime.getModelStatistics(), sceneSessionId);
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedInspectorSpatialInfo(runtime, selectedEntityIdRef.current);
   }, [
+    runtimeReady,
+    runtimeReadyGeneration,
     sceneSessionId,
     editRuntimeSceneDocument.entityIds,
     editRuntimeSceneDocument.entities,
@@ -1892,6 +1970,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       stopReadinessPolling();
     };
   }, [
+    runtimeReadyGeneration,
     editRuntimeSceneDocument,
     editRuntimeSceneDocument.entities,
     sceneDocument,
@@ -1921,6 +2000,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     attachCurrentSelectionGizmo(runtime, gizmo);
     publishSelectedInspectorSpatialInfo(runtime, selectedEntityId);
   }, [
+    runtimeReadyGeneration,
     attachCurrentSelectionGizmo,
     editRuntimeSceneDocument,
     hierarchySelectionIds,
@@ -2030,6 +2110,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     commitHierarchyGroupTranslation,
     consumeGroupInspectorTransformRequest,
     groupInspectorTransformRequest,
+    runtimeReadyGeneration,
     pushLog,
   ]);
 
@@ -2037,7 +2118,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     const runtime = runtimeRef.current;
     const gizmo = gizmoRef.current;
     const client = mqttTelemetryClientRef.current;
-    if (!runtime || !gizmo || !client) return;
+    if (!runtime || !gizmo || !client || !runtimeReady || sceneRuntimeStartupDeferred) return;
+    if (runtimeSynchronizedGenerationRef.current !== runtimeReadyGeneration) return;
     if (runtimeModeRef.current === runtimeMode) return;
     runtimeModeRef.current = runtimeMode;
 
@@ -2067,7 +2149,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       pushLog(`运行预览初始化失败：${message}`);
       stopRuntimePreview();
     }
-  }, [attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedInspectorSpatialInfo, pushLog, stopRuntimePreview]);
+  }, [runtimeReady, runtimeReadyGeneration, sceneRuntimeStartupDeferred, attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedInspectorSpatialInfo, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -2092,12 +2174,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       runtime.setTelemetryPerformanceTimingEnabled(false);
       setPerformanceRunSnapshot(session.getSnapshot());
     };
-  }, [isPerformanceRun, sceneSessionId]);
+  }, [isPerformanceRun, sceneSessionId, runtimeReadyGeneration]);
 
   useEffect(() => {
     if (!isRuntimePreview) return;
     mqttTelemetryClientRef.current?.updateConfig(mqttConfig);
-  }, [mqttConfig, isRuntimePreview]);
+  }, [mqttConfig, isRuntimePreview, runtimeReadyGeneration]);
 
   /** 环境调整态优先占用 Gizmo；进入预览或退出调整时恢复普通实体选区。 */
   useEffect(() => {
@@ -2124,6 +2206,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     gizmo.setTool(transformTool);
     gizmo.setTransformSpace(transformSpace);
   }, [
+    runtimeReadyGeneration,
     attachCurrentSelectionGizmo,
     environmentAdjustmentActive,
     environmentRuntimePhase,
@@ -2135,24 +2218,24 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   useEffect(() => {
     if (!isRuntimePreview) gizmoRef.current?.setTool(transformTool);
-  }, [transformTool, isRuntimePreview]);
+  }, [transformTool, isRuntimePreview, runtimeReadyGeneration]);
 
   useEffect(() => {
     if (!isRuntimePreview) gizmoRef.current?.setTransformSpace(transformSpace);
-  }, [transformSpace, isRuntimePreview]);
+  }, [transformSpace, isRuntimePreview, runtimeReadyGeneration]);
 
   useEffect(() => {
     if (!isRuntimePreview) gizmoRef.current?.setSnapSettings(snapSettings);
-  }, [snapSettings, isRuntimePreview]);
+  }, [snapSettings, isRuntimePreview, runtimeReadyGeneration]);
 
   /** 场景路线变化时刷新播放控制器；活动路线被删除、禁用或修改会由控制器安全停止。 */
   useEffect(() => {
     autoPatrolPlaybackRef.current?.setRoutes(autoPatrolRoutes);
-  }, [autoPatrolRoutes]);
+  }, [autoPatrolRoutes, runtimeReadyGeneration]);
 
   /** 消费 F1 录制和 Inspector 聚焦请求。 */
   useEffect(() => {
-    if (!autoPatrolCameraRequest) return;
+    if (!autoPatrolCameraRequest || !runtimeReady) return;
     const viewport = viewportRef.current;
     if (autoPatrolCameraRequest.kind === 'capture') {
       const pose = viewport?.getCameraPose();
@@ -2197,7 +2280,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       );
     }
     consumeAutoPatrolCameraRequest(autoPatrolCameraRequest.id);
-  }, [autoPatrolCameraRequest, consumeAutoPatrolCameraRequest, sceneDocument.entities]);
+  }, [autoPatrolCameraRequest, consumeAutoPatrolCameraRequest, sceneDocument.entities, runtimeReady, runtimeReadyGeneration]);
 
   const stopOpeningForPatrol = opening.stop;
   /** Inspector 和悬浮控制器通过 Store 发出一次性播放命令。 */
@@ -2355,11 +2438,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
 
   useEffect(() => {
     viewportRef.current?.setGridSettings(gridSettings);
-  }, [gridSettings]);
+  }, [gridSettings, runtimeReadyGeneration]);
 
   useEffect(() => {
     runtimeRef.current?.setTrajectoryVisible(trajectoryVisible);
-  }, [trajectoryVisible]);
+  }, [trajectoryVisible, runtimeReadyGeneration]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -2383,6 +2466,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       ));
     }
   }, [
+    runtimeReadyGeneration,
     environmentAdjustmentActive,
     environmentApplyRequest,
     environmentRuntimeOverride,
@@ -2393,11 +2477,11 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   ]);
 
   useSceneCameraTransition({
-    cameraResetRequest, manualRoamSnapshot, viewportRef, cameraProjection, cameraOrientation, cameraPoseSaveRequest, consumeCameraPoseSaveRequest, regionViewRequest, manualRoamRef, stopOpening: opening.stop, pauseHistoryReplay, autoPatrolPlaybackRef, consumeCameraResetRequest, sceneDocument,
+    cameraResetRequest: runtimeReady ? cameraResetRequest : null, manualRoamSnapshot, viewportRef, cameraProjection, cameraOrientation, cameraPoseSaveRequest: runtimeReady ? cameraPoseSaveRequest : null, consumeCameraPoseSaveRequest, regionViewRequest: runtimeReady ? regionViewRequest : null, manualRoamRef, stopOpening: opening.stop, pauseHistoryReplay, autoPatrolPlaybackRef, consumeCameraResetRequest, sceneDocument,
   });
 
   useEffect(() => {
-    if (!entityArrayRequest) return;
+    if (!entityArrayRequest || !runtimeReady) return;
 
     const runtime = runtimeRef.current;
     if (!runtime) {
@@ -2413,10 +2497,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       ? runtime.getEntityArrayGeometry(source.id, worldDirection)?.spanMeters ?? null
       : bounds?.geometryReady ? bounds.sizeMeters[axis] : null;
     resolveEntityArrayRequest(entityArrayRequest.id, selectionSpanMeters);
-  }, [entityArrayRequest, resolveEntityArrayRequest]);
+  }, [entityArrayRequest, resolveEntityArrayRequest, runtimeReady, runtimeReadyGeneration]);
 
   useSceneFocusTransition({
-    sceneFocusRequest, runtimeRef, viewportRef, manualRoamRef, sceneDocumentRef, sceneFocusPerformanceRef, consumeSceneFocusRequest, environmentFocusRequest, sceneDocument, consumeEnvironmentFocusRequest,
+    sceneFocusRequest: runtimeReady ? sceneFocusRequest : null, runtimeRef, viewportRef, manualRoamRef, sceneDocumentRef, sceneFocusPerformanceRef, consumeSceneFocusRequest, environmentFocusRequest: runtimeReady ? environmentFocusRequest : null, sceneDocument, consumeEnvironmentFocusRequest,
   });
 
   const entityArrayDialogValidationError = entityArrayDialog
@@ -2506,7 +2590,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       <h2 className="scene-title"><span>Scene</span><CompositionEditStatus /></h2>
       <div className={(isRuntimePreview ? 'scene-viewport scene-viewport-preview' : 'scene-viewport') + (isRuntimePreview && opening.active ? ' opening-presentation-active' : '')}>
         <canvas
-          ref={canvasRef}
+          key={`${viewportSessionKey}:${canvasRevision}`}
+          ref={attachCanvas}
           className="scene-canvas"
           onDragOver={handleCanvasDragOver}
           onDoubleClick={event => {

@@ -14,6 +14,7 @@ import { formatBuiltInMeshBaseDimensionsMeters } from '../model/builtInMeshGeome
 import type { LightKind, MeshKind } from '../model/components';
 import { POI_EFFECT_DEFINITIONS, VISIBLE_POI_EFFECT_DEFINITIONS } from '../model/poiEffect';
 import { getAlarmEffectThumbnail } from './alarmEffectThumbnails';
+import { getEffectThumbnail } from './effectThumbnails';
 import { DEFAULT_MODEL_LENGTH_UNIT_INFO, formatModelLengthUnit } from '../model/sceneUnits';
 import type { AssetEntry, BuiltInAssetDragPayload, ProjectSkyboxAssetEntry } from './AssetDatabase';
 import { formatSkyboxFileSize } from './skyboxAssets';
@@ -267,12 +268,12 @@ export function createPoiEffectLibraryItems(): BuiltInProjectLibraryItem[] {
       id: `poi-eff-${definition.kind}`,
       name: definition.name,
       icon: definition.icon,
-      thumbnailUrl: getAlarmEffectThumbnail(definition.kind) ?? getConveyorArrowThumbnail(definition.kind),
+      thumbnailUrl: getAlarmEffectThumbnail(definition.kind) ?? getConveyorArrowThumbnail(definition.kind) ?? getEffectThumbnail(definition.kind),
       subtitle: `EFF · ${definition.subtitle}`,
       hasStatusBadge: true,
       builtIn: { kind: 'poi-effect', effectKind: definition.kind },
     })),
-    ...EXISTING_EFFECT_COMPONENT_ITEMS,
+    ...EXISTING_EFFECT_COMPONENT_ITEMS.map(item => ({ ...item, thumbnailUrl: item.thumbnailUrl ?? getEffectThumbnail(item.id) })),
   ];
 }
 

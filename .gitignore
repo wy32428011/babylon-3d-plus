@@ -9,6 +9,8 @@ dist-electron
 release/
 CLAUDE.md
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 temp.log
 dist-viewer-template/
 output/

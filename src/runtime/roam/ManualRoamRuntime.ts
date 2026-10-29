@@ -3,7 +3,7 @@ import '../babylon/babylonGltfLoader.js';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { Ray } from '@babylonjs/core/Culling/ray.js';
-import { Engine } from '@babylonjs/core/Engines/engine.js';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
 import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
@@ -78,7 +78,7 @@ export type ManualRoamTouchAction = 'jump' | 'ascend' | 'descend' | 'sprint';
 
 export type ManualRoamRuntimeOptions = {
   scene: Scene;
-  engine: Engine;
+  engine: AbstractEngine;
   camera: ArcRotateCamera;
   canvas: HTMLCanvasElement;
   avatarUrl?: string;

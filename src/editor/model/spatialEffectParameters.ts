@@ -53,6 +53,7 @@ const registry: Record<string, Definition[]> = {
   'radar-sector': [number('sectorDegrees','扫描扇角 (度)',60,1,360,'扫描'),number('startAngleDegrees','起始朝向 (度)',0,-360,360,'扫描'),select('rotationDirection','旋转方向','forward',[['forward','正向'],['reverse','反向']],'扫描'),number('rangeRings','距离刻度圈',4,0,32,'扫描')],
   'light-pillar': [number('bottomRadius','底部半径 (米)',0.175,0.005,10000,'光柱'),number('topRadius','顶部半径 (米)',0.06,0,10000,'光柱'),boolean('showBase','显示底圈',true,'光柱')],
   'energy-dome': [number('gridColumns','网格列数',36,3,256,'罩体'),number('gridRows','网格行数',14,2,128,'罩体'),number('gridLineWidth','网格线宽',0.028,0.001,0.2,'罩体'),boolean('showBase','显示底圈',true,'罩体')],
+  'glow-strip': [number('lightRange','照明范围 (米)',2,0.1,20,'照明'),number('lightStrength','照明强度',1,0,4,'照明'),number('lightOffset','光源局部 Y 偏移 (米)',0.12,-2,2,'照明')],
   'flow-path': flow,
   'flow-arrows': [...flow,...arrows],
   'fly-line': [...flow,number('arcSegments','弧线精度',64,8,128,'飞线')],

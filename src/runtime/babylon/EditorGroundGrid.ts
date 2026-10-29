@@ -1,6 +1,6 @@
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
-import { Engine } from '@babylonjs/core/Engines/engine.js';
+import { ShaderLanguage } from '@babylonjs/core/Materials/shaderLanguage.js';
 import { ShaderMaterial } from '@babylonjs/core/Materials/shaderMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Vector2 } from '@babylonjs/core/Maths/math.vector.js';
@@ -150,6 +150,81 @@ void main(void) {
 }
 `;
 
+// 与 GLSL 共用参数和米制算法，仅改变 shader 语言，不降低网格层级、线宽或淡出质量。
+const GRID_VERTEX_SHADER_WGSL = `
+attribute position: vec3f;
+uniform worldViewProjection: mat4x4f;
+uniform gridOriginModulo: vec2f;
+uniform gridRadiusMeters: f32;
+varying vGridPosition: vec2f;
+varying vLocalMeters: vec2f;
+@vertex
+fn main(input: VertexInputs) -> FragmentInputs {
+  let localMeters = vertexInputs.position.xz * uniforms.gridRadiusMeters;
+  vertexOutputs.vLocalMeters = localMeters;
+  vertexOutputs.vGridPosition = localMeters + uniforms.gridOriginModulo;
+  var clipPosition = uniforms.worldViewProjection * vec4f(vertexInputs.position, 1.0);
+  if (clipPosition.w > 0.0) {
+    clipPosition.z = min(clipPosition.z, clipPosition.w * 0.999999);
+  }
+  vertexOutputs.position = clipPosition;
+}
+`;
+
+const GRID_FRAGMENT_SHADER_WGSL = `
+varying vGridPosition: vec2f;
+varying vLocalMeters: vec2f;
+uniform baseCellSizeMeters: f32;
+uniform fadeStartSquared: f32;
+uniform fadeEndSquared: f32;
+uniform minorLineColor: vec3f;
+uniform majorLineColor: vec3f;
+uniform coarseLineColor: vec3f;
+uniform minorLineAlpha: f32;
+uniform majorLineAlpha: f32;
+uniform coarseLineAlpha: f32;
+fn getGridLine(gridPosition: vec2f, derivative: vec2f, lineWidthPixels: f32) -> f32 {
+  let distanceToCell = abs(fract(gridPosition - vec2f(0.5)) - vec2f(0.5)) / derivative;
+  let distanceToLine = min(distanceToCell.x, distanceToCell.y);
+  return 1.0 - smoothstep(lineWidthPixels, lineWidthPixels + 1.0, distanceToLine);
+}
+fn getCellVisibility(derivative: vec2f, fadeInPixels: f32, fullPixels: f32) -> f32 {
+  let pixelsPerCell = 1.0 / max(max(derivative.x, derivative.y), 0.00001);
+  return smoothstep(fadeInPixels, fullPixels, pixelsPerCell);
+}
+@fragment
+fn main(input: FragmentInputs) -> FragmentOutputs {
+  let majorCellSizeMeters = uniforms.baseCellSizeMeters * 10.0;
+  let coarseCellSizeMeters = uniforms.baseCellSizeMeters * 100.0;
+  let minorGridPosition = fragmentInputs.vGridPosition / max(uniforms.baseCellSizeMeters, 0.0001);
+  let majorGridPosition = fragmentInputs.vGridPosition / max(majorCellSizeMeters, 0.0001);
+  let coarseGridPosition = fragmentInputs.vGridPosition / max(coarseCellSizeMeters, 0.0001);
+  let minorDerivative = max(fwidth(minorGridPosition), vec2f(0.00001));
+  let majorDerivative = max(fwidth(majorGridPosition), vec2f(0.00001));
+  let coarseDerivative = max(fwidth(coarseGridPosition), vec2f(0.00001));
+  let minorVisibility = getCellVisibility(minorDerivative, 1.5, 3.5);
+  let majorVisibility = getCellVisibility(majorDerivative, 1.25, 3.0);
+  let coarseVisibility = getCellVisibility(coarseDerivative, 0.75, 2.0);
+  let distanceSquared = dot(fragmentInputs.vLocalMeters, fragmentInputs.vLocalMeters);
+  let normalizedDistanceSquared = distanceSquared / max(uniforms.fadeEndSquared, 0.0001);
+  let minorDistanceFade = 1.0 - smoothstep(0.09, 0.3844, normalizedDistanceSquared);
+  let majorDistanceFade = 1.0 - smoothstep(0.2704, 0.6724, normalizedDistanceSquared);
+  let outerFade = 1.0 - smoothstep(uniforms.fadeStartSquared, uniforms.fadeEndSquared, distanceSquared);
+  let minorCoverage = getGridLine(minorGridPosition, minorDerivative, 0.55) * minorVisibility * minorDistanceFade;
+  let majorCoverage = getGridLine(majorGridPosition, majorDerivative, 0.78) * majorVisibility * majorDistanceFade;
+  let coarseCoverage = getGridLine(coarseGridPosition, coarseDerivative, 1.0) * coarseVisibility;
+  let minorContribution = minorCoverage * uniforms.minorLineAlpha;
+  let majorContribution = majorCoverage * uniforms.majorLineAlpha;
+  let coarseContribution = coarseCoverage * uniforms.coarseLineAlpha;
+  let lineAlpha = max(max(minorContribution, majorContribution), coarseContribution) * outerFade;
+  if (lineAlpha <= ${GRID_MIN_ALPHA.toFixed(3)}) { discard; }
+  var lineColor = uniforms.minorLineColor;
+  if (majorContribution >= minorContribution) { lineColor = uniforms.majorLineColor; }
+  if (coarseContribution >= max(minorContribution, majorContribution)) { lineColor = uniforms.coarseLineColor; }
+  fragmentOutputs.color = vec4f(lineColor, lineAlpha);
+}
+`;
+
 /** 将网格中心吸附到十个基础格的整数倍，减少相机移动时的 Mesh/Uniform 更新。 */
 export function calculateEditorGridAnchorCoordinate(
   worldCoordinate: number,
@@ -178,7 +253,7 @@ function quantizeCoverageRadius(radiusMeters: number, cellSizeMeters: EditorGrid
 /** 根据当前相机投影估算地面有效工作区，有限覆盖后由 Shader 在边缘渐隐。 */
 function calculateCoverageRadius(
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   cellSizeMeters: EditorGridCellSize,
 ): number {
   const renderWidth = Math.max(1, engine.getRenderWidth());
@@ -240,7 +315,7 @@ function calculateCoverageRadius(
 export function createEditorGroundGrid(
   scene: Scene,
   camera: ArcRotateCamera,
-  engine: Engine,
+  engine: AbstractEngine,
   initialSettings: EditorGridSettings,
 ): EditorGroundGridController {
   let settings = { ...initialSettings };
@@ -262,10 +337,11 @@ export function createEditorGroundGrid(
     'EditorGroundGridMaterial',
     scene,
     {
-      vertexSource: GRID_VERTEX_SHADER,
-      fragmentSource: GRID_FRAGMENT_SHADER,
+      vertexSource: engine.isWebGPU ? GRID_VERTEX_SHADER_WGSL : GRID_VERTEX_SHADER,
+      fragmentSource: engine.isWebGPU ? GRID_FRAGMENT_SHADER_WGSL : GRID_FRAGMENT_SHADER,
     },
     {
+      shaderLanguage: engine.isWebGPU ? ShaderLanguage.WGSL : ShaderLanguage.GLSL,
       attributes: ['position'],
       uniforms: [
         'worldViewProjection',

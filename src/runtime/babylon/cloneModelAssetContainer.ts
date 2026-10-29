@@ -21,16 +21,21 @@ export function prepareModelAssetTemplate(source: AssetContainer): void {
 }
 
 /**
- * 从只读解析模板创建完整工作容器。参数脚本可能直接改顶点、材质、贴图变换和动画，
- * 因此只共享内部纹理像素（Babylon 自带引用计数），其余可变对象均按实体隔离。
+ * 从只读解析模板创建完整工作容器。默认隔离材质和几何，只有验证后的明确集合才借用源材质。
+ * 可写目标及包含可写子材质的 MultiMaterial 继续克隆；可变纹理包装保持独立。
  */
-export function cloneModelAssetContainer(source: AssetContainer, shareReadonlyGeometry = false): AssetContainer {
+export function cloneModelAssetContainer(source: AssetContainer, shareReadonlyGeometry = false,
+  readonlyMaterials?: ReadonlySet<Material>): AssetContainer {
   const scene = source.scene;
   const working = new AssetContainer(scene);
   const materials = new Map<Material, Material>();
   const animations = new Map<Animation, Animation>();
   const materialTargets = new Map<unknown, unknown>();
   const ownedTextures = new Set<AssetContainer['textures'][number]>();
+  const readonlyTextures = new Set<AssetContainer['textures'][number]>();
+  for (const material of readonlyMaterials ?? []) {
+    for (const texture of material.getActiveTextures()) readonlyTextures.add(texture);
+  }
   const sourceRoots = [...source.transformNodes, ...source.meshes, ...source.cameras, ...source.lights]
     .filter(node => !node.parent);
   const existingMaterials = new Set([...source.materials, ...source.multiMaterials]
@@ -43,6 +48,11 @@ export function cloneModelAssetContainer(source: AssetContainer, shareReadonlyGe
   const cloneMaterial = (material: Material): Material => {
     const existing = materials.get(material);
     if (existing) return existing;
+    if (readonlyMaterials?.has(material)) {
+      materials.set(material, material);
+      materialTargets.set(material, material);
+      return material;
+    }
     // Babylon 9 的 instantiateModelsToScene(cloneMaterials=true) 会改写 MultiMaterial
     // 源对象的 subMaterials；在此显式克隆，保持模板和其它实例完全独立。
     const copy = material instanceof MultiMaterial
@@ -59,7 +69,8 @@ export function cloneModelAssetContainer(source: AssetContainer, shareReadonlyGe
     const sourceTextures = material.getActiveTextures();
     const clonedTextures = copy.getActiveTextures();
     for (const texture of clonedTextures) {
-      if (ownedTextures.has(texture)) continue;
+      // 独占 MultiMaterial 可混合独占/只读子材质，不能把借用子材质的纹理加入工作容器释放清单。
+      if (ownedTextures.has(texture) || readonlyTextures.has(texture)) continue;
       ownedTextures.add(texture);
       working.textures.push(texture);
     }

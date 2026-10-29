@@ -6,6 +6,7 @@ import type { AbstractEngine, AbstractMesh, BaseTexture, Material, Mesh, Scene, 
 import { getLightingLightmapBaseEncoding, type LightingLightmapAssetEncoding } from '../../../electron/shared/sceneLightingTextureCodec.ts';
 const pluginsByMaterial = new WeakMap<Material, BakedLightingMaterialPlugin>();
 const noOwnedTextures = new Set<BaseTexture>();
+const PROBE_UNIFORMS = ['lightingProbePX', 'lightingProbeNX', 'lightingProbePY', 'lightingProbeNY', 'lightingProbePZ', 'lightingProbeNZ'] as const;
 
 export type BakedLightingBinding = { texture?: BaseTexture; rgbmRange?: number; encoding?: LightingLightmapAssetEncoding; mipLevelCount?: number; probes?: readonly number[]; enabled: boolean };
 export const LIGHTING_UV_ATTRIBUTE = 'lightingBakeUV';
@@ -51,8 +52,8 @@ export class BakedLightingMaterialPlugin extends MaterialPluginBase {
     effect.setFloat('lightingBakeRange', binding.rgbmRange ?? 1);
     if (binding.texture) effect.setTexture('lightingBakeSampler', binding.texture);
     const coefficients = binding.probes;
-    for (const [i, axis] of ['PX', 'NX', 'PY', 'NY', 'PZ', 'NZ'].entries()) {
-      effect.setFloat3(`lightingProbe${axis}`, coefficients?.[i * 3] ?? 0, coefficients?.[i * 3 + 1] ?? 0, coefficients?.[i * 3 + 2] ?? 0);
+    for (let i = 0; i < PROBE_UNIFORMS.length; i++) {
+      effect.setFloat3(PROBE_UNIFORMS[i], coefficients?.[i * 3] ?? 0, coefficients?.[i * 3 + 1] ?? 0, coefficients?.[i * 3 + 2] ?? 0);
     }
   }
   override getCustomCode(shaderType: string): Record<string, string> | null {

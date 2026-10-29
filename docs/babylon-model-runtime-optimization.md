@@ -26,7 +26,7 @@
 }
 ```
 
-`geometry: "owned"` 明确要求独占。当前实现**不共享材质**；即使声明材质只读，仍保留隔离以保护 GI、报警和入场插件。未知版本/无源声明/配置不符均不启用新快路。
+`geometry: "owned"` 明确要求 Geometry 独占。带外置脚本或动画的模型材质仍保持独立，以保护参数修改、GI、报警和入场状态；无脚本、无动画的显式只读材质可按下述限定子集共享。未知版本/无源声明/配置不符均不启用新快路。
 
 只读承诺涵盖全部生命周期、参数组合与运行动作，不能调用 `setVerticesData`、`updateVerticesData`、索引/UV/顶点颜色写入、几何烘入变换或在共享 Geometry 上安装实例顶点属性，也不能直接修改取得的数组/缓冲。作者声明不是安全沙箱，静态扫描与摘要匹配也不等于行为证明。
 
@@ -46,7 +46,15 @@ npm run declare:model-readonly -- --scene "场景文件.scene.json" --entity "�
 
 固定 SOURCE 包的 `sourceSnapshot.contentSha256` 优先于普通 `assetRevision`，同时用于模板身份、模型重载及 GLB/脚本请求版本。普通模型与参数变体在声明或脚本集合变更时先重建资源再准入；生成器目标签名也保留固定快照、声明和相关配置。模板在所有加载入口都记录实际 glTF 声明，因此独占消费者先加载不会导致后续共享消费者丢失准入信息。
 
-同构建对照使用 `SceneRuntime.setReadonlyGeometrySharingEnabled(false)` 强制后续候选走完整独占克隆；传 `true` 恢复现有的声明准入策略，仍须通过源、配置和结构验证。应在打开场景前设置，并在独立 Scene 中比较。该开关不写场景文件，不追溯改变已有实例的所有权；已有共享 lease 仍在实例释放时归还。诊断字段 `runtime.loading.modelCache.readonlyGeometrySharingEnabled` 表示当前开关，累计命中计数不随切换清零。
+同构建对照使用 `SceneRuntime.setReadonlyGeometrySharingEnabled(false)` 强制后续候选 Geometry 独占；传 `true` 恢复现有的几何声明准入策略，仍须通过源、配置和结构验证。应在打开场景前设置，并在独立 Scene 中比较。该开关不写场景文件、不控制下述材质共享、不追溯改变已有实例的所有权；已有共享 lease 仍在实例释放时归还。诊断字段 `runtime.loading.modelCache.readonlyGeometrySharingEnabled` 表示当前开关，累计命中计数不随切换清零。
+
+## 无脚本模型的只读材质共享
+
+运行时消费经过同一源/配置验证的 `materials: "shared-readonly"`，但仅接纳空脚本集合、没有脚本元数据及任何节点/材质/纹理动画的模型。框架声明式 `bindings` 和全部 `rules.set` 中的材质目标从创建时就保持独占，不等待规则首次触发后再拆分；可写 MultiMaterial 子树独占，包含可写子材质的父容器也克隆。
+
+其余实际被模型引用、由源容器持有的 Standard/PBR/MultiMaterial 才共享。节点和 metadata 仍独立，Geometry 继续服从自己的声明；共享材质及纹理包装不进入工作容器的释放清单，源 lease 保护最后一个消费者，源材质登记随模板生命周期维护。旧包及任何未知/脚本路径仍沿用原策略，不自动给资源加声明。
+
+例如，仅用声明式参数调整节点位置/缩放、`geometry: "owned"`、`materials: "shared-readonly"` 且摘要一致的无动画模型，过去会完整克隆，现可保持节点/Geometry 独立而共用只读材质；两个材质中只被参数写入的一个仍独占。这不等于任意脚本模型通用材质共享，也不引入跨 GI/入场恢复链的晚期 COW。`runtime.loading.modelCache.sharedMaterialCloneCount` 只累计实际共享的工作容器，不代表 Draw Call 或 FPS 收益。上面的候选包命令仍以只读几何声明为准，不能把它当作材质行为的自动认证。
 
 ## thinInstance 稀疏上传实验
 
@@ -59,6 +67,13 @@ npm run declare:model-readonly -- --scene "场景文件.scene.json" --entity "�
 - 默认关闭。内部 A/B 入口为 `SceneRuntime.setSparseMatrixUploadsEnabled(boolean)`，只影响当前 Scene，不写场景文件或用户配置。净收益未验收前不默认启用。
 
 `runtime.loading.matrixUploads` 提供开关状态、全量/局部/跳过次数、受管矩阵上传字节和恢复次数。这些是本模块的累计计数，不是全部 GPU 流量或真实显存；应按采样前后取差值。
+
+### 已知变换增量
+
+正式阵列另有不依赖上述实验开关的增量路径：保持完整可见布局、无需空间重分片且实体顺序与方向分组不变时，保存数值 Transform 快照，仅重算变化实体的矩阵行，并按已知脏区间上传。源相对矩阵、Geometry、缓冲所有权和索引布局仍逐项核对；裁剪/重排、资源变化或大量变换变化时回退原全量事务。该路径复用既有上下文恢复机制，不修改场景配置，也不删除实例或降低几何精度。
+
+阵列单体拖拽优先沿受控局部同步更新目标及关联批次；预览令牌、权威文档、取消和提交继续隔离，未知外部修改仍走完整同步。此优化减少矩阵构造及上传，不等于整个处理过程达到 O(变化实体数)，也不构成实机场景 FPS 提升保证。`matrixUploads.enabled` 仍仅表示稀疏比较实验开关，因此关闭时也可能记录到已知变换增量产生的局部上传。
+
 
 ## 模型脚本的原生材质初始化入口
 

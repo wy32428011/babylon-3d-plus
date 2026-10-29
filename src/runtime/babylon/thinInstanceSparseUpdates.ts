@@ -62,6 +62,20 @@ export function copyMatrixRows(target: Float32Array, source: Float32Array, count
   return ranges;
 }
 
+/** 已知脏行由权威变换增量产生，不依赖实验性的全缓冲比较开关；碎片过多时仍合并为一次全量上传。 */
+export function matrixUploadRangesForRows(rows: readonly number[], count: number): MatrixUploadRange[] | undefined {
+  const ranges: MatrixUploadRange[] = [];
+  let previous = -1;
+  for (const row of rows) {
+    if (!Number.isInteger(row) || row <= previous || row >= count) throw new RangeError('实例矩阵脏行范围无效。');
+    const last = ranges[ranges.length - 1];
+    if (last && last.start + last.count === row) last.count++;
+    else ranges.push({ start: row, count: 1 });
+    previous = row;
+  }
+  return ranges.length > 8 || rows.length > count / 4 ? undefined : ranges;
+}
+
 /** 9.12 的 updateDirectly 会丢弃 Buffer 的恢复镜像，恢复后从 thinInstance 权威矩阵重新上传。 */
 function registerMatrixRestore(mesh: Mesh): void {
   if (restoreRegistered.has(mesh)) return;

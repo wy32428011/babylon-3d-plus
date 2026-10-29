@@ -1,13 +1,14 @@
-import { configureModelScriptPersistentCache, precompileModelScriptFile } from './ipc/modelScriptCompiler.js';
+import { configureModelScriptPersistentCache, precompileModelScriptBytes } from './ipc/modelScriptCompiler.js';
 import { assertLightingBakeResourceFile } from './ipc/sceneLightingBakeResources.js';
 import { registerCompositionIpc } from './ipc/compositionIpc.js';
-import { app, BrowserWindow, protocol, safeStorage } from 'electron';
-import { promises as fs } from 'node:fs';
+import { app, BrowserWindow, dialog, protocol, safeStorage, shell } from 'electron';
 import path from 'node:path';
 import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isTrustedEditorUrl, trustEditorWindow } from './ipc/trustedEditorIpc.js';
+import { guardEditorWindowClose, registerWindowCloseIpc } from './windowCloseGuard.js';
 import { registerAssetIpc } from './ipc/assetIpc.js';
-import { decodeAssetUrl, isAuthorizedAssetFile } from './ipc/assetRegistry.js';
+import { decodeAssetUrl, openAuthorizedAssetFile } from './ipc/assetRegistry.js';
 import { registerEffectDataIpc } from './ipc/effectDataIpc.js';
 import { disposeLightingBakeJobs, registerLightingBakeIpc } from './ipc/lightingBakeIpc.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
@@ -31,6 +32,10 @@ const FAILURE_PAGE_BACKGROUND = '#1e1e1e';
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindowReference: BrowserWindow | null = null;
+let mainWindowCloseGuard: ReturnType<typeof guardEditorWindowClose> | null = null;
+let quitAfterWindowClose = false;
+const devServerUrl = !app.isPackaged ? process.env.VITE_DEV_SERVER_URL : undefined;
+const rendererEntryUrl = devServerUrl || pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
 let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = findDataPlatformDeepLink(process.argv);
 
 if (!hasSingleInstanceLock) {
@@ -175,8 +180,6 @@ function attachRendererDiagnostics(mainWindow: BrowserWindow, rendererTarget: st
 
 /** 加载 React renderer，开发模式优先连接 Vite，生产模式加载 dist/index.html。 */
 async function loadRenderer(mainWindow: BrowserWindow): Promise<void> {
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
-
   if (devServerUrl) {
     attachRendererDiagnostics(mainWindow, devServerUrl);
     await mainWindow.loadURL(devServerUrl);
@@ -204,14 +207,46 @@ function createMainWindow(): void {
     icon: path.join(__dirname, '../build/icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
+      additionalArguments: [`--editor-entry-url=${encodeURIComponent(rendererEntryUrl)}`],
       contextIsolation: true,
       nodeIntegration: false,
       webgl: true,
     },
   });
   mainWindowReference = mainWindow;
+  trustEditorWindow(mainWindow, rendererEntryUrl);
+  mainWindowCloseGuard = guardEditorWindowClose(mainWindow, () => { quitAfterWindowClose = false; });
+  let externalPromptActive = false;
+  const offerExternalLink = async (value: string) => {
+    if (externalPromptActive || mainWindow.isDestroyed()) return;
+    let url: URL;
+    try { url = new URL(value); } catch { return; }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || value.length > 4096) return;
+    externalPromptActive = true;
+    try {
+      const answer = await dialog.showMessageBox(mainWindow, { type: 'question', title: '打开外部链接',
+        message: '是否在系统浏览器打开此链接？', detail: url.href,
+        buttons: ['取消', '打开'], defaultId: 0, cancelId: 0 });
+      if (answer.response === 1 && !mainWindow.isDestroyed()) await shell.openExternal(url.href);
+    } catch (error) { console.error('[electron] 打开外部链接失败。', error); }
+    finally { externalPromptActive = false; }
+  };
+  mainWindow.webContents.setWindowOpenHandler(details => {
+    void offerExternalLink(details.url);
+    return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isTrustedEditorUrl(url, rendererEntryUrl)) return;
+    event.preventDefault();
+    void offerExternalLink(url);
+  });
+  mainWindow.webContents.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame && !isTrustedEditorUrl(url, rendererEntryUrl)) event.preventDefault();
+  });
+  mainWindow.webContents.on('will-attach-webview', event => event.preventDefault());
   mainWindow.once('closed', () => {
-    if (mainWindowReference === mainWindow) mainWindowReference = null;
+    if (mainWindowReference === mainWindow) { mainWindowReference = null; mainWindowCloseGuard = null; }
+    if (quitAfterWindowClose) { quitAfterWindowClose = false; app.quit(); }
   });
   mainWindow.webContents.on('did-finish-load', () => {
     if (!pendingDataPlatformDeepLink || mainWindow.isDestroyed()) return;
@@ -229,44 +264,44 @@ function createMainWindow(): void {
 /** 注册受控本地模型资源协议，只允许读取资产索引授权过的文件。 */
 function registerEditorAssetProtocol(): void {
   protocol.handle('editor-asset', async (request) => {
-    const filePath = decodeAssetUrl(request.url);
-
-    if (!isAuthorizedAssetFile(filePath)) {
-      return new Response('Forbidden', { status: 403 });
-    }
-
+    let filePath: string;
+    try { filePath = decodeAssetUrl(request.url); }
+    catch { return new Response('资产 URL 格式不正确。', { status: 400 }); }
     const lightingResource = /[\\/]Assets[\\/]LightingBakes[\\/]/i.test(filePath);
-    let stat;
+    let opened: Awaited<ReturnType<typeof openAuthorizedAssetFile>>;
     try {
       if (lightingResource) await assertLightingBakeResourceFile(filePath);
-      stat = await fs.stat(filePath);
-    }
-    catch (error) {
+      opened = await openAuthorizedAssetFile(filePath);
+    } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') return new Response('本地资源文件不存在。', { status: 404 });
-      if (code === 'EACCES' || code === 'EPERM') return new Response('无权限读取本地资源文件。', { status: 403 });
-      if (lightingResource) return new Response('光照资源路径未通过校验。', { status: 403 });
+      if (code === 'EACCES' || code === 'EPERM' || code === 'ELOOP' || lightingResource) {
+        return new Response('资源路径未通过授权校验。', { status: 403 });
+      }
       throw error;
     }
-    if (new URL(request.url).searchParams.get('modelScriptCompiled') === '1') {
-      if (!/\.ts$/i.test(filePath)) return new Response('仅支持模型 TypeScript 脚本。', { status: 400 });
-      // 使用同一授权路径读取实际 TS，编译结果不接受 scene 或 renderer 提供的代码。
-      const artifact = await precompileModelScriptFile(filePath);
-      return new Response(JSON.stringify(artifact), { headers: {
-        'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
-      } });
+    let transferred = false;
+    try {
+      const { handle, stat } = opened;
+      if (new URL(request.url).searchParams.get('modelScriptCompiled') === '1') {
+        if (!/\.ts$/i.test(filePath)) return new Response('仅支持模型 TypeScript 脚本。', { status: 400 });
+        const artifact = await precompileModelScriptBytes(await handle.readFile(), request.signal);
+        return new Response(JSON.stringify(artifact), { headers: {
+          'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store',
+        } });
+      }
+      const decision = resolveEditorAssetProtocolResponse({
+        filePath, size: stat.size, mtimeMs: stat.mtimeMs,
+        ifNoneMatch: request.headers.get('If-None-Match'),
+      });
+      if (decision.status === 304) return new Response(null, { status: 304, headers: decision.headers });
+      const body = createAssetFileByteStream(handle, request.signal, stat.size);
+      const response = new Response(body, { headers: decision.headers });
+      transferred = true;
+      return response;
+    } finally {
+      if (!transferred) await opened.handle.close();
     }
-    const decision = resolveEditorAssetProtocolResponse({
-      filePath,
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      ifNoneMatch: request.headers.get('If-None-Match'),
-    });
-    if (decision.status === 304) {
-      return new Response(null, { status: 304, headers: decision.headers });
-    }
-    const body = createAssetFileByteStream(filePath, request.signal, stat.size);
-    return new Response(body, { headers: decision.headers });
   });
 }
 
@@ -278,6 +313,7 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
     protect: key => safeStorage.encryptString(key.toString('base64')),
     unprotect: encrypted => Buffer.from(safeStorage.decryptString(encrypted), 'base64'),
   } : undefined);
+  registerWindowCloseIpc();
   registerEditorAssetProtocol();
   registerProjectIpc();
   registerCompositionIpc();
@@ -307,6 +343,12 @@ let quitCleanupStarted = false;
 let quitCleanupCompleted = false;
 
 app.on('before-quit', (event) => {
+  if (mainWindowReference && !mainWindowReference.isDestroyed() && !mainWindowCloseGuard?.isApproved()) {
+    event.preventDefault();
+    quitAfterWindowClose = true;
+    mainWindowReference.close();
+    return;
+  }
   if (quitCleanupCompleted) return;
   event.preventDefault();
   if (quitCleanupStarted) return;

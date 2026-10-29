@@ -22,12 +22,13 @@ export class LightingProbeSampler {
   }
 
   sample(position: Position, visible: (point: Position) => boolean = () => true): number[] | null {
-    const center = position.map(v => Math.floor(v / this.spacing));
+    const centerX = Math.floor(position[0] / this.spacing), centerY = Math.floor(position[1] / this.spacing), centerZ = Math.floor(position[2] / this.spacing);
     const nearby: Array<{ probe: Probe; distance: number }> = [];
     for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
-      const probes = this.cells.get(`${center[0] + x},${center[1] + y},${center[2] + z}`) ?? [];
+      const probes = this.cells.get(`${centerX + x},${centerY + y},${centerZ + z}`);
+      if (!probes) continue;
       for (const probe of probes) {
-        const distance = Math.hypot(...probe.position.map((v, i) => v - position[i]));
+        const distance = Math.hypot(probe.position[0] - position[0], probe.position[1] - position[1], probe.position[2] - position[2]);
         if (distance <= this.spacing * 1.75) nearby.push({ probe, distance });
       }
     }
@@ -46,6 +47,7 @@ export class LightingProbeSampler {
       total += weight;
       for (let i = 0; i < 18; i++) result[i] += probe.irradiance[i] * weight;
     }
-    return result.map(value => value / total);
+    for (let i = 0; i < result.length; i++) result[i] /= total;
+    return result;
   }
 }

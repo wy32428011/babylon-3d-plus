@@ -1,6 +1,6 @@
 import * as decoder from '@babylonjs/ktx2decoder';
 import { DefaultKTX2DecoderOptions, KhronosTextureContainer2 } from '@babylonjs/core/Misc/khronosTextureContainer2.js';
-import type { Engine } from '@babylonjs/core/Engines/engine.js';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
 import type { IKTX2DecoderOptions, ICompressedFormatCapabilities } from '@babylonjs/core/Materials/Textures/ktx2decoderTypes.js';
 import type { LocalKtx2DecoderUrls } from './ktx2DecoderConfiguration';
 import { Ktx2DecodeWorkerPool, Ktx2WorkerInfrastructureError } from './ktx2DecodeWorkerPool';
@@ -22,7 +22,7 @@ let installed = false;
 const metrics = { workers: 0, submitted: 0, completed: 0, mainThread: 0, infrastructureFallbacks: 0, lastFallback: null as string | null };
 
 /** 只登记应用刚创建的实际Engine caps，不对外部decoder调用的未知capability对象做额外读取。 */
-export function registerKtx2WorkerEngine(engine: Engine): void { engineCapabilities.add(engine.getCaps()); }
+export function registerKtx2WorkerEngine(engine: AbstractEngine): void { engineCapabilities.add(engine.getCaps()); }
 export function getLocalKtx2DecodeDiagnostics() { return { ...metrics, installed }; }
 
 // 这些对象由引擎原函数的新literal产生；只登记其内建decision tree，不认证调用方的bypass数组。

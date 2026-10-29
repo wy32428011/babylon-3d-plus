@@ -1,4 +1,5 @@
-import { dialog, ipcMain } from 'electron';
+import { dialog } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import type { OpeningAssetImportResult, OpeningPackageExportRequest, OpeningPackageExportResult, OpeningPackageImportResult, OpeningPackageListResult } from '../types.js';
 import { getCurrentProjectRoot, listProjectAssets, selectCurrentProjectRootWithDialog } from './projectAssetStore.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';

@@ -17,6 +17,7 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import { ParticleSystem } from '@babylonjs/core/Particles/particleSystem.js';
+import { createRuntimeParticleSystem, type RuntimeParticleSystem } from '../gpuParticleRuntime.ts';
 import { Scene } from '@babylonjs/core/scene.js';
 import type { Material, AbstractMesh, Nullable, Observer } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
@@ -41,7 +42,7 @@ const PARTICLE_TEXTURE_SIZE = 48;
 type PoiResources = {
   meshes: Mesh[];
   materials: Material[];
-  particleSystems: ParticleSystem[];
+  particleSystems: RuntimeParticleSystem[];
   textures: Texture[];
   lightWall: LightWallFence | null;
   conveyorArrow: ConveyorArrowEffect | null;
@@ -637,7 +638,7 @@ export class PoiEffectRuntime {
   /** 添加粒子系统，并使用挂在 root 下的不可见 Mesh 作为受实体变换驱动的发射器。 */
   private addParticles(resources: PoiResources, root: TransformNode, component: PoiEffectComponent, spec: ParticleSpec): void {
     const capacity = Math.max(24, Math.round(spec.rate * component.density * component.intensity));
-    const system = new ParticleSystem(spec.name, capacity, this.scene);
+    const system = createRuntimeParticleSystem(spec.name, capacity, this.scene);
     const texture = this.createParticleTexture(`${spec.name}_texture`, spec.color);
     const emitter = MeshBuilder.CreateBox(`${spec.name}_emitter`, { size: 0.01 }, this.scene);
     emitter.parent = root;

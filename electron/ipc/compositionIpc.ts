@@ -4,7 +4,8 @@ import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContrac
 import { importCompositionArchive, exportCompositionArchive } from './compositionArchive.js';
 import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
 import { getScenePublishScope } from './scenePublishScope.js';
-import { ipcMain, dialog } from 'electron';
+import { dialog } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { readDataPlatformConfig, isDataPlatformProjectClosing } from './dataPlatformIpc.js';

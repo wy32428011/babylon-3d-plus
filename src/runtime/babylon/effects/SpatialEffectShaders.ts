@@ -89,6 +89,13 @@ void main() {
     float fine=sin((waterPosition.x+waterPosition.y)*wave.x*2.17391+time*TAU*3.0);
     float crest=pow(clamp(waves*0.55+fine*0.2+0.3,0.0,1.0),7.0);
     crest=clamp(crest*wave.y,0.0,1.0); rgb=mix(primary*0.45,secondary,crest); a=0.55+crest*0.4;
+  } else if(mode>10.5) {
+    float distanceFromCenter=abs(p.y);
+    float core=1.0-smoothstep(0.18,0.36,distanceFromCenter);
+    float halo=pow(max(0.0,1.0-distanceFromCenter),2.0);
+    a=clamp(core*0.8+halo*0.2,0.0,1.0);
+    rgb=primary;
+    glow=1.0;
   } else if(mode>9.5) {
     a=pow(vUv.x,detail.y)*pow(max(0.0,1.0-abs(p.y)),0.65);
     rgb=mix(primary,secondary,vUv.x); glow=1.3;

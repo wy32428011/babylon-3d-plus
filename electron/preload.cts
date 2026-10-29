@@ -99,7 +99,19 @@ ipcRenderer.on('data-platform:deepLinkOpen', (_event: IpcRendererEvent, payload:
   for (const handler of dataPlatformDeepLinkHandlers) handler(payload);
 });
 
-contextBridge.exposeInMainWorld('editorApi', {
+/** sandbox preload 无法加载相对模块；入口地址由主进程参数传入，不信任网页自报来源。 */
+function isTrustedPreloadPage(): boolean {
+  try {
+    const argument = process.argv.find(value => value.startsWith('--editor-entry-url='));
+    if (!process.isMainFrame || !argument) return false;
+    const expected = new URL(decodeURIComponent(argument.slice('--editor-entry-url='.length)));
+    const actual = new URL(location.href);
+    return !actual.username && !actual.password && actual.protocol === expected.protocol && actual.host === expected.host
+      && (actual.pathname === expected.pathname || (expected.pathname === '/' && actual.pathname === '/index.html'));
+  } catch { return false; }
+}
+
+if (isTrustedPreloadPage()) contextBridge.exposeInMainWorld('editorApi', {
   startLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakeContract.js').SceneLightingBakeSnapshot> => ipcRenderer.invoke('lighting-bake:start', input),
   preflightLightingBake: (input: import('./shared/sceneLightingBakeContract.js').LightingBakeInput | import('./shared/sceneLightingBakeBinary.js').LightingBakeBinaryInput): Promise<import('./shared/sceneLightingBakePreflight.js').LightingBakePreflight> => ipcRenderer.invoke('lighting-bake:preflight', input),
   lightingBakeResourceBudget: (): Promise<import('./shared/sceneLightingBakeResources.js').LightingBakeResourceBudget> => ipcRenderer.invoke('lighting-bake:resourceBudget'),
@@ -127,9 +139,25 @@ contextBridge.exposeInMainWorld('editorApi', {
   syncCompositions: () => ipcRenderer.invoke('composition:sync'),
   restoreComposition: (id: string, revision: string) => ipcRenderer.invoke('composition:restore', id, revision),
   version: '0.1.0',
+  onWindowCloseRequest: (handler: (requestId: string) => Promise<void>): (() => void) => {
+    const listener = (_event: IpcRendererEvent, requestId: string) => {
+      void handler(requestId).catch(error => {
+        console.error('关闭窗口前检查失败。', error);
+        void ipcRenderer.invoke('editor:confirmClose', requestId, false).catch(() => undefined);
+      });
+    };
+    ipcRenderer.on('editor:requestClose', listener);
+    void ipcRenderer.invoke('editor:closeReady', true).catch(() => undefined);
+    return () => {
+      ipcRenderer.removeListener('editor:requestClose', listener);
+      void ipcRenderer.invoke('editor:closeReady', false).catch(() => undefined);
+    };
+  },
+  confirmWindowClose: (requestId: string, allowed: boolean): Promise<void> => ipcRenderer.invoke('editor:confirmClose', requestId, allowed),
   saveScene: (request: SaveSceneRequest): Promise<SaveSceneResult> => ipcRenderer.invoke('scene:save', request),
   loadScene: (): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:load'),
   loadSceneFile: (request: LoadSceneFileRequest): Promise<LoadSceneResult> => ipcRenderer.invoke('scene:loadFile', request),
+  cancelSceneOpen: (request: { sceneOpenToken: number }): Promise<void> => ipcRenderer.invoke('scene:cancelOpen', request),
   confirmSceneOpen: (request: { sceneOpenToken: number }): Promise<boolean> => ipcRenderer.invoke('scene:confirmOpen', request),
   readTextFile: (request: ReadTextFileRequest): Promise<ReadTextFileResult> => ipcRenderer.invoke('file:readText', request),
   scanAssets: (): Promise<AssetEntry[]> => ipcRenderer.invoke('assets:scan'),

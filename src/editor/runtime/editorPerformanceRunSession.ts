@@ -1,5 +1,6 @@
 import type { ScenePerformanceSnapshot } from '../../runtime/babylon/ScenePerformanceMonitor';
 import type { FrameTimingReport } from '../../runtime/babylon/FrameTimingWindow';
+import { copySceneRenderPassSnapshot } from '../../runtime/babylon/SceneRenderPassDiagnostics.ts';
 import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
 
 const SAMPLE_INTERVAL_MS = 1_000;
@@ -10,7 +11,7 @@ const WARMUP_WINDOW_MS = 2_000;
 
 export type EditorPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
   'sampledAt' | 'fps' | 'frameTimeMs' | 'renderTimeMs' | 'activeMeshesEvaluationMs'
-  | 'gpuFrameTimeMs' | 'renderSurface' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
+  | 'gpuFrameTimeMs' | 'renderPasses' | 'gpuParticles' | 'renderSurface' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
   | 'totalMeshes' | 'totalVertices' | 'thinInstances' | 'activeThinInstances'
   | 'estimatedActiveVertexInvocations' | 'estimatedActiveTriangleInvocations'
   | 'longTaskCount' | 'longTaskDurationMs'>;
@@ -63,6 +64,11 @@ function selectSample(snapshot: EditorPerformanceSourceSnapshot, sampledAt: numb
     renderTimeMs: nullableMetric(snapshot.renderTimeMs),
     activeMeshesEvaluationMs: nullableMetric(snapshot.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(snapshot.gpuFrameTimeMs),
+    ...(snapshot.renderPasses !== undefined ? { renderPasses: copySceneRenderPassSnapshot(snapshot.renderPasses) } : {}),
+    ...(snapshot.gpuParticles ? { gpuParticles: {
+      requested: snapshot.gpuParticles.requested, backend: snapshot.gpuParticles.backend, ready: snapshot.gpuParticles.ready,
+      reason: snapshot.gpuParticles.reason, activeGpuSystems: snapshot.gpuParticles.activeGpuSystems, activeCpuSystems: snapshot.gpuParticles.activeCpuSystems,
+    } } : {}),
     ...(surface !== undefined ? { renderSurface } : {}),
     shaderCompilationMs: nullableMetric(snapshot.shaderCompilationMs),
     drawCalls: nullableMetric(snapshot.drawCalls),

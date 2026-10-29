@@ -1,4 +1,5 @@
-import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { type IpcMainInvokeEvent, type WebContents } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import mqtt, { type IClientSubscribeOptions, type MqttClient } from 'mqtt';
 import type {
   MqttConnectionTestCancelRequest,

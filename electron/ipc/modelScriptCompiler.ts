@@ -115,6 +115,11 @@ export function getModelScriptCompilerMetrics() { return { ...compiler.getMetric
 /** 只读取受调用方授权的脚本文件；每次重读原字节，不以路径或缓存自报摘要替代授权。 */
 export async function precompileModelScriptFile(filePath: string, signal?: AbortSignal): Promise<PrecompiledModelScript & { sourceFileSha256: string }> {
   const bytes = await fs.readFile(filePath, { signal });
+  return precompileModelScriptBytes(bytes, signal);
+}
+
+/** 协议入口使用已校验句柄读出的字节，不重新按路径打开脚本。 */
+export async function precompileModelScriptBytes(bytes: Uint8Array, signal?: AbortSignal): Promise<PrecompiledModelScript & { sourceFileSha256: string }> {
   const artifact = await precompileModelScript(decodeUtf8Text(bytes, '模型脚本'), signal);
   const fileArtifact = { ...artifact, sourceFileSha256: createHash('sha256').update(bytes).digest('hex') };
   serializePrecompiledModelScript(fileArtifact);

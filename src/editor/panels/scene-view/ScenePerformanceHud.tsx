@@ -54,6 +54,12 @@ export function ScenePerformanceHud({ showPerformanceHud, hasStoppedPerformanceR
                   <div><dt>GPU frame</dt><dd>{performanceSnapshot.gpuFrameTimeMs === null ? 'N/A' : `${formatPerformanceMetric(performanceSnapshot.gpuFrameTimeMs)} ms`}</dd></div>
                   <div><dt>Active eval</dt><dd>{formatPerformanceMetric(performanceSnapshot.activeMeshesEvaluationMs)} ms</dd></div>
                   <div><dt>Draw Calls</dt><dd>{formatPerformanceMetric(performanceSnapshot.drawCalls, 0)}</dd></div>
+                  {performanceSnapshot.renderPasses ? <>
+                    <div><dt>阴影 / 其余 DC</dt><dd>{formatPerformanceMetric(performanceSnapshot.renderPasses.shadowDrawCallsPerFrame, 0)} / {formatPerformanceMetric(performanceSnapshot.renderPasses.otherDrawCallsPerFrame, 0)}</dd></div>
+                    <div><dt>RTT / 绘制 CPU</dt><dd>{formatPerformanceMetric(performanceSnapshot.renderPasses.cpuMs.renderTargets)} / {formatPerformanceMetric(performanceSnapshot.renderPasses.cpuMs.draw)} ms</dd></div>
+                    <div><dt>动画 / 粒子 CPU</dt><dd>{formatPerformanceMetric(performanceSnapshot.renderPasses.cpuMs.animations)} / {formatPerformanceMetric(performanceSnapshot.renderPasses.cpuMs.particles)} ms</dd></div>
+                  </> : null}
+                  {performanceSnapshot.gpuParticles ? <div><dt>POI 系统 GPU / CPU</dt><dd title={performanceSnapshot.gpuParticles.reason ?? performanceSnapshot.gpuParticles.backend}>{performanceSnapshot.gpuParticles.activeGpuSystems} / {performanceSnapshot.gpuParticles.activeCpuSystems}</dd></div> : null}
                   <div><dt>Meshes</dt><dd>{performanceSnapshot.activeMeshes} / {performanceSnapshot.totalMeshes}</dd></div>
                   <div><dt>Vertices</dt><dd>{performanceSnapshot.totalVertices.toLocaleString()}</dd></div>
                   <div><dt>Thin instances</dt><dd>{performanceSnapshot.thinInstances.toLocaleString()}</dd></div>
@@ -80,6 +86,7 @@ export function ScenePerformanceHud({ showPerformanceHud, hasStoppedPerformanceR
                     onChange={event => onAdaptiveResolutionChange(event.target.checked)} />
                   移动时降低分辨率（本次会话）
                 </label> : null}
+                {performanceSnapshot.renderPasses ? <p className="scene-performance-run-note">阶段 CPU 为完整帧均值，包含嵌套工作，不可相加；其余 DC 包括主通道和后处理。</p> : null}
                 {isPerformanceRun ? <p className="scene-performance-run-note">1 Hz 采样，CPU 为秒级均值；报告保留本次最近一分钟。</p> : null}
                 <button className="scene-performance-copy" onClick={() => void (isPerformanceRun ? handleCopyPerformanceRunReport() : handleCopyPerformanceReport())} type="button">
                   {isPerformanceRun ? '复制本次性能运行报告' : '复制最近一分钟报告'}

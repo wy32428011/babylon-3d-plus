@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { UnsavedSceneDialog } from './editor/ui/UnsavedSceneDialog';
+import { confirmSceneLeave, isSceneLeaveApprovalCurrent } from './editor/project/sceneLeaveGuard';
 import stackerMqttDemoSceneContent from '../examples/scenes/stacker-mqtt-demo.scene.json?raw';
 import virtualConveyorMqttDemoSceneContent from '../examples/scenes/virtual-conveyor-mqtt-demo.scene.json?raw';
 import { HomePage } from './editor/home/HomePage';
@@ -167,17 +169,32 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    if (!window.editorApi?.onWindowCloseRequest) return undefined;
+    return window.editorApi.onWindowCloseRequest(async requestId => {
+      let allowed = false;
+      try {
+        useEditorStore.getState().stopRuntimePreview();
+        const approval = await confirmSceneLeave(useEditorStore.getState, '关闭编辑器');
+        allowed = Boolean(approval && isSceneLeaveApprovalCurrent(useEditorStore.getState(), approval));
+      } catch (error) {
+        useEditorStore.getState().pushLog(`关闭编辑器前检查失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      await window.editorApi.confirmWindowClose(requestId, allowed);
+    });
+  }, []);
+
   if (view === 'home') {
     return (
-      <HomePage
+      <><UnsavedSceneDialog /><HomePage
         onEnterBlankEditor={enterBlankEditor}
         onEnterProjectEditor={enterEditorWithProject}
         onNewScene={handleNewScene}
         onOpenRecentScene={handleOpenRecentScene}
         onOpenSceneDialog={handleOpenSceneDialog}
-      />
+      /></>
     );
   }
 
-  return <EditorLayout onBackToHome={handleBackToHome} />;
+  return <><UnsavedSceneDialog /><EditorLayout onBackToHome={handleBackToHome} /></>;
 }

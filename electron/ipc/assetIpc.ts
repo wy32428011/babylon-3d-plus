@@ -1,5 +1,6 @@
 import { registerSkyboxPreparationIpc } from './skyboxPreparationIpc.ts';
-import { app, dialog, ipcMain } from 'electron';
+import { app, dialog } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import { importManualRoamAvatarIntoProject } from './manualRoamAvatarStore.js';
 import { importCadFileIntoProject } from './projectCadAssetStore.js';
 import type { ImportManualRoamAvatarResult } from '../types.js';

@@ -47,6 +47,9 @@ type Dependencies = {
 };
 
 
+type SingleTransformPreview = { entityId: string; before: TransformComponent; after: TransformComponent | null;
+  sceneId: string; document: SceneDocument; derived: SceneDocument | null; pending: boolean };
+
 /** SceneDocumentController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class SceneDocumentController {
   constructor(_context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
@@ -55,8 +58,7 @@ export class SceneDocumentController {
   public readonly entityStates = new Map<string, EntityRuntimeState>();
   public readonly syncedEntities = new Map<string, Entity>();
   public disposed = false;
-  public singleTransformPreview: { entityId: string; before: TransformComponent; after: TransformComponent | null;
-    sceneId: string; document: SceneDocument; derived: SceneDocument | null; pending: boolean } | null = null;
+  public singleTransformPreview: SingleTransformPreview | null = null;
   public fullSyncCount = 0;
   public lastFullSyncDurationMs = 0;
   public maxFullSyncDurationMs = 0;
@@ -78,7 +80,7 @@ export class SceneDocumentController {
   }
 
   /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
-  /** 单体拖拽只保持运行时预览；普通节点由 Babylon 直接更新，阵列代理沿原同步路径更新矩阵。 */
+  /** 单体拖拽只保持运行时预览；阵列优先沿受控局部同步链更新，未知变更回退完整同步。 */
   beginSingleTransformPreview(entityId: string, before: TransformComponent): boolean {
     if (this.disposed || this.dependencies.telemetry.telemetryPreviewActive || !this.shadowDocument || !this.dependencies.transforms.getGizmoTargetByEntityId(entityId)) return false;
     this.singleTransformPreview = { entityId, before, after: null, sceneId: this.shadowDocument.id,
@@ -100,7 +102,13 @@ export class SceneDocumentController {
     const preview = this.singleTransformPreview;
     if (!preview?.pending) return;
     preview.pending = false;
-    this.sync(preview.document, [...this.dependencies.selection.selectedEntityIds], { modelArrayIdentityMode: this.dependencies.arrays.modelArrayIdentityMode });
+    const document = this.applySingleTransformPreview(preview.document);
+    const selectedIds = [...this.dependencies.selection.selectedEntityIds];
+    const options = { modelArrayIdentityMode: this.dependencies.arrays.modelArrayIdentityMode };
+    // 只允许本次受控派生文档绕过活动预览门；其它变更仍逐项核对，不能临时清空预览状态冒充普通同步。
+    if (this.singleTransformPreview === preview
+      && this.syncEntitiesLocallyInternal(document, [preview.entityId], selectedIds, options, preview)) return;
+    this.sync(document, selectedIds, options);
   }
 
   public applySingleTransformPreview(document: SceneDocument): SceneDocument {
@@ -159,10 +167,23 @@ export class SceneDocumentController {
     hierarchySelectionIds?: readonly string[],
     options?: SceneRuntimeSyncOptions,
   ): boolean {
+    return this.syncEntitiesLocallyInternal(document, entityIds, hierarchySelectionIds, options, null);
+  }
+
+  private syncEntitiesLocallyInternal(
+    document: SceneDocument,
+    entityIds: readonly string[],
+    hierarchySelectionIds: readonly string[] | undefined,
+    options: SceneRuntimeSyncOptions | undefined,
+    preview: SingleTransformPreview | null,
+  ): boolean {
     const shadow = this.shadowDocument;
     const nextModelArrayIdentityMode = options?.modelArrayIdentityMode ?? this.dependencies.arrays.modelArrayIdentityMode;
     if (
-      this.disposed || entityIds.length === 0 || !shadow || shadow === document || this.singleTransformPreview
+      this.disposed || entityIds.length === 0 || !shadow || shadow === document
+      || (this.singleTransformPreview !== null && this.singleTransformPreview !== preview)
+      || (preview !== null && (this.singleTransformPreview !== preview || document !== preview.derived
+        || entityIds.length !== 1 || entityIds[0] !== preview.entityId))
       || this.dependencies.telemetry.telemetryPreviewActive
       || nextModelArrayIdentityMode !== this.dependencies.arrays.modelArrayIdentityMode
       || shadow.id !== document.id || shadow.entityIds !== document.entityIds
@@ -196,6 +217,8 @@ export class SceneDocumentController {
     const startedAt = readRuntimeTimestampMs();
     this.dependencies.transforms.cancelFolderGroupTransforms();
     this.shadowDocument = document;
+    // 预览原先走完整同步，保留其在环境/实体更新前的光照失效入口。
+    if (preview) this.dependencies.environment.lightingRuntime?.sync(document);
     this.dependencies.effects.poiEffectRuntime.setDocument(document);
     if (this.dependencies.transforms.compositionArrayPreview) {
       const preview = this.dependencies.transforms.compositionArrayPreview;
@@ -203,7 +226,7 @@ export class SceneDocumentController {
       const validMemberIds = new Set(info?.entityIds);
       if (!info || info.error || preview.entityIds.some(id => !validMemberIds.has(id))) this.dependencies.transforms.clearEntityArrayPreview();
     }
-    // 与完整同步保持同一顺序：光照失效判断、灯光/阴影重新应用（含阴影接收面按场景网格重算）先于实体同步。
+    // 与完整同步保持同一顺序：灯光/阴影重新应用（含阴影接收面按场景网格重算）先于实体同步。
     this.dependencies.environment.syncLighting(document);
 
     const nextHighlightSet = mergeSceneRuntimeHighlightEntityIds(

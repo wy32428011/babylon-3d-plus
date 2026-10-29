@@ -27,8 +27,9 @@ type MaskStyle = CSSProperties & {
 export function createViewportScreenMask(
   sceneWindow: DataPlatformViewportScreenComponent['sceneWindow'],
 ): MaskStyle {
-  const x = `${sceneWindow.x * 100}%`;
-  const y = `${sceneWindow.y * 100}%`;
+  // CSS 百分比定位相对剩余空间，而场景窗口坐标相对整个容器。
+  const x = `${sceneWindow.width < 1 ? sceneWindow.x / (1 - sceneWindow.width) * 100 : 0}%`;
+  const y = `${sceneWindow.height < 1 ? sceneWindow.y / (1 - sceneWindow.height) * 100 : 0}%`;
   const width = `${sceneWindow.width * 100}%`;
   const height = `${sceneWindow.height * 100}%`;
   return {
@@ -195,6 +196,7 @@ export function DataPlatformViewportScreenOverlay({
             ref={iframeRef}
             title={`数据中台大屏 ${screen.screenId}`}
             src={iframeSrc}
+            sandbox="allow-scripts allow-same-origin allow-forms"
             onError={() => {
               window.clearTimeout(iframeTimeoutRef.current);
               iframeTimeoutRef.current = undefined;

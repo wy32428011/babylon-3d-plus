@@ -23,7 +23,7 @@ export type ReferenceRenderContext = {
 export type ReferenceOpeningOptions = {
   settings:SceneOpeningAnimationSettings;
   /** 独立开场包提供已校验的本地素材；历史场景仍沿用内置图片。 */
-  assetUrls?:{images:Readonly<Record<number,string>>;atlas:string};
+  assetUrls?:{images:Readonly<Record<number,string>>;atlas:string;logo?:string};
   stageOverrides?:readonly OpeningPackageStage[];
   onSkip?:()=>void;
   onSeek?:(actualSeconds:number)=>void;
@@ -110,6 +110,7 @@ export function createReferenceOpening(container:HTMLElement,options:ReferenceOp
   let images:ReferenceImageMap|null=null,atlas:HTMLImageElement|null=null;
   let resizeObserver:ResizeObserver|null=null,lastSize='',lastStage=-1,lastPause:boolean|null=null;
   let loaded=0;
+  const totalImages=10+(options.assetUrls?.logo?1:0);
   const imageBudget=new OpeningImageBudget();
   const removers:Array<()=>void>=[],cancelLoads=new Set<()=>void>();
   const listen=(target:EventTarget,type:string,callback:EventListener)=>{
@@ -207,7 +208,7 @@ export function createReferenceOpening(container:HTMLElement,options:ReferenceOp
         if(settled)return;settled=true;cleanup();loaded++;
         try{imageBudget.accept(image.naturalWidth,image.naturalHeight,label);}
         catch(error){image.src='';reject(error);return;}
-        if(!state.disposed){els.loadStatus.textContent=`本地资源准备中 · ${loaded} / 10`;els.loadProgress.style.width=`${loaded*10}%`;}
+        if(!state.disposed){els.loadStatus.textContent=`本地资源准备中 · ${loaded} / ${totalImages}`;els.loadProgress.style.width=`${loaded/totalImages*100}%`;}
         resolve(image);
       };
       image.onerror=()=>{if(settled)return;settled=true;cleanup();reject(new Error(`开场资源 ${label} 加载失败。`));};
@@ -262,6 +263,14 @@ export function createReferenceOpening(container:HTMLElement,options:ReferenceOp
       if(state.disposed)return;
       const loadedAtlas=await loadImage(options.assetUrls?.atlas??REFERENCE_ATLAS_URL,'asset-10.webp');
       if(state.disposed)return;
+      if(options.assetUrls?.logo){
+        const logo=await loadImage(options.assetUrls.logo,'brand-logo');
+        if(state.disposed)return;
+        const symbol=wrapper.querySelector('.zd-symbol');
+        if(!symbol)throw new Error('参考开场缺少品牌标志位置。');
+        logo.className='zd-brand-logo';logo.alt='';logo.draggable=false;logo.setAttribute('aria-hidden','true');
+        symbol.replaceWith(logo);logo.parentElement?.classList.add('zd-brand-custom');wrapper.classList.add('has-brand-logo');
+      }
       images=Object.fromEntries(loadedImages.map((image,index)=>[index+1,image]));atlas=loadedAtlas;
       const reduced=settings.motionPreference==='reduced'||(settings.motionPreference==='system'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);
       painter=createPainter(els.backdrop,els.effects,images,{

@@ -1,6 +1,7 @@
 import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
-import { dialog, ipcMain } from 'electron';
-import { promises as fs } from 'node:fs';
+import { dialog } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
+import { withSceneSaveLock, writeSceneFileAtomically } from './sceneFileSave.js';
 
 import type {
   LoadSceneFileRequest,
@@ -22,7 +23,7 @@ import { registerOpeningPackageIpc } from './openingPackageIpc.js';
 import { prepareOpeningSceneContent } from './openingPackageResources.js';
 import { prepareLightingSceneSave, prepareLightingSceneContent } from './sceneLightingBakeResources.js';
 import { preserveLegacyLightingSceneBeforeWrite } from './sceneLightingMigrationSave.js';
-import { beginScenePublishScopeUpdate, confirmScenePublishScopeFile, getScenePublishScope, stageScenePublishScopeFile } from './scenePublishScope.js';
+import { beginScenePublishScopeUpdate, cancelScenePublishScopeFile, confirmScenePublishScopeFile, getScenePublishScope, stageScenePublishScopeFile } from './scenePublishScope.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import {
   assertRecentSceneFile,
@@ -191,15 +192,18 @@ export function registerProjectIpc(): void {
       return { canceled: true, filePath: null };
     }
 
-    const saved = await prepareLightingSceneSave(saveRequest.content, result.filePath, { projectRoot: getCurrentProjectRoot(), isAuthorizedFile: isAuthorizedAssetFile });
-    await preserveLegacyLightingSceneBeforeWrite(result.filePath, saved.content);
-    await fs.writeFile(result.filePath, saved.content, 'utf-8');
-    for (const file of saved.files) authorizeAssetFile(file);
-    authorizeSceneFile(result.filePath);
-    authorizeModelAssetsFromSceneContent(saved.content);
-    await rememberRecentSceneFile(result.filePath);
-
-    return { canceled: false, filePath: result.filePath };
+    const filePath = result.filePath;
+    const projectRoot = getCurrentProjectRoot();
+    return withSceneSaveLock(filePath, async () => {
+      const saved = await prepareLightingSceneSave(saveRequest.content, filePath, { projectRoot, isAuthorizedFile: isAuthorizedAssetFile });
+      await preserveLegacyLightingSceneBeforeWrite(filePath, saved.content);
+      await writeSceneFileAtomically(filePath, saved.content);
+      for (const file of saved.files) authorizeAssetFile(file);
+      authorizeSceneFile(filePath);
+      authorizeModelAssetsFromSceneContent(saved.content);
+      await rememberRecentSceneFile(filePath);
+      return { canceled: false, filePath };
+    });
   });
 
   ipcMain.handle('scene:load', async (): Promise<LoadSceneResult> => {
@@ -265,6 +269,13 @@ export function registerProjectIpc(): void {
     const confirmed = await confirmScenePublishScopeFile(request.sceneOpenToken as number, assertSceneSwitchAllowed);
     assertSceneSwitchAllowed();
     return confirmed;
+  });
+
+  ipcMain.handle('scene:cancelOpen', (_event, request: { sceneOpenToken?: unknown }): void => {
+    if (!request || !Number.isSafeInteger(request.sceneOpenToken) || Number(request.sceneOpenToken) < 1) {
+      throw new Error('取消场景打开请求格式不正确。');
+    }
+    cancelScenePublishScopeFile(request.sceneOpenToken as number);
   });
 
   ipcMain.handle('file:readText', async (_event, request: ReadTextFileRequest): Promise<ReadTextFileResult> => {

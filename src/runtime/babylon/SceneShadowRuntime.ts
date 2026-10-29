@@ -208,14 +208,12 @@ export class SceneShadowRuntime {
     this.syncSceneMeshes(true);
     this.meshSyncObserver = scene.onBeforeRenderObservable.add(() => {
       if (!this.usesRealtimeShadows()) {
-        if (this.isHybrid()) this.updateHybridMaterialLights();
+        this.updateHybridMaterialLights();
         return;
       }
       this.syncSceneMeshes();
-      if (this.isHybrid()) {
-        this.syncSecondaryDirectionals();
-        this.updateHybridMaterialLights();
-      }
+      if (this.isHybrid()) this.syncSecondaryDirectionals();
+      this.updateHybridMaterialLights();
       if (!this.isCachedProfile() || this.isHybrid()) this.updateShadowDistance();
     });
   }
@@ -418,15 +416,16 @@ export class SceneShadowRuntime {
       this.disposePrimaryGenerator();
       this.disposeLocalGenerators();
       this.disposeSecondaryDirectionals();
-      this.restoreHybridMaterialLights();
+      if (this.isHybrid()) this.restoreHybridMaterialLights();
       this.refreshReceiverLightDefines();
       for (const [mesh, observer] of this.meshTransformObservers) mesh.onAfterWorldMatrixUpdateObservable.remove(observer);
       this.meshTransformObservers.clear();
       for (const mesh of this.knownMeshes) applyReceiveShadows(mesh, false);
       this.knownMeshes.clear();
       this.clearHybridMaterialObservers();
+      this.hybridMaterialsDirty = true;
       this.meshCollectionSignature = '';
-      if (this.isHybrid()) { this.hybridMaterialsDirty = true; this.updateHybridMaterialLights(); }
+      this.updateHybridMaterialLights();
       return;
     }
 
@@ -834,36 +833,84 @@ export class SceneShadowRuntime {
 
   private updateHybridMaterialLights(): void {
     const lights = this.scene.lights.filter(light => !light.isDisposed() && light.isEnabled() && light.intensity > 0);
-    const signature = lights.map(light => `${light.uniqueId}:${(light.getShadowGenerator(this.scene.activeCamera)
-      ?? light.getShadowGenerator())?.getShadowMap()?.uniqueId ?? ''}`).join(',');
+    const hybrid = this.isHybrid();
+    if (!hybrid && !lights.some(light => light.metadata?.glowStripLight === true)) {
+      if (this.hybridMaterialLightLimits.size || this.hybridMaterialObservers.size) this.restoreHybridMaterialLights();
+      return;
+    }
+    const signature = (hybrid ? 'hybrid:' : 'glow:') + lights.map(light => `${light.uniqueId}:${(light.getShadowGenerator(this.scene.activeCamera)
+      ?? light.getShadowGenerator())?.getShadowMap()?.uniqueId ?? ''}:${light.metadata?.glowStripLight === true
+        ? light.includedOnlyMeshes.map(mesh => mesh.uniqueId).join('.') : ''}`).join(',');
     if (!this.hybridMaterialsDirty && signature === this.hybridLightingSignature) return;
     this.hybridMaterialsDirty = false;
     this.hybridLightingSignature = signature;
-    const count = lights.length;
+    const count = hybrid ? lights.filter(light => light.metadata?.glowStripLight !== true).length : 0;
     const samplerLimit = this.scene.getEngine().getCaps().maxTexturesImageUnits;
     const errors = new Set<string>();
+    const materialTargets = new Map<PBRMaterial | StandardMaterial, number>();
     for (const mesh of this.scene.meshes) {
       if (!this.hybridMaterialObservers.has(mesh)) {
         this.hybridMaterialObservers.set(mesh, mesh.onMaterialChangedObservable.add(() => { this.hybridMaterialsDirty = true; }));
       }
+      // 共享材质按实际受光网格的最大灯位计算，避免灯带总数扩大整个场景的灯光上限。
+      const effectiveLights = mesh instanceof InstancedMesh ? mesh.sourceMesh.lightSources : mesh.lightSources;
+      let requiredLightSlots = 0;
+      effectiveLights.forEach((light, index) => {
+        if (light.isEnabled() && light.intensity > 0) requiredLightSlots = index + 1;
+      });
+      const hasGlowLight = effectiveLights.some(light => light.metadata?.glowStripLight === true && light.isEnabled() && light.intensity > 0);
+      if (!hybrid && !hasGlowLight) continue;
       for (const material of collectMeshMaterials(mesh)) {
         if (!(material instanceof PBRMaterial || material instanceof StandardMaterial)) continue;
-        const shadowSamplers = mesh.receiveShadows ? mesh.lightSources.filter(light => light.isEnabled() && light.intensity > 0
-          && (light.getShadowGenerator(this.scene.activeCamera) ?? light.getShadowGenerator())).length : 0;
-        const requiredSamplers = this.getRequiredSamplerCount(mesh, material, shadowSamplers);
-        if (samplerLimit > 0 && requiredSamplers > samplerLimit) {
-          errors.add(`混合阴影材质“${material.name}”至少需要 ${requiredSamplers} 个片元采样器，`
-            + `当前显卡仅支持 ${samplerLimit} 个。无法保证全部灯光及贴图，请调整场景后重试。`);
+        if (hybrid) {
+          const shadowSamplers = mesh.receiveShadows ? mesh.lightSources.filter(light => light.isEnabled() && light.intensity > 0
+            && (light.getShadowGenerator(this.scene.activeCamera) ?? light.getShadowGenerator())).length : 0;
+          const requiredSamplers = this.getRequiredSamplerCount(mesh, material, shadowSamplers);
+          if (samplerLimit > 0 && requiredSamplers > samplerLimit) {
+            errors.add(`混合阴影材质“${material.name}”至少需要 ${requiredSamplers} 个片元采样器，`
+              + `当前显卡仅支持 ${samplerLimit} 个。无法保证全部灯光及贴图，请调整场景后重试。`);
+          }
         }
         if (!this.hybridMaterialLightLimits.has(material)) this.hybridMaterialLightLimits.set(material, material.maxSimultaneousLights);
-        const target = Math.max(count, this.hybridMaterialLightLimits.get(material)!);
-        if (material.maxSimultaneousLights === target) continue;
+        const original = this.hybridMaterialLightLimits.get(material)!;
+        let target: number;
+        if (hybrid) target = Math.max(count, hasGlowLight ? requiredLightSlots : 0, original);
+        else {
+          // 计算原上限内的普通灯排位；零强度灯也占 Babylon shader 的灯位。
+          let ordinarySlots = 0, retainedSlots = 0, hasReachableGlow = false;
+          effectiveLights.forEach((light, index) => {
+            if (light.metadata?.glowStripLight === true) {
+              if (light.isEnabled() && light.intensity > 0 && index < original + 2) {
+                hasReachableGlow = true;
+                retainedSlots = index + 1;
+              }
+            } else if (ordinarySlots++ < original) retainedSlots = index + 1;
+          });
+          // 无可用灯带灯位时不扩容，避免只激活原本不可见的普通灯。
+          target = hasReachableGlow ? Math.min(original + 2, Math.max(original, retainedSlots)) : original;
+        }
+        materialTargets.set(material, Math.max(materialTargets.get(material) ?? 0, target));
+      }
+    }
+    // 普通模式不再受灯带影响的材质立即恢复原来的灯光上限。
+    if (!hybrid) for (const [material, original] of this.hybridMaterialLightLimits) {
+      if (materialTargets.has(material)) continue;
+      if (material.maxSimultaneousLights !== original) {
         const frozen = material.isFrozen;
         if (frozen) material.unfreeze();
-        material.maxSimultaneousLights = target;
+        material.maxSimultaneousLights = original;
         material.markAsDirty(Material.LightDirtyFlag);
         if (frozen) { material.freeze(); material.markDirty(true); }
       }
+      this.hybridMaterialLightLimits.delete(material);
+    }
+    for (const [material, target] of materialTargets) {
+      if (material.maxSimultaneousLights === target) continue;
+      const frozen = material.isFrozen;
+      if (frozen) material.unfreeze();
+      material.maxSimultaneousLights = target;
+      material.markAsDirty(Material.LightDirtyFlag);
+      if (frozen) { material.freeze(); material.markDirty(true); }
     }
     this.hybridValidationErrors = [...errors];
     const errorSignature = this.hybridValidationErrors.join('\n');

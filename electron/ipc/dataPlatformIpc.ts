@@ -1,5 +1,6 @@
 import { cancelCompositionSync } from './compositionRemote.js';
-import { app, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { app, dialog, type IpcMainInvokeEvent } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import { clearProjectAssetStoreSession } from './projectAssetStore.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
 import { resetScenePublishScope } from './scenePublishScope.js';

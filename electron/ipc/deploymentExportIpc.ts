@@ -4,11 +4,11 @@ import {
   app,
   BrowserWindow,
   dialog,
-  ipcMain,
   shell,
   type IpcMainInvokeEvent,
   type WebContents,
 } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
 import path from 'node:path';

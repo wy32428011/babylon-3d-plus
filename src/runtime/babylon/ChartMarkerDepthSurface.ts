@@ -13,21 +13,24 @@ type MaterialOverride = { original: Material | undefined; applied: Material };
 /** 合并相邻扫描行的透明区间，避免为每个像素生成一段 CSS 路径。 */
 function transparentRects(data: Uint8ClampedArray, width: number, height: number): PixelRect[] {
   const result: PixelRect[] = [];
-  let previous = new Map<string, PixelRect>();
+  let previous: PixelRect[] = [], current: PixelRect[] = [];
   for (let y = 0; y < height; y++) {
-    const current = new Map<string, PixelRect>();
-    let x = 0;
+    current.length = 0;
+    let x = 0, previousIndex = 0;
     while (x < width) {
       if (data[(y * width + x) * 4 + 3] !== 0) { x++; continue; }
       const start = x++;
       while (x < width && data[(y * width + x) * 4 + 3] === 0) x++;
-      const key = `${start}:${x}`;
-      const rect = previous.get(key) ?? { x: start, y, width: x - start, height: 0 };
-      if (!previous.has(key)) result.push(rect);
+      // 两行区间都按起点有序；线性合并保留原像素与矩形输出顺序，不再逐行分配 Map/字符串 key。
+      while (previousIndex < previous.length && previous[previousIndex].x < start) previousIndex++;
+      const candidate = previous[previousIndex];
+      const rect = candidate?.x === start && candidate.width === x - start
+        ? candidate : { x: start, y, width: x - start, height: 0 };
+      if (rect !== candidate) result.push(rect);
       rect.height++;
-      current.set(key, rect);
+      current.push(rect);
     }
-    previous = current;
+    const spare = previous; previous = current; current = spare;
   }
   return result;
 }

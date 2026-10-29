@@ -1,5 +1,16 @@
 # 实现经验
 
+## 模块化 WebGPU 必须验证真实绘制与异步释放（2026-10-29）
+
+- Babylon 9.12 的 GPU 粒子平台注册不等于 Compute 引擎扩展已注册；还需显式加载 `Engines/WebGPU/Extensions/engine.computeShader.js`，否则能力检测通过但 ComputeEffect 不存在。以实际粒子就绪及非空像素确认，而不是仅检查 `supportComputeShaders`。
+- CSM 的 `onBeforeRenderObservable` 传 layer，但 RTT unbind 后的 `onAfterRenderObservable` 仍传 faceIndex=0；分层诊断须保存实际 before pass 并限定在 bind/unbind 内，排除同样发送通知的 readiness 检查。不能仅用两个事件的同名数字配对。
+- 异步视口的资源预热发生在宿主取得返回值之前；取消必须在工厂内立即释放已创建视口，不能只在宿主 cleanup 里检查尚为空的 ref。更换 context 类型须换 canvas，并以 ready generation 重放首次同步，保留相机/选择和未启动请求，已取消的业务任务不能自动重做。
+
+## 编辑器离开与文件读取需要跨边界保持同一身份（2026-10-28）
+
+- 场景离开许可绑定会话与文档内容，异步确认、保存或加载后再次核对；窗口关闭需等 renderer 明确回复，不能到 `closed` 才检查未保存内容。
+- 桌面 IPC 的主 frame 不等于可信页面，入口校验同时绑定实际窗口与 URL；普通资产先核对真实路径，再把同一文件句柄交给响应流，避免检查后重新按路径打开。
+
 ## 静态图片审计应绑定真实视口（2026-10-26）
 
 - 通过CDP逐属性扫描整个React界面，会把模型库UI规模转化为大量跨进程等待；本例16路并发仍未在180秒内完成运行时发现。

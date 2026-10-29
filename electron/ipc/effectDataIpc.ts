@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { editorIpc as ipcMain } from './trustedEditorIpc.js';
 import { readDataPlatformConfig, isDataPlatformProjectClosing } from './dataPlatformIpc.js';
 import { requestDataPlatformJson } from './dataPlatformTransfer.js';
 import { effectDataEndpoint, validateEffectDataRequest } from '../shared/effectDataContract.js';
