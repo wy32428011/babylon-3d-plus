@@ -37,7 +37,7 @@ function ParameterInput({ definition, value, disabled, commit }: { definition: E
 
 /** 只编辑类型专用外观参数，不创建目标选择或数据触发表单。 */
 export function EffectParameterInspector({ component, disabled, onChange }: Props) {
-  const definitions = getEffectParameterDefinitions(component.effectKind);
+  const definitions = getEffectParameterDefinitions(component.effectKind).filter(definition => component.effectKind !== 'glow-strip' || !['lightRange', 'lightStrength', 'lightOffset'].includes(definition.key));
   const configuration = component.configuration ?? createDefaultEffectConfiguration(component);
   const groups = [...new Set(definitions.map(definition => definition.group))];
   return <>{groups.map(group => <details key={group} open><summary>{group}</summary>

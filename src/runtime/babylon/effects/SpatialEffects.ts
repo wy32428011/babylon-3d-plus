@@ -16,7 +16,6 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { SURFACE_VERTEX, SURFACE_FRAGMENT, PARTICLE_VERTEX, PARTICLE_FRAGMENT } from './SpatialEffectShaders';
-import { GlowStripLighting } from './GlowStripLighting';
 
 const KINDS = new Set([
   'boundary-flow', 'area-fill', 'ripple-ring', 'breathing-ring', 'radar-sector', 'light-pillar', 'energy-dome',
@@ -50,7 +49,6 @@ export class SpatialEffects {
   private active = true;
   private disposed = false;
   private trail: Mesh | null = null;
-  private glowStripLighting: GlowStripLighting | null = null;
   private readonly history: Vector3[] = [];
   private trailTarget: TransformNode | AbstractMesh | null = null;
   private targetRetry = 0;
@@ -90,7 +88,6 @@ export class SpatialEffects {
 
   tick(deltaSeconds: number): void {
     if (!this.active || this.disposed || !Number.isFinite(deltaSeconds) || deltaSeconds <= 0) return;
-    this.glowStripLighting?.tick(deltaSeconds);
     this.updateDataTransitions(deltaSeconds);
     if(this.playbackSpeed <= 0) return;
     const duration = this.effectiveDuration();
@@ -132,7 +129,6 @@ export class SpatialEffects {
       this.elapsed=duration===Number.MAX_VALUE?0:oldPhase*duration;
     }
     this.updateUniforms(); this.updateAnimation();
-    this.glowStripLighting?.update(component);
   }
 
   private parameter(key: string): unknown { return this.component.configuration?.parameters[key]; }
@@ -158,7 +154,7 @@ export class SpatialEffects {
     const parameters = Object.fromEntries(keys.map(k=>[k,this.parameter(k)]));
     const regions = this.rows('regions').map(r=>({id:r.id,points:r.points}));
     const dataEffect=['heatmap','region-level','data-bars'].includes(this.component.effectKind);
-    return JSON.stringify({kind:this.component.effectKind,radius,height,width,points:dataEffect?points.length:points,amount,density:this.component.density,count:this.component.effectKind==='heatmap'?0:values.length,parameters,regions});
+    return JSON.stringify({kind:this.component.effectKind,radius,height,width,stripSize:this.config.stripSize,points:dataEffect?points.length:points,amount,density:this.component.density,count:this.component.effectKind==='heatmap'?0:values.length,parameters,regions});
   }
 
   private updateUniforms(): void {
@@ -188,7 +184,6 @@ export class SpatialEffects {
   setActive(active: boolean): void {
     this.active = active;
     for (const mesh of this.meshes) mesh.setEnabled(active);
-    this.glowStripLighting?.setActive(active);
   }
 
   dispose(): void {
@@ -198,8 +193,6 @@ export class SpatialEffects {
   }
 
   private releaseResources(): void {
-    this.glowStripLighting?.dispose();
-    this.glowStripLighting = null;
     for (const mesh of this.meshes) mesh.dispose(false, false);
     for (const material of this.materials) material.dispose(false, false);
     for (const texture of this.textures) texture.dispose();
@@ -217,15 +210,12 @@ export class SpatialEffects {
       if (![point.x, point.y, point.z].every(Number.isFinite)) continue;
       const vector = new Vector3(point.x, point.y + this.number('elevation',0), point.z);
       // 数据点按索引与 values 配对，同位置的多个观测也必须保留，不能按路径去重。
-      const minimumDistanceSquared = this.component.effectKind === 'glow-strip' ? 1e-12 : 0.000001;
-      if (isData || !points.length || Vector3.DistanceSquared(points[points.length - 1], vector) > minimumDistanceSquared) points.push(vector);
+      if (isData || !points.length || Vector3.DistanceSquared(points[points.length - 1], vector) > 0.000001) points.push(vector);
     }
     if (isData && points.length) return points;
     if (points.length >= 2) {
       if (this.parameter('closed') === true && !points[0].equals(points.at(-1)!)) {
-        if (this.component.effectKind === 'glow-strip' && points.length > 2 && Vector3.DistanceSquared(points[0], points.at(-1)!) <= 1e-12) {
-          points[points.length - 1] = points[0].clone();
-        } else points.push(points[0].clone());
+        points.push(points[0].clone());
       }
       return points;
     }
@@ -286,6 +276,7 @@ export class SpatialEffects {
   private create(): void {
     const kind = this.component.effectKind;
     if (['rain', 'snow', 'flame', 'smoke-plume'].includes(kind)) { this.createParticles(kind); return; }
+    if (kind === 'glow-strip') { this.createGlowStrip(); return; }
     if (kind === 'heatmap') { this.createHeatmap(); return; }
     if (kind === 'region-level' || kind === 'data-bars') { this.createData(kind); return; }
     if (kind === 'camera-frustum') { this.createFrustum(); return; }
@@ -312,7 +303,6 @@ export class SpatialEffects {
       });
     }
     if (kind === 'fly-line' || kind === 'boundary-flow') { this.path = path; this.measurePath(); }
-    if (kind === 'glow-strip') { this.createGlowStrip(path); return; }
     if (kind === 'motion-trail') {
       const budget = Math.max(8, Math.min(MAX_POINTS, Math.round(this.config.amount)));
       this.trail = this.ribbon(Array.from({ length: budget }, () => path[0].clone()), 'motion-history', this.surface(10), true);
@@ -344,67 +334,18 @@ export class SpatialEffects {
     }
   }
 
-  /** 使用三维折线路径构造灯芯和渐变光晕；转角采用限幅斜接以保持连续。 */
-  private createGlowStrip(path: Vector3[]): void {
-    const positions: number[] = [], indices: number[] = [], uvs: number[] = [];
-    const closed = path.length > 2 && Vector3.DistanceSquared(path[0], path[path.length - 1]) < 1e-12;
-    const directions = path.slice(1).map((point, index) => point.subtract(path[index]).normalize());
-    const rotateAround = (vector: Vector3, axis: Vector3, angle: number): Vector3 => {
-      const cosine = Math.cos(angle), sine = Math.sin(angle);
-      return vector.scale(cosine).add(Vector3.Cross(axis, vector).scale(sine))
-        .add(axis.scale(Vector3.Dot(axis, vector) * (1 - cosine)));
-    };
-    // 最小旋转将上一段的侧向带到下一段，避免经过垂直方向时发生翻面。
-    const transport = (side: Vector3, from: Vector3, to: Vector3): Vector3 => {
-      const axis = Vector3.Cross(from, to);
-      const sine = axis.length();
-      const cosine = Math.max(-1, Math.min(1, Vector3.Dot(from, to)));
-      const rotated = sine > 1e-8 ? rotateAround(side, axis.scale(1 / sine), Math.atan2(sine, cosine)) : side.clone();
-      return rotated.subtract(to.scale(Vector3.Dot(rotated, to))).normalize();
-    };
-    let initialSide = Vector3.Cross(directions[0], Vector3.Up());
-    if (initialSide.lengthSquared() < 0.000001) initialSide = Vector3.Cross(directions[0], Vector3.Forward());
-    const sides = [initialSide.normalize()];
-    for (let index = 1; index < directions.length; index += 1) {
-      sides.push(transport(sides[index - 1], directions[index - 1], directions[index]));
-    }
-    if (closed && sides.length > 1) {
-      // 闭环平行传输可能积累旋转，将首尾夹角按路径长度分摊，避免接缝扭结。
-      const endSide = transport(sides[sides.length - 1], directions[directions.length - 1], directions[0]);
-      const correction = Math.atan2(Vector3.Dot(directions[0], Vector3.Cross(endSide, sides[0])), Vector3.Dot(endSide, sides[0]));
-      const segmentLengths = path.slice(1).map((point, index) => Vector3.Distance(path[index], point));
-      const totalLength = segmentLengths.reduce((total, length) => total + length, 0);
-      let distance = 0;
-      for (let index = 1; index < sides.length; index += 1) {
-        distance += segmentLengths[index - 1];
-        sides[index] = rotateAround(sides[index], directions[index], correction * distance / totalLength).normalize();
-      }
-    }
-    for (let index = 0; index < path.length; index += 1) {
-      const previous = index > 0 ? sides[index - 1] : closed ? sides[sides.length - 1] : sides[0];
-      const next = index < sides.length ? sides[index] : closed ? sides[0] : sides[sides.length - 1];
-      let side = previous.add(next);
-      if (side.lengthSquared() < 0.000001) side = next.clone();
-      side.normalize();
-      // 极锐转角限制斜接宽度，避免几何无限延伸。
-      const miter = Math.min(2, 1 / Math.max(0.5, Math.abs(Vector3.Dot(side, next))));
-      side.scaleInPlace(this.config.width * 2 * miter);
-      for (const sign of [-1, 1]) {
-        const point = path[index].add(side.scale(sign));
-        positions.push(point.x, point.y + 0.005, point.z);
-        uvs.push(index / Math.max(1, path.length - 1), (sign + 1) / 2);
-      }
-      if (index < path.length - 1) {
-        const vertex = index * 2;
-        indices.push(vertex, vertex + 1, vertex + 2, vertex + 1, vertex + 3, vertex + 2);
-      }
-    }
-    const mesh = new Mesh(this.id + '_glow_strip', this.scene);
-    const data = new VertexData();
-    data.positions = positions; data.indices = indices; data.uvs = uvs;
-    data.applyToMesh(mesh);
-    this.mesh(mesh, 'glow-strip', this.surface(11));
-    this.glowStripLighting = new GlowStripLighting(this.id, this.scene, this.root, path, this.component);
+  private createGlowStrip(): void {
+    const size = this.config.stripSize ?? { length: 4, width: 0.08, height: 0.08 };
+    const core = MeshBuilder.CreateBox(`${this.id}_glow_strip`, { width: size.length, height: size.height, depth: size.width }, this.scene);
+    const coreMaterial = this.solid(Color3.FromHexString(this.component.primaryColor));
+    coreMaterial.metadata.effectColorRole = 'primary';
+    this.mesh(core, 'glow-strip', coreMaterial);
+    const haloMaterial = this.surface(11);
+    const horizontal = MeshBuilder.CreatePlane(`${this.id}_glow_strip_halo_horizontal`, { width: size.length, height: size.width * 4 }, this.scene);
+    horizontal.rotation.x = Math.PI / 2;
+    this.mesh(horizontal, 'glow-strip-halo', haloMaterial);
+    const vertical = MeshBuilder.CreatePlane(`${this.id}_glow_strip_halo_vertical`, { width: size.length, height: size.height * 4 }, this.scene);
+    this.mesh(vertical, 'glow-strip-halo', haloMaterial);
   }
 
   private ribbon(path: Vector3[], role: string, material: Material, updatable = false): Mesh {

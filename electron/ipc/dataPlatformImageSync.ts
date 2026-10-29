@@ -24,7 +24,6 @@ const MAX_IMAGE_RECORDS = 20_000;
 const MAX_CONCURRENT_DOWNLOADS = 4;
 const QUERY_TIMEOUT_MS = 20_000;
 const FILE_DOWNLOAD_TIMEOUT_MS = 2 * 60_000;
-const MAX_IMAGE_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SYNC_IMAGE_BYTES = 1024 * 1024 * 1024;
 const IMAGE_INDEX_FILE = 'synced-images.json';
 const PLATFORM_IMAGE_REFERENCE_PREFIX = 'editor-image://platform/';
@@ -151,7 +150,7 @@ export async function listSyncedImages(editorRoot: string): Promise<SyncedImageA
       const [actualRoot, actualFile, stat] = await Promise.all([fs.realpath(root), fs.realpath(filePath), fs.lstat(filePath)]);
       const relative = path.relative(actualRoot, actualFile);
       if (relative.startsWith('..') || path.isAbsolute(relative) || stat.isSymbolicLink() || !stat.isFile()
-        || stat.size <= 0 || stat.size > MAX_IMAGE_FILE_BYTES) continue;
+        || stat.size <= 0) continue;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
@@ -280,6 +279,8 @@ async function runDataPlatformImageSync(
 
   let completedJobs = 0;
   const failedIconKeys: string[] = [];
+  const failureDetails: string[] = [];
+  let lastProgressUpdate = 0;
   const verifiedFileNames = new Map<string, string>();
 
   if (jobs.length > 0) {
@@ -299,7 +300,7 @@ async function runDataPlatformImageSync(
           baseUrl: context.baseUrl,
           remoteUrl: job.record.iconUrl,
           destinationPath: job.stagedPath,
-          maxBytes: MAX_IMAGE_FILE_BYTES,
+          maxBytes: MAX_SYNC_IMAGE_BYTES,
           signal,
           timeoutMs: FILE_DOWNLOAD_TIMEOUT_MS,
           context: `下载图标 ${job.record.iconKey}`,
@@ -309,11 +310,28 @@ async function runDataPlatformImageSync(
           throw new Error(`图标 ${job.record.iconKey} 不是可识别的图片或 SVG 文件。`);
         }
         verifiedFileNames.set(job.record.iconKey, `${job.record.iconKey}${verifiedExtension}`);
-      } catch {
-        failedIconKeys.push(job.record.iconKey);
+      } catch (error) {
+        if (!signal.aborted) {
+          failedIconKeys.push(job.record.iconKey);
+          failureDetails.push(`${job.record.iconKey}：${toErrorMessage(error)}`);
+        }
+      } finally {
+        completedJobs += 1;
+        const now = Date.now();
+        if (!signal.aborted && (completedJobs === jobs.length || now - lastProgressUpdate >= 250)) {
+          lastProgressUpdate = now;
+          updateImageSyncProgress({
+            runId,
+            phase: 'downloading',
+            completed: completedJobs,
+            total: jobs.length,
+            message: `正在下载中台图标，已处理 ${completedJobs}/${jobs.length} 张${failedIconKeys.length ? `，失败 ${failedIconKeys.length} 张` : ''}…`,
+            error: null,
+          });
+        }
       }
     });
-    completedJobs = jobs.length;
+    signal.throwIfAborted();
   }
 
   updateImageSyncProgress({
@@ -354,7 +372,7 @@ async function runDataPlatformImageSync(
   await writeImageIndex(context.editorRoot, { version: 1, images: nextEntries });
 
   const failureDetail = failedIconKeys.length > 0
-    ? `；${failedIconKeys.length} 个图标下载或校验失败，已保留其旧登记`
+    ? `；${failedIconKeys.length} 个图标下载或校验失败，已保留其旧登记（${failureDetails.slice(0, 3).join('；')}${failureDetails.length > 3 ? '；其余失败项未显示' : ''}）`
     : '';
   updateImageSyncProgress({
     runId,
