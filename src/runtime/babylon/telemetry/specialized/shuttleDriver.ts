@@ -117,18 +117,6 @@ const SHUTTLE_STATUS = {
   unknown: 11,
 } as const;
 
-const SHUTTLE_STATUS_LABELS: Record<number, string> = {
-  [SHUTTLE_STATUS.idle]: '空闲待机',
-  [SHUTTLE_STATUS.taking]: '取货中',
-  [SHUTTLE_STATUS.takeFinish]: '取货完成',
-  [SHUTTLE_STATUS.unloading]: '卸货中',
-  [SHUTTLE_STATUS.unloadFinish]: '卸货完成',
-  [SHUTTLE_STATUS.moving]: '移动中',
-  [SHUTTLE_STATUS.moveFinish]: '移动完成',
-  [SHUTTLE_STATUS.emergencyStop]: '急停触发',
-  [SHUTTLE_STATUS.unknown]: '未知',
-};
-
 /** 列号未知哨兵：进出换层提升机的过渡帧会上报 255 且 y=0，此时按载货台过渡处理而非普通目标。 */
 const SHUTTLE_COLUMN_UNKNOWN = 255;
 
@@ -1751,17 +1739,9 @@ export class ShuttleTelemetryDriver {
     };
   }
 
-  /** 对故障和 Status 变化做一次性 Console 提示，避免每帧刷屏。 */
+  /** 对故障和急停做一次性 Console 提示，避免每帧刷屏。 */
   private reportShuttleRuntimeState(snapshot: DeviceTelemetrySnapshot, status: number | null): void {
     const deviceKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}`;
-    const statusSignature = JSON.stringify([status, snapshot.message]);
-    if (this.state.reportedStatuses.get(deviceKey) !== statusSignature) {
-      this.state.reportedStatuses.set(deviceKey, statusSignature);
-      this.host.pushLog(
-        `多穿小车 ${snapshot.assetCode} 状态：${this.describeShuttleStatus(status)}${snapshot.message ? `，${snapshot.message}` : ''}`,
-      );
-    }
-
     const emergencyStop = status === SHUTTLE_STATUS.emergencyStop;
     if (!snapshot.faulted && !emergencyStop) {
       this.state.reportedFaults.delete(deviceKey);
@@ -1775,13 +1755,6 @@ export class ShuttleTelemetryDriver {
 
     this.state.reportedFaults.set(deviceKey, faultMessage);
     this.host.pushLog(`多穿小车 ${snapshot.assetCode} 故障/急停：${faultMessage}`);
-  }
-
-  /** Status 值的人类可读描述（新协议）。 */
-  private describeShuttleStatus(status: number | null): string {
-    if (status === null) return 'Status 未知';
-    const label = SHUTTLE_STATUS_LABELS[status];
-    return label ? `Status=${status}（${label}）` : `Status=${status}`;
   }
 }
 
