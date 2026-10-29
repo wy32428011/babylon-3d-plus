@@ -753,9 +753,25 @@ async function createAssetCopyPlan(
           integrityLabel: createDataPlatformSkyboxIntegrityLabel(bundle.dataPlatformSkyboxEntry),
         } : {}),
       });
-      sourceUrlMap.set(toLocalPathKey(file.sourcePath), logicalUrl);
+      let mappedUrl = logicalUrl;
+      if (bundle.category === 'models' && /%[0-9a-f]{2}/i.test(path.posix.basename(file.relativePath))
+          && path.posix.extname(file.relativePath).toLowerCase() === '.glb'
+          && [...bundle.explicitRelativePaths].some(relative => toDeploymentPath(relative) === file.relativePath)) {
+        const name = `model-${createHash('sha256').update(file.relativePath).digest('hex').slice(0, 20)}.glb`;
+        const directory = path.posix.dirname(file.relativePath);
+        const aliasPath = directory === '.' ? name : `${directory}/${name}`;
+        const aliasDestination = `${bundle.destinationRoot}/${aliasPath}`;
+        const aliasKey = aliasDestination.toLowerCase();
+        if (destinationKeys.has(aliasKey) || files.some(item => item.relativePath.toLowerCase() === aliasPath.toLowerCase())) {
+          throw new Error(`导出资源目标冲突：${aliasDestination}`);
+        }
+        destinationKeys.add(aliasKey);
+        mappedUrl = createVirtualAssetUrl(aliasDestination);
+        assetFiles.push({ ...file, destinationRelativePath: aliasDestination, logicalUrl: mappedUrl, kind: 'model' });
+      }
+      sourceUrlMap.set(toLocalPathKey(file.sourcePath), mappedUrl);
       const lexicalSourcePath = path.resolve(bundle.sourceRoot, ...file.relativePath.split('/'));
-      sourceUrlMap.set(toLocalPathKey(lexicalSourcePath), logicalUrl);
+      sourceUrlMap.set(toLocalPathKey(lexicalSourcePath), mappedUrl);
     }
   }
 
