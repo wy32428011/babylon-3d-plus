@@ -17,7 +17,7 @@ import path from 'node:path';
 import { readModelResourceDependencies } from './modelResourceDependencies.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
-import { getCurrentProjectRoot, readProjectAssetIndex } from './projectAssetStore.js';
+import { getCurrentProjectRoot, getSharedProjectAssetRoot, readProjectAssetIndex } from './projectAssetStore.js';
 import { resolveOpeningPackageResources } from './openingPackageResources.js';
 import { createOpeningPublishPlan } from '../shared/openingPublishPlan.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
@@ -440,7 +440,7 @@ async function loadProjectAssetContext(
   const binding = getCurrentDataPlatformBinding();
   const sharedResourcesRoot = sourceAssetContext?.sharedResourcesRoot ?? (binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
     ? resolveDataPlatformBindingSharedResourcesRoot(projectRoot, binding.metadata)
-    : null);
+    : binding ? null : getSharedProjectAssetRoot());
   let assets = index.assets;
   if (sharedResourcesRoot) {
     const indexedEnvironments = await listIndexedDataPlatformEnvironments(sharedResourcesRoot);
@@ -848,9 +848,14 @@ async function resolveModelTextureImagePath(
       if (!imagePath) throw new Error(`模型参数引用的数据中台图片未进入本次源工程快照：${value}`);
       return imagePath;
     }
-    const candidateRoots = projectContext.sharedResourcesRoot
-      ? [projectContext.projectRoot, projectContext.sharedResourcesRoot]
-      : [projectContext.projectRoot];
+    const sharedRoot = projectContext.sharedResourcesRoot;
+    const legacyRoot = sharedRoot && path.basename(sharedRoot).toLowerCase() === 'sharedresources' ? path.dirname(sharedRoot) : null;
+    // 本地场景优先共享缓存，兼容尚未迁移的工作区图片；独立导出不依赖业务项目绑定。
+    const candidateRoots = [...new Set([
+      ...(legacyRoot && toLocalPathKey(legacyRoot) === toLocalPathKey(projectContext.projectRoot) ? [] : [projectContext.projectRoot]),
+      ...(sharedRoot ? [sharedRoot] : []),
+      ...(legacyRoot ? [legacyRoot] : []),
+    ])];
     const entry = await findSyncedImageForReference(candidateRoots, value);
     if (!entry) throw new Error(`模型参数引用的数据中台图片未同步到当前项目：${value}`);
     return entry.filePath;
