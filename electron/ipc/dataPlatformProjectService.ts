@@ -670,13 +670,13 @@ async function prepareRecoveredLocalScene(baseUrl: string, workspaceRoot: string
 }
 
 /** 文件系统准备期间若关闭或切换了项目，旧同步不得重新挂载资源目录。 */
-function captureModelLibrarySyncContext(): () => boolean {
+function captureModelLibrarySyncContext(allowLocalSceneRecovery = false): () => boolean {
   const generation = sceneResourceContextGeneration;
   const projectRoot = getCurrentProjectRoot();
   const binding = getCurrentDataPlatformBinding();
   return () => {
     const current = getCurrentDataPlatformBinding();
-    return !dataPlatformProjectServiceShuttingDown && !openingProjectCount && !localSceneResourceTask
+    return !dataPlatformProjectServiceShuttingDown && !openingProjectCount && (allowLocalSceneRecovery || !localSceneResourceTask)
       && generation === sceneResourceContextGeneration && projectRoot === getCurrentProjectRoot()
       && current?.projectRoot === binding?.projectRoot
       && current?.metadata.baseUrl === binding?.metadata.baseUrl
@@ -819,22 +819,18 @@ export async function syncDataPlatformImagesForWorkspace(
   baseUrl: string,
   workspaceRoot: string,
 ): Promise<boolean> {
-  if (dataPlatformProjectServiceShuttingDown) return false;
+  // 图片同步可与本地模型恢复并行，但不能切换场景所属工程或由迟到任务重新挂载旧目录。
+  const isCurrent = captureModelLibrarySyncContext(true);
+  if (!isCurrent()) return false;
   const binding = getCurrentDataPlatformBinding();
-  if (!binding) {
-    await ensureWritableEditorRoot(workspaceRoot);
-    await activateProjectRoot(workspaceRoot);
-    const sharedResourcesRoot = resolveDataPlatformSharedResourcesRoot(workspaceRoot);
-    await ensureWritableEditorRoot(sharedResourcesRoot);
-    await ensureProjectDirectories(sharedResourcesRoot);
-    setSharedProjectAssetRoot(sharedResourcesRoot);
-    return startDataPlatformImageSync(baseUrl, workspaceRoot);
-  }
-  const sharedResourcesRoot = resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata);
+  const sharedResourcesRoot = binding
+    ? resolveDataPlatformBindingSharedResourcesRoot(binding.projectRoot, binding.metadata)
+    : resolveDataPlatformSharedResourcesRoot(workspaceRoot);
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
+  if (!isCurrent()) return false;
   setSharedProjectAssetRoot(sharedResourcesRoot);
-  return startDataPlatformImageSync(binding.metadata.baseUrl, sharedResourcesRoot);
+  return startDataPlatformImageSync(binding?.metadata.baseUrl ?? baseUrl, sharedResourcesRoot);
 }
 
 /** 根据数据中台地址和共享缓存目录生成环境同步业务 key。 */

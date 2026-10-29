@@ -12,7 +12,7 @@ import {
   type DeploymentCopiedFile,
   type DeploymentCopyFile,
 } from './deploymentExportFileSystem.js';
-import { createAssetManifestContent, prepareDeploymentExport } from './deploymentExportScene.js';
+import { createAssetManifestContent, prepareDeploymentExport, type DeploymentSourceAssetContext } from './deploymentExportScene.js';
 import { precompressDeploymentFiles, type DeploymentPrecompressionResult } from './deploymentPrecompression.js';
 import { writePrecompiledDeploymentScripts } from './deploymentPrecompiledScripts.js';
 import { createDeploymentReleaseCacheManifest, RELEASE_CACHE_MANIFEST_PATH } from './deploymentReleaseCacheManifest.js';
@@ -40,6 +40,7 @@ export type BuildDigitalTwinDistPackageOptions = {
   skyboxCacheContext?: DeploymentSkyboxCacheContext;
   skyboxValidationCache?: DeploymentSkyboxValidationCache;
   sourceResourceFiles?: readonly SourceResourceFile[];
+  sourceAssetContext?: DeploymentSourceAssetContext;
   /** 内部验收开关，默认生成可选传输侧车；不改变原文件或缓存清单。 */
   precompress?: boolean;
   /** 仅允许收紧原有 ZIP 上限，供近上限回退验证使用。 */
@@ -87,6 +88,7 @@ export async function buildDigitalTwinDistPackage(
       (detail) => options.onProgress?.(detail, 8),
       {
         skipCadReferences: true,
+        sourceAssetContext: options.sourceAssetContext,
         validateOpeningViewer: content => assertViewerTemplateSupportsScene(content, templateFiles, options.signal),
         skyboxCacheContext: options.skyboxCacheContext,
         skyboxValidationCache: options.skyboxValidationCache,

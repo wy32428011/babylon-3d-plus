@@ -10,6 +10,7 @@ import path from 'node:path';
 import type { SyncedImageAssetEntry } from '../types.js';
 import { readUtf8File } from '../shared/strictUtf8.js';
 import type { DeploymentCopyFile } from './deploymentExportFileSystem.js';
+import type { DeploymentSourceAssetContext } from './deploymentExportScene.js';
 import type {
   DeploymentSkyboxCacheDependencies,
   DeploymentSkyboxCacheContext,
@@ -107,6 +108,8 @@ export type DigitalTwinSourcePackageResult = {
   omittedResources: string[];
   /** SOURCE 已锁定的文件版本，DIST 必须按此校验复制结果。仅主进程内传递。 */
   resourceFiles: SourceResourceFile[];
+  /** 同一次发布的资源根和图片解析结果，仅在主进程内传给 DIST。 */
+  sourceAssetContext: DeploymentSourceAssetContext;
   /** 完成受管资源定位后的入口快照；DIST 必须使用同一版本，而不是重新使用请求中的旧缓存路径。 */
   entrySceneContent: string;
 };
@@ -176,6 +179,7 @@ export async function buildDigitalTwinSourcePackage(
     const scenesResult = await readSceneSnapshots(
       projectRoot,
       sharedResourcesRoot,
+      legacyWorkspaceRoot,
       entrySceneFilePath,
       options.signal,
       options.skipCadReferences === true,
@@ -393,6 +397,8 @@ export async function buildDigitalTwinSourcePackage(
       warnings,
       omittedResources,
       resourceFiles: resourcePlan.files,
+      sourceAssetContext: { projectRoot, sharedResourcesRoot,
+        platformImagePaths: new Map([...platformImageBundleMap].map(([reference, bundle]) => [reference, bundle.sourcePath])) },
       entrySceneContent: JSON.stringify(entryScene.parsed),
     };
   } catch (error) {
@@ -406,6 +412,7 @@ export async function buildDigitalTwinSourcePackage(
 async function readSceneSnapshots(
   projectRoot: string,
   sharedResourcesRoot: string,
+  legacyWorkspaceRoot: string | null,
   entrySceneFilePath: string,
   signal: AbortSignal,
   skipCadReferences: boolean,
@@ -473,7 +480,7 @@ async function readSceneSnapshots(
 
   const platformImageBundleMap = await collectPlatformImageBundleMap(
     snapshots.map((snapshot) => snapshot.content),
-    [projectRoot, sharedResourcesRoot],
+    [...new Set([projectRoot, sharedResourcesRoot, ...(legacyWorkspaceRoot ? [legacyWorkspaceRoot] : [])])],
     isPlatformImageReference,
     findSyncedImageForReference,
   );

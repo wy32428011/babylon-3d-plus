@@ -137,11 +137,19 @@ type ResolvedCadReference = MutableCadReference & {
   bundle: ResourceBundle;
 };
 
+/** 主进程从 SOURCE 快照传入，不随本地场景打开后的全局资源库切换而变化。 */
+export type DeploymentSourceAssetContext = {
+  projectRoot: string;
+  sharedResourcesRoot: string;
+  platformImagePaths: ReadonlyMap<string, string>;
+};
+
 type ProjectAssetContext = DeploymentSkyboxCacheContext & {
   projectRoot: string;
   projectRootRealPath: string;
   assets: ProjectModelAssetEntry[];
   sharedResourcesRoot: string | null;
+  platformImagePaths?: ReadonlyMap<string, string>;
 };
 
 /** Web 部署导出预检与场景改写的完整结果。 */
@@ -156,6 +164,7 @@ export type PreparedDeploymentExport = {
 };
 
 export type PrepareDeploymentExportOptions = {
+  sourceAssetContext?: DeploymentSourceAssetContext;
   skipCadReferences?: boolean;
   validateOpeningViewer?: (sceneContent: string) => Promise<void>;
   skyboxCacheContext?: DeploymentSkyboxCacheContext;
@@ -199,7 +208,7 @@ export async function prepareDeploymentExport(
   if (lightingBakeError) throw new Error(lightingBakeError);
   const originalLightingScene = captureSceneLightingBakeRelocation(scene) ? structuredClone(scene) : null;
 
-  const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext);
+  const projectContext = await loadProjectAssetContext(signal, warnings, options.skyboxCacheContext, options.sourceAssetContext);
   const bundles = new Map<string, ResourceBundle>();
   const openingPlan = await createOpeningPublishPlan(scene, { mode: 'dist', signal,
     validateViewer: options.validateOpeningViewer ? candidate => options.validateOpeningViewer!(JSON.stringify({ ...sceneFile, scene: candidate })) : undefined,
@@ -416,9 +425,10 @@ async function loadProjectAssetContext(
   signal: AbortSignal,
   warnings: string[],
   suppliedSkyboxCacheContext?: DeploymentSkyboxCacheContext,
+  sourceAssetContext?: DeploymentSourceAssetContext,
 ): Promise<ProjectAssetContext | null> {
   throwIfDeploymentExportAborted(signal);
-  const projectRoot = getCurrentProjectRoot();
+  const projectRoot = sourceAssetContext?.projectRoot ?? getCurrentProjectRoot();
   if (!projectRoot) return null;
   const rootStat = await lstatIfExists(projectRoot);
   if (!rootStat) {
@@ -428,9 +438,9 @@ async function loadProjectAssetContext(
   const projectRootRealPath = await assertSafeDirectory(projectRoot, '当前项目目录');
   const index = await readProjectAssetIndex(projectRoot);
   const binding = getCurrentDataPlatformBinding();
-  const sharedResourcesRoot = binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
+  const sharedResourcesRoot = sourceAssetContext?.sharedResourcesRoot ?? (binding && path.resolve(binding.projectRoot) === path.resolve(projectRoot)
     ? resolveDataPlatformBindingSharedResourcesRoot(projectRoot, binding.metadata)
-    : null;
+    : null);
   let assets = index.assets;
   if (sharedResourcesRoot) {
     const indexedEnvironments = await listIndexedDataPlatformEnvironments(sharedResourcesRoot);
@@ -446,6 +456,7 @@ async function loadProjectAssetContext(
     projectRootRealPath,
     assets,
     sharedResourcesRoot,
+    platformImagePaths: sourceAssetContext?.platformImagePaths,
     ...skyboxCacheContext,
   };
 }
@@ -832,6 +843,11 @@ async function resolveModelTextureImagePath(
 ): Promise<string | null> {
   if (isPlatformImageReference(value)) {
     if (!projectContext) throw new Error('数据中台贴图引用缺少项目上下文，无法解析。');
+    if (projectContext.platformImagePaths) {
+      const imagePath = projectContext.platformImagePaths.get(value);
+      if (!imagePath) throw new Error(`模型参数引用的数据中台图片未进入本次源工程快照：${value}`);
+      return imagePath;
+    }
     const candidateRoots = projectContext.sharedResourcesRoot
       ? [projectContext.projectRoot, projectContext.sharedResourcesRoot]
       : [projectContext.projectRoot];

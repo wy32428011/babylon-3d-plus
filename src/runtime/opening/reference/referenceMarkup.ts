@@ -16,7 +16,7 @@ export const REFERENCE_MARKUP=`
  <div class="zd-vignette"></div>
  <header class="zd-header">
   <div class="zd-brand"><svg class="zd-symbol" viewBox="0 0 36 40" fill="none" aria-hidden="true"><path d="m18 2 15 8.5v18L18 38 3 29V11z" stroke="currentColor" stroke-width="1.1"/><path d="m18 8 9 5.5v12L18 31l-9-5.5v-12zM9 13.5l9 6 9-6M18 19.5V31" stroke="currentColor" stroke-width="1.5"/><path d="M18 2v6M3 29l6-3.5M33 29l-6-3.5" stroke="currentColor" opacity=".4"/></svg>
-   <div class="zd-brand-name"><span data-role="brand-name"></span><span class="zd-brand-en">INTELLIGENT WAREHOUSING · DIGITAL TWIN</span></div></div>
+   <div class="zd-brand-name"><span data-role="brand-name"></span></div></div>
   <div class="zd-header-right"><div class="zd-preview-badge"><span class="zd-indicator"></span>OPENING EXPERIENCE<br><b data-role="stage-counter">01 / 09</b></div><button class="zd-icon-btn" data-action="fullscreen" title="全屏 / 退出全屏（F）" aria-label="切换全屏">${icon('full')}</button></div>
  </header>
  <section class="zd-heading"><div class="zd-overline" data-role="stage-en"></div><h2 data-role="stage-title"></h2><p data-role="stage-detail"></p><div class="zd-heading-rule"></div></section>

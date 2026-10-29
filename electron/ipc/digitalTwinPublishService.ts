@@ -529,6 +529,7 @@ export async function publishDigitalTwin(
       publishName: current.metadata.projectName,
       sceneContent: createPublicViewerSceneContent(sourcePackage.entrySceneContent),
       sourceResourceFiles: sourcePackage.resourceFiles,
+      sourceAssetContext: sourcePackage.sourceAssetContext,
       outputRoot: taskRoot,
       signal,
       skyboxCacheContext,
