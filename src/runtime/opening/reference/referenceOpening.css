@@ -21,3 +21,7 @@
 .zd-intro .zd-floating-skip{position:absolute;right:22px;bottom:22px;z-index:9;border:1px solid rgba(124,231,255,.28);background:rgba(3,18,32,.74);border-radius:6px;padding:9px 14px;color:#b9e8fc;font-size:12px;cursor:pointer}
 .zd-intro:not(.is-clean) .zd-floating-skip{display:none}
 .zd-intro .zd-hidden{display:none!important}
+.zd-intro .zd-brand-custom{min-width:0;flex:1 1 auto}
+.zd-intro .zd-brand-custom .zd-brand-logo{display:block;flex:0 1 auto;min-width:0;width:auto;height:auto;max-width:min(32vw,360px);max-height:38px;object-fit:contain}
+.zd-intro .zd-brand-custom .zd-brand-name,.zd-intro .zd-brand-custom .zd-brand-en{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.zd-intro.has-brand-logo .zd-header-right{flex:none}

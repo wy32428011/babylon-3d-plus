@@ -82,13 +82,17 @@ export function createOpeningVisualPlan(settings: SceneOpeningAnimationSettings,
             while (!disposed && next <= 10) { const index = next++; urls[index] = await assets.url(`asset-${index}`); }
           }));
           if (disposed) return;
+          const logoAsset = binding.definition.manifest.assets.find(asset => asset.id === 'brand-logo');
+          if (logoAsset && logoAsset.type !== 'image') throw new Error('参考开场品牌标志必须是图片素材。');
+          const logo = logoAsset ? await assets.url(logoAsset.id) : undefined;
+          if (disposed) return;
           const legacy = createReferenceOpening(container, { settings: adapted, ...controls,
             stageOverrides: stages.map((stage, index) => {
               const resolved = resolveOpeningStage(stage, binding.config.values);
               if (index === 8 && binding.config.values.arrivalDescription === '') delete resolved.description;
               return resolved;
             }),
-            assetUrls: { images: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [index + 1, urls[index + 1]])), atlas: urls[10] } });
+            assetUrls: { images: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [index + 1, urls[index + 1]])), atlas: urls[10], logo } });
           visual = { ready: legacy.ready, resize: legacy.resize, dispose: legacy.dispose,
             renderAt: (seconds, context) => legacy.renderAt(reducedMotion ? 61 : getReferenceOpeningFrame(seconds, adapted.reference).referenceSeconds, context) };
         } else {
