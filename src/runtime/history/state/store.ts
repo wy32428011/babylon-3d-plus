@@ -2,7 +2,7 @@ import type {
   AnyStateRecord, AtomicStateRevision, DeepReadonly, LogicManifest, StateChange, StateFact, StateMetadata,
   StateReadView, StateTable, StateTableRecords, StateTransactionPort, TwinStateDTO,
 } from './types';
-import { STATE_TABLES } from './types';
+import { STATE_TABLES, TWIN_FACTS_VERSION } from './types';
 import { canonicalStringify, compareText, copySafeJson, freezeData, requireState, stableKey, utf8Length } from './safeJson';
 import type { StateBudgets } from './safeJson';
 import type { StateAdapterRegistry } from './adapters';
@@ -83,6 +83,7 @@ export class StateStage implements StateReadView {
   readonly revisions: DeepReadonly<AtomicStateRevision>[] = [];
   #metadata: DeepReadonly<StateMetadata>;
   readonly #cost: ResourceCost;
+  readonly #factCost: ResourceCost = { bytes: 0, nodes: 0 };
   constructor(readonly base: StateStore, readonly registry: StateAdapterRegistry, readonly budgets: Readonly<StateBudgets>) {
     this.#metadata = base.metadata; this.#cost = { ...base.cost };
   }
@@ -105,7 +106,8 @@ export class StateStage implements StateReadView {
       if (value && !this.base.get(table, id)) yield value as unknown as DeepReadonly<StateTableRecords[K]>;
     }
   }
-  runRevision(metadata: DeepReadonly<StateMetadata>, cause: DeepReadonly<AtomicStateRevision['cause']>, apply: (transaction: StateTransactionPort) => unknown): void {
+  runRevision(metadata: DeepReadonly<StateMetadata>, cause: DeepReadonly<AtomicStateRevision['cause']>,
+    apply: (transaction: StateTransactionPort) => unknown, captureFacts = true): void {
     requireState(this.revisions.length < this.budgets.maxRevisionsPerBatch, 'BUDGET', '单批状态修订超过预算。');
     const beforeMetadata = resourceCost(this.#metadata), afterMetadata = resourceCost(metadata);
     this.#cost.bytes += afterMetadata.bytes - beforeMetadata.bytes; this.#cost.nodes += afterMetadata.nodes - beforeMetadata.nodes;
@@ -121,8 +123,15 @@ export class StateStage implements StateReadView {
       writesCount += 1;
       requireState(writesCount <= stage.budgets.maxChangesPerRevision, 'BUDGET', '事务写入次数超过预算。');
       const before = stage.get(table, id);
-      facts.push(...collectStateFacts(table, before, record ?? undefined));
       validateRecordTransition(table, before, record ?? undefined);
+      if (captureFacts) for (const fact of collectStateFacts(table, before, record ?? undefined, metadata.logicalTime,
+        touched.get(table)?.has(id) === true)) {
+        const cost = resourceCost(fact);
+        stage.#factCost.bytes += cost.bytes + 1; stage.#factCost.nodes += cost.nodes;
+        requireState(facts.length < stage.budgets.maxArrayLength && stage.#factCost.bytes <= stage.budgets.maxBytes
+          && stage.#factCost.nodes <= stage.budgets.maxNodes, 'BUDGET', '事务事实超过批次预算，不能截断或提交半态。');
+        facts.push(fact);
+      }
       const beforeCost = before ? resourceCost(before) : { bytes: 0, nodes: 0 };
       const afterCost = record ? resourceCost(record) : { bytes: 0, nodes: 0 };
       stage.#cost.bytes += afterCost.bytes - beforeCost.bytes + (record ? 1 : 0) - (before ? 1 : 0);
@@ -175,6 +184,7 @@ export class StateStage implements StateReadView {
       'BUDGET', '候选全态超过可恢复的字节或节点预算，未提交任何记录。');
     validateStateView(readOnlyView(this), this.registry, this.budgets);
     this.revisions.push(freezeData({ revision: metadata.cursor.stateRevision, logicalTime: metadata.logicalTime,
-      inputCursor: metadata.inputCursor, continuity: metadata.continuity, cause, changes, facts }));
+      inputCursor: metadata.inputCursor, continuity: metadata.continuity, cause, changes,
+      ...(captureFacts ? { facts, factsVersion: TWIN_FACTS_VERSION } : {}) }));
   }
 }

@@ -1,4 +1,4 @@
-import { BASELINE_DOMAINS, SCHEDULE_PHASES, STATE_TABLES } from './types';
+import { BASELINE_DOMAINS, SCHEDULE_PHASES, STATE_TABLES, TWIN_FACTS_VERSION } from './types';
 import { canonicalStringify, freezeData, requireState, TwinStateError } from './safeJson';
 import type { StateBudgets } from './safeJson';
 
@@ -20,6 +20,9 @@ export type JsonSchema = {
 const ref = (name: string): JsonSchema => ({ $ref: `#/$defs/${name}` });
 const object = (properties: Record<string, JsonSchema>): JsonSchema => ({
   type: 'object', properties, required: Object.keys(properties), additionalProperties: false,
+});
+const optionalObject = (properties: Record<string, JsonSchema>, optional: readonly string[]): JsonSchema => ({
+  ...object(properties), required: Object.keys(properties).filter(key => !optional.includes(key)),
 });
 const list = (items: JsonSchema): JsonSchema => ({ type: 'array', items });
 const nullable = (schema: JsonSchema): JsonSchema => ({ oneOf: [{ type: 'null' }, schema] });
@@ -127,8 +130,38 @@ const defs: Record<string, JsonSchema> = {
   checksum: object({ algorithm: literal('sha256'), value: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' } }),
   change: { oneOf: STATE_TABLES.flatMap(table => [object({ op: literal('put'), table: literal(table), record: ref(table) }),
     object({ op: literal('remove'), table: literal(table), id })]) },
-  revision: object({ revision: decimal, logicalTime: time, inputCursor: cursor,
-    cause: object({ kind: choice('input', 'timer', 'advance', 'gap'), id }), continuity: ref('continuity'), changes: list(ref('change')) }),
+  fact: { oneOf: [
+    object({ kind: literal('alarm'), action: choice('alarm-activated', 'alarm-cleared', 'alarm-observed-active', 'alarm-observed-inactive', 'alarm-state-unknown'), entityId: id,
+      details: object({ ruleId: id, deviceId: id, previousEdge: choice('absent', 'unknown', 'active', 'inactive'), edge: choice('absent', 'unknown', 'active', 'inactive') }) }),
+    object({ kind: literal('transfer'), action: choice('transfer-started', 'transfer-observed', 'transfer-phase-changed', 'transfer-completed', 'transfer-cancelled', 'transfer-unavailable'), entityId: id,
+      details: optionalObject({ cargoId: id, from: endpoint, to: endpoint,
+        previousPhase: nullable(choice('pending', 'in-flight', 'complete', 'cancelled')), phase: nullable(choice('pending', 'in-flight', 'complete', 'cancelled')),
+        startedAt: time, completedAt: nullable(time) }, ['startedAt', 'completedAt']) }),
+    object({ kind: literal('transfer'), action: literal('cargo-host-changed'), entityId: id,
+      details: object({ from: nullable(ref('host')), to: nullable(ref('host')) }) }),
+    object({ kind: literal('transfer'), action: literal('cargo-host-observed'), entityId: id,
+      details: object({ host: ref('host') }) }),
+    object({ kind: literal('stock'), action: choice('slot-occupied', 'slot-cleared', 'slot-changed'), entityId: id,
+      details: object({ previousCargoId: nullable(id), nextCargoId: nullable(id), inventoryRevision: nullable(id) }) }),
+    object({ kind: literal('stock'), action: choice('slot-observed', 'slot-unavailable'), entityId: id,
+      details: object({ cargoId: nullable(id), inventoryRevision: nullable(id) }) }),
+    object({ kind: literal('stock'), action: literal('inventory-revision-changed'), entityId: id,
+      details: object({ recordTable: choice('slots', 'fetchRows'), previousRevision: nullable(id), nextRevision: nullable(id) }) }),
+    object({ kind: literal('lifecycle'), action: choice('cargo-created', 'cargo-observed'), entityId: id,
+      details: optionalObject({ containerCode: nullable(id), taskId: nullable(id), createdAt: time }, ['createdAt']) }),
+    object({ kind: literal('lifecycle'), action: choice('cargo-destroyed', 'cargo-observed-destroyed'), entityId: id,
+      details: optionalObject({ reason: id, destroyedAt: time }, ['destroyedAt']) }),
+    object({ kind: literal('lifecycle'), action: choice('device-born', 'device-observed', 'device-retired'), entityId: id,
+      details: optionalObject({ sourceId: id, deviceType: id, assetCode: id, generatorId: id, generation: decimal, bornAt: time }, ['bornAt']) }),
+  ] },
+  revision: {
+    ...optionalObject({ revision: decimal, logicalTime: time, inputCursor: cursor,
+      cause: object({ kind: choice('input', 'timer', 'advance', 'gap'), id }), continuity: ref('continuity'), changes: list(ref('change')),
+      facts: list(ref('fact')), factsVersion: literal(TWIN_FACTS_VERSION) }, ['facts', 'factsVersion']),
+    // 保留旧格式，但只有显式事实数组才能携带完整覆盖语义版本。
+    oneOf: [{ type: 'object', properties: { factsVersion: { type: 'null' } } },
+      { type: 'object', required: ['facts', 'factsVersion'] }],
+  },
 };
 const envelope = { schemaVersion: literal('1'), id, projectionId: id, versions: ref('versions'), cursor, logicalTime: time };
 defs.input = { oneOf: [

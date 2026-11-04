@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { HistorySourceKind } from '../../../electron/shared/historyServiceContract';
 import type { HistoryHttpSourceConfig, HistoryMqttSourceConfig, HistorySourceConfig } from '../../../electron/shared/historySourceConfig';
 import { parseDeviceTelemetryMessage } from '../../runtime/mqtt/deviceTelemetry';
+import { applyHistoryMqttFieldMap, compileHistoryMqttFieldMap } from '../../runtime/history/mqttFieldMap';
 
 function pointer(root: unknown, path: string): unknown {
   if (path === '') return root;
@@ -55,25 +56,36 @@ export function HistorySourceSamplePreview({ kind, config, disabled }: { kind: H
         const parsed: unknown = JSON.parse(sample);
         if (kind === 'mqtt') {
           const mqtt = config as HistoryMqttSourceConfig;
+          const fieldMap = compileHistoryMqttFieldMap(mqtt.parser.fieldMap);
           if (mqtt.parser.adapter === 'epv-v1') {
             if (!topic || topic.includes('+') || topic.includes('#')) throw new Error('EPV 样本需要具体 Topic，不能使用订阅通配符。');
             const frame = parseDeviceTelemetryMessage(topic, sample, { kind: 'epv', sourceId: mqtt.logicalSourceId });
             if (!frame) throw new Error('样本未生成设备快照，请检查 EPV 数据与 Topic。');
             if (frame.sequence !== null && frame.sequence !== undefined && !Number.isSafeInteger(frame.sequence)) throw new Error('样本序号超过安全整数范围，应在历史来源合同中使用字符串序号。');
-            setResult(JSON.stringify(redact({ sourceId: frame.sourceId, deviceType: frame.deviceType, assetCode: frame.assetCode, fields: frame.fields, sourceTimestamp: frame.sourceTimestamp, sequence: frame.sequence }), null, 2));
+            setResult(JSON.stringify(redact({ sourceId: frame.sourceId, deviceType: frame.deviceType, assetCode: frame.assetCode, fields: applyHistoryMqttFieldMap(frame.fields, fieldMap, mqtt.parser.mode), sourceTimestamp: frame.sourceTimestamp, sequence: frame.sequence }), null, 2));
           } else {
             const records = mqtt.parser.recordsPath ? pointer(parsed, mqtt.parser.recordsPath) : parsed;
             const rows = Array.isArray(records) ? records.slice(0, 5) : [records];
             const keys = ['deviceTypePath', 'deviceIdPath', 'statePath', 'eventTimePath', 'sequencePath', 'epochPath', 'eventIdPath'] as const;
-            setResult(JSON.stringify(rows.map(row => Object.fromEntries(keys.map(key => [key, mqtt.parser[key] === undefined ? '[未映射]' : mappedValue(row, mqtt.parser[key]!)]))), null, 2));
+            const previews = rows.map(row => {
+              const mappings = Object.fromEntries(keys.map(key => [key, mqtt.parser[key] === undefined ? '[未映射]' : mappedValue(row, mqtt.parser[key]!)]));
+              if (mqtt.parser.statePath === undefined) return { mappings, fields: '[未映射状态对象]' };
+              const fields = pointer(row, mqtt.parser.statePath);
+              if (!fields || typeof fields !== 'object' || Array.isArray(fields)) throw new Error('状态路径必须指向 JSON 对象。');
+              return { mappings, fields: redact(applyHistoryMqttFieldMap(fields as Record<string, unknown>, fieldMap, mqtt.parser.mode)) };
+            });
+            setResult(JSON.stringify(previews, null, 2));
           }
         } else if (http) {
           const mapping = http.operations[selectedOperation as keyof typeof http.operations]?.mapping;
           if (!mapping) throw new Error('请先启用并配置要检查的接口。');
           const values = Object.entries(mapping).filter(([key, value]) => key !== 'fieldMap' && typeof value === 'string')
             .map(([field, path]) => ({ field, path, value: mappedValue(parsed, path as string) }));
-          const records = mapping.itemsPath !== undefined ? pointer(parsed, mapping.itemsPath) : parsed;
-          const rows = Array.isArray(records) ? records.slice(0, 5) : [records];
+          const records = selectedOperation === 'baseline' ? (mapping.statePath === undefined ? undefined : pointer(parsed, mapping.statePath))
+            : selectedOperation === 'events' ? (mapping.itemsPath === undefined ? undefined : pointer(parsed, mapping.itemsPath))
+              : mapping.itemsPath !== undefined ? pointer(parsed, mapping.itemsPath)
+                : mapping.statePath !== undefined ? pointer(parsed, mapping.statePath) : parsed;
+          const rows = selectedOperation === 'coverage' ? [] : Array.isArray(records) ? records.slice(0, 5) : [records];
           const fields = rows.map(row => Object.entries(mapping.fieldMap ?? {}).map(([target, path]) => ({ target, path, value: mappedValue(row, path) })));
           setResult(JSON.stringify({ responseMappings: values, recordMappings: fields }, null, 2));
         }

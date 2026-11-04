@@ -1,5 +1,6 @@
 import type { DurableHistoryArchive } from '../storage/index.ts';
 import type { StateAdapterRegistry } from '../../../runtime/history/state/adapters.ts';
+import type { HistoryEventIndex } from '../events/HistoryEventIndex.ts';
 
 export type ReadIdentity = { projectId: string; cacheRevision: string; publishedVersionId: string; bindingRevision: string; projectionId: string };
 export type ReadGrant = { grantId: string; identity: ReadIdentity; from: number; to: number; expiresAt: number };
@@ -11,6 +12,7 @@ export type TimeRange = { from: number; to: number };
  * 归档开/关读取租约内部也会执行 fencing 写入：实现必须显式支持同一 owner 的安全重入，
  * 或使用不与归档写入互锁的所有权屏障；不得在外层持有不可重入的同一锁造成死锁。
  * state/cancel 必须可与正在执行的恢复请求并行，且同样经当前授权检查。
+ * 只执行一次 operation 并原样返回其结果；授权撤销或过期应分别使用 ACCESS_DENIED、CAPABILITY_EXPIRED。
  */
 export interface QueryAuthority {
   runAuthorized<T>(grant: Readonly<ReadGrant>, action: ReadAction, operation: () => Promise<T>): Promise<T>;
@@ -22,6 +24,8 @@ export type QueryOptions = {
   archive: DurableHistoryArchive;
   registry: StateAdapterRegistry;
   authority: QueryAuthority;
+  /** 只返回同一归档 owner 已打开并追赶的投影索引，缺失时不得伪造空事件。 */
+  eventIndexForProjection?: (projectionId: string) => HistoryEventIndex | null;
   replayAbi: string;
   maxSessions?: number;
   maxSessionTtlMs?: number;

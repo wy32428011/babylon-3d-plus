@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, unlink } from 'node:fs/promises';
+import { link, lstat, open, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { compareDecimal } from '../../../runtime/history/state/safeJson.ts';
@@ -25,18 +25,28 @@ export class ArchiveWriterLock {
     } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
     const record: LockRecord = { format: 'history-owner/1', lockId: randomUUID(), projectId: scope.projectId,
       captureDomainId: scope.captureDomainId, writer: clone(writer) };
-    const bytes = pack(record, 8192), handle = await open(file, 'wx', 0o600);
-    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
-    await ArchiveFiles.syncDirectory(domain, durability);
+    const bytes = pack(record, 8192), temporary = path.join(domain, `.history-writer-${record.lockId}.tmp`);
+    let created = false, failed = false, failure: unknown;
+    try {
+      const handle = await open(temporary, 'wx', 0o600); created = true;
+      try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+      await link(temporary, file);
+      await ArchiveFiles.syncDirectory(domain, durability);
+    } catch (error) { failed = true; failure = error; }
+    if (created) {
+      try { await unlink(temporary); await ArchiveFiles.syncDirectory(domain, durability); }
+      catch (error) { if (!failed) { failed = true; failure = error; } }
+    }
+    if (failed) throw failure;
     return { lock: new ArchiveWriterLock(file, record, sha256(bytes), durability), reclaimed };
   }
   private static async read(file: string): Promise<{ record: LockRecord; digest: string }> {
-    const before = await lstat(file);
-    need(before.isFile() && !before.isSymbolicLink() && before.size <= 8192, 'WRITER_LOCK', 'writer 所有权文件无效。');
+    const before = await lstat(file, { bigint: true });
+    need(before.isFile() && !before.isSymbolicLink() && before.size <= 8192n, 'WRITER_LOCK', 'writer 所有权文件无效。');
     const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
-      const after = await handle.stat();
-      need(before.dev === after.dev && before.ino === after.ino && after.size <= 8192, 'WRITER_LOCK', 'writer 文件在打开期间改变。');
+      const after = await handle.stat({ bigint: true });
+      need(before.dev === after.dev && before.ino === after.ino && after.size <= 8192n, 'WRITER_LOCK', 'writer 文件在打开期间改变。');
       const bytes = await handle.readFile(), record = parse<LockRecord>(bytes, 8192);
       need(record.format === 'history-owner/1' && typeof record.lockId === 'string', 'WRITER_LOCK', 'writer 所有权记录损坏。');
       return { record, digest: sha256(bytes) };

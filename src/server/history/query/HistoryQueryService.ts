@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonicalStringify, compareDecimal } from '../../../runtime/history/state/safeJson.ts';
 import type { StateCursor } from '../../../runtime/history/state/types.ts';
 import type { HistoryChangePage, HistoryReadSession, ReadSessionRequest } from '../storage/types.ts';
+import { HistoryEventIndex } from '../events/HistoryEventIndex.ts';
 import { HistoryQueryError } from './types.ts';
 import type { QueryOptions, ReadAction, ReadGrant, ReadIdentity, TimeRange } from './types.ts';
 
@@ -9,10 +10,13 @@ type LeaseBudget = { id: string | null; limit: number; accounted: number; active
 type Snapshot = { id: string; requestId: string; requested: number | null; generation: number; bytes: Buffer; chunkSize: number; cursor: StateCursor; expiresAt: number; lease: string; response: Record<string, unknown> };
 type Job = { generation: number; requested: number | null; controller: AbortController };
 type Window = { id: string; generation: number; lease: string; budget: LeaseBudget; expiresAt: number; pageCursor: string; after: StateCursor; to: StateCursor; through: number; done: boolean };
+type EventWindow = { id: string; index: HistoryEventIndex; range: TimeRange; cursor: string; expiresAt: number; budget: LeaseBudget; busy: boolean };
+type EventJob = { controller: AbortController; done: Promise<unknown> };
 type Session = {
   id: string; grantId: string; grantFrom: number; grantTo: number; identity: ReadIdentity; mode: 'history' | 'live'; range: TimeRange | null;
   expiresAt: number; generation: number; usedBytes: number; reservedBytes: number; pages: number; snapshots: Map<string, Snapshot>;
-  windows: Map<string, Window>; openingWindows: number; cursors: Set<string>; jobs: Map<string, Job>; closed: boolean;
+  windows: Map<string, Window>; openingWindows: number; events: Map<string, EventWindow>; openingEvents: number; eventJobs: Set<EventJob>;
+  cursors: Set<string>; jobs: Map<string, Job>; closed: boolean; closePromise: Promise<void> | null;
 };
 const MAX_TIME = 8_640_000_000_000_000;
 function requireValue(value: unknown, code: string, message: string): asserts value { if (!value) throw new HistoryQueryError(code, message); }
@@ -38,27 +42,40 @@ export class HistoryQueryService {
   readonly #maxSessions: number; readonly #ttl: number; readonly #maxSnapshot: number; readonly #maxTotal: number;
   readonly #maxChunks: number; readonly #chunk: number; readonly #maxPage: number; readonly #maxPages: number;
   readonly #maxRead: number; readonly #maxLeaseRead: number; readonly #maxConcurrent: number;
-  #snapshotBytes = 0; #running = 0; #controls = 0;
-  constructor(readonly options: QueryOptions) {
+  readonly #reaper: ReturnType<typeof setInterval>;
+  #snapshotBytes = 0; #running = 0; #controls = 0; #stopped = false; #cleanupFailed = false;
+  #maintenance: Promise<void> | null = null; #shutdown: Promise<void> | null = null;
+  readonly options: Readonly<QueryOptions>;
+  constructor(options: QueryOptions) {
     requireValue(options.archive && options.registry && options.authority && typeof options.authority.runAuthorized === 'function'
-      && typeof options.authority.coverage === 'function' && typeof options.replayAbi === 'string' && options.replayAbi.length > 0,
+      && typeof options.authority.coverage === 'function' && typeof options.replayAbi === 'string' && options.replayAbi.length > 0
+      && (options.eventIndexForProjection === undefined || typeof options.eventIndexForProjection === 'function'),
     'AUTHORITY_REQUIRED', '缺少真实的归档所有权、授权或覆盖索引端口。');
+    // 构造后不能通过修改原 options 替换归档或授权端口。
+    this.options = Object.freeze({ ...options });
+    options = this.options;
     this.#maxSessions = positive(options.maxSessions, 16, 64);
-    this.#ttl = positive(options.maxSessionTtlMs, 60_000, Math.min(options.archive.limits.maxSessionTtlMs, 300_000));
+    this.#ttl = positive(options.maxSessionTtlMs, Math.min(60_000, options.archive.limits.maxSessionTtlMs), Math.min(options.archive.limits.maxSessionTtlMs, 300_000));
     this.#maxSnapshot = positive(options.maxSnapshotBytes, 32 * 1024 * 1024, 64 * 1024 * 1024);
     this.#maxTotal = positive(options.maxTotalSnapshotBytes, 64 * 1024 * 1024, 256 * 1024 * 1024);
     this.#maxChunks = positive(options.maxChunks, 128, 1024);
     this.#chunk = positive(options.chunkBytes, 256 * 1024, 1024 * 1024);
-    this.#maxPage = positive(options.maxPageBytes, 1024 * 1024, Math.min(4 * 1024 * 1024, options.archive.limits.maxPageBytes));
-    this.#maxPages = positive(options.maxPages, 128, Math.min(1024, options.archive.limits.maxPagesPerSession));
+    // 网关还要添加 ApiResult 信封；默认给编码和信封预留空间，部署时仍须核对网关上限。
+    this.#maxPage = positive(options.maxPageBytes, Math.min(1024 * 1024 - 8192, options.archive.limits.maxPageBytes), Math.min(4 * 1024 * 1024, options.archive.limits.maxPageBytes));
+    this.#maxPages = positive(options.maxPages, Math.min(128, options.archive.limits.maxPagesPerSession), Math.min(1024, options.archive.limits.maxPagesPerSession));
     this.#maxRead = positive(options.maxReadBytes, Math.min(512 * 1024 * 1024, options.archive.limits.maxReadBytesPerSession), options.archive.limits.maxReadBytesPerSession);
     this.#maxLeaseRead = positive(options.maxLeaseReadBytes, Math.min(64 * 1024 * 1024, this.#maxRead), this.#maxRead);
     this.#maxConcurrent = positive(options.maxConcurrent, 4, 32);
     requireValue(this.#maxPage >= 16_384 && this.#chunk * this.#maxChunks >= this.#maxSnapshot && Math.ceil(this.#chunk * 4 / 3) + 4096 <= this.#maxPage,
       'QUERY_BUDGET', '快照分块或响应预算不一致。');
+    // 无后续请求时也应释放过期快照和归档租约；清理失败后停止提供查询。
+    this.#reaper = setInterval(() => this.#scheduleSweep(), Math.min(this.#ttl, 5000));
+    this.#reaper.unref();
   }
   async dispatch(grant: ReadGrant, action: ReadAction, value: unknown, signal?: AbortSignal): Promise<unknown> {
+    requireValue(!this.#stopped && !this.#cleanupFailed, 'QUERY_UNAVAILABLE', '查询服务已关闭或过期租约清理失败。');
     this.#validateGrant(grant); requireValue(!signal?.aborted, 'CANCELLED', '请求已取消。');
+    grant = Object.freeze({ ...grant, identity: Object.freeze({ ...grant.identity }) });
     const actions: ReadAction[] = ['coverage', 'sessions/open', 'state/at', 'state/chunk', 'state/cancel', 'changes/query', 'events/query', 'sessions/close'];
     requireValue(actions.includes(action), 'ACTION_NOT_FOUND', '不支持的查询动作。');
     // 取消和关闭不能被恢复作业占满的并发预算挡住。
@@ -66,16 +83,27 @@ export class HistoryQueryService {
     if (counted) { requireValue(this.#running < this.#maxConcurrent, 'QUERY_BUSY', '查询并发已达上限。'); this.#running += 1; }
     else { requireValue(this.#controls < this.#maxConcurrent, 'QUERY_BUSY', '取消或关闭并发已达上限。'); this.#controls += 1; }
     try {
-      return await this.options.authority.runAuthorized(grant, action, async () => {
-        this.#validateGrant(grant); requireValue(!signal?.aborted, 'CANCELLED', '请求已取消。');
-        const result = await this.#execute(grant, action, value, signal);
-        this.#validateGrant(grant); requireValue(!signal?.aborted, 'CANCELLED', '请求已取消。');
-        return result;
-      });
+      let calls = 0, completed = false, active = true, produced: unknown;
+      let result: unknown;
+      try {
+        result = await this.options.authority.runAuthorized(grant, action, async () => {
+          calls += 1; requireValue(active && calls === 1, 'AUTHORITY_CONTRACT', '授权端口不得重复或延迟执行查询。');
+          this.#validateGrant(grant); requireValue(!signal?.aborted && !this.#stopped, 'CANCELLED', '请求已取消。');
+          const data = await this.#execute(grant, action, value, signal);
+          requireValue(Buffer.byteLength(JSON.stringify(data), 'utf8') <= this.#maxPage, 'PAGE_BUDGET', '查询响应超过协商的字节预算。');
+          this.#validateGrant(grant); requireValue(!signal?.aborted && !this.#stopped && !this.#cleanupFailed, 'CANCELLED', '请求已取消或查询服务不可用。');
+          produced = data; completed = true; return data;
+        });
+      } finally { active = false; }
+      requireValue(calls === 1 && completed && Object.is(result, produced), 'AUTHORITY_CONTRACT', '授权端口未在屏障内完整执行查询。');
+      this.#validateGrant(grant);
+      requireValue(!signal?.aborted && !this.#stopped && !this.#cleanupFailed, 'CANCELLED', '请求已取消或查询服务不可用。');
+      return result;
     } finally { if (counted) this.#running -= 1; else this.#controls -= 1; }
   }
   #validateGrant(grant: ReadGrant): void {
     requireValue(grant && typeof grant === 'object', 'ACCESS_DENIED', '缺少只读授权。');
+    object(grant, ['grantId', 'identity', 'from', 'to', 'expiresAt']);
     id(grant.grantId); identity(grant.identity); integer(grant.from); integer(grant.to); integer(grant.expiresAt);
     requireValue(grant.from < grant.to && grant.identity.projectId === this.options.archive.scope.projectId, 'ACCESS_DENIED', '只读授权不属于归档项目或时间范围无效。');
     requireValue(grant.expiresAt > Date.now(), 'CAPABILITY_EXPIRED', '只读能力已过期。');
@@ -143,24 +171,74 @@ export class HistoryQueryService {
     try { return await operation(); }
     finally { budget.active -= 1; this.#syncLease(s, budget); }
   }
+  #syncEventBudget(s: Session, budget: LeaseBudget, actual: number): void {
+    if (budget.released) return;
+    requireValue(Number.isSafeInteger(actual) && actual >= budget.accounted && actual <= budget.limit,
+      'QUERY_ACCOUNTING_UNAVAILABLE', '事件索引实际读取量不可用或超过预算。');
+    const delta = actual - budget.accounted;
+    budget.accounted = actual; s.reservedBytes -= delta; s.usedBytes += delta;
+  }
+  async #closeEvent(s: Session, event: EventWindow, uncertain = false): Promise<void> {
+    if (!s.events.delete(event.id)) return;
+    this.#finishLease(s, event.budget, uncertain || event.busy);
+    try { await event.index.closeQuery(s.id, event.id); }
+    catch (error) { this.#cleanupFailed = true; throw error; }
+  }
   async #closeSnapshot(s: Session, snapshot: Snapshot): Promise<void> {
     if (!s.snapshots.delete(snapshot.id)) return;
     this.#snapshotBytes -= snapshot.bytes.length;
-    await this.options.archive.closeReadSession(snapshot.lease);
+    try { await this.options.archive.closeReadSession(snapshot.lease); }
+    catch (error) { this.#cleanupFailed = true; throw error; }
   }
   async #closeWindow(s: Session, window: Window): Promise<void> {
     if (!s.windows.delete(window.id)) return;
     try {
       if (window.budget.active) this.#finishLease(s, window.budget, true);
       else { this.#syncLease(s, window.budget); this.#finishLease(s, window.budget); }
-    } finally { await this.options.archive.closeReadSession(window.lease); }
+    } finally {
+      try { await this.options.archive.closeReadSession(window.lease); }
+      catch (error) { this.#cleanupFailed = true; throw error; }
+    }
   }
-  async #close(s: Session): Promise<void> {
-    if (s.closed) return; s.closed = true; this.#sessions.delete(s.id);
+  #close(s: Session): Promise<void> {
+    if (s.closePromise) return s.closePromise;
+    s.closed = true;
     for (const job of s.jobs.values()) job.controller.abort();
-    await Promise.all([...s.snapshots.values()].map(x => this.#closeSnapshot(s, x)).concat([...s.windows.values()].map(x => this.#closeWindow(s, x))));
+    for (const job of s.eventJobs) job.controller.abort();
+    const pendingEvents = [...s.eventJobs].map(job => job.done);
+    s.closePromise = (async () => {
+      const cleanup = Promise.allSettled([...s.snapshots.values()].map(x => this.#closeSnapshot(s, x))
+        .concat([...s.windows.values()].map(x => this.#closeWindow(s, x)), [...s.events.values()].map(x => this.#closeEvent(s, x))));
+      await Promise.allSettled(pendingEvents);
+      const results = await cleanup;
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') { this.#cleanupFailed = true; throw failed.reason; }
+    })().finally(() => { this.#sessions.delete(s.id); });
+    return s.closePromise;
   }
-  async #sweep(): Promise<void> { for (const s of [...this.#sessions.values()]) if (s.expiresAt <= Date.now()) await this.#close(s); }
+  async #sweep(): Promise<void> {
+    const now = Date.now();
+    for (const s of [...this.#sessions.values()]) {
+      if (s.expiresAt <= now) await this.#close(s);
+      else for (const event of [...s.events.values()]) if (event.expiresAt <= now) await this.#closeEvent(s, event);
+    }
+  }
+  #scheduleSweep(): void {
+    if (this.#stopped || this.#maintenance) return;
+    this.#maintenance = this.#sweep().catch(() => { this.#cleanupFailed = true; }).finally(() => { this.#maintenance = null; });
+  }
+  /** 仅关闭本查询服务及其租约，不关闭采集归档；重连必须创建新实例。 */
+  close(): Promise<void> {
+    if (this.#shutdown) return this.#shutdown;
+    this.#stopped = true; clearInterval(this.#reaper);
+    this.#shutdown = (async () => {
+      if (this.#maintenance) await this.#maintenance;
+      const results = await Promise.allSettled([...this.#sessions.values()].map(s => this.#close(s)));
+      if (this.#cleanupFailed || results.some(result => result.status === 'rejected'))
+        throw new HistoryQueryError('QUERY_CLEANUP_FAILED', '查询租约清理失败，必须由归档所有者处理。');
+    })();
+    return this.#shutdown;
+  }
   #current(s: Session, generation: number, signal?: AbortSignal): void {
     requireValue(!signal?.aborted, 'CANCELLED', '请求已取消。');
     requireValue(!s.closed, 'SESSION_CLOSED', '读取会话已关闭。');
@@ -178,7 +256,7 @@ export class HistoryQueryService {
       const gaps: { from: number; to: number; reason: string }[] = [];
       if (r.from < mark.retainedFrom) gaps.push({ from: r.from, to: Math.min(r.to, mark.retainedFrom), reason: '早于可恢复留存起点' });
       if (r.to > mark.queryableThrough) { const from = Math.max(r.from, mark.retainedFrom, mark.queryableThrough); if (from < r.to) gaps.push({ from, to: r.to, reason: mark.continuity.status === 'gap' ? mark.continuity.reason : '超过连续可查询水位' }); }
-      return { identity: grant.identity, range: r, sourceName: coverage.sourceName, sourceQuality: coverage.sourceQuality, queryableThrough: mark.queryableThrough, gaps, versionBoundaries: coverage.versionBoundaries };
+      return { identity: grant.identity, range: r, sourceName: coverage.sourceName, sourceQuality: coverage.sourceQuality, queryableThrough: Math.min(mark.queryableThrough, grant.to), gaps, versionBoundaries: coverage.versionBoundaries };
     }
     if (action === 'sessions/open') {
       const req = object(input, ['identity', 'mode', 'range']); requireValue(sameIdentity(identity(req.identity), grant.identity), 'VERSION_MISMATCH', '查询身份不匹配。');
@@ -191,7 +269,8 @@ export class HistoryQueryService {
       await this.#sweep(); requireValue(this.#sessions.size < this.#maxSessions, 'SESSION_CAPACITY', '读取会话数量已达上限。');
       const s: Session = { id: randomUUID(), grantId: grant.grantId, grantFrom: grant.from, grantTo: grant.to, identity: { ...grant.identity }, mode: req.mode, range: selectedRange,
         expiresAt: Math.min(grant.expiresAt, Date.now() + this.#ttl), generation: -1, usedBytes: 0, reservedBytes: 0, pages: 0,
-        snapshots: new Map(), windows: new Map(), openingWindows: 0, cursors: new Set(), jobs: new Map(), closed: false };
+        snapshots: new Map(), windows: new Map(), openingWindows: 0, events: new Map(), openingEvents: 0, eventJobs: new Set(),
+        cursors: new Set(), jobs: new Map(), closed: false, closePromise: null };
       this.#sessions.set(s.id, s);
       return { sessionId: s.id, identity: s.identity, versions: mark.versions, mode: s.mode, readOnly: true, expiresAt: s.expiresAt, replayAbi: this.options.replayAbi,
         limits: { maxSnapshotBytes: this.#maxSnapshot, maxChunks: this.#maxChunks, maxPageBytes: this.#maxPage, maxPages: this.#maxPages } };
@@ -209,12 +288,7 @@ export class HistoryQueryService {
     }
     if (action === 'sessions/close') { await this.#close(s); return { closed: true }; }
     if (action === 'state/cancel') { const job = s.jobs.get(id(req.requestId)); if (job) job.controller.abort(); return { cancelled: Boolean(job) }; }
-    if (action === 'events/query') {
-      const r = range(req.range); this.#scope(grant, r);
-      requireValue(!s.range || r.from >= s.range.from && r.to <= s.range.to, 'ACCESS_DENIED', '事件范围超出会话范围。');
-      integer(req.limit, 1, 1000);
-      throw new HistoryQueryError('EVENT_INDEX_UNAVAILABLE', '尚无可验证的关键事件索引；不能以空结果表示无事件。');
-    }
+    if (action === 'events/query') return this.#runEvents(s, grant, req, signal);
     const generation = integer(req.generation, 0, Number.MAX_SAFE_INTEGER);
     if (action === 'state/at') return this.#stateAt(s, grant, req, generation, signal);
     if (action === 'changes/query' && generation > s.generation) {
@@ -234,6 +308,79 @@ export class HistoryQueryService {
       return response;
     }
     return this.#changes(s, grant, req, generation, signal);
+  }
+  async #runEvents(s: Session, grant: ReadGrant, req: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    const job: EventJob = { controller, done: Promise.resolve() };
+    s.eventJobs.add(job);
+    try { job.done = this.#events(s, grant, req, controller.signal); return await job.done; }
+    finally { signal?.removeEventListener('abort', abort); s.eventJobs.delete(job); }
+  }
+  async #events(s: Session, grant: ReadGrant, req: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    const selected = range(req.range); this.#scope(grant, selected);
+    requireValue(!s.range || selected.from >= s.range.from && selected.to <= s.range.to, 'ACCESS_DENIED', '事件范围超出会话范围。');
+    const limit = integer(req.limit, 1, 1000);
+    const requestedId = req.queryId === null ? null : id(req.queryId), requestedCursor = req.cursor === null ? null : id(req.cursor);
+    requireValue((requestedId === null) === (requestedCursor === null), 'INVALID_REQUEST', '事件会话与分页游标必须同时指定或同时为空。');
+    let event: EventWindow;
+    if (requestedId === null) {
+      for (const old of [...s.events.values()]) if (old.expiresAt <= Date.now()) await this.#closeEvent(s, old);
+      requireValue(!s.closed && s.expiresAt > Date.now() && !signal?.aborted, 'SESSION_EXPIRED', '读取会话已关闭、过期或取消。');
+      requireValue(s.events.size + s.openingEvents < 4 && s.pages < this.#maxPages, 'SESSION_CAPACITY', '事件会话或分页预算已达上限。');
+      const index = this.options.eventIndexForProjection?.(s.identity.projectionId);
+      requireValue(index instanceof HistoryEventIndex && index.isBoundTo(this.options.archive, s.identity.projectionId),
+        'EVENT_INDEX_UNAVAILABLE', '尚无属于当前归档和投影的关键事件索引。');
+      const limits = index.queryLimits;
+      requireValue(limit <= limits.maxPageItems, 'QUERY_BUDGET', '事件页条数超过索引预算。');
+      const budget = this.#reserveLease(s); let opened: Awaited<ReturnType<HistoryEventIndex['openQuery']>> | null = null;
+      s.openingEvents += 1;
+      try {
+        opened = await index.openQuery({ owner: s.id, range: selected,
+          ttlMs: Math.max(1, Math.min(s.expiresAt - Date.now(), limits.maxSessionTtlMs, this.options.archive.limits.maxSessionTtlMs)),
+          maxPages: Math.min(this.#maxPages - s.pages, limits.maxPages), maxReadBytes: Math.min(budget.limit, limits.maxReadBytes),
+          maxPageBytes: Math.min(this.#maxPage - 1024, limits.maxPageBytes), signal });
+        requireValue(!s.closed && s.expiresAt > Date.now() && !signal?.aborted, 'SESSION_EXPIRED', '读取会话在准备事件时已关闭或过期。');
+        event = { id: opened.queryId, index, range: selected, cursor: opened.cursor,
+          expiresAt: Math.min(opened.expiresAt, s.expiresAt), budget, busy: false };
+        s.events.set(event.id, event);
+      } catch (error) {
+        this.#finishLease(s, budget, true);
+        if (opened) try { await index.closeQuery(s.id, opened.queryId); } catch { this.#cleanupFailed = true; }
+        throw error;
+      } finally { s.openingEvents -= 1; }
+    } else {
+      const existing = s.events.get(requestedId);
+      requireValue(existing && existing.expiresAt > Date.now() && existing.range.from === selected.from && existing.range.to === selected.to
+        && existing.cursor === requestedCursor, 'SESSION_EXPIRED', '事件会话或分页游标已失效。');
+      requireValue(limit <= existing.index.queryLimits.maxPageItems, 'QUERY_BUDGET', '事件页条数超过索引预算。');
+      event = existing;
+    }
+    requireValue(!event.busy, 'QUERY_BUSY', '该事件查询已有分页正在读取。');
+    event.busy = true;
+    try {
+      this.#budget(s, 0, true);
+      const page = await event.index.readQuery(s.id, event.id, event.cursor, limit, signal);
+      this.#syncEventBudget(s, event.budget, page.readBytes);
+      requireValue(!s.closed && s.expiresAt > Date.now() && event.expiresAt > Date.now() && !signal?.aborted,
+        'SESSION_EXPIRED', '读取会话在事件分页期间已关闭、过期或取消。');
+      requireValue(page.queryId === event.id && page.cursor === event.cursor && page.range.from === selected.from && page.range.to === selected.to
+        && page.indexedThrough.projectionId === s.identity.projectionId && page.hasMore === (page.nextCursor !== null),
+      'EVENT_INDEX_INVALID', '事件索引返回了不一致的分页。');
+      const response = { identity: s.identity, range: selected, queryId: event.id, cursor: requestedCursor,
+        nextCursor: page.nextCursor, hasMore: page.hasMore, expiresAt: event.expiresAt,
+        items: page.items.map(item => ({ id: item.id, time: item.time, kind: item.kind, label: item.label })) };
+      this.#budget(s, Buffer.byteLength(JSON.stringify(response), 'utf8'));
+      if (page.nextCursor !== null) event.cursor = page.nextCursor;
+      else { event.busy = false; await this.#closeEvent(s, event); }
+      requireValue(!s.closed && s.expiresAt > Date.now() && !signal?.aborted, 'SESSION_EXPIRED', '事件分页交付前会话已关闭或过期。');
+      return response;
+    } catch (error) {
+      try { await this.#closeEvent(s, event, true); } catch { /* 清理故障已冻结查询服务。 */ }
+      throw error;
+    } finally { event.busy = false; }
   }
   async #stateAt(s: Session, grant: ReadGrant, req: Record<string, unknown>, generation: number, signal?: AbortSignal): Promise<unknown> {
     const requestId = id(req.requestId);
@@ -285,10 +432,12 @@ export class HistoryQueryService {
       const snapshotId = randomUUID(), expiresAt = Math.min(s.expiresAt, lease.expiresAt), snapshotCursor = lease.afterCursor;
       const chunks = []; for (let offset = 0, index = 0; offset < bytes.length; offset += this.#chunk, index += 1) { const part = bytes.subarray(offset, Math.min(offset + this.#chunk, bytes.length)); chunks.push({ index, byteLength: part.length, sha256: hash(part) }); }
       const response = { status: 'ready', snapshot: { snapshotId, identity: s.identity, cursor: snapshotCursor, requestedTime: requested,
-        checkpointTime: checkpoint.state.metadata.logicalTime, resolvedTime: resolved, coveredThrough: target, throughCursor: last, queryableThrough: lease.queryableThrough,
+        checkpointTime: checkpoint.state.metadata.logicalTime, resolvedTime: resolved, coveredThrough: target, throughCursor: last, queryableThrough: Math.min(lease.queryableThrough, grant.to),
         expiresAt, byteLength: bytes.length, chunks,
         resume: s.mode === 'live' ? { toCursor: last, throughTime: target, leaseExpiresAt: expiresAt } : null } };
-      this.#budget(s, Buffer.byteLength(JSON.stringify(response)));
+      const responseBytes = Buffer.byteLength(JSON.stringify(response));
+      requireValue(responseBytes <= this.#maxPage, 'PAGE_BUDGET', '快照清单超过响应字节预算。');
+      this.#budget(s, responseBytes);
       const snap: Snapshot = { id: snapshotId, requestId, requested, generation, bytes, chunkSize: this.#chunk, cursor: snapshotCursor, expiresAt, lease: lease.sessionId, response };
       this.#snapshotBytes += bytes.length; s.snapshots.set(snap.id, snap); s.cursors.add(`${snap.cursor.projectionId}:${snap.cursor.stateRevision}`); lease = null;
       return structuredClone(response);

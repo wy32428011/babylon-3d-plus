@@ -66,16 +66,18 @@ export function evaluateAlarms(ctx: LogisticsContext): void {
         const aliases: Record<string, string> = { '0': 'offline', '1': 'idle', '2': 'running', '3': 'alarm', '离线': 'offline', '空闲': 'idle', '运行': 'running', '报警': 'alarm', warning: 'alarm', fault: 'alarm' };
         const running = stale ? 'offline' : frame.faulted ? 'alarm' : raw === null ? null : aliases[raw] ?? raw;
         if (running === rule.runningState) trigger = 'device';
+        else if (running === null) status = 'missing';
+        else if (!['offline', 'idle', 'running', 'alarm'].includes(running)) status = 'invalid';
       }
       status = trigger !== null ? 'matched' : rule.listenProperty === 'CUSTOM PROPERTY'
-        ? custom === undefined ? 'missing' : scalar(custom) === null ? 'invalid' : 'unmatched' : 'unmatched';
+        ? custom === undefined ? 'missing' : scalar(custom) === null ? 'invalid' : 'unmatched'
+        : status === 'missing' || status === 'invalid' ? status : 'unmatched';
     }
     const active = trigger !== null;
+    const edge = active ? 'active' : status === 'disabled' || status === 'waiting' || status === 'missing' || status === 'invalid' ? 'unknown' : 'inactive';
     if (active && !alarm.active) alarm.activatedAt = ctx.now;
-    if (!active && alarm.active) alarm.clearedAt = ctx.now;
-    alarm.active = active; alarm.evaluatedAt = ctx.now;
-    // unknown 是诊断知识状态，不把没有点位的设备标成“正常”；活动集合仍与旧规则一致。
-    alarm.edge = active ? 'active' : status === 'waiting' || status === 'missing' || status === 'invalid' ? 'unknown' : 'inactive';
+    if (alarm.edge === 'active' && edge === 'inactive') alarm.clearedAt = ctx.now;
+    alarm.active = active; alarm.evaluatedAt = ctx.now; alarm.edge = edge;
     alarm.state = wrapLogisticsState({ kind: 'alarm', trigger, status }); ctx.tx.put('alarms', alarm);
   }
 }

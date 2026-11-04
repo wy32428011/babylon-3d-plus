@@ -597,14 +597,14 @@ export function PlayerApp() {
     /** 按部署契约顺序启动 Viewer，manifest 必须先于场景反序列化安装。 */
     const start = async (): Promise<void> => {
       try {
-        const runtimeConfigUrl = new URL('./runtime-config.json', document.baseURI);
-        const baseConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
-        // 历史兼容产物必须在任何旧版实时启动链之前分流；不能把旧 DIST 普通入口当作只读入口。
+        // 在读取任何发布配置或启动旧链路前分流，缺少只读宿主时也不能误入普通 Viewer。
         if (new URL(window.location.href).searchParams.getAll('mode').includes('history')) {
-          const reason = '历史兼容 Viewer 尚未接入受控只读启动与完整场景恢复，已阻断旧实时驱动。';
+          const reason = '历史兼容 Viewer 缺少可信发布身份与只读场景渲染接入；已阻断 MQTT、Fetch 与业务脚本。';
           setHistoryUnavailable(reason);
           throw new Error(reason);
         }
+        const runtimeConfigUrl = new URL('./runtime-config.json', document.baseURI);
+        const baseConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
         // 保留原发布缓存读取与一致性保护，再读取静态文档声明，不执行场景运行时代码。
         publishedCache = await installPublishedViewerCache(baseConfig, new URL('./', document.baseURI).href, abortController.signal,
           state => { if (!disposed) setReleaseCacheState(state); });
@@ -1523,7 +1523,7 @@ export function PlayerApp() {
   return (
     <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}${openingActive ? ' opening-presentation-active' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas key={canvasRevision} aria-label="Babylon 3D 场景" className="player-canvas" ref={attachCanvas} />
-      {phase === 'blocked' && historyUnavailable ? <HistoryReplayPanel session={null} unavailableReason={historyUnavailable} /> : null}
+      {phase === 'blocked' && historyUnavailable ? <HistoryReplayPanel session={null} unavailableReason={historyUnavailable} onUnavailableRetry={() => window.location.reload()} /> : null}
       {phase === 'ready' && initialLoadCompleted && openingSettings.enabled ? <OpeningReplayButton onReplay={() => replayOpeningRef.current()} /> : null}
       {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
       {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
@@ -1622,7 +1622,7 @@ export function PlayerApp() {
           {chartMarkerFallbackUrl ? <p><a href={chartMarkerFallbackUrl} target="_blank" rel="noopener noreferrer">在新窗口打开场景</a></p> : null}
           <button type="button" onClick={() => { setChartMarkerError(''); setChartMarkerFallbackUrl(''); }}>关闭提示</button>
         </section>
-      ) : showOverlay ? (
+      ) : showOverlay && !(phase === 'blocked' && historyUnavailable) ? (
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>
           <strong>{phase === 'loading' ? message : phase === 'blocked' ? '场景已阻断' : '场景运行中'}</strong>
           {phase === 'blocked' ? <><p>{message}</p><button type="button" style={{ pointerEvents: 'auto' }} onClick={() => window.location.reload()}>重新加载场景</button></> : null}

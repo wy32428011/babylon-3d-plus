@@ -3,6 +3,7 @@ import { parseDeviceTelemetryTopic } from '../../../runtime/mqtt/deviceTelemetry
 import { LOGISTICS_ADAPTER_ID, LOGISTICS_ADAPTER_VERSION } from '../../../runtime/history/adapters/manifest.ts';
 import type { LogisticsRawTelemetryRecord } from '../../../runtime/history/adapters/manifest.ts';
 import { copySafeJson } from '../../../runtime/history/state/safeJson.ts';
+import { applyHistoryMqttFieldMap, compileHistoryMqttFieldMap, type CompiledHistoryMqttField } from '../../../runtime/history/mqttFieldMap.ts';
 import type { JsonObject, StateReadView } from '../../../runtime/history/state/types.ts';
 import type { CapturedArrival } from '../storage/index.ts';
 import type { HistoryNormalizedInput, HistoryNormalizer } from './HistoryProjector.ts';
@@ -94,14 +95,15 @@ function epvFields(data: unknown, assetCode: string): { fields: JsonObject; payl
  * 设备序号及事件身份绝不充当来源级水位；原始增量前态只由已提交状态恢复。
  */
 export class MqttHistoryNormalizer implements HistoryNormalizer {
-  readonly #sources: ReadonlyMap<string, HistoryMqttNormalizerSource>;
+  readonly #sources: ReadonlyMap<string, HistoryMqttNormalizerSource & { fieldMap: readonly CompiledHistoryMqttField[] }>;
   constructor(sources: readonly HistoryMqttNormalizerSource[]) {
-    const values = new Map<string, HistoryMqttNormalizerSource>();
+    const values = new Map<string, HistoryMqttNormalizerSource & { fieldMap: readonly CompiledHistoryMqttField[] }>();
     for (const source of sources) {
       if (!source.sourceId || source.sourceId !== source.config.logicalSourceId || !source.sourceRevision || values.has(source.sourceId)) {
         throw new Error('MQTT 来源身份或修订不完整、重复。');
       }
-      values.set(source.sourceId, structuredClone(source));
+      const frozen = structuredClone(source);
+      values.set(source.sourceId, { ...frozen, fieldMap: compileHistoryMqttFieldMap(frozen.config.parser.fieldMap) });
     }
     this.#sources = values;
   }
@@ -152,6 +154,7 @@ export class MqttHistoryNormalizer implements HistoryNormalizer {
         fields = copySafeJson(object(pointer(record, parser.statePath))) as JsonObject;
         payloadDeviceCode = assetCode; spawnerCode = null;
       }
+      fields = copySafeJson(applyHistoryMqttFieldMap(fields, source.fieldMap, parser.mode)) as JsonObject;
       return { identity: { projectId: state.logic.versions.projectId, sourceId: source.sourceId, deviceType, assetCode },
         mode: parser.mode, fields, sourceTimestamp, sequence: sequenceValue, deviceEpoch, eventId, topic, payloadDeviceCode, spawnerCode };
     });

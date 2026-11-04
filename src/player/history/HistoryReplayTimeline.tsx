@@ -264,9 +264,9 @@ export const HistoryReplayTimeline = memo(function HistoryReplayTimeline({
           aria-label="历史回放定位时间"
           aria-orientation="horizontal"
           aria-disabled={Boolean(unavailable)}
-          aria-valuemin={validRange ? range.from : 0}
-          aria-valuemax={validRange ? range.to : 0}
-          aria-valuenow={sliderTime}
+          aria-valuemin={0}
+          aria-valuemax={validRange ? 10_000 : 0}
+          aria-valuenow={validRange ? Math.round(position(sliderTime, range) * 100) : 0}
           aria-valuetext={`${factText}${targetTime !== null ? `；${previewText}` : ''}`}
           aria-describedby={hintId}
           onPointerDown={handlePointerDown}
@@ -305,13 +305,13 @@ export const HistoryReplayTimeline = memo(function HistoryReplayTimeline({
         </div>
       </div>
       <details className="history-replay-details" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
-        <summary>事件与覆盖详情（{eventsKnown ? `${visibleEvents.length} 个事件` : '事件尚未获取'}，{visibleGaps.length} 处缺口，{visibleBoundaries.length} 个版本边界）</summary>
+        <summary>事件与覆盖详情（{eventsKnown ? `${visibleEvents.length} 个事件` : '事件未完整获取'}，{visibleGaps.length} 处缺口，{visibleBoundaries.length} 个版本边界）</summary>
         {detailsOpen && formats ? (
           <ul>
             {visibleEvents.map((event) => <li key={event.id}><button type="button" disabled={Boolean(unavailable)} onClick={() => onSeek(event.time)}><span aria-hidden="true">{EVENT_SYMBOLS[event.kind].symbol}</span> {format(event.time)} · {EVENT_SYMBOLS[event.kind].label} · {event.label}</button></li>)}
             {visibleGaps.map((gap, index) => <li key={`gap:${index}`}>数据缺口：{format(gap.from)} 至 {format(gap.to)} · {gap.reason}</li>)}
             {visibleBoundaries.map((boundary, index) => <li key={`version:${index}`}>版本边界：{format(boundary.time)} · {boundary.versionLabel}</li>)}
-            {!eventsKnown ? <li>关键事件尚未获取或读取失败；不能据此判断没有事件。</li> : null}
+            {!eventsKnown ? <li>关键事件未完整获取；已显示的结果仅覆盖可读取区间，不能据此判断其他区间没有事件。</li> : null}
             {eventsKnown && visibleEvents.length + visibleGaps.length + visibleBoundaries.length === 0 ? <li>该范围内没有返回事件或覆盖标记；不代表已证明历史完整。</li> : null}
           </ul>
         ) : null}

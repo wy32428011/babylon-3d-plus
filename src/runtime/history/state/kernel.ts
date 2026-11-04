@@ -120,7 +120,7 @@ export class TwinStateKernel {
     stage.runRevision(revisionMetadata(stage, event.logicalTime, event.cursor, continuity), cause, transaction => {
       if (event.kind === 'canonical') applyChanges(transaction, event.changes);
       else if (event.kind === 'adapter') this.#applyAdapterInput(event, transaction);
-    });
+    }, event.kind !== 'canonical');
     if (event.kind !== 'gap' && this.mode === 'projector') drain(true);
     const batch = sealStateChangeBatch({ format: 'twin-changes/1', committed: true, versions: stage.logic.versions,
       projectionId: before.projectionId, fromRevision: before.cursor.stateRevision, toRevision: stage.metadata.cursor.stateRevision,
@@ -152,8 +152,9 @@ export class TwinStateKernel {
         && canonicalStringify(prior.continuity) === canonicalStringify(revision.continuity)
         : revision.cause.kind === 'gap' ? revision.continuity.status === 'gap' && revision.continuity.since === prior.logicalTime
           : canonicalStringify(prior.continuity) === canonicalStringify(revision.continuity), 'CONTINUITY', '断档只能通过新基线恢复，不能由增量静默抹除。');
+      // 已提交批次的 changes 是净状态，不能重新推导并冒充原始逐次写入事实。
       stage.runRevision(revisionMetadata(stage, revision.logicalTime, revision.inputCursor, revision.continuity), revision.cause,
-        transaction => { applyChanges(transaction, revision.changes); });
+        transaction => { applyChanges(transaction, revision.changes); }, false);
     }
     requireState(batch.toRevision === stage.metadata.cursor.stateRevision && batch.throughTime === stage.metadata.logicalTime
       && compareInputCursor(batch.inputCursor, stage.metadata.inputCursor) === 0, 'BATCH_BOUNDARY', '批次尾游标或时间不匹配实际原子修订。');

@@ -3,6 +3,8 @@ import type { HistoryStateCursor } from '../historyReplayContract';
 export const TWIN_STATE_SCHEMA_VERSION = '1' as const;
 export const TWIN_KERNEL_VERSION = 'state-kernel/1' as const;
 export const TWIN_SCHEDULE_VERSION = 'input-boundary/1' as const;
+/** 完整事实覆盖的语义版本；旧批次没有此证明。 */
+export const TWIN_FACTS_VERSION = 'state-facts/2' as const;
 export const DEVICE_TYPES = ['stacker', 'conveyor', 'hclift', 'shuttle', 'rgv', 'lift'] as const;
 /** 同一截止时刻按此顺序执行；载货台先于多穿小车，外部拉货始终最后。 */
 export const SCHEDULE_PHASES = [
@@ -191,16 +193,16 @@ export type StateFact = {
   entityId: string; details: JsonObject;
 } & (
   | { kind: 'alarm'; action: 'alarm-activated' | 'alarm-cleared' | 'alarm-observed-active' | 'alarm-observed-inactive' | 'alarm-state-unknown' }
-  | { kind: 'transfer'; action: 'transfer-started' | 'transfer-phase-changed' | 'transfer-completed' | 'transfer-cancelled' | 'cargo-host-changed' }
-  | { kind: 'stock'; action: 'slot-occupied' | 'slot-cleared' | 'slot-changed' | 'inventory-revision-changed' }
-  | { kind: 'lifecycle'; action: 'cargo-created' | 'cargo-destroyed' | 'device-born' | 'device-retired' }
+  | { kind: 'transfer'; action: 'transfer-started' | 'transfer-observed' | 'transfer-phase-changed' | 'transfer-completed' | 'transfer-cancelled' | 'transfer-unavailable' | 'cargo-host-changed' | 'cargo-host-observed' }
+  | { kind: 'stock'; action: 'slot-occupied' | 'slot-cleared' | 'slot-changed' | 'slot-observed' | 'slot-unavailable' | 'inventory-revision-changed' }
+  | { kind: 'lifecycle'; action: 'cargo-created' | 'cargo-observed' | 'cargo-destroyed' | 'cargo-observed-destroyed' | 'device-born' | 'device-observed' | 'device-retired' }
 );
 export type AtomicStateRevision = {
   revision: string; logicalTime: number; inputCursor: InputCursor;
   cause: { kind: 'input' | 'timer' | 'advance' | 'gap'; id: string };
   continuity: Continuity; changes: StateChange[];
-  /** 按真实事务写入顺序保存的业务边沿；缺省表示旧批次不能证明完整事件覆盖。 */
-  facts?: StateFact[];
+  /** 按真实事务写入顺序保存；只有同时带当前语义版本才证明受支持事件的完整覆盖。 */
+  facts?: StateFact[]; factsVersion?: typeof TWIN_FACTS_VERSION;
 };
 export type StateChangeBatch = {
   format: 'twin-changes/1'; committed: true; versions: VersionManifest;

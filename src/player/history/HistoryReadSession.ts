@@ -3,7 +3,7 @@ import {
   type DeepReadonly, type PoseSample, type StateAdapterRegistry, type StateCursor, type StateReadView, type VersionManifest,
 } from '../../runtime/history/state';
 import type { HistoryTimeRange, HistoryTimelineEvent } from '../../runtime/history/historyReplayContract';
-import { HistoryAuthorizationError } from './historyReadClient';
+import { HistoryAuthorizationError, HistoryReadServiceError } from './historyReadClient';
 import type {
   HistoryChangesResponse, HistoryCoverageResponse, HistoryOpenResponse, HistoryReadApi, HistoryReadIdentity,
   HistorySnapshotManifest, HistoryStateAtResponse,
@@ -13,6 +13,8 @@ const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const MAX_CHUNKS = 1024;
 const MAX_PAGES = 1024;
 const MAX_PAGE_BYTES = 4 * 1024 * 1024;
+const SESSION_RENEW_MARGIN_MS = 5_000;
+const RENEWABLE_SESSION_ERRORS = new Set(['HISTORY_SESSION_EXPIRED', 'SESSION_EXPIRED', 'CURSOR_EXPIRED', 'QUERY_BUDGET']);
 
 /** prepare 不得改变当前可见画面或触发业务副作用；commit 必须同步、原子地切换全部实体。 */
 export interface HistorySceneAdapter {
@@ -26,17 +28,21 @@ export interface HistorySceneAdapter {
 }
 export type HistorySessionStatus = 'idle' | 'loading' | 'paused' | 'seeking' | 'buffering' | 'returning-live' | 'live' | 'gap' | 'error';
 export type HistorySessionSnapshot = {
-  status: HistorySessionStatus; currentTime: number | null; pendingTime: number | null;
-  cursor: StateCursor | null; error: string | null; coverage: HistoryCoverageResponse | null; readOnly: true;
+  status: HistorySessionStatus; currentTime: number | null; pendingTime: number | null; blockedTime: number | null;
+  cursor: StateCursor | null; error: string | null; coverage: HistoryCoverageResponse | null;
+  mode: 'history' | 'live' | null; publishedVersionId: string | null; canAdvance: boolean; readOnly: true;
 };
 function requireValue(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(message); }
 function identifier(value: unknown): value is string { return typeof value === 'string' && value.length > 0 && value.length <= 2048 && !/[\u0000-\u001f\u007f]/u.test(value); }
 function time(value: unknown): value is number { return Number.isSafeInteger(value) && typeof value === 'number' && value >= 0 && value <= 8_640_000_000_000_000; }
 function positive(value: unknown, max: number): value is number { return Number.isSafeInteger(value) && typeof value === 'number' && value > 0 && value <= max; }
 function cursor(value: StateCursor | null | undefined): value is StateCursor {
-  return Boolean(value && identifier(value.projectionId) && typeof value.stateRevision === 'string' && /^(0|[1-9]\d*)$/u.test(value.stateRevision) && value.stateRevision.length <= 128);
+  return Boolean(value && identifier(value.projectionId) && typeof value.stateRevision === 'string' && /^(0|[1-9]\d*)$/u.test(value.stateRevision) && value.stateRevision.length <= 256);
 }
 function sameCursor(a: StateCursor, b: StateCursor): boolean { return a.projectionId === b.projectionId && a.stateRevision === b.stateRevision; }
+export function isRenewableHistorySessionError(error: unknown): boolean {
+  return error instanceof HistoryReadServiceError && error.code !== null && RENEWABLE_SESSION_ERRORS.has(error.code);
+}
 function sameIdentity(a: HistoryReadIdentity | undefined, b: HistoryReadIdentity): boolean {
   return Boolean(a && a.projectId === b.projectId && a.cacheRevision === b.cacheRevision && a.publishedVersionId === b.publishedVersionId
     && a.bindingRevision === b.bindingRevision && a.projectionId === b.projectionId);
@@ -82,7 +88,10 @@ export class HistoryReadSession {
   #liveAbort: AbortController | null = null;
   #session: HistoryOpenResponse | null = null;
   #kernel: TwinStateKernel | null = null;
-  #snapshot: HistorySessionSnapshot = { status: 'idle', currentTime: null, pendingTime: null, cursor: null, error: null, coverage: null, readOnly: true };
+  #authorizationExpiresAt: number | null = null;
+  #sessionAuthorizationExpiresAt: number | null = null;
+  #authorizationTimer: ReturnType<typeof setTimeout> | null = null;
+  #snapshot: HistorySessionSnapshot = { status: 'idle', currentTime: null, pendingTime: null, blockedTime: null, cursor: null, error: null, coverage: null, mode: null, publishedVersionId: null, canAdvance: false, readOnly: true };
   #listeners = new Set<() => void>();
   #disposed = false;
 
@@ -97,53 +106,101 @@ export class HistoryReadSession {
   getSnapshot = (): HistorySessionSnapshot => this.#snapshot;
   subscribe = (listener: () => void): (() => void) => { this.#listeners.add(listener); return () => this.#listeners.delete(listener); };
   #publish(patch: Partial<HistorySessionSnapshot>): void {
-    this.#snapshot = { ...this.#snapshot, ...patch, readOnly: true };
+    const next = { ...this.#snapshot, ...patch };
+    const range = next.coverage?.range;
+    this.#snapshot = { ...next, mode: this.#session?.mode ?? null,
+      publishedVersionId: this.#session ? this.#identity.publishedVersionId : null,
+      canAdvance: Boolean(this.#session?.mode === 'history' && this.#kernel && range && next.currentTime !== null
+        && next.currentTime >= range.from && next.currentTime <= range.to), readOnly: true };
     for (const listener of this.#listeners) listener();
   }
   #stopLiveFeed(): void { this.#liveAbort?.abort(); this.#liveAbort = null; }
+  #closeSession(session: HistoryOpenResponse): void {
+    void this.#api.close({ sessionId: session.sessionId }, new AbortController().signal).catch(() => {});
+  }
+  #clearAuthorizationTimer(): void {
+    if (this.#authorizationTimer !== null) clearTimeout(this.#authorizationTimer);
+    this.#authorizationTimer = null; this.#authorizationExpiresAt = null;
+  }
+  #invalidateAuthorization(): void {
+    if (this.#disposed) return;
+    this.#generation += 1; this.#abort?.abort(); this.#abort = null; this.#stopLiveFeed();
+    this.#clearAuthorizationTimer();
+    const session = this.#session; this.#session = null; this.#kernel = null; this.#sessionAuthorizationExpiresAt = null;
+    try { this.#adapter.clear(); }
+    finally {
+      this.#publish({ status: 'error', currentTime: null, cursor: null, coverage: null, pendingTime: null, blockedTime: null,
+        error: '历史读取授权不足或已过期。' });
+      if (session) this.#closeSession(session);
+    }
+  }
+  #armAuthorization(expiresAt: number, preserveDisplayedFrame = false): void {
+    // 切范围暂留的旧画面仍受旧授权约束，不能靠新能力延长其可见时间。
+    const deadline = preserveDisplayedFrame && this.#snapshot.currentTime !== null && this.#authorizationExpiresAt !== null
+      ? Math.min(expiresAt, this.#authorizationExpiresAt) : expiresAt;
+    this.#clearAuthorizationTimer(); this.#authorizationExpiresAt = deadline;
+    const schedule = () => {
+      if (this.#authorizationExpiresAt !== deadline || this.#disposed) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) { this.#invalidateAuthorization(); return; }
+      this.#authorizationTimer = setTimeout(schedule, Math.min(remaining, 2_147_483_647));
+    };
+    schedule();
+  }
   #start(status: HistorySessionStatus, pendingTime: number | null): { generation: number; signal: AbortSignal } {
     requireValue(!this.#disposed, '历史会话已关闭。');
-    this.#abort?.abort(); this.#abort = new AbortController();
+    this.#abort?.abort(); const controller = new AbortController(); this.#abort = controller;
     const generation = ++this.#generation;
-    this.#publish({ status, pendingTime, error: null });
-    return { generation, signal: this.#abort.signal };
+    this.#publish({ status, pendingTime, blockedTime: null, error: null });
+    return { generation, signal: controller.signal };
   }
   #current(generation: number, signal: AbortSignal): void {
     signal.throwIfAborted(); requireValue(!this.#disposed && generation === this.#generation, '历史请求代次已失效。');
+    if (this.#authorizationExpiresAt !== null && this.#authorizationExpiresAt <= Date.now()) {
+      this.#invalidateAuthorization(); throw new HistoryAuthorizationError();
+    }
   }
   #fail(error: unknown, generation: number, signal: AbortSignal): void {
     if (this.#disposed || signal.aborted || generation !== this.#generation) return;
     const message = error instanceof Error ? error.message : '历史读取失败。';
-    if (error instanceof HistoryAuthorizationError) {
-      this.#stopLiveFeed(); this.#adapter.clear(); this.#kernel = null; this.#session = null;
-      this.#publish({ status: 'error', currentTime: null, cursor: null, coverage: null, pendingTime: null, error: message });
-      return;
-    }
-    this.#publish({ status: message.includes('缺口') ? 'gap' : 'error', pendingTime: null, error: message });
+    if (error instanceof HistoryAuthorizationError) { this.#invalidateAuthorization(); return; }
+    const gap = message.includes('缺口');
+    const blockedTime = gap && (this.#snapshot.status === 'seeking' || this.#snapshot.status === 'loading')
+      ? this.#snapshot.pendingTime : gap ? this.#snapshot.currentTime : null;
+    this.#publish({ status: gap ? 'gap' : 'error', pendingTime: null, blockedTime, error: message });
   }
-  async #open(mode: 'history' | 'live', range: HistoryTimeRange | null, signal: AbortSignal): Promise<HistoryOpenResponse> {
+  async #open(mode: 'history' | 'live', range: HistoryTimeRange | null, signal: AbortSignal): Promise<{ session: HistoryOpenResponse; authorizationExpiresAt: number }> {
     const capability = await this.#api.capabilities({ projectId: this.#identity.projectId, cacheRevision: this.#identity.cacheRevision }, signal);
     if (!(capability?.readOnly === true && capability.scope === 'history:read' && capability.projectId === this.#identity.projectId
-      && capability.cacheRevision === this.#identity.cacheRevision && identifier(capability.capability) && capability.capability.length >= 16
+      && capability.cacheRevision === this.#identity.cacheRevision && typeof capability.capability === 'string'
+      && capability.capability.length >= 16 && capability.capability.length <= 4096 && /^[\x21-\x7e]+$/u.test(capability.capability)
       && time(capability.expiresAt) && capability.expiresAt > Date.now())) throw new HistoryAuthorizationError();
     const session = await this.#api.open({ identity: this.#identity, mode, range }, signal);
-    requireValue(session && identifier(session.sessionId) && session.mode === mode && session.readOnly === true
-      && sameIdentity(session.identity, this.#identity) && session.replayAbi === this.#abi && time(session.expiresAt) && session.expiresAt > Date.now(), '发布包、有效版本、投影或兼容执行产物不匹配。');
-    const v = session.versions, limits = session.limits;
-    requireValue(v && canonicalStringify(v) === canonicalStringify(this.#versions)
-      && v.projectId === this.#identity.projectId && v.publishedVersionId === this.#identity.publishedVersionId
-      && v.bindingRevision === this.#identity.bindingRevision && limits && positive(limits.maxSnapshotBytes, MAX_SNAPSHOT_BYTES)
-      && positive(limits.maxChunks, MAX_CHUNKS) && positive(limits.maxPageBytes, MAX_PAGE_BYTES) && positive(limits.maxPages, MAX_PAGES), '会话版本或预算无效。');
-    return session;
+    try {
+      requireValue(session && identifier(session.sessionId) && session.mode === mode && session.readOnly === true
+        && sameIdentity(session.identity, this.#identity) && session.replayAbi === this.#abi && time(session.expiresAt)
+        && session.expiresAt > Date.now() && session.expiresAt <= capability.expiresAt, '发布包、有效版本、投影或兼容执行产物不匹配。');
+      const v = session.versions, limits = session.limits;
+      requireValue(v && canonicalStringify(v) === canonicalStringify(this.#versions)
+        && v.projectId === this.#identity.projectId && v.publishedVersionId === this.#identity.publishedVersionId
+        && v.bindingRevision === this.#identity.bindingRevision && limits && positive(limits.maxSnapshotBytes, MAX_SNAPSHOT_BYTES)
+        && positive(limits.maxChunks, MAX_CHUNKS) && positive(limits.maxPageBytes, MAX_PAGE_BYTES) && positive(limits.maxPages, MAX_PAGES), '会话版本或预算无效。');
+      return { session, authorizationExpiresAt: capability.expiresAt };
+    } catch (error) {
+      if (session && identifier(session.sessionId)) this.#closeSession(session);
+      throw error;
+    }
   }
   async coverage(range: HistoryTimeRange, signal: AbortSignal): Promise<HistoryCoverageResponse> {
     requireValue(time(range.from) && time(range.to) && range.to > range.from, '历史范围无效。');
     const data = await this.#api.coverage({ identity: this.#identity, range }, signal);
     requireValue(sameIdentity(data?.identity, this.#identity) && data.range?.from === range.from && data.range?.to === range.to
       && time(data.queryableThrough) && Array.isArray(data.gaps) && data.gaps.length <= MAX_PAGES
-      && data.gaps.every(gap => time(gap.from) && time(gap.to) && gap.to > gap.from && identifier(gap.reason))
+      && data.gaps.every(gap => time(gap.from) && time(gap.to) && gap.from >= range.from && gap.to <= range.to
+        && gap.to > gap.from && identifier(gap.reason))
       && Array.isArray(data.versionBoundaries) && data.versionBoundaries.length <= MAX_PAGES
-      && data.versionBoundaries.every(boundary => time(boundary.time) && identifier(boundary.versionLabel))
+      && data.versionBoundaries.every(boundary => time(boundary.time) && boundary.time >= range.from && boundary.time <= range.to
+        && identifier(boundary.versionLabel))
       && identifier(data.sourceName) && identifier(data.sourceQuality), '历史覆盖响应无效。');
     // 后续 seek/播放只使用同一份经验证的覆盖证明，不允许界面或调用方改写缺口。
     for (const gap of data.gaps) Object.freeze(gap);
@@ -157,23 +214,27 @@ export class HistoryReadSession {
     let opened: HistoryOpenResponse | null = null;
     try {
       requireValue(time(range.from) && time(range.to) && range.to > range.from && time(target) && target >= range.from && target <= range.to, '历史目标不在所选范围内。');
-      const session = await this.#open('history', range, signal); opened = session; this.#current(generation, signal);
+      const result = await this.#open('history', range, signal); const session = result.session;
+      opened = session; this.#current(generation, signal);
       const coverage = await this.coverage(range, signal); this.#current(generation, signal);
-      // 首次目标落在缺口时保留可信覆盖和只读会话，让用户显式选择下一可用时刻。
-      if (!this.#session) { this.#session = session; opened = null; this.#publish({ coverage }); this.#current(generation, signal); }
+      // 应用范围后保留旧画面，但新会话的游标必须先由新快照签发，不能沿用旧内核推进。
+      const old = this.#session; this.#session = session; this.#kernel = null;
+      this.#sessionAuthorizationExpiresAt = result.authorizationExpiresAt; opened = null;
+      this.#armAuthorization(result.authorizationExpiresAt, true);
+      if (old && old.sessionId !== session.sessionId) this.#closeSession(old);
+      this.#current(generation, signal); this.#publish({ coverage }); this.#current(generation, signal);
       this.#checkTarget(coverage, target);
       const candidate = await this.#restore(session, target, generation, signal);
-      await this.#install(candidate.kernel, candidate.time, generation, signal, session.expiresAt);
-      const old = this.#session; this.#session = session; opened = null;
-      if (old && old.sessionId !== session.sessionId) void this.#api.close({ sessionId: old.sessionId }, new AbortController().signal).catch(() => {});
-      this.#publish({ status: 'paused', pendingTime: null, coverage, error: null });
+      await this.#install(candidate.kernel, candidate.time, generation, signal, Math.min(session.expiresAt, result.authorizationExpiresAt, candidate.validUntil));
+      this.#armAuthorization(result.authorizationExpiresAt); this.#current(generation, signal);
+      this.#publish({ status: 'paused', currentTime: candidate.time, cursor: { ...candidate.kernel.metadata.cursor }, pendingTime: null, error: null });
     } catch (error) { this.#fail(error, generation, signal); }
-    finally { if (opened) void this.#api.close({ sessionId: opened.sessionId }, new AbortController().signal).catch(() => {}); }
+    finally { if (opened) this.#closeSession(opened); }
   }
   #checkTarget(coverage: HistoryCoverageResponse, target: number): void {
-    requireValue(target <= coverage.queryableThrough, '目标超过可查询水位。');
     requireValue(!coverage.gaps.some(gap => target >= gap.from && target < gap.to), '目标位于历史缺口，不能定位。');
     requireValue(!coverage.versionBoundaries.some(boundary => boundary.time > coverage.range.from && boundary.time <= target), '目标跨越发布版本边界，需选择相应兼容版本。');
+    requireValue(target <= coverage.queryableThrough, '目标超过可查询水位。');
   }
   async seek(target: number): Promise<void> {
     this.#stopLiveFeed();
@@ -183,28 +244,69 @@ export class HistoryReadSession {
       requireValue(session?.mode === 'history' && coverage && sameIdentity(coverage.identity, this.#identity)
         && target >= coverage.range.from && target <= coverage.range.to && time(target), '历史会话或目标范围无效。');
       this.#checkTarget(coverage, target);
-      const candidate = await this.#restore(session, target, generation, signal);
-      await this.#install(candidate.kernel, candidate.time, generation, signal, session.expiresAt);
-      this.#publish({ status: 'paused', pendingTime: null, error: null });
+      if (session.expiresAt <= Date.now() + SESSION_RENEW_MARGIN_MS) {
+        await this.open(coverage.range, target); return;
+      }
+      try {
+        const candidate = await this.#restore(session, target, generation, signal);
+        await this.#install(candidate.kernel, candidate.time, generation, signal, Math.min(session.expiresAt, candidate.validUntil));
+        if (this.#sessionAuthorizationExpiresAt !== null) this.#armAuthorization(this.#sessionAuthorizationExpiresAt);
+        this.#current(generation, signal);
+        this.#publish({ status: 'paused', currentTime: candidate.time, cursor: { ...candidate.kernel.metadata.cursor }, pendingTime: null, error: null });
+      } catch (error) {
+        if (!isRenewableHistorySessionError(error)) throw error;
+        this.#current(generation, signal);
+        await this.open(coverage.range, target);
+      }
     } catch (error) { this.#fail(error, generation, signal); }
+  }
+  #checkAdvance(coverage: HistoryCoverageResponse, currentTime: number, target: number): void {
+    requireValue(currentTime >= coverage.range.from && target >= currentTime && target <= coverage.range.to, '目标超过历史范围。');
+    requireValue(!coverage.gaps.some(gap => gap.from <= target && gap.to > currentTime), '播放遇到数据缺口，不能自动跨越。');
+    requireValue(!coverage.versionBoundaries.some(boundary => boundary.time > currentTime && boundary.time <= target), '播放遇到版本边界，不能自动跨越。');
+    requireValue(target <= coverage.queryableThrough, '目标超过查询水位。');
+  }
+  /** 会话预算或租约结束时重新取得全态，仍核对新覆盖，不能用换会话跨越缺口。 */
+  async #renewHistory(range: HistoryTimeRange, currentTime: number, previousCursor: StateCursor, target: number, generation: number, signal: AbortSignal): Promise<void> {
+    let opened: HistoryOpenResponse | null = null;
+    try {
+      this.#current(generation, signal);
+      const result = await this.#open('history', range, signal); const session = result.session;
+      opened = session; this.#current(generation, signal);
+      const coverage = await this.coverage(range, signal); this.#current(generation, signal);
+      this.#checkTarget(coverage, target); this.#checkAdvance(coverage, currentTime, target);
+      const candidate = await this.#restore(session, target, generation, signal);
+      requireValue(sameIdentity(session.identity, this.#identity) && candidate.kernel.metadata.cursor.projectionId === previousCursor.projectionId
+        && compareDecimal(candidate.kernel.metadata.cursor.stateRevision, previousCursor.stateRevision) >= 0,
+      '重新读取的历史游标早于已呈现状态。');
+      await this.#install(candidate.kernel, candidate.time, generation, signal, Math.min(session.expiresAt, result.authorizationExpiresAt, candidate.validUntil));
+      const old = this.#session; this.#session = session; this.#sessionAuthorizationExpiresAt = result.authorizationExpiresAt; opened = null;
+      if (old && old.sessionId !== session.sessionId) this.#closeSession(old);
+      this.#armAuthorization(result.authorizationExpiresAt); this.#current(generation, signal);
+      this.#publish({ status: 'paused', coverage, currentTime: candidate.time,
+        cursor: { ...candidate.kernel.metadata.cursor }, pendingTime: null, error: null });
+    } finally { if (opened) this.#closeSession(opened); }
   }
   /** 倍速只影响调用者发起的目标；只有服务端证明的连续窗口能推进事实时间。 */
   async advanceTo(target: number): Promise<void> {
     this.#stopLiveFeed();
     const { generation, signal } = this.#start('buffering', target);
     try {
-      const session = this.#session, current = this.#kernel, currentTime = this.#snapshot.currentTime;
-      requireValue(session && current && currentTime !== null && time(target) && target >= currentTime, '不能从当前状态向后推进。');
-      if (session.mode === 'history') {
-        const coverage = this.#snapshot.coverage;
-        requireValue(coverage && target <= coverage.range.to && target <= coverage.queryableThrough, '目标超过历史范围或查询水位。');
-        requireValue(!coverage.gaps.some(gap => gap.from <= target && gap.to > currentTime), '播放遇到数据缺口，不能自动跨越。');
-        requireValue(!coverage.versionBoundaries.some(boundary => boundary.time > currentTime && boundary.time <= target), '播放遇到版本边界，不能自动跨越。');
+      const session = this.#session, current = this.#kernel, currentTime = this.#snapshot.currentTime, coverage = this.#snapshot.coverage;
+      requireValue(session?.mode === 'history' && current && coverage && currentTime !== null && time(target), '不能从当前状态推进历史。');
+      this.#checkAdvance(coverage, currentTime, target);
+      if (session.expiresAt <= Date.now() + SESSION_RENEW_MARGIN_MS) {
+        await this.#renewHistory(coverage.range, currentTime, current.metadata.cursor, target, generation, signal); return;
       }
-      const candidate = TwinStateKernel.fromCheckpoint(current.checkpoint(), this.#registry, { mode: 'canonical-follower', expectedVersions: session.versions });
-      await this.#consume(session, candidate, target, null, generation, signal);
-      await this.#install(candidate, target, generation, signal, session.expiresAt);
-      this.#publish({ status: session.mode === 'live' ? 'live' : 'paused', pendingTime: null, error: null });
+      try {
+        const candidate = TwinStateKernel.fromCheckpoint(current.checkpoint(), this.#registry, { mode: 'canonical-follower', expectedVersions: session.versions });
+        await this.#consume(session, candidate, target, null, generation, signal, currentTime);
+        await this.#install(candidate, target, generation, signal, session.expiresAt);
+        this.#publish({ status: 'paused', currentTime: target, cursor: { ...candidate.metadata.cursor }, pendingTime: null, error: null });
+      } catch (error) {
+        if (!isRenewableHistorySessionError(error)) throw error;
+        await this.#renewHistory(coverage.range, currentTime, current.metadata.cursor, target, generation, signal);
+      }
     } catch (error) { this.#fail(error, generation, signal); }
   }
   /** 只能返回与当前包完全匹配的有效版本；新的投影/资源须由兼容宿主先切换。 */
@@ -214,18 +316,50 @@ export class HistoryReadSession {
     let opened: HistoryOpenResponse | null = null;
     try {
       requireValue(sameIdentity(activeIdentity, this.#identity), '当前有效版本与本包或投影不匹配，不能沿用历史场景返回实时。');
-      const session = await this.#open('live', null, signal); opened = session; this.#current(generation, signal);
+      const result = await this.#open('live', null, signal); const session = result.session;
+      opened = session; this.#current(generation, signal);
       const candidate = await this.#restore(session, null, generation, signal);
-      requireValue(candidate.resume && candidate.resume.leaseExpiresAt > Date.now(), '实时续传租约不可用或已过期。');
-      await this.#consume(session, candidate.kernel, candidate.resume.throughTime, candidate.resume.toCursor, generation, signal);
+      const shownAt = this.#snapshot.currentTime, shownCursor = this.#snapshot.cursor;
+      requireValue(candidate.resume && candidate.resume.leaseExpiresAt > Date.now()
+        && (shownAt === null || candidate.resume.throughTime >= shownAt)
+        && (!shownCursor || candidate.resume.toCursor.projectionId === shownCursor.projectionId
+          && compareDecimal(candidate.resume.toCursor.stateRevision, shownCursor.stateRevision) >= 0),
+      '实时续传租约不可用、已过期或早于已呈现状态。');
+      await this.#consume(session, candidate.kernel, candidate.resume.throughTime, candidate.resume.toCursor, generation, signal, candidate.time);
       requireValue(candidate.resume.leaseExpiresAt > Date.now(), '实时续传租约已过期，必须重新取得全态。');
-      await this.#install(candidate.kernel, candidate.resume.throughTime, generation, signal, Math.min(session.expiresAt, candidate.resume.leaseExpiresAt));
-      const old = this.#session; this.#session = session; opened = null;
-      if (old && old.sessionId !== session.sessionId) void this.#api.close({ sessionId: old.sessionId }, new AbortController().signal).catch(() => {});
-      this.#publish({ status: 'live', pendingTime: null, error: null });
-      this.#startLiveFeed();
+      await this.#install(candidate.kernel, candidate.resume.throughTime, generation, signal, Math.min(session.expiresAt, candidate.resume.leaseExpiresAt, candidate.validUntil));
+      const old = this.#session; this.#session = session; this.#sessionAuthorizationExpiresAt = result.authorizationExpiresAt; opened = null;
+      if (old && old.sessionId !== session.sessionId) this.#closeSession(old);
+      this.#armAuthorization(result.authorizationExpiresAt); this.#current(generation, signal);
+      this.#publish({ status: 'live', currentTime: candidate.resume.throughTime, coverage: null,
+        cursor: { ...candidate.kernel.metadata.cursor }, pendingTime: null, error: null });
+      this.#current(generation, signal); this.#startLiveFeed();
     } catch (error) { this.#fail(error, generation, signal); }
-    finally { if (opened) void this.#api.close({ sessionId: opened.sessionId }, new AbortController().signal).catch(() => {}); }
+    finally { if (opened) this.#closeSession(opened); }
+  }
+  /** 实时会话换租约必须重新握手当前有效投影及完整状态，不能直接拼接过期游标。 */
+  async #renewLive(shownAt: number, previousCursor: StateCursor, generation: number, signal: AbortSignal, liveSignal: AbortSignal): Promise<void> {
+    let opened: HistoryOpenResponse | null = null;
+    try {
+      this.#current(generation, signal); liveSignal.throwIfAborted();
+      const result = await this.#open('live', null, signal); const session = result.session;
+      opened = session; this.#current(generation, signal); liveSignal.throwIfAborted();
+      const candidate = await this.#restore(session, null, generation, signal);
+      requireValue(candidate.resume && candidate.resume.leaseExpiresAt > Date.now()
+        && candidate.resume.throughTime >= shownAt && candidate.resume.toCursor.projectionId === previousCursor.projectionId
+        && compareDecimal(candidate.resume.toCursor.stateRevision, previousCursor.stateRevision) >= 0,
+      '实时续传租约不可用、已过期或早于已呈现状态。');
+      await this.#consume(session, candidate.kernel, candidate.resume.throughTime, candidate.resume.toCursor, generation, signal, candidate.time);
+      this.#current(generation, signal); liveSignal.throwIfAborted();
+      requireValue(candidate.resume.leaseExpiresAt > Date.now(), '实时续传租约已过期，必须重新取得全态。');
+      await this.#install(candidate.kernel, candidate.resume.throughTime, generation, signal,
+        Math.min(session.expiresAt, candidate.resume.leaseExpiresAt, result.authorizationExpiresAt, candidate.validUntil));
+      const old = this.#session; this.#session = session; this.#sessionAuthorizationExpiresAt = result.authorizationExpiresAt; opened = null;
+      if (old && old.sessionId !== session.sessionId) this.#closeSession(old);
+      this.#armAuthorization(result.authorizationExpiresAt); this.#current(generation, signal); liveSignal.throwIfAborted();
+      this.#publish({ status: 'live', currentTime: candidate.resume.throughTime,
+        cursor: { ...candidate.kernel.metadata.cursor }, pendingTime: null, error: null });
+    } finally { if (opened) this.#closeSession(opened); }
   }
   /** 只消费服务端声明的水位；等待只是网络节流，不产生历史事实。 */
   #startLiveFeed(): void {
@@ -239,14 +373,22 @@ export class HistoryReadSession {
         try {
           const session = this.#session, current = this.#kernel, shownAt = this.#snapshot.currentTime;
           requireValue(session?.mode === 'live' && current && shownAt !== null, '实时 canonical 会话不可用。');
-          const candidate = TwinStateKernel.fromCheckpoint(current.checkpoint(), this.#registry, { mode: 'canonical-follower', expectedVersions: session.versions });
-          const through = await this.#consume(session, candidate, null, null, generation, signal, shownAt);
-          this.#current(generation, signal); controller.signal.throwIfAborted();
-          requireValue(session.expiresAt > Date.now(), '实时会话已过期，不能继续显示为实时。');
-          if (through !== shownAt || !sameCursor(candidate.metadata.cursor, current.metadata.cursor)) {
-            await this.#install(candidate, through, generation, signal, session.expiresAt);
+          if (session.expiresAt <= Date.now() + SESSION_RENEW_MARGIN_MS) {
+            await this.#renewLive(shownAt, current.metadata.cursor, generation, signal, controller.signal); continue;
           }
-          this.#publish({ status: 'live', pendingTime: null, error: null });
+          try {
+            const candidate = TwinStateKernel.fromCheckpoint(current.checkpoint(), this.#registry, { mode: 'canonical-follower', expectedVersions: session.versions });
+            const through = await this.#consume(session, candidate, null, null, generation, signal, shownAt);
+            this.#current(generation, signal); controller.signal.throwIfAborted();
+            requireValue(session.expiresAt > Date.now(), '实时会话已过期，不能继续显示为实时。');
+            if (through !== shownAt || !sameCursor(candidate.metadata.cursor, current.metadata.cursor)) {
+              await this.#install(candidate, through, generation, signal, session.expiresAt);
+            }
+            this.#publish({ status: 'live', currentTime: through, cursor: { ...candidate.metadata.cursor }, pendingTime: null, error: null });
+          } catch (error) {
+            if (!isRenewableHistorySessionError(error)) throw error;
+            await this.#renewLive(shownAt, current.metadata.cursor, generation, signal, controller.signal);
+          }
         } catch (error) {
           if (!controller.signal.aborted) this.#fail(error, generation, signal);
           this.#stopLiveFeed(); return;
@@ -255,7 +397,7 @@ export class HistoryReadSession {
     };
     void run();
   }
-  async #restore(session: HistoryOpenResponse, target: number | null, generation: number, signal: AbortSignal): Promise<{ kernel: TwinStateKernel; time: number; resume: HistorySnapshotManifest['resume'] }> {
+  async #restore(session: HistoryOpenResponse, target: number | null, generation: number, signal: AbortSignal): Promise<{ kernel: TwinStateKernel; time: number; validUntil: number; resume: HistorySnapshotManifest['resume'] }> {
     requireValue(session.expiresAt > Date.now(), '历史会话已过期。');
     const requestId = crypto.randomUUID();
     let response: HistoryStateAtResponse;
@@ -278,7 +420,8 @@ export class HistoryReadSession {
       && snapshot.requestedTime === target && time(snapshot.checkpointTime) && time(snapshot.resolvedTime) && time(snapshot.coveredThrough)
       && snapshot.checkpointTime <= snapshot.resolvedTime && snapshot.resolvedTime <= snapshot.coveredThrough
       && (target === null || snapshot.coveredThrough === target)
-      && time(snapshot.expiresAt) && snapshot.expiresAt > Date.now() && positive(snapshot.byteLength, session.limits.maxSnapshotBytes)
+      && time(snapshot.expiresAt) && snapshot.expiresAt > Date.now() && snapshot.expiresAt <= session.expiresAt
+      && positive(snapshot.byteLength, session.limits.maxSnapshotBytes)
       && Array.isArray(snapshot.chunks) && snapshot.chunks.length > 0 && snapshot.chunks.length <= session.limits.maxChunks,
     '快照身份、游标、时刻或租约无效。');
     const content = new Uint8Array(snapshot.byteLength); let offset = 0;
@@ -302,11 +445,13 @@ export class HistoryReadSession {
     requireValue(kernel.metadata.logicalTime === snapshot.checkpointTime && sameCursor(kernel.metadata.cursor, snapshot.cursor)
       && kernel.metadata.continuity.status === 'complete', '检查点实际时间、游标或完整性不匹配。');
     await this.#consume(session, kernel, snapshot.coveredThrough, snapshot.throughCursor, generation, signal);
-    requireValue(kernel.metadata.logicalTime === snapshot.resolvedTime, '最后业务修订的实际时间不匹配，不能冒充目标时刻。');
+    requireValue(snapshot.expiresAt > Date.now() && kernel.metadata.logicalTime === snapshot.resolvedTime,
+      '快照租约已过期或最后业务修订的实际时间不匹配，不能提交画面。');
     if (session.mode === 'live') requireValue(snapshot.resume && cursor(snapshot.resume.toCursor)
       && snapshot.resume.toCursor.projectionId === this.#identity.projectionId && time(snapshot.resume.throughTime)
-      && snapshot.resume.throughTime >= snapshot.coveredThrough && time(snapshot.resume.leaseExpiresAt), '实时续传握手缺失。');
-    return { kernel, time: snapshot.coveredThrough, resume: snapshot.resume };
+      && snapshot.resume.throughTime >= snapshot.coveredThrough && time(snapshot.resume.leaseExpiresAt)
+      && snapshot.resume.leaseExpiresAt <= snapshot.expiresAt, '实时续传握手缺失或租约无效。');
+    return { kernel, time: snapshot.coveredThrough, validUntil: snapshot.expiresAt, resume: snapshot.resume };
   }
   async #consume(session: HistoryOpenResponse, kernel: TwinStateKernel, throughTime: number | null, fixedCursor: StateCursor | null, generation: number, signal: AbortSignal, minimumTime = kernel.metadata.logicalTime): Promise<number> {
     let windowId: string | null = null, windowExpiresAt: number | null = null, toCursor = fixedCursor, afterCursor: StateCursor = { ...kernel.metadata.cursor };
@@ -327,7 +472,9 @@ export class HistoryReadSession {
       requireValue(result.continuity === 'complete', result.continuity === 'gap' ? '历史变化遇到数据缺口。' : '历史变化跨版本、游标失效或连续性未知。');
       windowId = result.windowId; windowExpiresAt = result.windowExpiresAt; toCursor = result.toCursor; fixedTime = result.throughTime;
       for (const batch of result.batches) {
-        requireValue(batch.throughTime <= fixedTime, '变化批次超出目标时刻。');
+        requireValue(batch.throughTime <= fixedTime && Array.isArray(batch.revisions)
+          && batch.revisions.every(revision => time(revision.logicalTime) && revision.logicalTime >= minimumTime),
+        '变化批次越过目标时刻或回写了已呈现时间。');
         kernel.applyChangeBatch(batch);
         requireValue(kernel.metadata.continuity.status === 'complete', '历史变化遇到数据缺口。');
       }
@@ -348,25 +495,33 @@ export class HistoryReadSession {
       requireValue(validUntil > Date.now(), '会话或续传租约已过期，不能提交暂存画面。');
       prepared.commit();
       this.#kernel = kernel;
-      this.#publish({ currentTime: factTime, cursor: { ...kernel.metadata.cursor } });
     } finally { prepared.dispose(); }
   }
   /** 暂停只中止未提交请求，不更改最后成功呈现的事实。 */
   pause(): void {
     if (this.#disposed) return;
     this.#stopLiveFeed(); this.#generation += 1; this.#abort?.abort(); this.#abort = null;
-    if (this.#snapshot.currentTime !== null) this.#publish({ status: 'paused', pendingTime: null, error: null });
+    if (this.#kernel && this.#session?.mode === 'history' && this.#snapshot.currentTime !== null) {
+      this.#publish({ status: 'paused', pendingTime: null, error: null });
+    } else if (this.#snapshot.status === 'gap' || this.#snapshot.status === 'error') {
+      this.#publish({ pendingTime: null });
+    } else {
+      this.#publish({ status: 'error', pendingTime: null, error: '当前请求已取消，尚无可推进的历史状态。' });
+    }
   }
   /** 事件索引不可用时抛错，不把缺失索引伪装成没有事件。 */
   async loadEvents(range: HistoryTimeRange, signal: AbortSignal): Promise<HistoryTimelineEvent[]> {
-    const session = this.#session;
-    requireValue(session?.mode === 'history' && this.#snapshot.coverage?.range.from === range.from
-      && this.#snapshot.coverage.range.to === range.to, '历史事件会话或范围不匹配。');
+    const session = this.#session, coverage = this.#snapshot.coverage;
+    requireValue(session?.mode === 'history' && coverage && time(range.from) && time(range.to)
+      && range.from >= coverage.range.from && range.to <= coverage.range.to && range.to > range.from
+      && range.to <= coverage.queryableThrough
+      && !coverage.gaps.some(gap => gap.from < range.to && gap.to > range.from)
+      && !coverage.versionBoundaries.some(boundary => boundary.time > coverage.range.from && boundary.time < range.to),
+    '历史事件范围超出连续可查询区间或跨越版本边界。');
     const events: HistoryTimelineEvent[] = [], seen = new Set<string>();
     const checkSession = () => {
       signal.throwIfAborted();
-      requireValue(!this.#disposed && this.#session === session && this.#snapshot.coverage?.range.from === range.from
-        && this.#snapshot.coverage.range.to === range.to, '历史事件会话已失效。');
+      requireValue(!this.#disposed && this.#session === session && this.#snapshot.coverage === coverage, '历史事件会话已失效。');
     };
     let eventCursor: string | null = null, queryId: string | null = null, expiresAt: number | null = null;
     try {
@@ -381,7 +536,7 @@ export class HistoryReadSession {
           && (result.nextCursor === null || identifier(result.nextCursor)), '历史事件分页无效。');
         queryId = result.queryId; expiresAt = result.expiresAt;
         for (const event of result.items) {
-          requireValue(identifier(event.id) && !seen.has(event.id) && time(event.time) && event.time >= range.from && event.time <= range.to
+          requireValue(identifier(event.id) && !seen.has(event.id) && time(event.time) && event.time >= range.from && event.time < range.to
             && ['alarm', 'transfer', 'stock', 'lifecycle', 'other'].includes(event.kind) && identifier(event.label), '历史事件内容无效。');
           seen.add(event.id); events.push(event);
         }
@@ -393,16 +548,15 @@ export class HistoryReadSession {
       throw new Error('历史事件分页超过预算。');
     } catch (error) {
       if (error instanceof HistoryAuthorizationError && !this.#disposed && this.#session === session) {
-        this.#generation += 1; this.#abort?.abort(); this.#adapter.clear(); this.#kernel = null; this.#session = null;
-        this.#publish({ status: 'error', currentTime: null, cursor: null, coverage: null, pendingTime: null, error: error.message });
+        this.#invalidateAuthorization();
       }
       throw error;
     }
   }
   dispose(): void {
     if (this.#disposed) return;
-    this.#disposed = true; this.#stopLiveFeed(); this.#generation += 1; this.#abort?.abort();
-    const session = this.#session; this.#session = null; this.#kernel = null; this.#listeners.clear();
-    if (session) void this.#api.close({ sessionId: session.sessionId }, new AbortController().signal).catch(() => {});
+    this.#disposed = true; this.#stopLiveFeed(); this.#generation += 1; this.#abort?.abort(); this.#clearAuthorizationTimer();
+    const session = this.#session; this.#session = null; this.#kernel = null; this.#sessionAuthorizationExpiresAt = null; this.#listeners.clear();
+    if (session) this.#closeSession(session);
   }
 }

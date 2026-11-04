@@ -21,6 +21,7 @@ export class HistoryCaptureGate {
   #transition: Promise<void> | null = null;
   #blocked = false;
   #closed = false;
+  #closePromise: Promise<void> | null = null;
   #count = 0;
   #bytes = 0;
   readonly #inflight = new Set<Promise<CapturedReceipt>>();
@@ -115,10 +116,14 @@ export class HistoryCaptureGate {
     return { durable: true };
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
-    if (this.#transition) await this.#transition;
-    await Promise.allSettled([...this.#inflight]);
-    if (this.#projector) await this.#projector.stop();
+    this.#closePromise = (async () => {
+      if (this.#transition) await this.#transition;
+      await Promise.allSettled([...this.#inflight]);
+      if (this.#projector) await this.#projector.stop();
+    })();
+    return this.#closePromise;
   }
 }

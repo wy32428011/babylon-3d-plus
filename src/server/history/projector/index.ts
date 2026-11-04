@@ -1,5 +1,5 @@
 export { HistoryCaptureRuntime } from './HistoryCaptureRuntime.ts';
-export type { HistoryCaptureRuntimeOptions, HistoryCaptureMqttSource, HistoryBaselineCandidate } from './HistoryCaptureRuntime.ts';
+export type { HistoryCaptureRuntimeOptions, HistoryCaptureMqttSource, HistoryBaselineCandidate, HistoryRestoreBinding, HistoryRestoreEvidence, HistoryRestoreBindingGuard } from './HistoryCaptureRuntime.ts';
 export { HistoryCaptureGate, HistoryCaptureGateError } from './HistoryCaptureGate.ts';
 export type { HistoryBindingDecision } from './HistoryCaptureGate.ts';
 export { HistoryProjector, HistoryProjectorError } from './HistoryProjector.ts';

@@ -87,6 +87,7 @@ export function encodeCheckpoint(value: unknown, registry: StateAdapterRegistry,
 function assertBatchLimits(batch: StateChangeBatch, budgets: Readonly<StateBudgets>): void {
   requireState(batch.revisions.length > 0 && batch.revisions.length <= budgets.maxRevisionsPerBatch, 'BUDGET', '变化批次必须包含有界的原子修订。');
   for (const revision of batch.revisions) {
+    requireState(revision.factsVersion === undefined || revision.facts !== undefined, 'SCHEMA', '事实语义版本不能脱离事实数组。');
     requireState(revision.changes.length <= budgets.maxChangesPerRevision, 'BUDGET', '原子修订变化数超过预算。');
     const identities = new Set<string>();
     for (const change of revision.changes) {

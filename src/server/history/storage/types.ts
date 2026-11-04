@@ -15,6 +15,8 @@ export type HistoryDurability = 'file-and-directory-fsync' | 'file-fsync';
  * 同一项目/关联域（跨 captureEpoch）必须使用同一互斥键。
  */
 export interface HistoryFencingPort {
+  /** 采用本地持久授权文件的实现须拒绝与授权库物理根目录不一致的归档。 */
+  assertArchiveRoot?(rootDirectory: string, scope: Readonly<ArchiveScope>): Promise<void>;
   runExclusive<T>(scope: Readonly<ArchiveScope>, writer: Readonly<HistoryWriter>, operation: () => Promise<T>): Promise<T>;
 }
 export type ArchiveLimits = {

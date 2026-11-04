@@ -13,6 +13,7 @@ export class HistoryPrivateProtocol {
   readonly #secret: Buffer;
   readonly #active = new Set<AbortController>();
   #lastSequence = 0;
+  #established = false;
   #closed = false;
   constructor(readonly service: HistoryQueryService, secret: Uint8Array) {
     if (!service || !(secret instanceof Uint8Array) || secret.byteLength < 32 || secret.byteLength > 128) throw new HistoryQueryError('CHANNEL_KEY_REQUIRED', '私有查询通道缺少独立密钥。');
@@ -31,7 +32,7 @@ export class HistoryPrivateProtocol {
       throw new HistoryQueryError('CHANNEL_FRAME', '私有查询帧无效。');
     const supplied = Buffer.from(frame.mac, 'base64url'), expected = this.#mac('request', frame.payload);
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected) || supplied.toString('base64url') !== frame.mac) throw new HistoryQueryError('CHANNEL_AUTH', '私有查询通道认证失败。');
-    let request: { sequence: number; deadline: number; grant: ReadGrant; action: ReadAction; body: unknown };
+    let request: { sequence: number; deadline: number; grant: ReadGrant | null; action: ReadAction | 'channel/hello' | 'channel/ping'; body: unknown };
     try {
       const data = Buffer.from(frame.payload, 'base64url');
       if (data.toString('base64url') !== frame.payload) throw new Error();
@@ -42,19 +43,39 @@ export class HistoryPrivateProtocol {
       || !Number.isSafeInteger(request.deadline) || request.deadline <= Date.now() || request.deadline > Date.now() + 30_000)
       throw new HistoryQueryError('CHANNEL_SEQUENCE', '私有查询帧重放、乱序或超时。');
     if (this.#active.size >= 32) throw new HistoryQueryError('CHANNEL_CAPACITY', '私有查询通道并发已达上限。');
+    if (request.action === 'channel/hello') {
+      const body = request.body;
+      if (this.#established || request.sequence !== 1 || request.grant !== null || !body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).join(',') !== 'challenge' || typeof (body as { challenge?: unknown }).challenge !== 'string'
+        || !/^[A-Za-z0-9_-]{43}$/u.test((body as { challenge: string }).challenge))
+        throw new HistoryQueryError('CHANNEL_HANDSHAKE', '私有查询通道握手无效。');
+      this.#lastSequence = request.sequence; this.#established = true;
+      return this.#response({ sequence: request.sequence, ok: true, data: { protocol: 'history-query/1', challenge: (body as { challenge: string }).challenge } });
+    }
+    if (!this.#established) throw new HistoryQueryError('CHANNEL_HANDSHAKE', '私有查询通道尚未握手。');
+    if (request.action === 'channel/ping') {
+      if (request.grant !== null || request.body !== null) throw new HistoryQueryError('CHANNEL_FRAME', '私有查询保活帧无效。');
+      this.#lastSequence = request.sequence;
+      return this.#response({ sequence: request.sequence, ok: true, data: { protocol: 'history-query/1', alive: true } });
+    }
     this.#lastSequence = request.sequence;
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), Math.max(1, request.deadline - Date.now()));
+    let timedOut = false;
+    const controller = new AbortController(), timer = setTimeout(() => { timedOut = true; controller.abort(); }, Math.max(1, request.deadline - Date.now()));
     this.#active.add(controller);
     let result: unknown;
     try {
-      const data = await this.service.dispatch(request.grant, request.action, request.body, controller.signal);
+      const data = await this.service.dispatch(request.grant as ReadGrant, request.action, request.body, controller.signal);
       if (controller.signal.aborted || Date.now() >= request.deadline) throw new HistoryQueryError('QUERY_TIMEOUT', '查询超过期限。');
       result = { sequence: request.sequence, ok: true, data };
     } catch (error) {
       const possible = typeof error === 'object' && error !== null && 'code' in error ? (error as { code: unknown }).code : null;
-      const code = typeof possible === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(possible) ? possible : 'QUERY_FAILED';
+      const code = timedOut || Date.now() >= request.deadline ? 'QUERY_TIMEOUT'
+        : typeof possible === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(possible) ? possible : 'QUERY_FAILED';
       result = { sequence: request.sequence, ok: false, code };
     } finally { clearTimeout(timer); this.#active.delete(controller); }
+    return this.#response(result);
+  }
+  #response(result: unknown): string {
     if (this.#closed) throw new HistoryQueryError('CHANNEL_CLOSED', '私有查询通道已关闭。');
     const data = Buffer.from(JSON.stringify(result), 'utf8');
     if (data.length > 4 * 1024 * 1024) throw new HistoryQueryError('CHANNEL_FRAME', '私有查询响应超过预算。');

@@ -43,7 +43,10 @@
  *   Windows 的 Node 目录 fsync 通常不可用，默认会明确失败；只能显式选择较弱的 file-fsync。
  *   file-fsync 只承诺已 flush 的文件内容和进程崩溃恢复，不承诺断电后的目录项持久性。
  * - 任何文件 fsync 失败都拒绝确认，并冻结实例等待重新恢复；失败返回不表示该写入必然未落盘，需按原 proof 查询。
- * - 不支持 NFS/SMB 多机共享写入；每个实例固定一个 captureEpoch，关联域只有一个拥有者。
+ * - 可选 SqliteHistoryFencing 使用 Node 内置 SQLite 的本地排他事务和持久代次；首次仅允许空域显式初始化。
+ *   可信部署必须让同一项目/关联域在所有进程和纪元始终指向唯一物理根，并独立保留权威代次高水位。
+ *   运行期间禁止替换、复制恢复或回滚授权库；故障恢复须先停尽所有 writer 并由外部高水位对账，不能用 current() 自证。
+ *   不支持 NFS/SMB 多机共享写入；每个实例固定一个 captureEpoch，关联域只有一个拥有者。
  *   旧纪元的跨进程并发查询需由外层拥有者路由，本层不提供绕过所有权的 reader-only 打开方式。
  *   不得用内存 Mutex/租约超时假装实现持久 fencing。
  *   崩溃锁仅在外层持久换代后显式提供 reclaimAbandonedWriter，严格核对原 owner/token；从不杀进程。
@@ -56,5 +59,7 @@
  *   未接 broker/HTTP、Java th_runtime_commit、对象存储或外部发布资源删除，不声称端到端零丢失或生产吞吐。
  */
 export { DurableHistoryArchive } from './DurableHistoryArchive.ts';
+export { SqliteHistoryFencing } from './SqliteHistoryFencing.ts';
+export type { SqliteHistoryFencingOptions } from './SqliteHistoryFencing.ts';
 export { DEFAULT_ARCHIVE_LIMITS } from './primitives.ts';
 export * from './types.ts';

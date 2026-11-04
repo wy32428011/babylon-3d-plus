@@ -2,7 +2,8 @@
  * 关键事件为服务端 canonical 状态的派生索引，不执行脚本或重新请求业务来源。
  *
  * 集成：archive 已打开且绑定真实持久 HistoryFencingPort -> HistoryEventIndex.open() -> sync()。
- * 每次 sync 固定归档已提交上界并按 maxBatches 有界推进，hasMoreCommitted 为 true 时按同一 toCursor 继续。
+ * 每次 sync 固定归档连续可查询上界并按 maxBatches 有界推进，hasMoreCommitted 为 true 时按同一 toCursor 继续。
+ * 已出现缺口时仍可追赶缺口前的完整前缀，不能越过连续可查询游标。
  * 重启先从持久帧恢复 indexedThrough，再以 cursor-recovery 从真实检查点和连续已提交变化恢复 follower。
  * 同毫秒批次按 revision/ordinal 稳定排序；查询时间严格为 [from,to)，不以最大时间冒充后续同毫秒提交。
  *

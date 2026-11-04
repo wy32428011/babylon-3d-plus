@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readdir, realpath, rename, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,7 @@ import { clone, errorCode, frame, need, pack, parse, same, sha256, unframe } fro
 import { compareDecimal } from '../../../runtime/history/state/safeJson.ts';
 
 const SEGMENT = /^([0-9]{12})\.events$/u;
+const OWNER_TEMP = /^\.owner-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/u;
 type Lock = { format: 'history-event-owner/1'; id: string; scope: ArchiveScope; writer: HistoryWriter };
 export type EventFileLimits = { maxSegmentBytes: number; maxFrameBytes: number; maxStoredBytes: number; maxRecoveryBytes: number; maxSegments: number };
 export type FrameLocation = { segment: number; offset: number; bytes: number; digest: string };
@@ -34,15 +35,15 @@ export class EventFiles {
     const files = new EventFiles(dir, durability, limits); await files.acquire(scope, writer, reclaim); return files;
   }
   private filename(name: string): string {
-    need(name === 'identity' || name === 'identity.tmp' || name === 'owner' || SEGMENT.test(name), 'PATH', '事件索引拒绝非自有文件名。');
+    need(name === 'identity' || name === 'identity.tmp' || name === 'owner' || SEGMENT.test(name) || OWNER_TEMP.test(name), 'PATH', '事件索引拒绝非自有文件名。');
     return path.join(this.dir, name);
   }
   private async checkedHandle(name: string, write = false): Promise<FileHandle> {
     const parent = await lstat(this.dir); need(parent.isDirectory() && !parent.isSymbolicLink(), 'PATH', '事件目录被替换。');
-    const file = this.filename(name), before = await lstat(file);
-    need(before.isFile() && !before.isSymbolicLink() && before.nlink === 1, 'PATH', '事件文件必须是单链接普通文件。');
+    const file = this.filename(name), before = await lstat(file, { bigint: true });
+    need(before.isFile() && !before.isSymbolicLink() && before.nlink === 1n, 'PATH', '事件文件必须是单链接普通文件。');
     const handle = await open(file, (write ? constants.O_RDWR : constants.O_RDONLY) | (constants.O_NOFOLLOW ?? 0));
-    try { const after = await handle.stat(); need(after.isFile() && after.nlink === 1 && before.dev === after.dev && before.ino === after.ino, 'PATH', '事件文件在打开时被替换或存在外部硬链接。'); return handle; }
+    try { const after = await handle.stat({ bigint: true }); need(after.isFile() && after.nlink === 1n && before.dev === after.dev && before.ino === after.ino, 'PATH', '事件文件在打开时被替换或存在外部硬链接。'); return handle; }
     catch (error) { await handle.close(); throw error; }
   }
   private async create(name: string, data: Buffer): Promise<void> {
@@ -55,7 +56,33 @@ export class EventFiles {
     let position = 0; while (position < data.length) { const result = await handle.write(data, position, data.length - position, offset + position);
       need(result.bytesWritten > 0, 'WRITE_FAILED', '事件索引写入未前进。'); position += result.bytesWritten; }
   }
+  private async recoverOwnerLink(): Promise<void> {
+    let original;
+    try { original = await lstat(this.filename('owner'), { bigint: true }); }
+    catch (error) { if (errorCode(error) === 'ENOENT') return; throw error; }
+    need(original.isFile() && !original.isSymbolicLink(), 'WRITER_LOCK', '事件索引所有权文件无效。');
+    if (original.nlink === 1n) return;
+    need(original.nlink === 2n, 'WRITER_LOCK', '事件索引所有权文件存在未知硬链接。');
+    const entries = await readdir(this.dir, { withFileTypes: true });
+    need(entries.length <= this.limits.maxSegments + 64, 'BUDGET', '事件索引目录文件数超过预算。');
+    const aliases: string[] = [];
+    for (const entry of entries) if (entry.isFile() && !entry.isSymbolicLink() && OWNER_TEMP.test(entry.name)) {
+      const file = this.filename(entry.name);
+      try {
+        const stat = await lstat(file, { bigint: true });
+        if (stat.dev === original.dev && stat.ino === original.ino) aliases.push(file);
+      } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+    }
+    if (aliases.length === 1) {
+      try { await unlink(aliases[0]); } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
+      await ArchiveFiles.syncDirectory(this.dir, this.durability);
+    }
+    const current = await lstat(this.filename('owner'), { bigint: true });
+    need(current.dev === original.dev && current.ino === original.ino && current.nlink === 1n,
+      'WRITER_LOCK', '事件索引所有权文件被替换或存在未知硬链接。');
+  }
   private async acquire(scope: ArchiveScope, writer: HistoryWriter, reclaim?: HistoryWriter): Promise<void> {
+    await this.recoverOwnerLink();
     try {
       const data = await this.readFile('owner', 16_384), previous = parse<Lock>(unframe(data, 16_348), 16_348);
       need(previous.format === 'history-event-owner/1' && same(previous.scope, scope) && reclaim && same(previous.writer, reclaim)
@@ -64,7 +91,19 @@ export class EventFiles {
       await unlink(this.filename('owner')); await ArchiveFiles.syncDirectory(this.dir, this.durability); this.#reclaimed = true;
     } catch (error) { if (errorCode(error) !== 'ENOENT') throw error; }
     const record: Lock = { format: 'history-event-owner/1', id: randomUUID(), scope: clone(scope), writer: clone(writer) };
-    const bytes = frame(pack(record, 16_348)); await this.create('owner', bytes); this.#lockDigest = sha256(bytes);
+    const bytes = frame(pack(record, 16_348)), temporary = `.owner-${record.id}.tmp`;
+    let created = false, failed = false, failure: unknown;
+    try {
+      await this.create(temporary, bytes); created = true;
+      await link(this.filename(temporary), this.filename('owner'));
+      await ArchiveFiles.syncDirectory(this.dir, this.durability);
+    } catch (error) { failed = true; failure = error; }
+    if (created) {
+      try { await unlink(this.filename(temporary)); await ArchiveFiles.syncDirectory(this.dir, this.durability); }
+      catch (error) { if (!failed) { failed = true; failure = error; } }
+    }
+    if (failed) throw failure;
+    this.#lockDigest = sha256(bytes);
   }
   async assertOwned(): Promise<void> { need(sha256(await this.readFile('owner', 16_384)) === this.#lockDigest, 'FENCED', '事件索引已失去 writer 所有权。'); }
   async release(): Promise<void> { await this.assertOwned(); await unlink(this.filename('owner')); await ArchiveFiles.syncDirectory(this.dir, this.durability); }
@@ -90,8 +129,10 @@ export class EventFiles {
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') throw error;
       await this.removeIdentityTemp(this.#reclaimed);
-      const entries = await readdir(this.dir);
-      need(entries.every(entry => entry === 'owner'), 'CORRUPT_INDEX', '存在事件数据却缺少身份记录，不能初始化空索引。');
+      const entries = await readdir(this.dir, { withFileTypes: true });
+      need(entries.length <= 65 && entries.every(entry => entry.name === 'owner'
+        || entry.isFile() && !entry.isSymbolicLink() && OWNER_TEMP.test(entry.name)),
+      'CORRUPT_INDEX', '存在事件数据或未知文件却缺少身份记录，不能初始化空索引。');
       await this.create('identity.tmp', frame(pack(initial, 65_500)));
       await rename(this.filename('identity.tmp'), this.filename('identity'));
       await ArchiveFiles.syncDirectory(this.dir, this.durability);
@@ -108,12 +149,20 @@ export class EventFiles {
   /** 完整校验帧，只有最后文件的不完整尾部可回退；所有恢复均由外层持久 fencing 包围。 */
   async recover(onFrame: (location: FrameLocation, payload: Buffer) => void): Promise<void> {
     const entries = await readdir(this.dir, { withFileTypes: true });
-    need(entries.length <= this.limits.maxSegments + 2, 'INDEX_CAPACITY', '事件目录文件数超过预算。');
+    need(entries.length <= this.limits.maxSegments + 66, 'INDEX_CAPACITY', '事件目录文件数超过预算。');
     for (const entry of entries) need(!entry.isSymbolicLink() && entry.isFile()
-      && (entry.name === 'owner' || entry.name === 'identity' || SEGMENT.test(entry.name)), 'PATH', '事件目录含未知文件或符号链接，拒绝读取和清理。');
+      && (entry.name === 'owner' || entry.name === 'identity' || SEGMENT.test(entry.name) || OWNER_TEMP.test(entry.name)), 'PATH', '事件目录含未知文件或符号链接，拒绝读取和清理。');
     const names = entries.map(entry => entry.name).filter(name => SEGMENT.test(name)).sort();
     let recovered = (await this.readFile('identity', 65_536)).byteLength + (await this.readFile('owner', 16_384)).byteLength;
     this.#total = recovered;
+    for (const entry of entries) if (OWNER_TEMP.test(entry.name)) {
+      const handle = await this.checkedHandle(entry.name);
+      try {
+        const size = (await handle.stat()).size;
+        need(Number.isSafeInteger(size) && size <= 16_384, 'BUDGET', '事件所有权暂存文件超过预算。');
+        this.#total += size;
+      } finally { await handle.close(); }
+    }
     need(recovered <= this.limits.maxRecoveryBytes && this.#total <= this.limits.maxStoredBytes, 'RECOVERY_BUDGET', '事件元数据超出恢复或存储预算。');
     for (let index = 0; index < names.length; index += 1) {
       const name = names[index]; need(name === this.segmentName(index), 'CORRUPT_INDEX', '事件段缺失或序号不连续。');

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { TwinStateKernel } from '../../../runtime/history/state/kernel.ts';
 import type { StateAdapterRegistry } from '../../../runtime/history/state/adapters.ts';
-import { canonicalStringify, compareDecimal, nextDecimal } from '../../../runtime/history/state/safeJson.ts';
+import { canonicalStringify, compareDecimal, DEFAULT_STATE_BUDGETS, nextDecimal } from '../../../runtime/history/state/safeJson.ts';
 import type { StateBudgets } from '../../../runtime/history/state/safeJson.ts';
 import type { DeepReadonly, StateCursor, TwinCheckpoint } from '../../../runtime/history/state/types.ts';
 import type { HistoryTimeRange } from '../../../runtime/history/historyReplayContract.ts';
@@ -12,17 +12,17 @@ import { clone, decimal, jsonHash, need, pack, parse, same, timestamp, upperBoun
 import { EventFiles } from './eventFiles.ts';
 import type { EventFileLimits, FrameLocation } from './eventFiles.ts';
 import { deriveEvents, EVENT_PROJECTION_VERSION, validateIndexedEvent } from './projection.ts';
-import type { IndexedHistoryEvent } from './projection.ts';
+import type { IncompleteEventRange, IndexedHistoryEvent } from './projection.ts';
 
 export type HistoryEventIndexLimits = EventFileLimits & {
-  maxGroups: number; maxRecordsPerGroup: number; maxEventsPerGroup: number; maxSessions: number;
+  maxGroups: number; maxRecordsPerGroup: number; maxEventsPerGroup: number; maxIncompleteRanges: number; maxSessions: number;
   maxSessionTtlMs: number; maxPages: number; maxReadBytes: number; maxReadOps: number; maxConcurrentReads: number; maxPageBytes: number; maxPageItems: number;
 };
 type Limits = HistoryEventIndexLimits;
 const DEFAULTS: Limits = {
   maxSegmentBytes: 16 * 1024 * 1024, maxFrameBytes: 4 * 1024 * 1024, maxStoredBytes: 4 * 1024 ** 3,
   maxRecoveryBytes: 4 * 1024 ** 3, maxSegments: 4096, maxGroups: 500_000, maxRecordsPerGroup: 256,
-  maxEventsPerGroup: 20_000, maxSessions: 64, maxSessionTtlMs: 300_000, maxPages: 256,
+  maxEventsPerGroup: 20_000, maxIncompleteRanges: 500_000, maxSessions: 64, maxSessionTtlMs: 300_000, maxPages: 256,
   maxReadBytes: 256 * 1024 * 1024, maxReadOps: 8192, maxConcurrentReads: 4, maxPageBytes: 2 * 1024 * 1024, maxPageItems: 1000,
 };
 type Identity = {
@@ -31,10 +31,17 @@ type Identity = {
 };
 type RecordEntry = {
   fromRevision: string; toRevision: string; throughTime: number; batchChecksum: string; events: IndexedHistoryEvent[];
-  incompleteFrom: number | null; incompleteThrough: number | null;
+  incompleteRanges: IncompleteEventRange[];
 };
 type Group = { format: 'history-event-group/1'; sequence: string; previousHash: string; records: RecordEntry[] };
 type GroupEntry = { location: FrameLocation; firstTime: number; lastTime: number; firstRevision: string; lastRevision: string };
+function coverageAfter(count: number, end: number | null, ranges: readonly IncompleteEventRange[]): { count: number; end: number | null } {
+  for (const range of ranges) {
+    if (end === null || range.firstTime > end + 1) count += 1;
+    end = end === null ? range.lastTime : Math.max(end, range.lastTime);
+  }
+  return { count, end };
+}
 type Query = {
   id: string; owner: string; range: HistoryTimeRange; direction: 'forward' | 'reverse'; expiresAt: number; cursor: string; group: number; event: number;
   firstGroup: number; lastGroup: number; pages: number; readBytes: number; readOps: number; maxPages: number; maxReadBytes: number; maxReadOps: number; maxPageBytes: number;
@@ -67,6 +74,7 @@ export type EventQueryPage = {
 export class HistoryEventIndex {
   readonly #files: EventFiles; readonly #identity: Identity; readonly #options: HistoryEventIndexOptions; readonly #limits: Limits;
   readonly #groups: GroupEntry[] = []; readonly #incomplete: { firstTime: number; lastTime: number }[] = [];
+  readonly #incompleteGroupLastTimes: number[] = [];
   readonly #queries = new Map<string, Query>();
   #revision: string; #time: number; #sequence = '0'; #hash = '0'.repeat(64); #groupCount = 0;
   #kernel!: TwinStateKernel; #syncing = false; #opening = 0; #reads = 0; #failure: unknown = null; #closed = false; #closing = false;
@@ -104,7 +112,8 @@ export class HistoryEventIndex {
         versionDigest: jsonHash(watermark.versions), anchor, anchorTime, availableFrom, checkpointChecksum: checkpoint.checksum.value };
       let instance!: HistoryEventIndex;
       await HistoryEventIndex.gated(options, async () => {
-        files = await EventFiles.open(options.rootDirectory, JSON.stringify([options.archive.archiveId, options.projectionId]), options.archive.scope,
+        // 投影语义改变时在独立目录重建，不复用旧索引对完整覆盖的错误判断。
+        files = await EventFiles.open(options.rootDirectory, JSON.stringify([options.archive.archiveId, options.projectionId, EVENT_PROJECTION_VERSION]), options.archive.scope,
           options.archive.writer, options.archive.durability, limits, options.reclaimAbandonedWriter);
         const identity = await files.identity(proposed);
         need(identity.format === 'history-event-index/1' && identity.eventProjectionVersion === EVENT_PROJECTION_VERSION
@@ -142,28 +151,35 @@ export class HistoryEventIndex {
   }
   private watermark(): ProjectionWatermarks {
     const value = HistoryEventIndex.watermark(this.#options.archive, this.#identity.projectionId);
-    need(jsonHash(value.versions) === this.#identity.versionDigest && compareDecimal(value.committedStateCursor.stateRevision, this.#revision) >= 0,
-      'INDEX_AHEAD', '事件索引领先归档提交水位或投影版本已改变。'); return value;
+    need(jsonHash(value.versions) === this.#identity.versionDigest && compareDecimal(value.queryableCursor.stateRevision, this.#revision) >= 0,
+      'INDEX_AHEAD', '事件索引领先归档连续可查询水位或投影版本已改变。'); return value;
   }
   private healthy(): void { need(!this.#closed && !this.#closing, 'INDEX_CLOSED', '事件索引已关闭或正在关闭。'); need(this.#failure === null, 'RECOVERY_REQUIRED', '事件索引发生写入或校验失败，须关闭后从归档恢复。'); }
+  private parseGroup(payload: Buffer): Group {
+    const arrays = Math.min(this.#limits.maxFrameBytes, Math.max(this.#limits.maxEventsPerGroup * 4, this.#limits.maxRecordsPerGroup,
+      this.#options.stateBudgets?.maxRevisionsPerBatch ?? DEFAULT_STATE_BUDGETS.maxRevisionsPerBatch));
+    return parse<Group>(payload, this.#limits.maxFrameBytes, arrays);
+  }
   private install(location: FrameLocation, payload: Buffer): void {
-    const group = parse<Group>(payload, this.#limits.maxFrameBytes, this.#limits.maxEventsPerGroup * 4);
+    const group = this.parseGroup(payload);
     need(group.format === 'history-event-group/1' && group.sequence === nextDecimal(this.#sequence) && group.previousHash === this.#hash
       && Array.isArray(group.records) && group.records.length > 0 && group.records.length <= this.#limits.maxRecordsPerGroup,
     'CORRUPT_INDEX', '事件提交组序号、链或记录数无效。');
     let revision = this.#revision, time = this.#time, firstTime: number | null = null, lastTime: number | null = null;
     let firstRevision: string | null = null, lastEventRevision: string | null = null, count = 0;
-    let incompleteFrom: number | null = null, incompleteThrough: number | null = null;
+    const incompleteRanges: IncompleteEventRange[] = [];
     for (const record of group.records) {
       decimal(record.fromRevision); decimal(record.toRevision); timestamp(record.throughTime);
       need(record.fromRevision === revision && compareDecimal(record.toRevision, revision) > 0 && record.throughTime >= time
         && /^[a-f0-9]{64}$/u.test(record.batchChecksum) && Array.isArray(record.events), 'REVISION_GAP', '事件批次水位不连续或来源摘要无效。');
-      need((record.incompleteFrom === null) === (record.incompleteThrough === null), 'CORRUPT_INDEX', '旧事实覆盖区间不成对。');
-      if (record.incompleteFrom !== null && record.incompleteThrough !== null) {
-        timestamp(record.incompleteFrom); timestamp(record.incompleteThrough);
-        need(record.incompleteFrom >= time && record.incompleteThrough >= record.incompleteFrom && record.incompleteThrough <= record.throughTime,
-          'CORRUPT_INDEX', '旧事实覆盖区间超出已提交修订。');
-        incompleteFrom ??= record.incompleteFrom; incompleteThrough = record.incompleteThrough;
+      need(Array.isArray(record.incompleteRanges), 'CORRUPT_INDEX', '旧事实覆盖区间缺失。');
+      let previousIncomplete = time;
+      for (const range of record.incompleteRanges) {
+        need(range && typeof range === 'object', 'CORRUPT_INDEX', '旧事实覆盖区间无效。');
+        timestamp(range.firstTime); timestamp(range.lastTime);
+        need(range.firstTime >= previousIncomplete && range.lastTime >= range.firstTime && range.lastTime <= record.throughTime,
+          'CORRUPT_INDEX', '旧事实覆盖区间超出已提交修订或次序反转。');
+        incompleteRanges.push(range); previousIncomplete = range.lastTime;
       }
       let previousRevision = record.fromRevision, lastOrdinal = -1, lastEventTime = time;
       for (const event of record.events) {
@@ -180,9 +196,16 @@ export class HistoryEventIndex {
       revision = record.toRevision; time = record.throughTime;
     }
     need(this.#groupCount < this.#limits.maxGroups, 'INDEX_CAPACITY', '事件索引达到分组容量上限。');
+    const coverage = coverageAfter(this.#incomplete.length, this.#incomplete[this.#incomplete.length - 1]?.lastTime ?? null, incompleteRanges);
+    need(coverage.count <= this.#limits.maxIncompleteRanges, 'INDEX_CAPACITY', '旧事实覆盖区间达到容量上限。');
     if (firstTime !== null && lastTime !== null && firstRevision !== null && lastEventRevision !== null)
       this.#groups.push({ location, firstTime, lastTime, firstRevision, lastRevision: lastEventRevision });
-    if (incompleteFrom !== null && incompleteThrough !== null) this.#incomplete.push({ firstTime: incompleteFrom, lastTime: incompleteThrough });
+    for (const range of incompleteRanges) {
+      const last = this.#incomplete[this.#incomplete.length - 1];
+      if (last && range.firstTime <= last.lastTime + 1) last.lastTime = Math.max(last.lastTime, range.lastTime);
+      else this.#incomplete.push({ ...range });
+    }
+    if (incompleteRanges.length) this.#incompleteGroupLastTimes.push(incompleteRanges[incompleteRanges.length - 1].lastTime);
     this.#groupCount += 1; this.#revision = revision; this.#time = time; this.#sequence = group.sequence; this.#hash = location.digest;
   }
   private async restoreFollower(initial: DeepReadonly<TwinCheckpoint>): Promise<void> {
@@ -213,22 +236,40 @@ export class HistoryEventIndex {
       'RECOVERY_GAP', 'canonical-follower 没有恢复到事件索引的真实连续水位。');
     this.#kernel = kernel;
   }
-  status(): EventIndexStatus { this.healthy(); this.watermark(); return { indexedThrough: { projectionId: this.#identity.projectionId, stateRevision: this.#revision },
-    indexedThroughTime: this.#time, availableFrom: this.#identity.availableFrom, eventGroups: this.#groups.length,
-    coverage: this.#incomplete.length ? 'net-only' : 'complete', incompleteGroups: this.#incomplete.length }; }
+  /** 只允许归档所有者把同一投影的事件索引绑定到只读查询。 */
+  isBoundTo(archive: DurableHistoryArchive, projectionId: string): boolean {
+    this.healthy();
+    if (this.#options.archive !== archive || this.#identity.archiveId !== archive.archiveId || this.#identity.projectionId !== projectionId) return false;
+    this.watermark();
+    return true;
+  }
+  get queryLimits(): Readonly<Pick<HistoryEventIndexLimits, 'maxSessionTtlMs' | 'maxPages' | 'maxReadBytes' | 'maxPageBytes' | 'maxPageItems'>> {
+    const { maxSessionTtlMs, maxPages, maxReadBytes, maxPageBytes, maxPageItems } = this.#limits;
+    return { maxSessionTtlMs, maxPages, maxReadBytes, maxPageBytes, maxPageItems };
+  }
+  status(): EventIndexStatus {
+    this.healthy(); const watermark = this.watermark(), availableFrom = Math.max(this.#identity.availableFrom, watermark.retainedFrom);
+    const firstIncomplete = upperBound(this.#incomplete, range => range.lastTime < availableFrom);
+    const firstIncompleteGroup = upperBound(this.#incompleteGroupLastTimes, time => time < availableFrom);
+    return { indexedThrough: { projectionId: this.#identity.projectionId, stateRevision: this.#revision },
+      indexedThroughTime: this.#time, availableFrom, eventGroups: this.#groups.length,
+      coverage: firstIncomplete < this.#incomplete.length ? 'net-only' : 'complete',
+      incompleteGroups: this.#incompleteGroupLastTimes.length - firstIncompleteGroup };
+  }
   /** 每次读取固定的归档已提交上界；每页一个 fsync 提交组，组内每个批次均保存 indexedThrough，包括零事件。 */
   async sync(options: { maxPages?: number; maxReadBytes?: number; maxBatches?: number; signal?: AbortSignal; toCursor?: StateCursor; throughTime?: number } = {}): Promise<EventSyncResult> {
     this.healthy(); need(!this.#syncing, 'INDEX_BUSY', '已有事件追赶正在运行。'); this.#syncing = true;
     let advanced = false;
     try {
-      const watermark = this.watermark(); need(watermark.continuity.status === 'complete', 'CONTINUITY_GAP', '归档存在缺口，事件追赶已阻断。');
+      const watermark = this.watermark();
       const afterCursor = { projectionId: this.#identity.projectionId, stateRevision: this.#revision };
       need(options.throughTime === undefined || options.toCursor !== undefined, 'CURSOR_RANGE', '提交时间必须绑定明确的游标。');
-      const ceiling = options.toCursor ?? watermark.committedStateCursor;
+      // 缺口之后仍可补索引已提交的完整前缀，但绝不能追过最后连续水位。
+      const ceiling = options.toCursor ?? watermark.queryableCursor;
       decimal(ceiling.stateRevision);
       if (options.throughTime !== undefined) timestamp(options.throughTime);
       need(ceiling.projectionId === afterCursor.projectionId && compareDecimal(ceiling.stateRevision, afterCursor.stateRevision) >= 0
-        && compareDecimal(ceiling.stateRevision, watermark.committedStateCursor.stateRevision) <= 0, 'CURSOR_RANGE', '目标游标不在已提交状态范围内。');
+        && compareDecimal(ceiling.stateRevision, watermark.queryableCursor.stateRevision) <= 0, 'CURSOR_RANGE', '目标游标不在连续可查询的已提交状态范围内。');
       const maxPageBatches = Math.min(this.#limits.maxRecordsPerGroup, this.#options.archive.limits.maxPageBatches);
       const session = await this.#options.archive.openReadSession({ mode: 'changes-bounded', projectionId: afterCursor.projectionId, afterCursor,
         upperCursor: ceiling, maxBatches: options.maxBatches ?? maxPageBatches, maxPages: options.maxPages,
@@ -246,6 +287,7 @@ export class HistoryEventIndex {
           need(!options.signal?.aborted, 'CANCELLED', '事件追赶已取消。');
           const page = await this.#options.archive.readChanges(session.sessionId, cursor, options.signal);
           let records: RecordEntry[] = [], eventCount = 0;
+          let coverage: { count: number; end: number | null } = { count: this.#incomplete.length, end: this.#incomplete[this.#incomplete.length - 1]?.lastTime ?? null };
           const body = (items: RecordEntry[]): Group => ({ format: 'history-event-group/1', sequence: nextDecimal(this.#sequence), previousHash: this.#hash, records: items });
           const headerBytes = (): number => Buffer.byteLength(canonicalStringify(body([])), 'utf8');
           let groupBytes = headerBytes();
@@ -262,6 +304,7 @@ export class HistoryEventIndex {
               this.install(location, payload);
             });
             records = []; eventCount = 0; groupBytes = headerBytes(); advanced = false;
+            coverage = { count: this.#incomplete.length, end: this.#incomplete[this.#incomplete.length - 1]?.lastTime ?? null };
           };
           for (const batch of page.batches) {
             need(batch.fromRevision === this.#kernel.metadata.cursor.stateRevision, 'REVISION_GAP', '事件 follower 批次不连续。');
@@ -271,13 +314,15 @@ export class HistoryEventIndex {
               const projected = deriveEvents(this.#identity.archiveId, this.#identity.versionDigest, batch, this.#kernel.view, this.#limits.maxEventsPerGroup);
               const events = projected.events;
               const entry: RecordEntry = { fromRevision: batch.fromRevision, toRevision: batch.toRevision, throughTime: batch.throughTime,
-                batchChecksum: batch.checksum.value, events, incompleteFrom: projected.incompleteFrom, incompleteThrough: projected.incompleteThrough };
+                batchChecksum: batch.checksum.value, events, incompleteRanges: projected.incompleteRanges };
               const entryBytes = Buffer.byteLength(canonicalStringify(entry), 'utf8');
               if (records.length && (eventCount + events.length > this.#limits.maxEventsPerGroup
                 || groupBytes + entryBytes + 1 > this.#limits.maxFrameBytes)) await flush();
               need(groupBytes + entryBytes + (records.length ? 1 : 0) <= this.#limits.maxFrameBytes,
                 'EVENT_BUDGET', '单个已提交变化批次的关键事件超过帧预算，不能截断。');
-              advanced = true; prepared.commit(); committed = true;
+              const nextCoverage = coverageAfter(coverage.count, coverage.end, entry.incompleteRanges);
+              need(nextCoverage.count <= this.#limits.maxIncompleteRanges, 'INDEX_CAPACITY', '旧事实覆盖区间达到容量上限。');
+              advanced = true; prepared.commit(); committed = true; coverage = nextCoverage;
               groupBytes += entryBytes + (records.length ? 1 : 0); eventCount += events.length; records.push(entry);
             } catch (error) { if (!committed) prepared.abort(); throw error; }
           }
@@ -351,7 +396,7 @@ export class HistoryEventIndex {
           onRead: () => { need(readOps < maxReadOps, 'QUERY_BUDGET', '定位事件锚点超过读取次数预算。'); readOps += 1; },
           onBytes: bytes => { readBytes += bytes; },
         });
-        const candidate = parse<Group>(payload, this.#limits.maxFrameBytes, this.#limits.maxEventsPerGroup * 4);
+        const candidate = this.parseGroup(payload);
         const events = candidate.records.flatMap(record => record.events);
         const position = events.findIndex(item => item.id === anchor.id && item.revision === anchor.revision
           && item.ordinal === anchor.ordinal && item.time === anchor.time);
@@ -395,7 +440,7 @@ export class HistoryEventIndex {
           onRead: () => { need(query.readOps < query.maxReadOps, 'QUERY_BUDGET', '事件会话实际读取次数超过预算。'); query.readOps += 1; },
           onBytes: bytes => { query.readBytes += bytes; },
         });
-        const group = parse<Group>(payload, this.#limits.maxFrameBytes, this.#limits.maxEventsPerGroup * 4);
+        const group = this.parseGroup(payload);
         const events = group.records.flatMap(record => record.events);
         if (reverse && eventIndex < 0) eventIndex = events.length - 1;
         while (eventIndex >= 0 && eventIndex < events.length) {

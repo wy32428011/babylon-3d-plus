@@ -76,8 +76,14 @@ export class DurableHistoryArchive {
   usesFencing(port: DurableHistoryArchiveOptions['fencing']): boolean { return this.#options.fencing === port; }
 
   static async open(options: DurableHistoryArchiveOptions): Promise<DurableHistoryArchive> {
+    options = Object.freeze({ ...options, scope: Object.freeze(clone(options.scope)), writer: Object.freeze(clone(options.writer)),
+      registry: options.registry.snapshot(),
+      ...(options.reclaimAbandonedWriter ? { reclaimAbandonedWriter: Object.freeze(clone(options.reclaimAbandonedWriter)) } : {}),
+      ...(options.stateBudgets ? { stateBudgets: Object.freeze({ ...options.stateBudgets }) } : {}),
+      ...(options.limits ? { limits: Object.freeze({ ...options.limits }) } : {}) });
     validateScope(options.scope, options.writer); decimal(options.initialOffset ?? '0', 'initialOffset');
     need(options.fencing && typeof options.fencing.runExclusive === 'function', 'FENCING_REQUIRED', '必须接入真实的持久 fencing 授权端口。');
+    if (options.fencing.assertArchiveRoot) await options.fencing.assertArchiveRoot(options.rootDirectory, options.scope);
     const limits = resolveArchiveLimits(options.limits), durability = options.durability ?? 'file-and-directory-fsync';
     need(['file-and-directory-fsync', 'file-fsync'].includes(durability), 'DURABILITY', '不支持的持久性级别。');
     // 创建目录、所有权变更和恢复尾部也在同一个持久 gate 内，不允许旧 writer 迟到写入。
@@ -322,7 +328,7 @@ export class DurableHistoryArchive {
       if (!this.#index.segment(group.record.segmentId).cold) break;
       archived = { captureDomainId: this.scope.captureDomainId, captureEpoch: this.scope.captureEpoch, offset: group.lastOffset };
     }
-    return { archiveId: this.archiveId, scope: clone(this.scope), capturedThrough: this.#index.capturedCursor, capturedReceivedAt: this.#index.capturedReceivedAt,
+    return { archiveId: this.archiveId, scope: clone(this.scope), capturedThrough: clone(this.#index.capturedCursor), capturedReceivedAt: this.#index.capturedReceivedAt,
       archivedThrough: archived, durability: this.durability, journalSequence: this.#journal.position.sequence,
       projections: [...this.#index.projections.values()].map(projection => {
         const checkpoint = projection.checkpoints[projection.checkpoints.length - 1];
@@ -377,7 +383,7 @@ export class DurableHistoryArchive {
       }
       need(same(kernel.metadata.cursor, session.toCursor), 'RECOVERY_GAP', '恢复没有达到固定持久提交上界。');
       const usage = this.#queries.usage(session.sessionId);
-      return { checkpoint: kernel.checkpoint(), committedStateCursor: clone(kernel.metadata.cursor), capturedThrough: this.#index.capturedCursor,
+      return { checkpoint: kernel.checkpoint(), committedStateCursor: clone(kernel.metadata.cursor), capturedThrough: clone(this.#index.capturedCursor),
         unprocessedAfter: clone(kernel.metadata.inputCursor), readBytes: usage.readBytes, pages: usage.pages };
     } finally { await this.closeReadSession(session.sessionId); }
   }

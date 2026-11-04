@@ -1,11 +1,13 @@
 import type { CargoHost, DeepReadonly, DeviceIdentity, Matrix4, PoseSample, StateReadView } from '../../history/state';
+import { stableKey } from '../../history/state/safeJson';
+import { LOGISTICS_ADAPTER_ID, LOGISTICS_ADAPTER_VERSION, LOGISTICS_STATE_SCHEMA_VERSION } from '../../history/adapters/manifest';
 
 /** canonical 数值投影；不是 Mesh，也不会调用旧实时生成器或业务脚本。 */
 export type HistorySceneFrame = {
   projectionId: string; revision: string; sampledAt: number;
   devices: { id: string; identity: DeepReadonly<DeviceIdentity>; logicalDeviceId: string | null; modelId: string; dynamicGeneratorId: string | null; dynamicGeneration: string | null; worldMatrix: DeepReadonly<Matrix4>;
     anchors: readonly { id: string; worldMatrix: DeepReadonly<Matrix4> }[] }[];
-  cargo: { id: string; generatorId: string | null; host: DeepReadonly<CargoHost>; worldMatrix: DeepReadonly<Matrix4> }[];
+  cargo: { id: string; generatorId: string | null; templateId: string | null; host: DeepReadonly<CargoHost>; worldMatrix: DeepReadonly<Matrix4> }[];
   slots: { id: string; locatorId: string; row: string; column: number; layer: number; depth: string; cargoId: string | null }[];
   alarms: { id: string; deviceId: string; ruleId: string; active: boolean; activatedAt: number | null }[];
 };
@@ -41,7 +43,20 @@ export function buildHistorySceneFrame(view: StateReadView, pose: DeepReadonly<P
   const cargo = pose.cargo.map(sample => {
     const item = view.get('cargo', sample.id);
     if (!item || !item.host || item.destroyedAt !== null) throw new Error('历史货物缺少唯一活动宿主，不能提交画面。');
-    return { id: item.id, generatorId: item.origin.generatorId, host: item.host, worldMatrix: sample.worldMatrix };
+    const record = view.get('adapterStates', stableKey('logistics-cargo', item.id));
+    let templateId: string | null = null;
+    if (record) {
+      const state = record.state;
+      if (state.adapterId !== LOGISTICS_ADAPTER_ID || state.version !== LOGISTICS_ADAPTER_VERSION
+        || state.stateSchemaVersion !== LOGISTICS_STATE_SCHEMA_VERSION || state.value.kind !== 'cargo'
+        || state.value.cargoId !== item.id || typeof state.value.templateId !== 'string' || !state.value.templateId
+        || record.cargoIds.length !== 1 || record.cargoIds[0] !== item.id) {
+        throw new Error('历史货物模板状态无效，不能提交画面。');
+      }
+      // 模板会随物流交接或库存事实改变；origin.generatorId 不能替代当前已提交模板。
+      templateId = state.value.templateId;
+    }
+    return { id: item.id, generatorId: item.origin.generatorId, templateId, host: item.host, worldMatrix: sample.worldMatrix };
   });
   const slotsById = new Map(view.logic.slots.map(slot => [slot.id, slot]));
   const slots = [...view.values('slots')].map(slot => {

@@ -84,6 +84,7 @@ export class HistoryProjector {
 
   /** 恢复先验证已提交全态，再按固定 capturedThrough 追赶原始证据；此时尚不接受新输入。 */
   static async recover(options: HistoryProjectorOptions, signal?: AbortSignal): Promise<HistoryProjector> {
+    options = Object.freeze({ ...options, versions: Object.freeze(structuredClone(options.versions)), registry: options.registry.snapshot() });
     const recovered = await options.archive.recoverProjection(options.projectionId, signal);
     const kernel = TwinStateKernel.fromCheckpoint(recovered.checkpoint, options.registry, { mode: 'projector', expectedVersions: options.versions });
     const worker = new HistoryProjector(options, kernel);
@@ -183,10 +184,18 @@ export class HistoryProjector {
     this.#notify();
   }
 
-  async checkpoint(): Promise<void> {
-    await this.#tail;
-    requireProjector(!this.#stopping && (this.#phase === 'running' || this.#phase === 'gap'), 'PROJECTOR_UNAVAILABLE', '当前投影不能建立检查点。');
-    await this.#archive.putCheckpoint(this.#kernel.checkpoint());
+  checkpoint(): Promise<void> {
+    if (this.#stopping || !['running', 'gap'].includes(this.#phase)) {
+      return Promise.reject(new HistoryProjectorError('PROJECTOR_UNAVAILABLE', '当前投影不能建立检查点。'));
+    }
+    const task = this.#tail.then(async () => {
+      requireProjector(this.#phase === 'running' || this.#phase === 'gap', 'PROJECTOR_UNAVAILABLE', '当前投影不能建立检查点。');
+      await this.#archive.putCheckpoint(this.#kernel.checkpoint());
+    });
+    this.#tail = task.catch(error => {
+      if (this.#phase !== 'faulted') { this.#phase = 'faulted'; this.#errorCode = errorCode(error); this.#notify(); }
+    });
+    return task;
   }
   async openHistory(request: Parameters<DurableHistoryArchive['openReadSession']>[0]): Promise<HistoryReadSession> {
     requireProjector(request.projectionId === this.#projectionId, 'PROJECTION_MISMATCH', '查询投影与当前协调者不一致。');

@@ -60,6 +60,8 @@ export type HistoryMqttParser = {
   sequencePath?: string;
   epochPath?: string;
   eventIdPath?: string;
+  /** 规范点位名到所选状态对象内 JSON Pointer 的映射；未映射的原始字段保留。 */
+  fieldMap?: Record<string, string>;
   mode: 'full' | 'delta';
   timeUnit: 'ms' | 's';
   timeZone: 'UTC';

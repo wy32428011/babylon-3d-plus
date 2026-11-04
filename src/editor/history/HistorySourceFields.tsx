@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import type { HistoryJson, HistorySourceKind } from '../../../electron/shared/historyServiceContract';
+import { compileHistoryMqttFieldMap } from '../../runtime/history/mqttFieldMap';
 import type {
   HistoryHttpMapping, HistoryHttpOperation, HistoryHttpSourceConfig,
   HistoryMqttParser, HistoryMqttSourceConfig, HistorySourceConfig, HistorySourceCredential,
@@ -10,7 +11,7 @@ export type InvalidFieldHandler = (field: string, message: string | null) => voi
 
 type JsonFieldProps = {
   field: string; label: string; value: HistoryJson | undefined;
-  kind?: 'json' | 'object' | 'string-map'; hint?: string;
+  kind?: 'json' | 'object' | 'string-map' | 'mqtt-field-map'; hint?: string;
   onChange: (value: HistoryJson) => void; onInvalid: InvalidFieldHandler;
 };
 
@@ -33,6 +34,7 @@ export function HistoryJsonField({ field, label, value, kind = 'json', hint, onC
           const parsed: unknown = JSON.parse(next);
           if (kind !== 'json' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) throw new Error('此字段需要 JSON 对象。');
           if (kind === 'string-map' && Object.values(parsed as object).some(item => typeof item !== 'string')) throw new Error('映射值必须是字符串。');
+          if (kind === 'mqtt-field-map') compileHistoryMqttFieldMap(parsed);
           setError(null); onInvalid(field, null); onChange(parsed as HistoryJson);
         } catch (reason) {
           const message = reason instanceof SyntaxError ? 'JSON 格式不正确，请补齐括号、引号或逗号。' : reason instanceof Error ? reason.message : '字段无效。';
@@ -74,15 +76,19 @@ export function HistorySourceFields(props: {
       <label className="history-settings-field"><span>权威业务域</span><input disabled={props.identityLocked} value={common.authorityScope} onChange={event => onChange({ ...common, authorityScope: event.target.value })} placeholder="例如 warehouse-a/device" required maxLength={256} /></label>
     </div>
     {kind === 'mqtt'
-      ? <MqttFields config={config as HistoryMqttSourceConfig} onChange={onChange} />
+      ? <MqttFields config={config as HistoryMqttSourceConfig} onChange={onChange} onInvalid={onInvalid} />
       : <HttpFields kind={kind} config={config as HistoryHttpSourceConfig} onChange={onChange} onInvalid={onInvalid} />}
   </>;
 }
 
-function MqttFields({ config, onChange }: { config: HistoryMqttSourceConfig; onChange: (value: HistoryMqttSourceConfig) => void }) {
-  const setParser = (value: Partial<HistoryMqttParser>) => onChange({ ...config, parser: { ...config.parser, ...value } });
+function MqttFields({ config, onChange, onInvalid }: { config: HistoryMqttSourceConfig; onChange: (value: HistoryMqttSourceConfig) => void; onInvalid: InvalidFieldHandler }) {
+  const setParser = (value: Partial<HistoryMqttParser>) => {
+    const parser = { ...config.parser, ...value }, entries = parser as unknown as Record<string, unknown>;
+    for (const key of Object.keys(entries)) if (entries[key] === undefined) delete entries[key];
+    onChange({ ...config, parser });
+  };
   return <>
-    <label className="history-settings-field"><span>服务器 Broker 地址</span><input value={config.brokerUri} onChange={event => onChange({ ...config, brokerUri: event.target.value })} placeholder="mqtts://broker.example.com:8883" required />
+    <label className="history-settings-field"><span>服务器 Broker 地址</span><input value={config.brokerUri} onChange={event => onChange({ ...config, brokerUri: event.target.value })} placeholder="ssl://broker.example.com:8883" required />
       <small>使用服务器可达的协议与端口；不会把浏览器 WebSocket 地址自动改写为 TCP。</small></label>
     <fieldset><legend>只读订阅</legend>
       {config.topics.map((topic, index) => <div className="history-settings-row" key={index}>
@@ -97,13 +103,16 @@ function MqttFields({ config, onChange }: { config: HistoryMqttSourceConfig; onC
     <div className="history-settings-grid">
       <label className="history-settings-field"><span>解析协议</span><select value={config.parser.adapter} onChange={event => setParser({ adapter: event.target.value as HistoryMqttParser['adapter'] })}><option value="epv-v1">EPV（e/p/v）</option><option value="json-v1">JSON 字段映射</option></select></label>
       <label className="history-settings-field"><span>帧语义</span><select value={config.parser.mode} onChange={event => setParser({ mode: event.target.value as 'full' | 'delta' })}><option value="full">完整帧</option><option value="delta">增量字段</option></select></label>
-      <label className="history-settings-field"><span>固定设备类型（可选）</span><input value={config.parser.deviceType ?? ''} onChange={event => setParser({ deviceType: event.target.value })} placeholder="stacker / conveyor / …" /></label>
+      <label className="history-settings-field"><span>固定设备类型（可选）</span><input value={config.parser.deviceType ?? ''} onChange={event => setParser({ deviceType: event.target.value || undefined })} placeholder="stacker / conveyor / …" /></label>
       <label className="history-settings-field"><span>时间口径</span><select value={config.parser.timeBasis} onChange={event => setParser({ timeBasis: event.target.value as 'observed' | 'source' })}><option value="observed">平台观测时间</option><option value="source">来源事件时间</option></select></label>
       <label className="history-settings-field"><span>时间单位（UTC）</span><select value={config.parser.timeUnit} onChange={event => setParser({ timeUnit: event.target.value as 'ms' | 's' })}><option value="ms">毫秒</option><option value="s">秒</option></select></label>
-      <label className="history-settings-field"><span>设备序号纪元</span><select value={config.parser.epochMode} onChange={event => setParser({ epochMode: event.target.value as 'field' | 'none' })}><option value="none">来源未提供</option><option value="field">显式字段</option></select></label>
+      <label className="history-settings-field"><span>设备序号纪元</span><select value={config.parser.epochMode} onChange={event => setParser(event.target.value === 'field' ? { epochMode: 'field' } : { epochMode: 'none', epochPath: undefined })}><option value="none">来源未提供</option><option value="field">显式字段</option></select></label>
     </div>
     <details><summary>身份、事件与状态映射</summary><p className="history-settings-note">使用 RFC6901 JSON Pointer，例如 /device/id。网络重连不代表设备序号重启。</p>
-      <div className="history-settings-grid">{MQTT_PATHS.map(([key, label]) => <label className="history-settings-field" key={key}><span>{label}</span><input value={String(config.parser[key] ?? '')} onChange={event => setParser({ [key]: event.target.value })} placeholder="/field/path" /></label>)}</div>
+      <div className="history-settings-grid">{MQTT_PATHS.map(([key, label]) => <label className="history-settings-field" key={key}><span>{label}</span><input disabled={key === 'epochPath' && config.parser.epochMode === 'none'} value={String(config.parser[key] ?? '')} onChange={event => setParser({ [key]: event.target.value })} placeholder="/field/path" /></label>)}</div>
+      <HistoryJsonField field="mqtt.fieldMap" label="点位映射（规范点位名 → 来源字段路径）" kind="mqtt-field-map" value={config.parser.fieldMap ?? EMPTY_MAP} onInvalid={onInvalid}
+        onChange={value => setParser({ fieldMap: value as Record<string, string> })}
+        hint={'路径相对于所选状态对象，例如 {"front_task":"/taskId"}；未映射字段保留，缺失字段不会补造。'} />
     </details>
   </>;
 }

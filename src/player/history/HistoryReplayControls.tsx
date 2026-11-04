@@ -31,9 +31,16 @@ export type HistoryReplayControlsProps = {
   sourceQuality?: string | null;
   errorMessage?: string | null;
   showRetry?: boolean;
+  /** 阻断入口可重新加载，但不能启用回放或时间轴。 */
+  retryWhenDisabled?: boolean;
   disabledReason?: string | null;
   /** 尚无可信实时版本/续传能力时禁止把失败伪装成返回实时。 */
   canReturnLive?: boolean;
+  /** 实时续传或尚无新会话全态时，不允许将旧画面当作可推进的历史。 */
+  canAdvance?: boolean;
+  canSeekHistory?: boolean;
+  liveMode?: boolean;
+  awaitingRange?: boolean;
   nextAvailableTime?: number | null;
   onPlayPause: () => void;
   /** 宿主暂停逻辑时钟并记住此前播放状态。 */
@@ -133,8 +140,8 @@ type RangeEditorProps = {
 
 const RangeEditor = memo(function RangeEditor({ range, timeZone, formatter, disabled, onApply, onCancel }: RangeEditorProps) {
   const id = useId();
-  const [from, setFrom] = useState(() => inputValue(range.from, formatter));
-  const [to, setTo] = useState(() => inputValue(range.to, formatter));
+  const [from, setFrom] = useState(() => range.to > range.from ? inputValue(range.from, formatter) : '');
+  const [to, setTo] = useState(() => range.to > range.from ? inputValue(range.to, formatter) : '');
   const [error, setError] = useState<string | null>(null);
 
   function submit(event: FormEvent<HTMLFormElement>): void {
@@ -170,7 +177,8 @@ const RangeEditor = memo(function RangeEditor({ range, timeZone, formatter, disa
 /** 独立受控播放面板；不订阅业务数据、不推进时钟、不更改来源或场景版本。 */
 export const HistoryReplayControls = memo(function HistoryReplayControls({
   range, currentTime, pendingTime = null, status, speed, sourceName, versionLabel, timeZone,
-  events, eventsKnown = true, gaps, versionBoundaries, sourceQuality, errorMessage, showRetry = false, disabledReason, canReturnLive = true, nextAvailableTime,
+  events, eventsKnown = true, gaps, versionBoundaries, sourceQuality, errorMessage, showRetry = false, retryWhenDisabled = false, disabledReason,
+  canReturnLive = true, canAdvance = true, canSeekHistory = true, liveMode = false, awaitingRange = false, nextAvailableTime,
   onPlayPause, onScrubStart, onScrubCancel, onSeek, onSpeedChange, onRangeChange,
   onReturnLive, onRetry, className, style,
 }: HistoryReplayControlsProps) {
@@ -195,10 +203,11 @@ export const HistoryReplayControls = memo(function HistoryReplayControls({
   const format = (time: number) => formats?.full.format(time) ?? '时区不可用';
   const invalidReason = disabledReason || (!formats ? `无法识别显示时区 ${timeZone || '（未提供）'}，未使用本机时区替代。` : null);
   const returningLive = status === 'returning-live';
-  const isPlaying = status === 'playing' || status === 'buffering';
+  const isPlaying = status === 'playing' || status === 'buffering' && !liveMode;
+  const statusLabel = awaitingRange ? '待选择范围' : STATUS_LABELS[status];
   const canChangeRange = !invalidReason && !returningLive;
-  const canSeek = validRange && !invalidReason && !['live', 'loading', 'empty', 'returning-live'].includes(status);
-  const canPlay = validRange && isTime(currentTime) && !invalidReason && !scrubbing && ['paused', 'playing', 'buffering', 'ended'].includes(status);
+  const canSeek = canSeekHistory && validRange && !invalidReason && !['live', 'loading', 'empty', 'returning-live'].includes(status);
+  const canPlay = canAdvance && validRange && isTime(currentTime) && !invalidReason && !scrubbing && ['paused', 'playing', 'buffering', 'ended'].includes(status);
   const navigationTime = isTime(pendingTime) ? pendingTime : isTime(currentTime) ? currentTime : range.from;
   const sortedEvents = useMemo(() => events.filter((event) => isTime(event.time) && event.time >= range.from && event.time <= range.to).sort((a, b) => a.time - b.time), [events, range.from, range.to]);
   let previousEvent: HistoryTimelineEvent | undefined;
@@ -214,7 +223,10 @@ export const HistoryReplayControls = memo(function HistoryReplayControls({
   const dateText = isTime(currentTime) && formats ? inputValue(currentTime, formats.input).slice(0, 10) : '尚未呈现';
   const rangeText = validRange && formats ? `${inputValue(range.from, formats.input).replace('T', ' ')} — ${inputValue(range.to, formats.input).replace('T', ' ')}` : '选择回放时间范围';
   const playLabel = isPlaying ? '暂停' : status === 'ended' ? '重新播放' : '播放';
-  const banner = invalidReason || errorMessage || (!validRange ? '请选择有效的回放时间范围。' : null) || ({
+  const banner = invalidReason || errorMessage
+    || (awaitingRange ? '请选择回放时间范围，尚未读取历史。' : null)
+    || (liveMode ? status === 'buffering' ? '实时投影正在同步，选择时间范围可载入历史。' : '当前处于实时模式。选择时间范围后载入历史。' : null)
+    || (!validRange ? '请选择有效的回放时间范围。' : null) || ({
     live: '当前处于实时模式。选择时间范围后载入历史。',
     loading: '正在读取历史范围和初始状态，尚未完成呈现。',
     seeking: '正在恢复目标时刻，当前已呈现时间保持不变。',
@@ -255,8 +267,8 @@ export const HistoryReplayControls = memo(function HistoryReplayControls({
         {!collapsed ? <button ref={rangeButton} type="button" className="history-replay-range-button" aria-expanded={rangeEditing} aria-controls={`${id}-range`} disabled={!canChangeRange} onClick={() => setRangeEditing((open) => !open)} title={`${rangeText} · ${timeZone}`}><ReplayIcon name="calendar" /><span>{rangeText}</span><ReplayIcon name="chevron" /></button> : null}
         {collapsed ? (
           <>
-            <span className="history-replay-compact-time" title={isTime(currentTime) ? format(currentTime) : '尚未呈现历史画面'}><span>历史 · {dateText}</span><span>{timeText} · {timeZone}</span></span>
-            <span className="history-replay-state" data-status={status} role="status">{STATUS_LABELS[status]}</span>
+            <span className="history-replay-compact-time" title={isTime(currentTime) ? format(currentTime) : '尚未呈现历史画面'}><span>{liveMode ? '实时' : '历史'} · {dateText}</span><span>{timeText} · {timeZone}</span></span>
+            <span className="history-replay-state" data-status={status} role="status">{statusLabel}</span>
             <button type="button" className="history-replay-compact-play" onClick={onPlayPause} disabled={!canPlay} aria-label={playLabel}>{playLabel}</button>
             <button type="button" className="history-replay-return" onClick={onReturnLive} disabled={returningLive || status === 'live' || !canReturnLive}>{returningLive ? '返回中…' : '返回实时'}</button>
           </>
@@ -273,14 +285,14 @@ export const HistoryReplayControls = memo(function HistoryReplayControls({
               <span className="history-replay-clock-label">当前已呈现<span>{dateText}</span></span>
               <time className="history-replay-clock" dateTime={isTime(currentTime) ? new Date(currentTime).toISOString() : undefined}>{timeText}</time>
               <span className="history-replay-timezone">{timeZone || '时区未提供'}</span>
-              <span className="history-replay-state" data-status={status} role="status">{STATUS_LABELS[status]}</span>
-              <dl className="history-replay-meta"><div><dt>数据源</dt><dd title={sourceName}>{sourceName || '未提供来源'}</dd></div><div><dt>历史版本</dt><dd title={versionLabel ?? undefined}>{versionLabel ?? '尚未确定'}</dd></div></dl>
+              <span className="history-replay-state" data-status={status} role="status">{statusLabel}</span>
+              <dl className="history-replay-meta"><div><dt>数据源</dt><dd title={sourceName}>{sourceName || '未提供来源'}</dd></div><div><dt>{liveMode ? '当前版本' : '历史版本'}</dt><dd title={versionLabel ?? undefined}>{versionLabel ?? '尚未确定'}</dd></div></dl>
             </div>
             <HistoryReplayTimeline range={range} currentTime={currentTime} pendingTime={pendingTime} timeZone={timeZone} events={events} eventsKnown={eventsKnown} gaps={gaps} versionBoundaries={versionBoundaries} disabled={!canSeek} onScrubStart={handleScrubStart} onScrubCancel={handleScrubCancel} onSeek={handleSeek} />
             {banner ? (
               <div className="history-replay-status-line" data-error={Boolean(errorMessage || invalidReason || status === 'error')} role={errorMessage || invalidReason || status === 'error' ? 'alert' : 'status'}>
                 <span>{banner}</span>
-                {(status === 'error' || showRetry) && !invalidReason ? <button type="button" onClick={onRetry}>重试</button> : null}
+                {(status === 'error' || showRetry) && (!invalidReason || retryWhenDisabled) ? <button type="button" onClick={onRetry}>重试</button> : null}
                 {status === 'gap' && nextIsAvailable && canSeek ? <button type="button" onClick={() => handleSeek(nextAvailableTime)} title={format(nextAvailableTime)}>跳至下一可用时刻</button> : null}
                 {(status === 'empty' || status === 'error' || status === 'gap' && !nextIsAvailable) && canChangeRange ? <button type="button" onClick={openRange}>调整时间范围</button> : null}
               </div>
@@ -291,16 +303,16 @@ export const HistoryReplayControls = memo(function HistoryReplayControls({
               <button type="button" className="history-replay-jump" disabled={!canSeek || scrubbing || navigationTime <= range.from} aria-label="后退 10 秒" title="后退 10 秒" onClick={() => handleSeek(Math.max(range.from, navigationTime - 10_000))}><ReplayIcon name="left" />10s</button>
               <button type="button" className="history-replay-primary history-replay-play" disabled={!canPlay} onClick={onPlayPause} aria-label={playLabel}><ReplayIcon name={isPlaying ? 'pause' : 'play'} />{playLabel}</button>
               <button type="button" className="history-replay-jump" disabled={!canSeek || scrubbing || navigationTime >= range.to} aria-label="前进 10 秒" title="前进 10 秒" onClick={() => handleSeek(Math.min(range.to, navigationTime + 10_000))}>10s<ReplayIcon name="right" /></button>
-              <label className="history-replay-speed">倍速<select value={speed} aria-label="回放倍速" disabled={Boolean(invalidReason) || returningLive || scrubbing || status === 'live'} onChange={(event) => onSpeedChange(Number(event.target.value) as HistoryReplaySpeed)}>{HISTORY_REPLAY_SPEEDS.map((rate) => <option key={rate} value={rate}>{rate}×</option>)}</select></label>
+              <label className="history-replay-speed">倍速<select value={speed} aria-label="回放倍速" disabled={Boolean(invalidReason) || returningLive || scrubbing || liveMode || status === 'live'} onChange={(event) => onSpeedChange(Number(event.target.value) as HistoryReplaySpeed)}>{HISTORY_REPLAY_SPEEDS.map((rate) => <option key={rate} value={rate}>{rate}×</option>)}</select></label>
               <span className="history-replay-elapsed" aria-label={`已播 ${factInRange ? formatDuration(currentTime - range.from) : '尚未呈现'}，总时长 ${validRange ? formatDuration(range.to - range.from) : '未知'}`}><b>{factInRange ? formatDuration(currentTime - range.from) : '--:--:--'}</b> / {validRange ? formatDuration(range.to - range.from) : '--:--:--'}</span>
-              <button type="button" className="history-replay-event-nav" disabled={!canSeek || scrubbing || !previousEvent} title={previousEvent ? `${previousEvent.label} · ${format(previousEvent.time)}` : '没有上一关键事件'} onClick={() => { if (previousEvent) handleSeek(previousEvent.time); }} aria-label="上一关键事件">上一事件</button>
-              <button type="button" className="history-replay-event-nav" disabled={!canSeek || scrubbing || !nextEvent} title={nextEvent ? `${nextEvent.label} · ${format(nextEvent.time)}` : '没有下一关键事件'} onClick={() => { if (nextEvent) handleSeek(nextEvent.time); }} aria-label="下一关键事件">下一事件</button>
+              <button type="button" className="history-replay-event-nav" disabled={!canSeek || scrubbing || !previousEvent} title={previousEvent ? `${previousEvent.label} · ${format(previousEvent.time)}` : eventsKnown ? '没有上一关键事件' : '关键事件未完整获取'} onClick={() => { if (previousEvent) handleSeek(previousEvent.time); }} aria-label="上一关键事件">上一事件</button>
+              <button type="button" className="history-replay-event-nav" disabled={!canSeek || scrubbing || !nextEvent} title={nextEvent ? `${nextEvent.label} · ${format(nextEvent.time)}` : eventsKnown ? '没有下一关键事件' : '关键事件未完整获取'} onClick={() => { if (nextEvent) handleSeek(nextEvent.time); }} aria-label="下一关键事件">下一事件</button>
               <button type="button" className="history-replay-return" onClick={onReturnLive} disabled={returningLive || status === 'live' || !canReturnLive}><ReplayIcon name="live" />{returningLive ? '正在返回实时…' : '返回实时'}</button>
             </div>
             <div className="history-replay-legend" aria-label="时间轴图例">
               <span><i className="history-replay-alarm-key" aria-hidden="true">△</i>告警</span><span><i aria-hidden="true">◇</i>货物交接</span><span><i aria-hidden="true">○</i>库存变更</span><span><i aria-hidden="true">□</i>生命周期</span><span><i aria-hidden="true">·</i>其他事件</span><span><i className="history-replay-gap-key" aria-hidden="true" />数据缺口</span><span><i className="history-replay-version-key" aria-hidden="true" />版本边界</span>
               {sourceQuality ? <span className="history-replay-quality">来源质量：{sourceQuality}</span> : null}
-              <span className="history-replay-readonly">只读回放 · 暂停不锁相机</span>
+              <span className="history-replay-readonly">{liveMode ? '实时投影 · 只读' : '只读回放 · 暂停不锁相机'}</span>
             </div>
           </footer>
         </>
