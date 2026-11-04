@@ -165,6 +165,11 @@ if (isTrustedPreloadPage()) contextBridge.exposeInMainWorld('editorApi', {
   getRecentWorkspaces: (): Promise<RecentWorkspacesResult> => ipcRenderer.invoke('project:getRecentWorkspaces'),
   fetchEffectData: (request: import('./shared/effectDataContract.js').EffectDataRequest): Promise<unknown> => ipcRenderer.invoke('effect-data:fetch', request),
   cancelEffectData: (requestId: string): Promise<boolean> => ipcRenderer.invoke('effect-data:cancel', requestId),
+  getHistoryProjectContext: (): Promise<import('./shared/historyServiceContract.js').HistoryProjectContext | null> => ipcRenderer.invoke('history:context'),
+  invokeHistoryService: (request: import('./shared/historyServiceContract.js').HistoryServiceRequest): Promise<import('./shared/historyServiceContract.js').HistoryServiceResult> => ipcRenderer.invoke('history:invoke', request),
+  cancelHistoryService: (requestId: string): Promise<boolean> => ipcRenderer.invoke('history:cancel', requestId),
+  getHistoryAccessStatus: (projectId: string): Promise<import('./shared/historyServiceContract.js').HistoryAccessStatus> => ipcRenderer.invoke('history:access-status', projectId),
+  updateHistoryAccess: (request: import('./shared/historyServiceContract.js').HistoryAccessUpdate): Promise<import('./shared/historyServiceContract.js').HistoryAccessStatus> => ipcRenderer.invoke('history:access-update', request),
   getDataPlatformConfig: (): Promise<DataPlatformConfig> => ipcRenderer.invoke('data-platform:getConfig'),
   saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest): Promise<DataPlatformConfig> =>
     ipcRenderer.invoke('data-platform:saveConfig', request),

@@ -138,6 +138,8 @@ export async function requestDataPlatformJson(options: {
   signal: AbortSignal;
   timeoutMs: number;
   context: string;
+  /** 仅由主进程受控调用方提供，不从 renderer 转发任意请求头。 */
+  authorization?: string;
   fetchImpl?: typeof globalThis.fetch;
 }): Promise<unknown> {
   const endpoint = resolveDataPlatformRemoteUrl(options.baseUrl, options.endpointPath);
@@ -161,6 +163,7 @@ export async function requestDataPlatformJson(options: {
         Accept: 'application/json',
         'Cache-Control': 'no-store',
         'Content-Type': 'application/json; charset=utf-8',
+        ...(options.authorization ? { Authorization: options.authorization } : {}),
       },
       body: JSON.stringify(options.body),
       signal: requestController.signal,

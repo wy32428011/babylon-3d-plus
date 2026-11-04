@@ -16,6 +16,15 @@
 .chart-marker-screen-slot[aria-disabled="true"] { opacity: 0.6; }
 .chart-marker-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .chart-marker-error { color: #ffad9e; font-size: 12px; }
+.inspector-panel .chart-marker-events .inspector-row.chart-marker-scene-url { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.chart-marker-scene-url input { width: 100%; min-width: 0; }
+.chart-marker-scene-preview { position: absolute; inset: 0; z-index: 150; display: flex; flex-direction: column; background: #101827; }
+.chart-marker-scene-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px; background: #15212e; color: #d9e8f2; font-size: 12px; }
+.chart-marker-scene-preview-toolbar strong, .chart-marker-scene-preview-toolbar a, .chart-marker-scene-preview-toolbar button { white-space: nowrap; }
+.chart-marker-scene-preview-toolbar a { color: #80d8ff; }
+.chart-marker-scene-preview-toolbar button { padding: 3px 7px; border: 1px solid #526172; border-radius: 4px; background: #1f3042; color: #d9e8f2; cursor: pointer; }
+.chart-marker-scene-preview-toolbar span { flex: 1 1 100%; color: #aebfcd; }
+.chart-marker-scene-preview iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
 
 .inspector-panel .chart-marker-fieldset .inspector-row { grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1.2fr); }
 .chart-marker-fieldset input[type="checkbox"] { justify-self: start; width: 16px; height: 16px; }

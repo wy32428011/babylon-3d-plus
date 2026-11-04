@@ -115,6 +115,23 @@ test('主题展示只传递有界项目和大屏标识，拒绝 URL 和多余字
   assert.equal(parseDigitalTwinBridgeMessage({ ...base, requestId: 'unexpected' }), null);
 });
 
+test('点击扩展支持无资产编号的生成单元并保持类型与安全边界', () => {
+  const base = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION, sessionId: 'session', type: 'event.assetClicked' };
+  for (const payload of [
+    { unit: { kind: 'cargo', containerCode: 'BOX-001' }, host: { entityId: 'carrier', assetCode: '001005' } },
+    { slot: { row: 0, column: 2, layer: 3 }, business: { enabled: false, count: 0, tags: ['A'] } },
+    { assetCode: '001005', entityId: 'entity-1' },
+  ]) assert.deepEqual(parseDigitalTwinBridgeMessage({ ...base, payload }), { ...base, payload });
+  for (const payload of [
+    { unit: { kind: 'unknown' } },
+    { unit: { kind: ['cargo'] } },
+    { host: { entityId: 1 } },
+    { business: { value: Number.NaN } },
+    { business: 'x'.repeat(16_385) },
+    JSON.parse('{"business":{"__proto__":{"polluted":true}}}'),
+  ]) assert.equal(parseDigitalTwinBridgeMessage({ ...base, payload }), null);
+});
+
 test('取消选择协议携带选择标记且严格校验命令和回执', () => {
   const base = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION, sessionId: 'session' };
   const command = { ...base, type: 'command.clearSelection', requestId: 'close-1', payload: { selectionToken: 'selection-1' } };

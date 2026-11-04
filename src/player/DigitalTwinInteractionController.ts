@@ -93,6 +93,7 @@ type ActiveFocusRequest = {
 const GEOMETRY_READY_TIMEOUT_MS = 5_000;
 const GEOMETRY_POLL_INTERVAL_MS = 50;
 const EXTERNAL_HIGHLIGHT_DURATION_MS = 3_000;
+const SCENE_NAVIGATION_TIMEOUT_MS = 3_000;
 
 const FAILURE_MESSAGES: Record<DigitalTwinViewerErrorCode, string> = {
   INVALID_ASSET_CODE: '资产编号无效',
@@ -142,6 +143,8 @@ export class DigitalTwinInteractionController {
   private highlightTimer: unknown | null = null;
   private highlightRequestId: string | null = null;
   private selectionRevision = 0;
+  private sceneNavigationSequence = 0;
+  private pendingSceneNavigation: { requestId: string; timer: unknown; onError: (message: string) => void } | null = null;
   private disposed = false;
 
   constructor(private readonly options: DigitalTwinInteractionControllerOptions) {
@@ -212,6 +215,35 @@ export class DigitalTwinInteractionController {
     return true;
   }
 
+  /** 请求已握手的中台宿主切换整个页面；旧宿主超时后提示而不改为切换 iframe。 */
+  navigateScene(url: string, onError: (message: string) => void): boolean {
+    if (this.disposed || !this.runtime || !this.activeSessionId || !this.activeParentOrigin || this.pendingSceneNavigation) return false;
+    const requestId = `scene-navigation:${this.now()}:${++this.sceneNavigationSequence}`;
+    const message = parseDigitalTwinBridgeMessage({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId,
+      type: 'viewer.navigateScene',
+      requestId,
+      payload: { url },
+    });
+    if (!message) return false;
+    const timer = this.setTimer(() => {
+      if (this.pendingSceneNavigation?.requestId !== requestId) return;
+      this.pendingSceneNavigation = null;
+      onError('中台未响应场景切换，请确认中台已升级并允许整页跳转。');
+    }, SCENE_NAVIGATION_TIMEOUT_MS);
+    this.pendingSceneNavigation = { requestId, timer, onError };
+    try {
+      this.post(message);
+      return true;
+    } catch {
+      this.clearTimer(timer);
+      this.pendingSceneNavigation = null;
+      return false;
+    }
+  }
+
   /** 每次设备/货格选择产生新标记，旧弹层的关闭不能清理后来的选择。 */
   beginSelection(): void {
     if (this.disposed) return;
@@ -237,6 +269,8 @@ export class DigitalTwinInteractionController {
     this.disposed = true;
     this.cancelActiveRequest('disposed', false);
     this.clearHighlight();
+    if (this.pendingSceneNavigation) this.clearTimer(this.pendingSceneNavigation.timer);
+    this.pendingSceneNavigation = null;
     this.unsubscribeMessages();
     this.runtime = null;
     this.activeSessionId = null;
@@ -259,6 +293,15 @@ export class DigitalTwinInteractionController {
       || message.sessionId !== this.activeSessionId
       || event.origin !== this.activeParentOrigin
     ) return;
+
+    if (message.type === 'host.navigateSceneResult') {
+      const pending = this.pendingSceneNavigation;
+      if (!pending || pending.requestId !== message.requestId) return;
+      this.clearTimer(pending.timer);
+      this.pendingSceneNavigation = null;
+      if (!message.ok) pending.onError(message.error.message);
+      return;
+    }
 
     if (message.type === 'host.regionViews') {
       if (!this.runtime?.getRegionViews || !this.runtime.applyRegionView) return;
@@ -327,6 +370,12 @@ export class DigitalTwinInteractionController {
   }
 
   private resetSession(): void {
+    if (this.pendingSceneNavigation) {
+      const pending = this.pendingSceneNavigation;
+      this.clearTimer(pending.timer);
+      this.pendingSceneNavigation = null;
+      pending.onError('中台连接已重置，场景切换未完成。');
+    }
     this.appliedRegionView = null;
     this.cancelActiveRegionView('cancelled');
     this.regionViewsEnabled = false;

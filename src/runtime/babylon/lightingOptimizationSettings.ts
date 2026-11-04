@@ -1,4 +1,5 @@
 export type LightingOptimizationOptions = {
+  /** 仅保留旧调用和本机偏好；global/local 均执行 Babylon 原生整图调度，局部策略不生效。 */
   shadowCache: 'global' | 'local';
   environmentBatching: boolean;
 };

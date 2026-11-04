@@ -135,12 +135,36 @@ export function normalizeChartMarkerThemeScreen(value: unknown): ChartMarkerThem
   };
 }
 
+export const CHART_MARKER_SCENE_URL_MAX_LENGTH = 4096;
+
+/** 发布地址不得包含账号密码或浏览器可能忽略的控制字符。 */
+export function parseChartMarkerSceneUrl(value: string): string | null {
+  if (value.length > CHART_MARKER_SCENE_URL_MAX_LENGTH || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  const normalized = value.trim();
+  if (!/^https?:\/\//i.test(normalized) || normalized.includes(String.fromCharCode(92))) return null;
+  try {
+    const url = new URL(normalized);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeClickEvents(value: unknown): ChartMarkerClickEvent[] {
   return readEventArray(value, CHART_MARKER_MAX_CLICK_EVENTS).map((entry) => {
     const event = readEventObject(entry, ['type', 'actions']);
     if (event.type !== 'left-click') throw new Error('图表立标点击事件类型无效');
     const actions = readEventArray(event.actions, CHART_MARKER_MAX_CLICK_ACTIONS).map((entry): ChartMarkerClickAction => {
-      const action = readEventObject(entry, ['type', 'targetEntityId', 'screen']);
+      const action = readEventObject(entry, ['type', 'targetEntityId', 'screen', 'url', 'target']);
+      if (action.type === 'scene-switch') {
+        if (Object.hasOwn(action, 'targetEntityId') || Object.hasOwn(action, 'screen')
+          || typeof action.url !== 'string' || action.url.length > CHART_MARKER_SCENE_URL_MAX_LENGTH
+          || (action.target !== 'same-window' && action.target !== 'new-window')) {
+          throw new Error('图表立标场景切换配置无效');
+        }
+        return { type: 'scene-switch', url: action.url, target: action.target };
+      }
+      if (Object.hasOwn(action, 'url') || Object.hasOwn(action, 'target')) throw new Error('图表立标非场景切换动作不能包含跳转配置');
       if (action.type === 'theme' && !Object.hasOwn(action, 'targetEntityId')) {
         return { type: 'theme', ...(Object.hasOwn(action, 'screen') ? { screen: normalizeChartMarkerThemeScreen(action.screen) } : {}) };
       }

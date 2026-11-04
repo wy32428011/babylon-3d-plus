@@ -1,4 +1,4 @@
-import { getChartMarkerClickEvents } from '../../editor/model/chartMarker';
+import { getChartMarkerClickEvents, parseChartMarkerSceneUrl } from '../../editor/model/chartMarker';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
 import type { ChartMarkerThemeScreen } from '../../editor/model/components';
 
@@ -7,6 +7,8 @@ export type ChartMarkerClickEffects = {
   selectEntity: (entityId: string) => void;
   refreshMarker: (entityId: string) => void;
   showTheme: (screen: ChartMarkerThemeScreen) => void;
+  navigateScene?: (url: string, target: 'same-window' | 'new-window') => boolean;
+  allowSceneSwitch?: boolean;
   reportError: (message: string) => void;
 };
 
@@ -19,11 +21,24 @@ export function executeChartMarkerClick(
   const marker = Object.hasOwn(scene.entities, markerId) ? scene.entities[markerId] : undefined;
   if (!marker?.components.chartMarker) return false;
   const events = getChartMarkerClickEvents(marker.components.chartMarker, markerId);
-  if (!events.some((event) => event.actions.length > 0)) return false;
+  if (!events.some((event) => event.actions.some((action) => action.type !== 'scene-switch' || effects.allowSceneSwitch !== false))) return false;
   const errors: string[] = [];
   for (const event of events) {
     if (event.type !== 'left-click') continue;
     for (const action of event.actions) {
+      if (action.type === 'scene-switch') {
+        if (effects.allowSceneSwitch === false) continue;
+        const url = parseChartMarkerSceneUrl(action.url);
+        if (!url) {
+          errors.push(`图表立标“${marker.name}”的场景发布地址为空或无效。`);
+        } else if (!effects.navigateScene?.(url, action.target)) {
+          errors.push(`图表立标“${marker.name}”的场景切换未能启动。`);
+        } else if (action.target === 'same-window') {
+          if (errors.length > 0) effects.reportError([...new Set(errors)].join('\n'));
+          return true;
+        }
+        continue;
+      }
       if (action.type === 'refresh') {
         effects.refreshMarker(markerId);
         continue;

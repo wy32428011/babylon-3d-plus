@@ -1,3 +1,4 @@
+import { normalizeHistoryReplaySettings, type HistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource, type SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import { normalizeSceneModelEntranceSettings, type SceneModelEntranceSettings } from './sceneModelEntrance';
@@ -250,6 +251,8 @@ export type SceneEnvironmentSettingsInput = Omit<
 >>;
 
 export type SceneSettings = {
+  /** 可选的无凭据回溯声明；缺省不改变旧场景的实时链路。 */
+  historyReplay?: HistoryReplaySettings;
   lighting: SceneLightingConfig;
   appearance: SceneAppearanceConfig;
   camera: SceneCameraSettings;
@@ -920,6 +923,7 @@ export function sanitizeSceneSettings(settings: SceneSettings): SceneSettings {
     regionViews: regionViews.views,
     openingAnimation: normalizeSceneOpeningConfig(settings.openingAnimation),
     modelEntrance: normalizeSceneModelEntranceSettings(settings.modelEntrance),
+    ...(settings.historyReplay === undefined ? {} : { historyReplay: normalizeHistoryReplaySettings(settings.historyReplay) }),
     sensitivity: {
       zoom: sanitizeSceneSensitivityValue(settings.sensitivity.zoom),
       pan: sanitizeSceneSensitivityValue(settings.sensitivity.pan),

@@ -1,5 +1,11 @@
 # 实现经验
 
+## 原生阴影缓存须遵守渲染 pass 与刷新生命周期（2026-11-02）
+
+- RTT 解绑后已恢复相机 pass，不可再调用阴影 `customIsReadyFunction(..., true)`；它会把相机 drawWrapper 改成阴影 effect，冻结材质可能沿用错误 shader。未就绪重试应由原生 ShadowGenerator 的刷新计数器负责；实际跳过重绘后再统计可复用面数。
+- `autoCalcShadowZBounds` 的方向光深度是原生求解结果，不应被业务相机距离每帧覆写，否则静态图的输入签名持续振荡。固定深度/视锥与 CSM 的显式距离控制另行保留。
+- `RawTexture.getClassName()` 也可能返回 `Texture`，不能据此证明透明像素稳定；独立 opacity、可变像素贴图及自定义绘制路径应可靠跟踪全部输入或保守采用原生实时刷新。
+
 ## 模块化 WebGPU 必须验证真实绘制与异步释放（2026-10-29）
 
 - Babylon 9.12 的 GPU 粒子平台注册不等于 Compute 引擎扩展已注册；还需显式加载 `Engines/WebGPU/Extensions/engine.computeShader.js`，否则能力检测通过但 ComputeEffect 不存在。以实际粒子就绪及非空像素确认，而不是仅检查 `supportComputeShaders`。

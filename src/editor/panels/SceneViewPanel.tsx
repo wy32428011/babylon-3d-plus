@@ -40,6 +40,7 @@ import { findCompositionRoot } from '../composition/composition';
 import { shouldValidateSceneModelResources } from '../assets/sceneModelSyncTransaction';
 import { environmentPreparationStore } from '../loading/environmentPreparationProgress';
 import { executeChartMarkerClick } from '../../runtime/babylon/chartMarkerClick';
+import { openChartMarkerSceneInNewWindow } from '../../runtime/babylon/chartMarkerNavigation';
 import { CHART_MARKER_REFRESH_EVENT } from '../../shared/chartMarkerEmbed';
 import {
   useCallback,
@@ -320,6 +321,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const hierarchyGroupRotationRef = useRef<HierarchyGroupRotationSession | null>(null);
   const hierarchyGroupStatusLogSignatureRef = useRef('');
   const [viewportError, setViewportError] = useState<string | null>(null);
+  const [previewSceneUrl, setPreviewSceneUrl] = useState('');
   const [viewportCamera, setViewportCamera] = useState<BabylonViewport['camera'] | null>(null);
   const [entityArrayDialog, setEntityArrayDialog] = useState<EntityArrayDialogState | null>(null);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<ScenePerformanceSnapshot | null>(null);
@@ -359,6 +361,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const manualRoamSceneSessionIdRef = useRef(sceneSessionId);
   const mqttConfig = useEditorStore((state) => state.scene.mqttConfig);
   const runtimeMode = useEditorStore((state) => state.runtimeMode);
+  useEffect(() => { setPreviewSceneUrl(''); }, [runtimeMode, sceneSessionId]);
   const runtimePerformanceEnabled = useEditorStore((state) => state.runtimePerformanceEnabled);
   const selectedEntityId = useEditorStore((state) => state.scene.selectedEntityId);
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
@@ -558,7 +561,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     onReplayStart: beginHistoryReplay,
     onError: pushLog,
   });
-  const handleChartMarkerClick = useCallback((entityId: string): boolean => {
+  const handleChartMarkerClick = useCallback((entityId: string, allowSceneSwitch: boolean): boolean => {
     const state = useEditorStore.getState();
     const runtime = runtimeRef.current;
     if (state.runtimeMode !== 'preview' || !runtime) return false;
@@ -580,6 +583,12 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       refreshMarker: (markerId) => window.dispatchEvent(new CustomEvent(CHART_MARKER_REFRESH_EVENT, { detail: markerId })),
       showTheme: () => {
         state.pushLog('主题展示需从数据中台大屏中嵌入的数字孪生触发，编辑器预览未连接大屏宿主。');
+      },
+      allowSceneSwitch,
+      navigateScene: (url, target) => {
+        if (target === 'new-window') return openChartMarkerSceneInNewWindow(url);
+        setPreviewSceneUrl(url);
+        return true;
       },
       reportError: state.pushLog,
     });
@@ -2617,6 +2626,17 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           showPerformanceHud, hasStoppedPerformanceReport, isPerformanceHudExpanded, performanceSnapshot, isPerformanceRun, setPerformanceRunHudExpanded, setPerformanceHudExpanded, performanceRunSnapshot, handleCopyPerformanceRunReport, handleCopyPerformanceReport,
           adaptiveResolutionEnabled, onAdaptiveResolutionChange: handleAdaptiveResolutionChange,
         }} />} />
+        {isRuntimePreview && previewSceneUrl ? (
+          <div role="dialog" aria-label="场景切换预览" className="chart-marker-scene-preview">
+            <div className="chart-marker-scene-preview-toolbar">
+              <strong>场景切换预览</strong>
+              <a href={previewSceneUrl} target="_blank" rel="noopener noreferrer">新窗口打开</a>
+              <button type="button" onClick={() => setPreviewSceneUrl('')}>返回预览</button>
+              <span>页面空白时，目标场景可能不允许嵌入。</span>
+            </div>
+            <iframe title="目标场景预览" src={previewSceneUrl} sandbox="allow-scripts allow-same-origin allow-forms allow-pointer-lock allow-popups" />
+          </div>
+        ) : null}
       </div>
       {entityArrayDialog ? (
         <EntityArrayDialog

@@ -362,6 +362,19 @@ export function DigitalTwinPublishDialog(props: DigitalTwinPublishDialogProps) {
           </p>
         </section>
 
+        {scene.sceneSettings.historyReplay?.enabled ? (
+          <section className="deployment-export-dialog-section" aria-label="时光回溯发布状态">
+            <div className="deployment-export-section-heading"><h3>时光回溯</h3><span>已启用草稿</span></div>
+            <p className="deployment-export-resource-detail">
+              提供方：{scene.sceneSettings.historyReplay.providerKind === 'platform' ? '平台采集' : '外部历史'}；
+              输入绑定：{scene.sceneSettings.historyReplay.sourceBindingRefs.length}；申请留存：{scene.sceneSettings.historyReplay.requestedPolicy.retentionDays} 天。
+              发布预检使用当前绑定项目的历史管理授权冻结来源合同，不会自动启用采集。
+            </p>
+            <p className="deployment-export-error" role="status">
+              真实设备逻辑清单与 Viewer 版本握手尚未接入；历史发布会被阻止，不能使用空清单代替。旧 Fetch 凭据须迁移到服务器来源。
+            </p>
+          </section>
+        ) : null}
 
         {assetWarningView.requiresConfirmation ? (
           <section className="deployment-export-dialog-section deployment-export-warnings" aria-label="资产编号发布提示">

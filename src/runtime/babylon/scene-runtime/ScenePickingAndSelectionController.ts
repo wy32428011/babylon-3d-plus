@@ -165,6 +165,10 @@ export class ScenePickingAndSelectionController {
 
   /** 运行态点击立标正文：按真实几何深度拾取，前景模型和其他立标都能阻挡点击。 */
   pickChartMarkerAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null {
+    return this.pickChartMarkerClickAtCanvasPoint(clientX, clientY, canvas)?.entityId ?? null;
+  }
+
+  pickChartMarkerClickAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): { entityId: string; allowSceneSwitch: boolean } | null {
     // 没有已配置动作的可见立标时，不为普通模型点击增加一次全场景射线检测。
     let hasClickEvents = false;
     for (const entityId of this.dependencies.presentation.meshes.keys()) {
@@ -186,7 +190,16 @@ export class ScenePickingAndSelectionController {
     if (!pick?.hit || !pick.pickedMesh) return null;
     const entityId = this.readEntityIdFromMesh(pick.pickedMesh, pick.thinInstanceIndex);
     if (!entityId || !this.dependencies.document.isEntityVisible(entityId) || this.dependencies.presentation.meshes.get(entityId) !== pick.pickedMesh) return null;
-    return this.dependencies.document.syncedEntities.get(entityId)?.components.chartMarker ? entityId : null;
+    const entity = this.dependencies.document.syncedEntities.get(entityId);
+    const marker = entity?.components.chartMarker;
+    if (!entity || !marker) return null;
+    const screen = entity.components.dataPlatformScreen;
+    const interactiveRing = marker.panelShape === 'ring' && (
+      (marker.contentType === 'video' && Boolean(marker.videoUrl))
+      || ((marker.contentType ?? 'screen') === 'screen' && screen?.renderMode === 'iframe' && Boolean(screen.screenUrl))
+    );
+    const uv = interactiveRing ? pick.getTextureCoordinates() : null;
+    return { entityId, allowSceneSwitch: !interactiveRing || Boolean(uv && (uv.y <= 0.08 || uv.y >= 0.92)) };
   }
 
   /**

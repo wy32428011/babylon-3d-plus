@@ -21,6 +21,7 @@ import styles from './EditorLayout.module.css';
 const loadDeploymentExportDialog = () => import('../deployment/DeploymentExportDialog').then(module => ({ default: module.DeploymentExportDialog }));
 const loadDigitalTwinPublishDialog = () => import('../deployment/DigitalTwinPublishDialog').then(module => ({ default: module.DigitalTwinPublishDialog }));
 const loadLightingBakeManager = () => import('../panels/LightingBakeManager').then(module => ({ default: module.LightingBakeManager }));
+const loadHistoryReplaySettings = () => import('../history/HistoryReplaySettingsDialog').then(module => ({ default: module.HistoryReplaySettingsDialog }));
 
 const TOOL_SHORTCUTS: Record<string, TransformTool> = {
   e: 'translate',
@@ -61,6 +62,8 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
   const [isMqttConfigDialogOpen, setMqttConfigDialogOpen] = useState(false);
   const [isDeploymentExportDialogOpen, setDeploymentExportDialogOpen] = useState(false);
   const [isDigitalTwinPublishDialogOpen, setDigitalTwinPublishDialogOpen] = useState(false);
+  const [isHistoryReplaySettingsOpen, setHistoryReplaySettingsOpen] = useState(false);
+  const sceneSessionId = useEditorStore(state => state.sceneSessionId);
   const lightingManagerOpen = useEditorStore(state => state.lightingManagerOpen);
   const [performanceHudVisible, setPerformanceHudVisible] = useState(true);
   const deploymentExport = useDeploymentExport();
@@ -386,6 +389,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         digitalTwinPublishProgress={digitalTwinPublish.state.progress}
         onOpenDeploymentExport={() => setDeploymentExportDialogOpen(true)}
         onOpenLightingManager={() => useEditorStore.getState().openLightingManager({ tab: 'overview' })}
+        onOpenHistoryReplay={() => setHistoryReplaySettingsOpen(true)}
         deploymentExportStatus={deploymentExport.state.status}
         deploymentExportProgress={deploymentExport.state.progress}
         deploymentExportBusy={deploymentExport.isBusy}
@@ -427,6 +431,10 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         onClose={() => setDigitalTwinPublishDialogOpen(false)}
         open={isDigitalTwinPublishDialogOpen}
       />
+      <LazyEditorDialog key={`history-${sceneSessionId}`} load={loadHistoryReplaySettings} title="时光回溯设置"
+        dialogProps={{ onClose: () => setHistoryReplaySettingsOpen(false) }} keepMounted={false}
+        open={isHistoryReplaySettingsOpen && !isRuntimePreview}
+        onClose={() => setHistoryReplaySettingsOpen(false)} />
       <LazyEditorDialog load={loadLightingBakeManager} title="光照与烘焙管理器" dialogProps={{}}
         open={lightingManagerOpen} onClose={() => useEditorStore.getState().closeLightingManager()} />
       <div className={styles.workspace}>

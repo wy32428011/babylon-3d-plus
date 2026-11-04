@@ -1,3 +1,4 @@
+import type { HistoryReplaySettings } from '../../../runtime/history/historyReplayContract';
 import { type SceneModelEntranceSettings } from '../../model/sceneModelEntrance';
 import { type SceneOpeningConfig } from '../../model/sceneOpeningAnimation';
 import { type FailedSceneResources } from '../../assets/restoreFailedSceneResources';
@@ -469,6 +470,7 @@ export type EditorState = {
   commitSelectedTransform: (before: TransformComponent, after: TransformComponent) => void;
   updateMqttConfig: (config: MqttConfig) => void;
   updateFetchConfig: (config: FetchConfig) => void;
+  updateHistoryReplaySettings: (settings: HistoryReplaySettings) => void;
   undo: () => void;
   redo: () => void;
   newScene: () => void;

@@ -101,13 +101,14 @@ export function parseDeviceTelemetryMessage(
   topic: string,
   payloadText: string,
   adapter: TelemetryAdapterConfig = { kind: 'epv' },
+  receivedAt = Date.now(),
 ): DeviceTelemetrySnapshot | null {
   const payload = JSON.parse(payloadText) as DeviceTelemetryPayload;
   if (adapter.kind === 'json-path') {
-    return parseJsonPathTelemetryMessage(topic, payload, adapter);
+    return parseJsonPathTelemetryMessage(topic, payload, adapter, receivedAt);
   }
 
-  return parseEpvTelemetryMessage(topic, payload, { kind: 'epv', sourceId: adapter.sourceId });
+  return parseEpvTelemetryMessage(topic, payload, { kind: 'epv', sourceId: adapter.sourceId }, receivedAt);
 }
 
 /** 兼容旧 Stacker 调用方，只接受 stacker 设备类型。 */
@@ -334,12 +335,13 @@ function parseEpvTelemetryMessage(
   topic: string,
   payload: DeviceTelemetryPayload,
   adapter: EpvTelemetryAdapterConfig,
+  receivedAt: number,
 ): DeviceTelemetrySnapshot | null {
   const topicInfo = parseDeviceTelemetryTopic(topic);
   if (!topicInfo) return null;
 
   const fields = parseTelemetryFields(payload.data, topicInfo.assetCode);
-  return createSnapshot({
+  return createDeviceTelemetrySnapshot({
     sourceId: normalizeSourceId(adapter.sourceId),
     topic,
     deviceType: topicInfo.deviceType,
@@ -349,7 +351,7 @@ function parseEpvTelemetryMessage(
     sourceTimestamp: readTimestamp(payload.ts),
     sequence: readSequence(payload.seq ?? payload.sequence),
     fields,
-  });
+  }, receivedAt);
 }
 
 /** 使用安全 JSON Path 配置解析任意结构遥测消息。 */
@@ -357,6 +359,7 @@ function parseJsonPathTelemetryMessage(
   topic: string,
   payload: unknown,
   adapter: JsonPathTelemetryAdapterConfig,
+  receivedAt: number,
 ): DeviceTelemetrySnapshot | null {
   if (!adapter.deviceTypePath || !adapter.assetCodePath) return null;
   const deviceType = readPathString(payload, adapter.deviceTypePath)?.toLowerCase() ?? null;
@@ -370,7 +373,7 @@ function parseJsonPathTelemetryMessage(
     fields[fieldName] = value;
   }
 
-  return createSnapshot({
+  return createDeviceTelemetrySnapshot({
     sourceId: normalizeSourceId(adapter.sourceId),
     topic,
     deviceType,
@@ -380,11 +383,11 @@ function parseJsonPathTelemetryMessage(
     sourceTimestamp: adapter.timestampPath ? readTimestamp(readSafeJsonPath(payload, adapter.timestampPath)) : null,
     sequence: adapter.sequencePath ? readSequence(readSafeJsonPath(payload, adapter.sequencePath)) : null,
     fields,
-  });
+  }, receivedAt);
 }
 
-/** 创建统一快照，并补齐设备类型相关的兼容和派生语义。 */
-function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'currentLocationKey' | 'targetLocationKey' | 'hasTargetLocation' | 'faulted' | 'message'>): DeviceTelemetrySnapshot {
+/** 使用调用方提供的观测时间创建统一快照；历史恢复不得依赖当前墙钟。 */
+export function createDeviceTelemetrySnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'currentLocationKey' | 'targetLocationKey' | 'hasTargetLocation' | 'faulted' | 'message'>, receivedAt: number): DeviceTelemetrySnapshot {
   normalizeDeviceCompatibleFields(input.deviceType, input.fields);
   const stackerLocation = createStackerLocationState(input.deviceType, input.fields);
   const normal = readBooleanField(input.fields, 'normal');
@@ -393,7 +396,7 @@ function createSnapshot(input: Omit<DeviceTelemetrySnapshot, 'receivedAt' | 'cur
 
   return {
     ...input,
-    receivedAt: Date.now(),
+    receivedAt,
     currentLocationKey: stackerLocation.currentLocationKey,
     targetLocationKey: stackerLocation.targetLocationKey,
     hasTargetLocation: stackerLocation.targetLocationKey !== null,

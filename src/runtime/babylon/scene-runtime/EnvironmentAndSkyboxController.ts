@@ -253,7 +253,10 @@ export class EnvironmentAndSkyboxController {
     }
   }
   getLightingOptimizationMetrics() {
-    return { options: { ...this.lightingOptimizationOptions }, environment: this.lightingRuntime.getEnvironmentBatchMetrics(),
+    // options 保留调用者请求值；有效阴影策略单列，避免把旧 local 偏好显示成逐面 GPU 缓存。
+    return { options: { ...this.lightingOptimizationOptions },
+      effectiveShadowCache: { backend: 'babylon-native' as const, scope: 'whole-map' as const, invalidationMode: 'global' as const, localInvalidationApplied: false as const },
+      environment: this.lightingRuntime.getEnvironmentBatchMetrics(),
       shadows: this.shadowRuntime.getHybridMetrics() };
   }
   waitForLightingReady(): Promise<void> { return this.lightingRuntime.whenReady(); }

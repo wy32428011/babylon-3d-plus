@@ -1,3 +1,4 @@
+import { normalizeHistoryReplaySettings } from '../../../runtime/history/historyReplayContract';
 import { executeCommand } from '../../commands/CommandHistory';
 import { updateAutoPatrolCommand, updateSceneDocumentCommand } from '../../commands/entityCommands';
 import { createId } from '../../../shared/ids';
@@ -36,7 +37,8 @@ export const createRuntimePreviewAndTelemetrySlice: EditorSlice<
   "consumeAutoPatrolPlaybackRequest" |
   "setAutoPatrolPlaybackSnapshot" |
   "updateMqttConfig" |
-  "updateFetchConfig"
+  "updateFetchConfig" |
+  "updateHistoryReplaySettings"
 > = (set, get) => ({
   runtimeMode: 'edit',
   runtimePerformanceEnabled: false,
@@ -320,6 +322,22 @@ export const createRuntimePreviewAndTelemetrySlice: EditorSlice<
     set((state) => areJsonValuesEqual(state.autoPatrolPlaybackSnapshot, snapshot)
       ? state
       : { autoPatrolPlaybackSnapshot: snapshot });
+  },
+  updateHistoryReplaySettings: (settings) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改时光回溯配置');
+      const historyReplay = normalizeHistoryReplaySettings(settings);
+      const previous = normalizeHistoryReplaySettings(state.scene.sceneSettings.historyReplay);
+      if (areJsonValuesEqual(previous, historyReplay)) return state;
+      const command = updateSceneDocumentCommand('更新时光回溯配置', (scene) => ({
+        ...scene,
+        sceneSettings: { ...scene.sceneSettings, historyReplay },
+      }));
+      return {
+        ...executeCommand(state.scene, state.history, command),
+        logs: prependLog(state.logs, '时光回溯草稿已应用到场景，尚未保存或应用到服务器；后台采集状态不变。'),
+      };
+    });
   },
   updateMqttConfig: (config) => {
     set((state) => {

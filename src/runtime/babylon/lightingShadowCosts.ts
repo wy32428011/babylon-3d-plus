@@ -1,7 +1,7 @@
-import type { HybridShadowMetrics } from './HybridShadowCache.ts';
+import type { HybridShadowMetrics, NativeShadowCacheDiagnostics, NativeShadowRefreshPolicy } from './HybridShadowCache.ts';
 import type { HybridShadowInvalidationMetrics } from './hybridShadowInvalidation.ts';
 
-export type LightingShadowLightCost = HybridShadowInvalidationMetrics & {
+export type LightingShadowLightCost = HybridShadowInvalidationMetrics & NativeShadowCacheDiagnostics & {
   lightId: string;
   entityId?: string;
   name: string;
@@ -12,8 +12,13 @@ export type LightingShadowLightCost = HybridShadowInvalidationMetrics & {
   cascades: number;
   cubeFaces: number;
   shadowMapBytes: number;
+  /** 原生调度无额外纹理副本，恒为 0。 */
   cacheBytes: number;
+  /** 原生图中当前可复用的面数，不另计显存。 */
   cachedFaces: number;
+  refreshPolicy: NativeShadowRefreshPolicy;
+  refreshReason: string | null;
+  /** 原生 subMesh/实例批次提交次数，不是分阶段绘制次数。 */
   staticRenders: number;
   dynamicRenders: number;
   cacheHits: number;

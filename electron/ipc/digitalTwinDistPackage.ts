@@ -20,6 +20,7 @@ import type { DeploymentSkyboxCacheContext, DeploymentSkyboxValidationCache } fr
 import { bindSourceResourceIntegrity, type SourceResourceFile } from './digitalTwinSourceResourcePlan.js';
 import { assertViewerCoreIntegrity, assertViewerTemplateSupportsScene, selectRuntimeTemplateFiles } from './viewerTemplateCapabilities.js';
 import { collectLightingMipArchiveStorePaths, applyLightingMipArchiveStore } from './lightingMipArchiveStore.js';
+import { readHistoryPublicationSettings } from './historyPublicationScene.js';
 
 const COPY_CONCURRENCY = 4;
 const MAX_DIST_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -64,6 +65,9 @@ export async function buildDigitalTwinDistPackage(
   options: BuildDigitalTwinDistPackageOptions,
 ): Promise<DigitalTwinDistPackageResult> {
   throwIfDeploymentExportAborted(options.signal);
+  if (readHistoryPublicationSettings(options.sceneContent)) {
+    throw new Error('时光回溯 DIST 需要真实逻辑清单和版本握手；当前尚未接入，不能生成无历史保护的公开包。');
+  }
   const maxPackageBytes = options.maxPackageBytes ?? MAX_DIST_PACKAGE_BYTES;
   if (!Number.isSafeInteger(maxPackageBytes) || maxPackageBytes <= 0 || maxPackageBytes > MAX_DIST_PACKAGE_BYTES) {
     throw new Error('dist ZIP 验收预算无效；不能扩大原有 2 GB 限制。');

@@ -476,6 +476,8 @@ export class SceneRuntime {
 
   pickChartMarkerAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): string | null { return this.selection.pickChartMarkerAtCanvasPoint(clientX, clientY, canvas); }
 
+  pickChartMarkerClickAtCanvasPoint(clientX: number, clientY: number, canvas: HTMLCanvasElement): { entityId: string; allowSceneSwitch: boolean } | null { return this.selection.pickChartMarkerClickAtCanvasPoint(clientX, clientY, canvas); }
+
   pickBuiltInSlotCellAtCanvasPoint(
     clientX: number,
     clientY: number,

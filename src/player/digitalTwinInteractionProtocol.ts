@@ -79,6 +79,23 @@ export type DigitalTwinShowScreenMessage = {
   payload: { projectId: string; screenId: string; selectionToken?: string };
 };
 
+export type DigitalTwinNavigateSceneRequest = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'viewer.navigateScene';
+  requestId: string;
+  payload: { url: string };
+};
+
+export type DigitalTwinNavigateSceneResult = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+  type: 'host.navigateSceneResult';
+  requestId: string;
+} & ({ ok: true } | { ok: false; error: { code: 'NAVIGATION_DENIED'; message: string } });
+
 export type DigitalTwinClearSelectionCommand = {
   channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
   version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
@@ -178,6 +195,8 @@ export type DigitalTwinAssetClickedSlot = {
   layer: number;
 };
 
+export type DigitalTwinClickValue = string | number | boolean | null | DigitalTwinClickValue[] | { [key: string]: DigitalTwinClickValue | undefined };
+
 /** Viewer 内部点击命中 show-chart 效果时发送给宿主页面的点击事件。 */
 export type DigitalTwinAssetClickedEvent = {
   channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
@@ -188,6 +207,9 @@ export type DigitalTwinAssetClickedEvent = {
     assetCode?: string;
     slot?: DigitalTwinAssetClickedSlot;
     chartId?: string;
+    unit?: { kind: 'cargo' | 'spawned-device'; containerCode?: string; assetCode?: string };
+    host?: { entityId: string; assetCode?: string; name?: string };
+    [key: string]: DigitalTwinClickValue | undefined;
   };
 };
 
@@ -201,6 +223,8 @@ export type DigitalTwinBridgeMessage =
   | DigitalTwinViewerReadyMessage
   | DigitalTwinViewerInitialLoadStateMessage
   | DigitalTwinShowScreenMessage
+  | DigitalTwinNavigateSceneRequest
+  | DigitalTwinNavigateSceneResult
   | DigitalTwinClearSelectionCommand
   | DigitalTwinFocusAssetCommand
   | DigitalTwinCancelFocusAssetCommand
@@ -216,6 +240,7 @@ const MAX_ASSET_CODE_LENGTH = 128;
 const MAX_ENTITY_ID_LENGTH = 256;
 const MAX_ENTITY_COUNT = 64;
 const MAX_ERROR_MESSAGE_LENGTH = 1024;
+const MAX_SCENE_URL_LENGTH = 4096;
 const MAX_CHART_ID_LENGTH = 256;
 const MAX_SLOT_COORDINATE = 100_000;
 const VIEWER_ERROR_CODE_SET = new Set<string>(DIGITAL_TWIN_VIEWER_ERROR_CODES);
@@ -244,6 +269,17 @@ function hasAllowedKeys(value: Record<string, unknown>, allowedKeys: readonly st
 function isBoundedString(value: unknown, maxLength: number, trim = true): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) return false;
   return !trim || value.trim().length > 0;
+}
+
+function isSceneNavigationUrl(value: unknown): value is string {
+  if (!isBoundedString(value, MAX_SCENE_URL_LENGTH) || /[\u0000-\u001f\u007f]/.test(value)
+    || !/^https?:\/\//i.test(value.trim()) || value.includes(String.fromCharCode(92))) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch {
+    return false;
+  }
 }
 
 function isBaseEnvelope(value: Record<string, unknown>): boolean {
@@ -314,11 +350,43 @@ function isAssetClickedSlot(value: unknown): value is DigitalTwinAssetClickedSlo
   ));
 }
 
-function isAssetClickedPayload(value: unknown): value is DigitalTwinAssetClickedEvent['payload'] {
-  if (!isRecord(value) || !hasAllowedKeys(value, ['assetCode', 'slot', 'chartId'])) return false;
+// 扩展参数仅允许有界 JSON；保持来源、会话和已知字段校验，不因新增业务字段丢弃整条点击消息。
+export function isDigitalTwinClickPayload(value: unknown): value is DigitalTwinAssetClickedEvent['payload'] {
+  let remainingNodes = 512;
+  let remainingCharacters = 65_536;
+  const isSafeValue = (entry: unknown, depth: number): boolean => {
+    if (--remainingNodes < 0 || depth > 8) return false;
+    if (entry === undefined || entry === null || typeof entry === 'boolean') return true;
+    if (typeof entry === 'number') return Number.isFinite(entry);
+    if (typeof entry === 'string') {
+      remainingCharacters -= entry.length;
+      return entry.length <= 16_384 && remainingCharacters >= 0;
+    }
+    if (Array.isArray(entry)) return entry.length <= 256 && entry.every((item) => isSafeValue(item, depth + 1));
+    if (!isRecord(entry) || ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) return false;
+    const entries = Object.entries(entry);
+    return entries.length <= 256 && entries.every(([key, item]) => {
+      remainingCharacters -= key.length;
+      return key.length > 0 && key.length <= 128 && remainingCharacters >= 0
+        && !['__proto__', 'prototype', 'constructor'].includes(key)
+        && isSafeValue(item, depth + 1);
+    });
+  };
+  if (!isRecord(value) || !isSafeValue(value, 0)) return false;
   if (value.assetCode !== undefined && !isBoundedString(value.assetCode, MAX_ASSET_CODE_LENGTH)) return false;
   if (value.chartId !== undefined && !isBoundedString(value.chartId, MAX_CHART_ID_LENGTH)) return false;
-  return value.slot === undefined || isAssetClickedSlot(value.slot);
+  if (value.slot !== undefined && !isAssetClickedSlot(value.slot)) return false;
+  if (value.unit !== undefined) {
+    if (!isRecord(value.unit) || (value.unit.kind !== 'cargo' && value.unit.kind !== 'spawned-device')) return false;
+    if (value.unit.containerCode !== undefined && !isBoundedString(value.unit.containerCode, 16_384)) return false;
+    if (value.unit.assetCode !== undefined && !isBoundedString(value.unit.assetCode, MAX_ASSET_CODE_LENGTH)) return false;
+  }
+  if (value.host !== undefined) {
+    if (!isRecord(value.host) || !isBoundedString(value.host.entityId, MAX_ENTITY_ID_LENGTH)) return false;
+    if (value.host.assetCode !== undefined && !isBoundedString(value.host.assetCode, MAX_ASSET_CODE_LENGTH)) return false;
+    if (value.host.name !== undefined && !isBoundedString(value.host.name, 16_384, false)) return false;
+  }
+  return true;
 }
 
 /** 严格解析宿主与发布 Viewer 的 v1 交互消息；非法或未知消息返回 null。 */
@@ -348,6 +416,21 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
         && isViewerInitialLoadStatePayload(value.payload)
         ? value as DigitalTwinViewerInitialLoadStateMessage
         : null;
+    case 'viewer.navigateScene':
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'payload'])
+        && isBoundedString(value.requestId, MAX_IDENTIFIER_LENGTH)
+        && isRecord(value.payload) && hasOnlyKeys(value.payload, ['url']) && isSceneNavigationUrl(value.payload.url)
+        ? value as DigitalTwinNavigateSceneRequest : null;
+    case 'host.navigateSceneResult':
+      if (!isBoundedString(value.requestId, MAX_IDENTIFIER_LENGTH) || typeof value.ok !== 'boolean') return null;
+      if (value.ok) {
+        return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'ok'])
+          ? value as DigitalTwinNavigateSceneResult : null;
+      }
+      return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'requestId', 'ok', 'error'])
+        && isRecord(value.error) && hasOnlyKeys(value.error, ['code', 'message'])
+        && value.error.code === 'NAVIGATION_DENIED' && isBoundedString(value.error.message, MAX_ERROR_MESSAGE_LENGTH)
+        ? value as DigitalTwinNavigateSceneResult : null;
     case 'viewer.showScreen':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
         && isRecord(value.payload)
@@ -398,7 +481,7 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
     }
     case 'event.assetClicked':
       return hasOnlyKeys(value, ['channel', 'version', 'sessionId', 'type', 'payload'])
-        && isAssetClickedPayload(value.payload)
+        && isDigitalTwinClickPayload(value.payload)
         ? value as DigitalTwinAssetClickedEvent
         : null;
     default:

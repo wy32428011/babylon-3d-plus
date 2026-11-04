@@ -59,7 +59,10 @@ import {
   setSharedProjectSkyboxRoot,
 } from './projectAssetStore.js';
 import { createDeploymentSkyboxValidationCache, loadDeploymentSkyboxCacheContext } from './deploymentSkyboxCache.js';
-import { readDataPlatformConfig, requestDataPlatformProject, resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
+import { isDataPlatformProjectClosing, readDataPlatformConfig, requestDataPlatformProject, resolveDataPlatformPublishProjectContext } from './dataPlatformIpc.js';
+import { historyManagementOrigin } from './historyAccessStore.js';
+import { prepareHistoryPublication } from './historyPublicationPreflight.js';
+import { assertHistorySceneHasNoCredentials, readHistoryPublicationSettings } from './historyPublicationScene.js';
 import { prepareDataPlatformProjectForPublish } from './dataPlatformProjectService.js';
 import { resolveDataPlatformProjectLocation } from './dataPlatformProjectLocation.js';
 import { getScenePublishScope, setBoundScenePublishScope } from './scenePublishScope.js';
@@ -426,6 +429,42 @@ export async function publishDigitalTwin(
       message: '目标业务项目已经有当前数字孪生工程，请确认覆盖后再发布。',
     });
   }
+
+  const historySettings = readHistoryPublicationSettings(validated.sceneContent);
+  if (prepared) {
+    for (const scene of validated.preparedScenes!) {
+      if (scene.sceneId !== prepared.entry.sceneId && readHistoryPublicationSettings(scene.sceneContent)) {
+        throw new Error('源工程的非入口场景启用了时光回溯；当前发布合同尚不能为多个场景分别冻结历史清单，已阻止发布。');
+      }
+    }
+  }
+  if (historySettings) {
+    if (!prepared) throw new Error('时光回溯发布必须先准备全部 SOURCE 场景快照，不能跳过完整凭据检查。');
+    if (selected.target || getScenePublishScope().kind === 'local-file') {
+      throw new Error('时光回溯发布必须使用当前已绑定的项目及其历史管理授权；选择发布目标不代表管理权限。');
+    }
+    for (const scene of validated.preparedScenes!) assertHistorySceneHasNoCredentials(scene.sceneContent);
+    const assertHistoryContext = async (): Promise<void> => {
+      signal.throwIfAborted();
+      await assertPublishTargetCurrent(selected);
+      const config = await readDataPlatformConfig();
+      const binding = getCurrentDataPlatformBinding();
+      if (isDataPlatformProjectClosing() || getScenePublishScope().generation !== selected.generation
+        || getScenePublishScope().kind === 'local-file' || !binding
+        || binding.metadata.projectId !== selected.metadata.projectId
+        || !isSameFilePath(binding.projectRoot, selected.projectRoot)
+        || historyManagementOrigin(binding.metadata.baseUrl) !== historyManagementOrigin(selected.metadata.baseUrl)
+        || historyManagementOrigin(config.baseUrl) !== historyManagementOrigin(selected.metadata.baseUrl)) {
+        throw new Error('历史管理项目或平台已变化，请重新进行发布预检。');
+      }
+    };
+    emit(onProgress, validated.requestId, 'saving', '正在冻结历史来源合同并核验服务器投影器…', 0);
+    const frozen = await prepareHistoryPublication({ projectId: selected.metadata.projectId, baseUrl: selected.metadata.baseUrl,
+      settings: historySettings, signal, assertCurrent: assertHistoryContext });
+    if (frozen.expiresAt <= Date.now()) throw new Error('历史来源预检已过期，请重新发布。');
+    // 不能用默认几何或空清单绕过已加载、参数化模型与 Viewer 启动握手的缺失。
+    throw new Error('历史来源候选已冻结，但真实 Babylon 逻辑清单提取和 Viewer 版本握手尚未接入；未保存运行配置、上传或发布。');
+  }
   if (selected.target) {
     const target = selected.target;
     const prepared = await prepareDataPlatformProjectForPublish({
@@ -507,6 +546,10 @@ export async function publishDigitalTwin(
         emit(onProgress, validated.requestId, 'source-package', detail, 6 + ratio * 22);
       },
     });
+    // 兼容旧内部调用未提交多场景准备快照的情况；SOURCE 尚未上传，不能漏掉其他场景的历史声明。
+    if (sourcePackage.sceneContents.some(content => readHistoryPublicationSettings(content))) {
+      throw new Error('源工程包含启用时光回溯的场景，但本次没有完整历史发布清单；已阻止 SOURCE/DIST 上传。');
+    }
     appendUniqueWarnings(warnings, sourcePackage.warnings);
     const omittedSourceResources = sourcePackage.omittedResources;
     if (omittedSourceResources.length) {

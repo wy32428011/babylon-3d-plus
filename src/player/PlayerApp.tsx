@@ -11,6 +11,7 @@ import { GeographicOpeningBridge } from './geographicOpeningBridge';
 import { configureEffectDataTransport } from '../runtime/effects/EffectDataRuntime';
 import type { AlarmActivation } from '../runtime/babylon/AlarmManagerRuntime';
 import { executeChartMarkerClick } from '../runtime/babylon/chartMarkerClick';
+import { openChartMarkerSceneInNewWindow } from '../runtime/babylon/chartMarkerNavigation';
 import { CHART_MARKER_REFRESH_EVENT } from '../shared/chartMarkerEmbed';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { deserializeScene } from '../editor/project/SceneSerializer';
@@ -116,6 +117,7 @@ import {
   type PlayerPerformanceSample,
 } from './playerPerformanceDiagnostics';
 import { resolvePublishedFetchConfig, startPublishedFetchDrive } from './publishedFetchDrive';
+import { HistoryReplayPanel } from './history/HistoryReplayPanel';
 import './player.css';
 
 type PlayerPhase = 'loading' | 'ready' | 'blocked';
@@ -199,6 +201,19 @@ async function fetchText(url: URL, signal: AbortSignal): Promise<string> {
   return readUtf8ResponseText(response, `文件 ${url.pathname}`);
 }
 
+/** 不安装资源或执行业务代码即可读取发布文档的历史声明；异常声明按阻断处理。 */
+function hasHistoryReplayDeclaration(content: string): boolean {
+  const file: unknown = JSON.parse(content);
+  const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+  if (!object(file) || !object(file.scene) || !object(file.scene.sceneSettings)) return false;
+  const replay = file.scene.sceneSettings.historyReplay;
+  if (replay === undefined || replay === null) return false;
+  if (!object(replay)) throw new Error('时光回溯声明无效，不能确定只读边界。');
+  if (replay.enabled === undefined) return false;
+  if (typeof replay.enabled !== 'boolean') throw new Error('时光回溯声明无效，不能确定只读边界。');
+  return replay.enabled;
+}
+
 /** 把 #RRGGBB 同步到 Babylon 清屏色。 */
 function applySceneBackground(viewport: BabylonViewport, color: string): void {
   viewport.scene.clearColor.set(
@@ -216,7 +231,7 @@ export function PlayerApp() {
   const { revision: canvasRevision, attachCanvas, replaceCanvas } = useViewportCanvas(canvasRef);
   const sceneFullscreen = useDigitalTwinFullscreen(playerRootRef);
   const viewportRef = useRef<BabylonViewport | null>(null);
-  const chartMarkerClickRef = useRef<((entityId: string) => boolean) | null>(null);
+  const chartMarkerClickRef = useRef<((entityId: string, allowSceneSwitch: boolean) => boolean) | null>(null);
   const runtimeRef = useRef<SceneRuntime | null>(null);
   const performanceSessionRef = useRef<PlayerPerformanceSession | null>(null);
   const autoPatrolPlaybackRef = useRef<AutoPatrolPlaybackController | null>(null);
@@ -236,9 +251,11 @@ export function PlayerApp() {
   /** 发布场景是否包含手动漫游 POI；无出生点时不渲染漫游面板、不创建漫游运行时。 */
   const [hasManualRoamSpawn, setHasManualRoamSpawn] = useState(false);
   const [message, setMessage] = useState('场景加载中...');
+  const [historyUnavailable, setHistoryUnavailable] = useState<string | null>(null);
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [lightingRuntimeStatus, setLightingRuntimeStatus] = useState<string | null>(null);
   const [chartMarkerError, setChartMarkerError] = useState('');
+  const [chartMarkerFallbackUrl, setChartMarkerFallbackUrl] = useState('');
   const [viewportRuntimeIssue, setViewportRuntimeIssue] = useState(false);
   const [environmentRuntimeIssue, setEnvironmentRuntimeIssue] = useState(false);
   const [statusOverlayVisible, setStatusOverlayVisible] = useState(false);
@@ -582,11 +599,27 @@ export function PlayerApp() {
       try {
         const runtimeConfigUrl = new URL('./runtime-config.json', document.baseURI);
         const baseConfig = parsePlayerRuntimeConfig(await fetchJson(runtimeConfigUrl, abortController.signal));
+        // 历史兼容产物必须在任何旧版实时启动链之前分流；不能把旧 DIST 普通入口当作只读入口。
+        if (new URL(window.location.href).searchParams.getAll('mode').includes('history')) {
+          const reason = '历史兼容 Viewer 尚未接入受控只读启动与完整场景恢复，已阻断旧实时驱动。';
+          setHistoryUnavailable(reason);
+          throw new Error(reason);
+        }
+        // 保留原发布缓存读取与一致性保护，再读取静态文档声明，不执行场景运行时代码。
+        publishedCache = await installPublishedViewerCache(baseConfig, new URL('./', document.baseURI).href, abortController.signal,
+          state => { if (!disposed) setReleaseCacheState(state); });
+        if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
+        startupStage = '检查场景历史声明';
+        const sceneContent = await fetchText(new URL(baseConfig.paths.scene, document.baseURI), abortController.signal);
+        if (hasHistoryReplayDeclaration(sceneContent)) {
+          const reason = '此发布版启用了时光回溯，但历史查询、只读授权、版本握手或全态渲染尚未就绪；已阻断 MQTT、Fetch 与业务脚本。';
+          setHistoryUnavailable(reason);
+          throw new Error(reason);
+        }
         startupStage = '读取项目运行配置';
         const projectRuntimeConfig = await fetchDigitalTwinRuntimeConfig(baseConfig, abortController.signal);
         const parsedConfig = applyDigitalTwinRuntimeConfig(baseConfig, projectRuntimeConfig);
         if (disposed || initialLoadFailed) return;
-        configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
         openingBridge = new GeographicOpeningBridge({
           enabled: true, embedded: window.parent !== window, parentWindow: window.parent,
           viewerOrigin: window.location.origin,
@@ -619,9 +652,6 @@ export function PlayerApp() {
           projectRuntimeConfig ? parseDigitalTwinAllowedParentOrigins(projectRuntimeConfig.config) : [],
         );
         interactionController.markInitialLoadStarted();
-        publishedCache = await installPublishedViewerCache(parsedConfig, new URL('./', document.baseURI).href, abortController.signal,
-          state => { if (!disposed) setReleaseCacheState(state); });
-        if (disposed || initialLoadFailed) { publishedCache?.dispose(); publishedCache = null; return; }
         document.title = parsedConfig.page.title;
         setConfig(parsedConfig);
         setDismissedStatusIssue(null);
@@ -640,9 +670,15 @@ export function PlayerApp() {
         installDeploymentAssetManifest(manifestMappings);
         setStartupPercent(20);
 
-        const sceneUrl = new URL(parsedConfig.paths.scene, document.baseURI);
         startupStage = '读取场景文档';
-        const sceneDocument = deserializeScene(await fetchText(sceneUrl, abortController.signal));
+        const sceneDocument = deserializeScene(sceneContent);
+        if (sceneDocument.sceneSettings.historyReplay?.enabled) {
+          // SceneRuntime.sync 会安装业务脚本和旧遥测驱动；在全态渲染及 canonical 接续就绪前必须阻断。
+          const reason = '此发布版启用了时光回溯，但当前 Viewer 尚未接入版本握手、只读全态渲染和 canonical 续传；已阻断 MQTT、Fetch 与业务脚本，未回退到旧实时链路。';
+          setHistoryUnavailable(reason);
+          throw new Error(reason);
+        }
+        configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
         sceneOpeningSettings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
         sceneModelEntranceSettings = normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance);
         setOpeningSettings(sceneOpeningSettings);
@@ -896,10 +932,11 @@ export function PlayerApp() {
             if (pendingAlarmTheme) setChartMarkerError('告警主题等待连接：请在同项目的数据中台大屏中打开数字孪生。');
           }
         };
-        chartMarkerClickRef.current = (markerId) => {
+        chartMarkerClickRef.current = (markerId, allowSceneSwitch) => {
           if (disposed || !runtime) return false;
           pauseHistoryReplay();
           setChartMarkerError('');
+          setChartMarkerFallbackUrl('');
           return executeChartMarkerClick(sceneDocument, markerId, {
             focusEntity: (targetId) => {
               const bounds = runtime!.getEntitiesFocusBounds([targetId]);
@@ -923,6 +960,23 @@ export function PlayerApp() {
                 setChartMarkerError('主题展示未发送：请从数据中台大屏中打开当前数字孪生，并确认主题与当前项目一致。');
               }
             },
+            allowSceneSwitch,
+            navigateScene: (url, target) => {
+              if (target === 'new-window') {
+                const opened = openChartMarkerSceneInNewWindow(url);
+                if (!opened) setChartMarkerFallbackUrl(url);
+                return opened;
+              }
+              if (window.parent === window) {
+                try { window.location.assign(url); return true; } catch { setChartMarkerFallbackUrl(url); return false; }
+              }
+              const accepted = interactionController?.navigateScene(url, (message) => {
+                setChartMarkerFallbackUrl(url);
+                setChartMarkerError(message);
+              }) ?? false;
+              if (!accepted) setChartMarkerFallbackUrl(url);
+              return accepted;
+            },
             reportError: setChartMarkerError,
           });
         };
@@ -931,8 +985,8 @@ export function PlayerApp() {
           onSelectionClick: ({ clientX, clientY }) => {
             if (disposed || !runtime) return;
             pauseHistoryReplay();
-            const markerId = runtime.pickChartMarkerAtCanvasPoint(clientX, clientY, canvas);
-            if (markerId && chartMarkerClickRef.current?.(markerId)) return;
+            const markerHit = runtime.pickChartMarkerClickAtCanvasPoint(clientX, clientY, canvas);
+            if (markerHit && chartMarkerClickRef.current?.(markerHit.entityId, markerHit.allowSceneSwitch)) return;
             const modelHit = runtime.pickRuntimeModelHitAtCanvasPoint(clientX, clientY, canvas);
             // 货格反解对所有内置货格填充体做射线检测取最近命中，避免透过前排货架空格穿透到另一排。
             const cellHit = runtime.pickBuiltInSlotCellAtCanvasPoint(clientX, clientY, canvas);
@@ -1469,6 +1523,7 @@ export function PlayerApp() {
   return (
     <main className={`player-root${isDigitalTwin ? ' is-digital-twin' : ''}${openingActive ? ' opening-presentation-active' : ''}`} ref={playerRootRef} style={{ backgroundColor }}>
       <canvas key={canvasRevision} aria-label="Babylon 3D 场景" className="player-canvas" ref={attachCanvas} />
+      {phase === 'blocked' && historyUnavailable ? <HistoryReplayPanel session={null} unavailableReason={historyUnavailable} /> : null}
       {phase === 'ready' && initialLoadCompleted && openingSettings.enabled ? <OpeningReplayButton onReplay={() => replayOpeningRef.current()} /> : null}
       {openingActive && initialLoadCompleted ? <OpeningAnimationOverlay settings={openingSettings} snapshot={openingSnapshot} onSkip={() => openingPlaybackRef.current?.skip()} /> : null}
       {phase === 'ready' && viewportRef.current && runtimeRef.current ? (
@@ -1564,7 +1619,8 @@ export function PlayerApp() {
         <section className="player-status" role="alert" style={{ pointerEvents: 'auto' }}>
           <strong>点击事件未完成</strong>
           <p>{chartMarkerError}</p>
-          <button type="button" onClick={() => setChartMarkerError('')}>关闭提示</button>
+          {chartMarkerFallbackUrl ? <p><a href={chartMarkerFallbackUrl} target="_blank" rel="noopener noreferrer">在新窗口打开场景</a></p> : null}
+          <button type="button" onClick={() => { setChartMarkerError(''); setChartMarkerFallbackUrl(''); }}>关闭提示</button>
         </section>
       ) : showOverlay ? (
         <section className={`player-status player-status-${phase}`} role={phase === 'blocked' ? 'alert' : 'status'}>

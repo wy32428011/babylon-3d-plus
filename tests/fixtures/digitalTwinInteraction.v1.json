@@ -14,6 +14,30 @@
   ],
   "valid": [
     {
+      "name": "asset clicked accepts extension keys",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": { "assetCode": "001005", "entityId": "entity-1" }
+      }
+    },
+    {
+      "name": "asset clicked accepts generated cargo without asset code",
+      "message": {
+        "channel": "zending.digital-twin.bridge",
+        "version": 1,
+        "sessionId": "runtime-1:session-1",
+        "type": "event.assetClicked",
+        "payload": {
+          "unit": { "kind": "cargo", "containerCode": "BOX-001" },
+          "host": { "entityId": "carrier", "assetCode": "001005", "name": "承运设备" },
+          "business": { "enabled": false, "count": 0 }
+        }
+      }
+    },
+    {
       "name": "host hello",
       "message": {
         "channel": "zending.digital-twin.bridge",
@@ -413,7 +437,7 @@
       }
     },
     {
-      "name": "asset clicked rejects unknown payload key",
+      "name": "asset clicked rejects unsupported unit kind",
       "message": {
         "channel": "zending.digital-twin.bridge",
         "version": 1,
@@ -421,7 +445,7 @@
         "type": "event.assetClicked",
         "payload": {
           "assetCode": "001005",
-          "entityId": "entity-1"
+          "unit": { "kind": "unknown" }
         }
       }
     },

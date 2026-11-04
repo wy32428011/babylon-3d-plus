@@ -1,3 +1,4 @@
+import { normalizeHistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { collectSceneSkyboxReferences } from '../../../electron/shared/sceneResourceTraversal.ts';
 import { normalizeSkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
@@ -164,6 +165,7 @@ function createSerializableSceneSnapshot(scene: SceneDocument, includePrepared: 
       skybox: preparedSkyboxSnapshot(normalizeSceneSkyboxSettings(sceneSettings.skybox), includePrepared),
       openingAnimation: normalizeSceneOpeningConfig(sceneSettings.openingAnimation),
       modelEntrance: normalizeSceneModelEntranceSettings(sceneSettings.modelEntrance),
+      ...(sceneSettings.historyReplay === undefined ? {} : { historyReplay: normalizeHistoryReplaySettings(sceneSettings.historyReplay) }),
     },
   };
 }

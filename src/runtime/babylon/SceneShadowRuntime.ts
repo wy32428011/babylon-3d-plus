@@ -165,7 +165,7 @@ function engineSupportsCascadedShadows(scene: Scene): boolean {
   return engine._features?.supportCSM === true;
 }
 
-/** 集中管理数字孪生场景的缓存/级联阴影、接收地面和补光压制。 */
+/** 集中管理 Babylon 原生阴影、整图刷新调度、接收地面和补光压制。 */
 export class SceneShadowRuntime {
   private readonly scene: Scene;
   private readonly entityDirectionals = new Map<string, DirectionalLight>();
@@ -184,7 +184,7 @@ export class SceneShadowRuntime {
   private hybridMaterialsDirty = true;
   private readonly hybridMaterialObservers = new Map<AbstractMesh, Observer<AbstractMesh>>();
   private readonly retiredHybridMetrics = {
-    staticRenders: 0, dynamicRenders: 0, cacheInvalidations: 0, cacheHits: 0,
+    staticRenders: 0, dynamicRenders: 0, nativeMapRenders: 0, cacheInvalidations: 0, cacheHits: 0,
     localInvalidations: 0, localCacheHits: 0, globalFallbacks: 0,
     globalFallbackReasons: {} as Partial<Record<HybridShadowFallbackReason, number>>,
   };
@@ -193,6 +193,8 @@ export class SceneShadowRuntime {
   private renderSuppressedMeshes = new Set<AbstractMesh>();
   private readonly meshTransformObservers = new Map<AbstractMesh, Observer<TransformNode>>();
   private readonly meshSyncObserver: Nullable<Observer<Scene>>;
+  private readonly shadowPreparationObserver: Nullable<Observer<Scene>>;
+  private shadowMembershipRevision = -1;
   private readonly catcher: Mesh;
   private managedLight: DirectionalLight | null = null;
   private primaryLight: DirectionalLight | null = null;
@@ -206,6 +208,14 @@ export class SceneShadowRuntime {
     this.catcher = this.createCatcher();
     this.refreshPrimary();
     this.syncSceneMeshes(true);
+    // 在各灯的原生刷新判定之前更新分类和完整 renderList；动态关闭表示移除投射物，而非冻结旧图。
+    this.shadowPreparationObserver = scene.onBeforeRenderTargetsRenderObservable.add(() => {
+      if (this.disposed || !this.usesRealtimeShadows() || !this.isHybrid() || this.hybridCaches.size === 0) return;
+      this.hybridMeshState.refreshForFrame(this.scene.getRenderId());
+      if (this.shadowMembershipRevision === this.hybridMeshState.membershipRevision) return;
+      this.shadowMembershipRevision = this.hybridMeshState.membershipRevision;
+      for (const mesh of this.knownMeshes) this.registerMesh(mesh);
+    }, -1, true);
     this.meshSyncObserver = scene.onBeforeRenderObservable.add(() => {
       if (!this.usesRealtimeShadows()) {
         this.updateHybridMaterialLights();
@@ -218,7 +228,7 @@ export class SceneShadowRuntime {
     });
   }
 
-  /** 独立运行期诊断开关，后续新建缓存继承；不写回场景配置。 */
+  /** 保留旧 global/local 请求兼容；实际始终采用原生整图失效，不写回场景配置。 */
   setCacheInvalidationMode(mode: HybridShadowInvalidationMode): void {
     if (this.disposed || this.cacheInvalidationMode === mode) return;
     this.cacheInvalidationMode = mode;
@@ -243,7 +253,7 @@ export class SceneShadowRuntime {
     }
     this.hybridMeshRoles = new Map([...roles].map(([mesh, role]) => [mesh, { ...role }]));
     this.hybridOptions = nextOptions;
-    for (const cache of this.hybridCaches.values()) cache.setEnabled(nextOptions.cacheStaticShadows);
+    for (const cache of this.hybridCaches.values()) cache.setEnabled(this.isHybrid() && nextOptions.cacheStaticShadows);
     if (this.isHybrid() && this.settings.enabled) this.syncSceneMeshes(true);
   }
 
@@ -272,13 +282,14 @@ export class SceneShadowRuntime {
   /** 轻量读取已有验证结果；常驻错误轮询无需构建成本报表。 */
   getValidationErrors(): readonly string[] { return this.hybridValidationErrors; }
 
-  /** 计数沿用现有监控；资源按实际面数估算，并区分阴影图和静态缓存。 */
+  /** 原生提交/整图刷新计数；阴影图单独估算，调度器不分配额外 GPU 缓存。 */
   getHybridMetrics(): LightingShadowMetrics {
     const metrics: LightingShadowMetrics = {
       ...this.retiredHybridMetrics, staticCasterCount: 0, dynamicCasterCount: 0, textureBytes: 0,
       cachedFaces: 0, unsupportedCacheReason: null, validationErrors: [...this.hybridValidationErrors],
       shadowMapBytes: 0, cacheBytes: 0, lights: [], samplerDiagnostics: this.getSamplerDiagnostics(),
-      invalidationMode: this.cacheInvalidationMode, globalFallbackReasons: { ...this.retiredHybridMetrics.globalFallbackReasons },
+      backend: 'babylon-native', cacheScope: 'whole-map', requestedInvalidationMode: this.cacheInvalidationMode, localInvalidationApplied: false,
+      invalidationMode: 'global', globalFallbackReasons: { ...this.retiredHybridMetrics.globalFallbackReasons },
     };
     const generators = new Set([...this.localGenerators.values(), ...this.secondaryDirectionalGenerators.values()]);
     if (this.primaryGenerator) generators.add(this.primaryGenerator);
@@ -287,7 +298,7 @@ export class SceneShadowRuntime {
       metrics.lights.push(cost);
       metrics.shadowMapBytes += cost.shadowMapBytes; metrics.cacheBytes += cost.cacheBytes;
       if (!cache) continue;
-      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
+      for (const key of ['staticRenders', 'dynamicRenders', 'nativeMapRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
         metrics[key] = (metrics[key] ?? 0) + cache.metrics[key];
       }
       for (const reason of Object.keys(cache.metrics.globalFallbackReasons) as HybridShadowFallbackReason[]) {
@@ -296,7 +307,8 @@ export class SceneShadowRuntime {
       metrics.cachedFaces += cache.cachedFaces;
       metrics.unsupportedCacheReason ??= cache.metrics.unsupportedCacheReason;
     }
-    metrics.textureBytes = metrics.shadowMapBytes + metrics.cacheBytes;
+    // textureBytes 保留额外缓存开销语义，原生阴影图只计入 shadowMapBytes，不能重复累计。
+    metrics.textureBytes = 0;
     metrics.lights.sort((a, b) => b.shadowMapBytes + b.cacheBytes - a.shadowMapBytes - a.cacheBytes);
     if (this.isHybrid() && this.settings.enabled) {
       metrics.staticCasterCount = this.hybridMeshState.staticMeshes.size;
@@ -310,8 +322,10 @@ export class SceneShadowRuntime {
     const cascades = generator instanceof CascadedShadowGenerator ? generator.numCascades : light instanceof DirectionalLight ? 1 : 0;
     const cubeFaces = light.needCube() ? 6 : 0, faces = cascades || cubeFaces || 1;
     let shadowMapBytes = 0;
+    const countedTextures = new Set<NonNullable<ReturnType<RenderTargetTexture['getInternalTexture']>>>();
     for (const target of new Set([map, generator.getShadowMapForRendering()])) {
-      const texture = target?.getInternalTexture(); if (!target || !texture) continue;
+      const texture = target?.getInternalTexture(); if (!target || !texture || countedTextures.has(texture)) continue;
+      countedTextures.add(texture);
       const components = texture.format === 6 ? 1 : 4;
       const componentBytes = texture.type === 1 ? 4 : texture.type === 2 ? 2 : 1;
       const size = target.getSize();
@@ -325,7 +339,9 @@ export class SceneShadowRuntime {
       mapWidth: size?.width ?? 0, mapHeight: size?.height ?? 0, faces, cascades, cubeFaces,
       shadowMapBytes, cacheBytes: cache?.textureBytes ?? 0, cachedFaces: cache?.cachedFaces ?? 0,
       staticRenders: cache?.metrics.staticRenders ?? 0, dynamicRenders: cache?.metrics.dynamicRenders ?? 0, cacheHits: cache?.metrics.cacheHits ?? 0,
-      invalidationMode: cache?.getInvalidationMode() ?? this.cacheInvalidationMode,
+      backend: 'babylon-native', cacheScope: 'whole-map', requestedInvalidationMode: cache?.getInvalidationMode() ?? this.cacheInvalidationMode,
+      localInvalidationApplied: false, invalidationMode: 'global', nativeMapRenders: cache?.metrics.nativeMapRenders ?? 0,
+      refreshPolicy: cache?.metrics.refreshPolicy ?? 'every-frame', refreshReason: cache?.metrics.unsupportedCacheReason ?? null,
       localInvalidations: cache?.metrics.localInvalidations ?? 0, localCacheHits: cache?.metrics.localCacheHits ?? 0,
       globalFallbacks: cache?.metrics.globalFallbacks ?? 0, globalFallbackReasons: { ...cache?.metrics.globalFallbackReasons },
     };
@@ -479,6 +495,7 @@ export class SceneShadowRuntime {
     if (this.meshSyncObserver) {
       this.scene.onBeforeRenderObservable.remove(this.meshSyncObserver);
     }
+    if (this.shadowPreparationObserver) this.scene.onBeforeRenderTargetsRenderObservable.remove(this.shadowPreparationObserver);
     this.disposePrimaryGenerator();
     this.disposeLocalGenerators();
     this.disposeSecondaryDirectionals();
@@ -498,10 +515,10 @@ export class SceneShadowRuntime {
     this.clearHybridMaterialObservers();
   }
 
-  /** 缓存档只在场景内容确实变化时重绘一帧阴影贴图。 */
+  /** 通知原生调度器内容可能变化；是否复用整图由静态集合和公共状态签名决定。 */
   invalidateCachedShadow(): void {
     if (this.isHybrid()) {
-      // 缓存在每次绑定阴影贴图前调用 refreshForFrame，因此这里只标记过期，避免每次失效都全量检查静态网格。
+      // 各灯在原生 RTT 刷新判定之前检测签名；这里只标记 CPU 状态过期，避免重复全量扫描。
       this.hybridMeshState.markStale();
       return;
     }
@@ -538,7 +555,8 @@ export class SceneShadowRuntime {
       this.knownMeshes.delete(knownMesh);
     }
 
-    if (this.isHybrid()) {
+    // 接收材质和接收面仍需同步；只有存在实际生成器时才维护 caster 分类。
+    if (this.isHybrid() && this.hybridCaches.size > 0) {
       this.hybridMeshState.setMeshes(meshes.filter(mesh => !this.renderSuppressedMeshes.has(mesh) && isShadowCaster(mesh)), this.hybridMeshRoles);
     }
     for (const mesh of meshes) {
@@ -765,9 +783,8 @@ export class SceneShadowRuntime {
   private configureShadowMapRefresh(generator: ShadowGenerator): void {
     const shadowMap = generator.getShadowMap();
     if (!shadowMap) return;
-    shadowMap.refreshRate = this.isCachedProfile() && !this.isHybrid()
-      ? RenderTargetTexture.REFRESHRATE_RENDER_ONCE
-      : RenderTargetTexture.REFRESHRATE_RENDER_ONEVERYFRAME;
+    // 画质档不能证明 caster 静止；只有原生调度器确认已知静态集合后才能切到 render-once。
+    shadowMap.refreshRate = RenderTargetTexture.REFRESHRATE_RENDER_ONEVERYFRAME;
   }
 
   private isCachedProfile(): boolean {
@@ -781,17 +798,17 @@ export class SceneShadowRuntime {
   }
 
   private attachHybridCache(generator: ShadowGenerator): void {
-    if (!this.isHybrid() || this.hybridCaches.has(generator)) return;
+    if (this.hybridCaches.has(generator)) return;
     const cache = new HybridShadowCache(generator, this.hybridMeshState);
     cache.setInvalidationMode(this.cacheInvalidationMode);
-    cache.setEnabled(this.hybridOptions.cacheStaticShadows);
+    cache.setEnabled(this.isHybrid() && this.hybridOptions.cacheStaticShadows);
     this.hybridCaches.set(generator, cache);
   }
 
   private disposeGenerator(generator: ShadowGenerator): void {
     const cache = this.hybridCaches.get(generator);
     if (cache) {
-      for (const key of ['staticRenders', 'dynamicRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
+      for (const key of ['staticRenders', 'dynamicRenders', 'nativeMapRenders', 'cacheInvalidations', 'cacheHits', 'localInvalidations', 'localCacheHits', 'globalFallbacks'] as const) {
         this.retiredHybridMetrics[key] += cache.metrics[key];
       }
       for (const reason of Object.keys(cache.metrics.globalFallbackReasons) as HybridShadowFallbackReason[]) {
@@ -802,6 +819,11 @@ export class SceneShadowRuntime {
       this.hybridCaches.delete(generator);
     }
     generator.dispose();
+    if (this.hybridCaches.size === 0) {
+      // 无消费者时释放候选、签名与几何监听；各生成器创建路径会强制同步最新场景和业务角色。
+      this.hybridMeshState.dispose();
+      this.shadowMembershipRevision = -1;
+    }
   }
 
   /** hybrid 对全部方向灯生成阴影；旧模式继续保留单一主方向灯策略。 */
@@ -1043,7 +1065,9 @@ export class SceneShadowRuntime {
       this.primaryGenerator.shadowMaxZ = distance;
       return;
     }
-    if (this.primaryLight) this.primaryLight.shadowMaxZ = distance;
+    // 自动深度范围由 Babylon 根据投射物求得，不能每帧覆写并使原生整图缓存持续失效。
+    const light = this.primaryLight;
+    if (light && (!light.autoCalcShadowZBounds || !light.autoUpdateExtends || light.shadowFrustumSize > 0)) light.shadowMaxZ = distance;
   }
 
   private disposePrimaryGenerator(): void {

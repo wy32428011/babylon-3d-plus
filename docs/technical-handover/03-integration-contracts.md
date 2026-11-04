@@ -179,10 +179,15 @@ Electron 有主进程 MQTT IPC 路径，Viewer 使用浏览器 MQTT.js，两者�
 | focusAsset / cancelFocusAsset / clearSelection | 聚焦设备、取消与清选 |
 | globalOverview / startAutoPatrol / startManualRoam | 总览、巡检和漫游 |
 | command.result | 按 requestId 返回命令结果 |
-| event.assetClicked | 设备/库位点击，可含 assetCode/slot/chartId |
+| event.assetClicked | 设备/库位/生成单元点击，可含 assetCode/slot/chartId/unit/host 及有界 JSON 扩展参数 |
 | viewer.showScreen | 请求展示关联大屏 |
+| viewer.navigateScene / host.navigateSceneResult | 立标“场景切换·本窗口”请求中台整页跳转（payload.url 为不含账号密码、不超过 4096 字符的完整 HTTP(S) 地址），宿主以 `NAVIGATION_DENIED` 返回失败；Viewer 3 秒无应答或会话重置时提示，不退化为切换 iframe |
 
 依据：[Viewer 协议](../../src/player/digitalTwinInteractionProtocol.ts#L1)、[中台同协议](../../../central-data-platform/frontend/src/pages/BigscreenDesigner/utils/digitalTwinInteractionProtocol.ts#L1)、[Viewer Origin 校验](../../src/player/DigitalTwinInteractionController.ts#L247)、[宿主桥实现](../../../central-data-platform/frontend/src/pages/BigscreenDesigner/utils/digitalTwinRuntimeHostBridge.ts#L378)。
+
+点击消息的业务字段均可缺省：普通设备通常只有 `assetCode`，货格有 `slot: {row,column,layer}`；生成货箱可带 `unit: {kind:"cargo",containerCode}` 和 `host: {entityId,assetCode?,name?}`，动态设备可带 `unit: {kind:"spawned-device",assetCode?}`。中台不会再因缺少 `assetCode` 或存在 `unit` / `host` 丢弃合法消息。两端接受有界 JSON 扩展参数（最大深度 8、512 个值节点、累计 65536 字符），拒绝危险属性名和非法已知字段；channel、版本、来源和会话校验不变。
+
+中台将整份 payload 作为本次点击上下文；完整对象 / 数组按 JSON 文本保留，同时生成 `slot.row`、`unit.containerCode`、`host.assetCode` 等点路径参数，数字与布尔值也按文本接入现有请求模板。GET 自动追加参数，POST Body / Header 可用 `${unit.containerCode}`，数据编排数据源自动并入 runParams。中台组件和流程节点的“数字孪生点击参数”入口提供字段条件、复制模板与实际消息样本解析。流程需要由大屏显式 POST 已发布流程 API 才会运行，读取流程结果集不等同于点击传参执行。
 
 反向“Viewer 内嵌大屏”还涉及 embed-ready、纹理截图和独立选择桥，不能把主桥的双端实现套用于所有扩展。截图存在更严格的同源边界；`zending.data-platform-screen.bridge` 的 selection/focus 完整中台内置对端在本次搜索中未确认。自定义脚本或部署侧扩展是否补齐，需实际项目确认。
 

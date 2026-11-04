@@ -10,6 +10,7 @@ import { guardEditorWindowClose, registerWindowCloseIpc } from './windowCloseGua
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, openAuthorizedAssetFile } from './ipc/assetRegistry.js';
 import { registerEffectDataIpc } from './ipc/effectDataIpc.js';
+import { registerHistoryIpc } from './ipc/historyIpc.js';
 import { disposeLightingBakeJobs, registerLightingBakeIpc } from './ipc/lightingBakeIpc.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
 import { disposeDataPlatformChartSync } from './ipc/dataPlatformChartSync.js';
@@ -318,6 +319,7 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
   registerProjectIpc();
   registerCompositionIpc();
   registerEffectDataIpc();
+  registerHistoryIpc();
   registerLightingBakeIpc();
   registerDataPlatformIpc();
   registerAssetIpc();

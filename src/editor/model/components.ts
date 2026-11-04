@@ -489,7 +489,8 @@ export type ChartMarkerThemeScreen = {
 export type ChartMarkerClickAction =
   | { type: 'focus' | 'select'; targetEntityId: string }
   | { type: 'refresh' }
-  | { type: 'theme'; screen?: ChartMarkerThemeScreen };
+  | { type: 'theme'; screen?: ChartMarkerThemeScreen }
+  | { type: 'scene-switch'; url: string; target: 'same-window' | 'new-window' };
 
 export type ChartMarkerClickEvent = {
   type: 'left-click';

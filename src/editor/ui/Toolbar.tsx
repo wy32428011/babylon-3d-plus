@@ -163,6 +163,7 @@ type ToolbarProps = {
   digitalTwinPublishProgress: DigitalTwinPublishProgress | null;
   onOpenDeploymentExport: () => void;
   onOpenLightingManager?: () => void;
+  onOpenHistoryReplay?: () => void;
   deploymentExportStatus: DeploymentExportStatus;
   deploymentExportProgress: DeploymentExportViewProgress | null;
   deploymentExportBusy: boolean;
@@ -760,6 +761,12 @@ export function Toolbar(props: ToolbarProps) {
           setFetchConfigDialogOpen(true);
         }}
       />
+      {props.onOpenHistoryReplay && <ToolbarIconButton
+        disabled={props.readOnly}
+        icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.5 7M3 4v7h7M12 7v5l3 2" /></svg>}
+        label="时光回溯设置"
+        onClick={props.onOpenHistoryReplay}
+      />}
       {props.cadImportProgress ? (
         <ToolbarTaskProgress
           detail={props.cadImportProgress.detail}

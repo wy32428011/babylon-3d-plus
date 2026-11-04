@@ -25,7 +25,7 @@ type Options = {
   pauseHistoryReplay: () => void;
   autoPatrolPlaybackRef: RefObject<AutoPatrolPlaybackController | null>;
   isRuntimePreview: boolean;
-  handleChartMarkerClick: (entityId: string) => boolean;
+  handleChartMarkerClick: (entityId: string, allowSceneSwitch: boolean) => boolean;
   manualRoamRef: RefObject<ManualRoamRuntime | null>;
   viewportRef: RefObject<BabylonViewport | null>;
   clickProductHighlightIdRef: RefObject<string | null>;
@@ -149,10 +149,10 @@ export function useSceneSelectionHandlers({
     }
 
     if (isRuntimePreview) {
-      const markerId = runtimeRef.current?.pickChartMarkerAtCanvasPoint(
+      const markerHit = runtimeRef.current?.pickChartMarkerClickAtCanvasPoint(
         selectionClick.clientX, selectionClick.clientY, event.currentTarget,
       );
-      if (markerId && handleChartMarkerClick(markerId)) return;
+      if (markerHit && handleChartMarkerClick(markerHit.entityId, markerHit.allowSceneSwitch)) return;
     }
     const previewModelHit = isRuntimePreview
       ? runtimeRef.current?.pickRuntimeModelHitAtCanvasPoint(

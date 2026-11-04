@@ -650,6 +650,11 @@ interface Window {
     getRecentWorkspaces: () => Promise<RecentWorkspacesResult>;
     fetchEffectData?: (request: import('../electron/shared/effectDataContract').EffectDataRequest) => Promise<unknown>;
     cancelEffectData?: (requestId: string) => Promise<boolean>;
+    getHistoryProjectContext?: () => Promise<import('../electron/shared/historyServiceContract').HistoryProjectContext | null>;
+    invokeHistoryService?: (request: import('../electron/shared/historyServiceContract').HistoryServiceRequest) => Promise<import('../electron/shared/historyServiceContract').HistoryServiceResult>;
+    cancelHistoryService?: (requestId: string) => Promise<boolean>;
+    getHistoryAccessStatus?: (projectId: string) => Promise<import('../electron/shared/historyServiceContract').HistoryAccessStatus>;
+    updateHistoryAccess?: (request: import('../electron/shared/historyServiceContract').HistoryAccessUpdate) => Promise<import('../electron/shared/historyServiceContract').HistoryAccessStatus>;
     getDataPlatformConfig: () => Promise<DataPlatformConfig>;
     saveDataPlatformConfig: (request: SaveDataPlatformConfigRequest) => Promise<DataPlatformConfig>;
     selectDataPlatformWorkspace: () => Promise<DataPlatformWorkspaceSelectionResult>;

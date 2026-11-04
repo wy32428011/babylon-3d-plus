@@ -75,11 +75,11 @@ function LightingBakeManagerTaskToolsPage({ preflight, currentSignature, costs, 
     <section className="lighting-manager-card" aria-labelledby="lighting-cost-title">
       <h3 id="lighting-cost-title">实时阴影成本</h3>
       {costs ? <>
-        <dl className="lighting-manager-resource-summary"><div><dt>阴影图估算</dt><dd>{formatLightingBytes(costs.shadowMapBytes)}</dd></div><div><dt>静态缓存估算</dt><dd>{formatLightingBytes(costs.cacheBytes)}</dd></div>
-          <div><dt>静态 / 动态绘制累计</dt><dd>{costs.staticRenders} / {costs.dynamicRenders}</dd></div><div><dt>缓存命中累计</dt><dd>{costs.cacheHits}</dd></div></dl>
-        <div className="lighting-manager-asset-scroll"><table className="lighting-manager-table"><thead><tr><th>光源</th><th>阴影结构</th><th>阴影图</th><th>静态缓存</th></tr></thead>
-          <tbody>{costs.lights.map(light => <tr key={light.lightId}><td>{light.name}</td><td>{light.type === 'point' ? '点光源 · ' + light.cubeFaces + ' 面' : light.type === 'directional' ? '方向光 · ' + light.cascades + ' 级联' : '聚光灯'} · {light.mapWidth} × {light.mapHeight}</td><td>{formatLightingBytes(light.shadowMapBytes)}</td><td>{formatLightingBytes(light.cacheBytes)}</td></tr>)}</tbody></table></div>
-        <p className="lighting-manager-note">按当前纹理形状估算，不等于驱动实际分配显存。绘制与命中是运行累计值，不代表 FPS。</p>
+        <dl className="lighting-manager-resource-summary"><div><dt>阴影图估算</dt><dd>{formatLightingBytes(costs.shadowMapBytes)}</dd></div><div><dt>额外缓存估算</dt><dd>{formatLightingBytes(costs.cacheBytes)}</dd></div>
+          <div><dt>原生阴影图绘制累计</dt><dd>{costs.nativeMapRenders}</dd></div><div><dt>静态 / 动态投射提交</dt><dd>{costs.staticRenders} / {costs.dynamicRenders}</dd></div><div><dt>整图缓存命中累计</dt><dd>{costs.cacheHits}</dd></div></dl>
+        <div className="lighting-manager-asset-scroll"><table className="lighting-manager-table"><thead><tr><th>光源</th><th>阴影结构</th><th>刷新策略</th><th>阴影图</th><th>额外缓存</th></tr></thead>
+          <tbody>{costs.lights.map(light => <tr key={light.lightId}><td>{light.name}</td><td>{light.type === 'point' ? '点光源 · ' + light.cubeFaces + ' 面' : light.type === 'directional' ? (light.cascades > 1 ? '方向光 · ' + light.cascades + ' 级联' : '方向光 · 单图') : '聚光灯'} · {light.mapWidth} × {light.mapHeight}</td><td title={light.refreshReason ?? undefined}>{light.refreshPolicy === 'render-once' ? '原生整图缓存' : '原生每帧刷新'}</td><td>{formatLightingBytes(light.shadowMapBytes)}</td><td>{formatLightingBytes(light.cacheBytes)}</td></tr>)}</tbody></table></div>
+        <p className="lighting-manager-note">原生缓存复用阴影图本身，不另建深度缓存纹理；含动态投射物或使用级联阴影时整图实时更新。纹理数值为形状估算，不等于驱动实际显存；绘制与命中是运行累计值，不代表 FPS。</p>
         {costs.samplerDiagnostics.map(issue => <p key={issue.materialId} className="lighting-manager-warning">{issue.materialName}：纹理采样器 {issue.requiredSamplers} / {issue.limit}，{issue.severity === 'over-limit' ? '已超出设备上限' : '接近设备上限'}。涉及 {issue.meshNames.slice(0, 3).join('、')}{issue.meshNames.length > 3 ? ' 等' + issue.meshNames.length + ' 个网格' : ''}。</p>)}
       </> : <p className="lighting-manager-note">场景渲染就绪后显示当前运行时统计。</p>}
     </section>

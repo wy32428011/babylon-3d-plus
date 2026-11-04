@@ -1,9 +1,18 @@
 import type { Entity } from '../model/Entity';
 import type { ChartMarkerClickAction, ChartMarkerClickEvent } from '../model/components';
-import { getChartMarkerClickEvents, CHART_MARKER_MAX_CLICK_EVENTS as MAX_EVENTS, CHART_MARKER_MAX_CLICK_ACTIONS as MAX_ACTIONS } from '../model/chartMarker';
+import { getChartMarkerClickEvents, parseChartMarkerSceneUrl, CHART_MARKER_SCENE_URL_MAX_LENGTH, CHART_MARKER_MAX_CLICK_EVENTS as MAX_EVENTS, CHART_MARKER_MAX_CLICK_ACTIONS as MAX_ACTIONS } from '../model/chartMarker';
 import { useEditorStore } from '../store/editorStore';
 import { SearchableSelect } from '../ui/SearchableSelect';
 import { ChartMarkerThemeScreenSlot } from './ChartMarkerThemeScreenSlot';
+
+const actionOptions = <>
+  <option value="none">无</option>
+  <option value="focus">对象聚焦</option>
+  <option value="theme">主题展示</option>
+  <option value="select">选中物体</option>
+  <option value="refresh">刷新内容</option>
+  <option value="scene-switch">场景切换</option>
+</>;
 
 export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entity; disabled: boolean }) {
   const entities = useEditorStore((state) => state.scene.entities);
@@ -24,6 +33,23 @@ export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entit
     updateActions(eventIndex, events[eventIndex].actions.map((action, index) => index === actionIndex ? next : action));
   }
 
+  function changeActionType(eventIndex: number, actionIndex: number | null, type: string): void {
+    const actions = events[eventIndex].actions;
+    if (type === 'none') {
+      if (actionIndex !== null) updateActions(eventIndex, actions.filter((_, index) => index !== actionIndex));
+      return;
+    }
+    const current = actionIndex === null ? undefined : actions[actionIndex];
+    let next: ChartMarkerClickAction;
+    if (type === 'theme' || type === 'refresh') next = { type };
+    else if (type === 'scene-switch') next = { type, url: '', target: 'same-window' };
+    else if (type === 'focus' || type === 'select') {
+      next = { type, targetEntityId: current?.type === 'focus' || current?.type === 'select' ? current.targetEntityId : entity.id };
+    } else return;
+    if (actionIndex === null) updateActions(eventIndex, [...actions, next]);
+    else updateAction(eventIndex, actionIndex, next);
+  }
+
   return (
     <fieldset className="transform-fieldset chart-marker-fieldset chart-marker-events" disabled={disabled}>
       <legend>点击事件</legend>
@@ -42,7 +68,14 @@ export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entit
             </select>
           </label>
           <div className="chart-marker-list-heading">动作</div>
-          {event.actions.length === 0 ? <p className="muted">暂无动作。</p> : null}
+          {event.actions.length === 0 ? (
+            <label className="inspector-row">
+              <span>动作类型</span>
+              <select aria-label={'点击事件 ' + (eventIndex + 1) + ' 动作类型'} value="none" onChange={(change) => changeActionType(eventIndex, null, change.target.value)}>
+                {actionOptions}
+              </select>
+            </label>
+          ) : null}
           {event.actions.map((action, actionIndex) => {
             const label = '点击事件 ' + (eventIndex + 1) + ' 动作 ' + (actionIndex + 1);
             const missingTarget = (action.type === 'focus' || action.type === 'select') && action.targetEntityId !== '' && !targetIds.has(action.targetEntityId);
@@ -54,24 +87,27 @@ export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entit
                 </div>
                 <label className="inspector-row">
                   <span>动作类型</span>
-                  <select aria-label={label + ' 类型'} value={action.type} onChange={(change) => {
-                    const type = change.target.value as ChartMarkerClickAction['type'];
-                    if (type === 'theme' || type === 'refresh') {
-                      updateAction(eventIndex, actionIndex, { type });
-                    } else {
-                      updateAction(eventIndex, actionIndex, {
-                        type,
-                        targetEntityId: action.type === 'focus' || action.type === 'select' ? action.targetEntityId : entity.id,
-                      });
-                    }
-                  }}>
-                    <option value="focus">对象聚焦</option>
-                    <option value="theme">主题展示</option>
-                    <option value="select">选中物体</option>
-                    <option value="refresh">刷新内容</option>
+                  <select aria-label={label + ' 类型'} value={action.type} onChange={(change) => changeActionType(eventIndex, actionIndex, change.target.value)}>
+                    {actionOptions}
                   </select>
                 </label>
-                {action.type === 'theme' ? (
+                {action.type === 'scene-switch' ? (
+                  <>
+                    <label className="inspector-row chart-marker-scene-url">
+                      <span>场景发布地址</span>
+                      <input type="url" aria-label={label + ' 场景发布地址'} value={action.url} maxLength={CHART_MARKER_SCENE_URL_MAX_LENGTH}
+                        placeholder="https://..." onChange={(change) => updateAction(eventIndex, actionIndex, { ...action, url: change.target.value })} />
+                    </label>
+                    {!action.url.trim() ? <p className="muted">请输入完整的场景发布地址。</p> : !parseChartMarkerSceneUrl(action.url) ? <p className="chart-marker-error">请输入不含账号密码的完整 HTTP(S) 地址。</p> : null}
+                    <label className="inspector-row">
+                      <span>切换方式</span>
+                      <select aria-label={label + ' 切换方式'} value={action.target} onChange={(change) => updateAction(eventIndex, actionIndex, { ...action, target: change.target.value === 'new-window' ? 'new-window' : 'same-window' })}>
+                        <option value="same-window">本窗口</option>
+                        <option value="new-window">新窗口</option>
+                      </select>
+                    </label>
+                  </>
+                ) : action.type === 'theme' ? (
                   <ChartMarkerThemeScreenSlot key={entity.id} label={label} disabled={disabled} screen={action.screen}
                     onChange={(screen) => updateAction(eventIndex, actionIndex, screen ? { type: 'theme', screen } : { type: 'theme' })} />
                 ) : action.type === 'focus' || action.type === 'select' ? (
@@ -102,10 +138,10 @@ export function ChartMarkerEventsInspector({ entity, disabled }: { entity: Entit
         </div>
       ))}
       <div className="chart-marker-actions">
-        <button type="button" aria-label="添加点击事件" disabled={events.length >= MAX_EVENTS} onClick={() => commit([...events, { type: 'left-click', actions: [{ type: 'focus', targetEntityId: entity.id }] }])}>+ 添加事件</button>
+        <button type="button" aria-label="添加点击事件" disabled={events.length >= MAX_EVENTS} onClick={() => commit([...events, { type: 'left-click', actions: [] }])}>+ 添加事件</button>
         {events.length >= MAX_EVENTS ? <span className="muted">最多 {MAX_EVENTS} 个事件</span> : null}
       </div>
-      <p className="muted">运行预览或 Viewer 中，左键点击内置面板或“执行事件”按钮，按列表顺序执行动作。</p>
+      <p className="muted">运行预览或 Viewer 中点击立标触发动作；网页和视频内容保持独立交互，环形网页或视频从上下边缘触发场景切换。</p>
     </fieldset>
   );
 }

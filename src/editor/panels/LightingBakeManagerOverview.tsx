@@ -94,13 +94,13 @@ export function LightingBakeManagerOverview(props: LightingBakeManagerOverviewPr
         <p className="lighting-manager-note">全场景自动阴影统一管理有效模型和部件的投射与接收，保留原规则和例外；切回后恢复原策略。选择自动模式时会启用阴影和动态更新，此后仍可单独调整；阴影还需要有效光源。</p>
         <LightingManagerToggle label="启用阴影" checked={shadows.enabled} disabled={disabled} onChange={setShadowsEnabled} />
         <p className="lighting-manager-note">GLB 标准环境使用统一主光时，开启阴影会同时启用主光；主光强度为 0 时恢复默认强度。阴影需要有效光源及物体投射、接收设置。</p>
-        <LightingManagerToggle label="静态阴影缓存" description="固定遮挡重复使用，动态设备保持更新" checked={bake.cacheStaticShadows}
+        <LightingManagerToggle label="静态阴影缓存" description="仅稳定静态投射复用原生整图；动态投射或级联阴影实时更新" checked={bake.cacheStaticShadows}
           disabled={disabled || !shadows.enabled} onChange={cacheStaticShadows => onBakeChange({ cacheStaticShadows })} />
         <LightingManagerToggle label="动态阴影更新" description="运动部件继续产生实时遮挡" checked={bake.dynamicShadows}
           disabled={disabled || !shadows.enabled} onChange={dynamicShadows => onBakeChange({ dynamicShadows })} />
         <LightingManagerToggle label="间接光烘焙" description="静态间接光与环境漫反射写入独立资产" checked={bake.enabled}
           disabled={disabled} onChange={enabled => onBakeChange({ enabled })} />
-        <p className="lighting-manager-note with-icon"><LightingManagerIcon name="check" size={16} />直射光、高光与反射保持实时</p>
+        <p className="lighting-manager-note with-icon"><LightingManagerIcon name="check" size={16} />光源与阴影使用 Babylon 原生实现；直射光、高光与反射保持实时</p>
       </section>
       <section className="lighting-manager-card" aria-labelledby="lighting-overview-bake-title">
         <h3 id="lighting-overview-bake-title">烘焙参数</h3>
