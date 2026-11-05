@@ -20,6 +20,12 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
   const [snapshot, setSnapshot] = useState<ManualRoamSnapshot>(createInitialManualRoamSnapshot);
   const [error, setError] = useState<string | null>(null);
   const [action, setAction] = useState('站立');
+  const sequenceRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  function cancelSequence(): void {
+    sequenceRef.current.forEach(clearTimeout);
+    sequenceRef.current = [];
+  }
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -34,6 +40,9 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
     let runtime: ManualRoamRuntime | undefined, unsubscribe: (() => void) | undefined;
     let resize: ResizeObserver | undefined;
     let disposed = false;
+    setError(null);
+    setAction('站立');
+    setSnapshot(createInitialManualRoamSnapshot());
     try {
       engine = new Engine(canvas, true, { stencil: true });
       engine.setHardwareScalingLevel(Math.max(1, window.devicePixelRatio / 1.5));
@@ -60,6 +69,12 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
       runtime = new ManualRoamRuntime({ scene, engine, camera, canvas, avatarUrl: sourceUrl,
         resolveSpawnPose: () => ({ position: { x: 0, y: 0, z: 0 }, yaw: 0 }),
         setOrbitControlsEnabled: enabled => enabled ? camera.attachControl(canvas, true) : camera.detachControl(),
+        onManualInput: () => {
+          cancelSequence();
+          runtime?.setVirtualMovement(0, 0);
+          runtime?.setTouchAction('sprint', false);
+          setAction('手动控制');
+        },
       });
       runtimeRef.current = runtime;
       // 预览以全身为构图中心，保留正式漫游的动作、重力和碰撞参数。
@@ -83,6 +98,7 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
     }
     return () => {
       disposed = true;
+      cancelSequence();
       runtimeRef.current = null;
       resize?.disconnect();
       unsubscribe?.();
@@ -94,12 +110,24 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
   }, [sourceUrl]);
 
   function preview(next: string): void {
+    cancelSequence();
     const runtime = runtimeRef.current;
     if (!runtime) return;
     runtime.setVirtualMovement(0, 0);
     runtime.setTouchAction('sprint', false);
     runtime.setLocomotionMode(next === '飞行' ? 'fly' : 'ground');
     if (next === '行走' || next === '跑步') runtime.setVirtualMovement(0, 1);
+    if (next === '后退') runtime.setVirtualMovement(0, -1);
+    if (next === '向左移动') runtime.setVirtualMovement(-1, 0);
+    if (next === '向右移动') runtime.setVirtualMovement(1, 0);
+    if (next === '走跑停衔接') {
+      runtime.setVirtualMovement(0, 1);
+      sequenceRef.current = [
+        setTimeout(() => { runtime.setTouchAction('sprint', true); }, 1600),
+        setTimeout(() => { runtime.setTouchAction('sprint', false); }, 3200),
+        setTimeout(() => { runtime.setVirtualMovement(0, 0); setAction('站立'); sequenceRef.current = []; }, 4800),
+      ];
+    }
     if (next === '跑步') runtime.setTouchAction('sprint', true);
     if (next === '跳跃') { runtime.setTouchAction('jump', true); runtime.setTouchAction('jump', false); }
     if (next === '返回起点') runtime.reset();
@@ -125,13 +153,13 @@ export function ManualRoamAvatarPreviewDialog({ name, sourceUrl, onClose, onAppl
         <button type="button" onClick={onClose} aria-label="关闭人物预览">关闭</button></header>
       <canvas ref={canvasRef} tabIndex={0} aria-label="人物动作预览画面" />
       <div className="manual-roam-avatar-preview-actions" aria-label="预览动作">
-        {['站立', '行走', '跑步', '跳跃', '飞行', '返回起点'].map(value => <button type="button" key={value}
+        {['站立', '行走', '跑步', '后退', '向左移动', '向右移动', '走跑停衔接', '跳跃', '飞行', '返回起点'].map(value => <button type="button" key={value}
           disabled={loading || failed} aria-pressed={value === action} onClick={() => preview(value)}>{value}</button>)}
       </div>
       <div className="manual-roam-avatar-preview-status" role="status">
         <strong>{label}</strong><span>{error ?? snapshot.statusMessage ?? '可查看不同动作，确认人物外观与关节活动。'}</span>
       </div>
-      <footer><p>右键拖动查看转身；WASD 移动、Shift 跑步、Space 跳跃，飞行时 Q/E 升降。</p>
+      <footer><p>右键拖动查看转身；WASD 移动、Shift 跑步、Space 跳跃，飞行时 Q/E 降低/升高。默认人物随行进方向转身。</p>
         {onApply ? <button type="button" disabled={loading || failed} onClick={onApply}>应用此人物</button> : null}</footer>
     </dialog>
   );

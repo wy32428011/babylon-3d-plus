@@ -476,6 +476,13 @@
         "attribution": "BabylonJS Assets contributors",
         "clip": "run",
         "derivation": "rest-pose-retarget-in-place-reduced-wrist-motion"
+      },
+      "armPose": {
+        "retentionFromNeutral": {
+          "Arm": 0.55,
+          "ForeArm": 0.8
+        },
+        "wristRetention": 0.2
       }
     },
     "RunBackward": {
@@ -557,6 +564,13 @@
           "clip": "run"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
+      },
+      "armPose": {
+        "retentionFromNeutral": {
+          "Arm": 0.55,
+          "ForeArm": 0.8
+        },
+        "wristRetention": 0.2
       }
     },
     "RunLeft": {
@@ -640,6 +654,13 @@
           "clip": "run"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
+      },
+      "armPose": {
+        "retentionFromNeutral": {
+          "Arm": 0.55,
+          "ForeArm": 0.8
+        },
+        "wristRetention": 0.2
       }
     },
     "RunRight": {
@@ -723,6 +744,13 @@
           "clip": "run"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
+      },
+      "armPose": {
+        "retentionFromNeutral": {
+          "Arm": 0.55,
+          "ForeArm": 0.8
+        },
+        "wristRetention": 0.2
       }
     },
     "JumpStart": {
@@ -993,7 +1021,7 @@
     },
     "animation": {
       "path": "manual-roam/locomotion-v2.glb",
-      "sha256": "e5c4f1e562cfeda22518c8abb706bc10e85e5b1a57c97d9dc4a73445f580f09a"
+      "sha256": "7c5568dec8e50a8d4efceb3acd235fdc88801d1f3177a3a34fd6fc15a2b32822"
     }
   },
   "sources": [

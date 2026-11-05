@@ -12,6 +12,7 @@ export type ManualRoamAnimationFrame = {
   fly: boolean;
   sprint: boolean;
   walkSpeed: number;
+  runSpeed?: number;
   worldScale: number;
   turn?: { clip: typeof MANUAL_ROAM_TURN_CLIPS[number]; progress: number; weight: number };
 };
@@ -58,20 +59,41 @@ export function stepManualRoamAnimationState(previous: ManualRoamAnimationState,
     const forward = velocityX * Math.sin(yaw) + velocityZ * Math.cos(yaw);
     const right = velocityX * Math.cos(yaw) - velocityZ * Math.sin(yaw);
     const total = Math.abs(forward) + Math.abs(right);
-    const run = frame.sprint && speed > Math.max(0.1, finite(frame.walkSpeed)) * 1.1;
-    const prefix = run ? 'Run' : 'Walk';
-    if (Math.abs(forward) > 1e-6) weights[`${prefix}${forward > 0 ? 'Forward' : 'Backward'}`] = Math.abs(forward) / total;
-    if (Math.abs(right) > 1e-6) weights[`${prefix}${right > 0 ? 'Right' : 'Left'}`] = Math.abs(right) / total;
-    const scale = Math.max(0.01, finite(frame.worldScale, 1));
-    const fallback = run ? timing.runSpeed * timing.runDuration : timing.walkSpeed * timing.walkDuration;
-    const reference = Object.entries(weights).reduce((sum,[clip,weight])=>sum+(weight??0)*(timing.clipCycleDistances?.[clip as ManualRoamClip]??fallback),0);
-    gaitFrequency=speed/scale/Math.max(.01,reference);
-    if(timing.enableStrideWarp)strideTarget=Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,gaitFrequency*(run?timing.runDuration:timing.walkDuration)));
+    const walkSpeed = Math.max(0.1, finite(frame.walkSpeed, timing.walkSpeed));
+    const runSpeed = Math.max(walkSpeed * 1.1, finite(frame.runSpeed ?? walkSpeed * 2, walkSpeed * 2));
+    const blend = frame.sprint ? Math.max(0, Math.min(1, (speed - walkSpeed) / (runSpeed - walkSpeed))) : 0;
+    const run = blend * blend * (3 - 2 * blend);
+    for (const [prefix, amount] of [['Walk', 1 - run], ['Run', run]] as const) {
+      if (amount <= 0) continue;
+      if (Math.abs(forward) > 1e-6) weights[`${prefix}${forward > 0 ? 'Forward' : 'Backward'}`] = amount * Math.abs(forward) / total;
+      if (Math.abs(right) > 1e-6) weights[`${prefix}${right > 0 ? 'Right' : 'Left'}`] = amount * Math.abs(right) / total;
+    }
+    gaitFrequency = resolveManualRoamGaitFrequency(frame, timing, weights);
+    if(timing.enableStrideWarp)strideTarget=Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,gaitFrequency*(timing.walkDuration*(1-run)+timing.runDuration*run)));
   }
   const strideScale=timing.enableStrideWarp?smoothStride(Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,finite(previous.strideScale,1))),strideTarget,delta):1;
   // 本帧足部目标使用同一strideScale；世界距离=相位增量×标定周期距离×步幅×人物缩放。
   phase=(phase+delta*Math.min(4,gaitFrequency/strideScale))%1;
   return { kind, elapsed, phase, strideScale, grounded: frame.grounded, flying: frame.fly, weights };
+}
+
+/** 混合期间按实际显示的走跑步长推进同一相位，而不是提前切到目标动作步频。 */
+export function resolveManualRoamGaitFrequency(
+  frame: ManualRoamAnimationFrame,
+  timing: ManualRoamGaitTiming,
+  weights: Partial<Record<ManualRoamClip, number>>,
+): number {
+  const speed = Math.hypot(finite(frame.velocityX), finite(frame.velocityZ));
+  if (!frame.grounded || frame.fly || speed <= 0.03) return 0;
+  let distance = 0, total = 0;
+  for (const [name, weight] of Object.entries(weights)) {
+    if (!(weight && weight > 0) || !(name.startsWith('Walk') || name.startsWith('Run'))) continue;
+    const fallback = name.startsWith('Run') ? timing.runSpeed * timing.runDuration : timing.walkSpeed * timing.walkDuration;
+    distance += weight * Math.max(0.01, finite(timing.clipCycleDistances?.[name as ManualRoamClip] ?? fallback, fallback));
+    total += weight;
+  }
+  if (total <= 1e-6) return 0;
+  return speed / Math.max(0.01, finite(frame.worldScale, 1)) / (distance / total);
 }
 
 /** 对恒定目标精确积分限速一阶响应，避免30/60/120FPS得到不同步幅。 */

@@ -16,6 +16,7 @@ import { Scene } from '@babylonjs/core/scene.js';
 import type { AnimationGroup, Nullable, Observer } from '@babylonjs/core';
 import { resolveDefaultManualRoamAvatarUrl, resolveManualRoamMotionUrls } from '../assets/manualRoamAvatarAsset';
 import { ManualRoamAvatarAnimator } from './ManualRoamAvatarAnimator';
+import { ManualRoamEmbeddedAnimator } from './ManualRoamEmbeddedAnimator';
 import { getManualRoamRigProfile, MANUAL_ROAM_RIG_PROFILE_V2 } from './manualRoamAvatarRig';
 import { ManualRoamFootIK } from './ManualRoamFootIK';
 import { createManualRoamTurnState, stepManualRoamTurnState } from './manualRoamTurnState';
@@ -195,8 +196,7 @@ export class ManualRoamRuntime {
   private readonly frameVelocity = Vector3.Zero();
   private frameJumped = false;
   private motionResetThisFrame = false;
-  private currentAnimation: AnimationGroup | null = null;
-  private pausedAvatarAnimation: AnimationGroup | null = null;
+  private embeddedAnimator: ManualRoamEmbeddedAnimator | null = null;
   private animationGroups: AnimationGroup[] = [];
   private proceduralGaitState: ProceduralGaitState = createInitialProceduralGaitState();
   private proceduralAnimator: ProceduralAvatarMorphAnimator | null = null;
@@ -319,8 +319,7 @@ export class ManualRoamRuntime {
       this.options.setOrbitControlsEnabled(false);
       this.collider.setEnabled(true);
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
-      if (this.pausedAvatarAnimation === this.currentAnimation) this.pausedAvatarAnimation?.restart();
-      this.pausedAvatarAnimation = null;
+      this.embeddedAnimator?.resume();
       this.skeletalAnimator?.sampleIdle();
       this.skeletalAnimator?.resume();
       this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
@@ -338,11 +337,7 @@ export class ManualRoamRuntime {
     this.facingRoot.setEnabled(false);
     this.skeletalAnimator?.pause();
     this.footIK?.reset();
-    // 只暂停本控制器正在播放的片段；重进恢复同一实例，不重置进度或重启已结束的跳跃。
-    if (this.currentAnimation?.isPlaying) {
-      this.currentAnimation.pause();
-      this.pausedAvatarAnimation = this.currentAnimation;
-    }
+    this.embeddedAnimator?.pause();
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
     this.localTriangleCollider.deactivate();
@@ -441,6 +436,7 @@ export class ManualRoamRuntime {
 
   reset(): void {
     this.skeletalAnimator?.sampleIdle();
+    this.embeddedAnimator?.reset();
     this.frameVelocity.setAll(0);
     this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
     this.applyAvatarFacing(this.avatarBaseYaw);
@@ -474,6 +470,7 @@ export class ManualRoamRuntime {
     this.options.scene.onNewMeshAddedObservable.remove(this.meshAddedObserver);
     if (this.collisionMeshDefaults.size > 0) this.deactivateCollisionWorld();
     this.stopCurrentAnimation();
+    this.embeddedAnimator = null;
     this.skeletalAnimator?.dispose();
     this.skeletalAnimator = null;
     this.footIK?.dispose(); this.footIK = null;
@@ -625,6 +622,7 @@ export class ManualRoamRuntime {
     this.avatarStrideAbort?.abort();
     this.avatarStrideAbort = null;
     this.stopCurrentAnimation();
+    this.embeddedAnimator = null;
     this.skeletalAnimator?.dispose();
     this.skeletalAnimator = null;
     this.footIK?.dispose(); this.footIK = null;
@@ -723,6 +721,12 @@ export class ManualRoamRuntime {
       this.skeletalAnimator?.sampleIdle();
       if (!this.snapshot.enabled) this.skeletalAnimator?.pause();
       this.animationGroups = shared ? [] : [...container.animationGroups];
+      if (this.animationGroups.length) {
+        this.embeddedAnimator = new ManualRoamEmbeddedAnimator(this.animationGroups);
+        notices.push(...this.embeddedAnimator.getWarnings());
+        this.embeddedAnimator.reset();
+        if (!this.snapshot.enabled) this.embeddedAnimator.pause();
+      }
       if (!shared && isDefaultAvatar && this.animationGroups.length === 0) {
         const abort = new AbortController();
         this.avatarStrideAbort = abort;
@@ -1076,7 +1080,7 @@ export class ManualRoamRuntime {
         verticalVelocity: this.snapshot.locomotionMode === 'fly' ? this.frameVelocity.y : this.kinematicState.verticalVelocity,
         grounded: this.kinematicState.grounded, jumped: this.frameJumped,
         fly: this.snapshot.locomotionMode === 'fly', sprint: input.sprint,
-        walkSpeed: this.snapshot.config.walkSpeed, worldScale: this.avatarVisualRoot.scaling.y,
+        walkSpeed: this.snapshot.config.walkSpeed, runSpeed: this.snapshot.config.runSpeed, worldScale: this.avatarVisualRoot.scaling.y,
         turn:this.turnState.turnClip?{clip:this.turnState.turnClip,progress:this.turnState.turnProgress,weight:this.turnState.turnWeight}:undefined,
       });
       return;
@@ -1086,9 +1090,14 @@ export class ManualRoamRuntime {
     const referenceSpeed = input.sprint ? this.snapshot.config.runSpeed : this.snapshot.config.walkSpeed;
     const horizontalAmount = Math.min(1, horizontalSpeed / referenceSpeed);
     const airborne = this.snapshot.locomotionMode === 'ground' && !this.kinematicState.grounded;
-    const animationName = airborne ? 'jump' : horizontalSpeed > 0.03 ? input.sprint ? 'run' : 'walk' : 'idle';
-    if (this.animationGroups.length > 0) {
-      this.playEmbeddedAnimation(animationName, horizontalSpeed);
+    if (this.embeddedAnimator) {
+      this.embeddedAnimator.update({
+        deltaSeconds, velocityX: this.frameVelocity.x, velocityZ: this.frameVelocity.z,
+        yaw: this.kinematicState.yaw, verticalVelocity: this.snapshot.locomotionMode === 'fly' ? this.frameVelocity.y : this.kinematicState.verticalVelocity,
+        grounded: this.kinematicState.grounded, jumped: this.frameJumped,
+        fly: this.snapshot.locomotionMode === 'fly', sprint: input.sprint,
+        walkSpeed: this.snapshot.config.walkSpeed, runSpeed: this.snapshot.config.runSpeed, worldScale: 1,
+      });
       return;
     }
     this.stopCurrentAnimation();
@@ -1116,34 +1125,8 @@ export class ManualRoamRuntime {
       turning:Math.hypot(this.frameVelocity.x,this.frameVelocity.z)>.03&&Math.abs(this.turnState.deltaYaw)>.08});
   }
 
-  /** 按当前水平速度缩放内置走/跑片段，避免滑步或原地碎步。 */
-  private playEmbeddedAnimation(
-    kind: 'idle' | 'walk' | 'run' | 'jump',
-    horizontalSpeed: number,
-  ): void {
-    const patterns: Record<typeof kind, RegExp[]> = {
-      idle: [/idle/i, /stand/i],
-      walk: [/walk/i, /move/i],
-      run: [/run/i, /sprint/i, /walk/i],
-      jump: [/jump/i, /fall/i, /walk/i],
-    };
-    const next = patterns[kind]
-      .map((pattern) => this.animationGroups.find((group) => pattern.test(group.name)))
-      .find((group): group is AnimationGroup => Boolean(group))
-      ?? this.animationGroups[0]
-      ?? null;
-    if (!next) return;
-    next.speedRatio = resolveEmbeddedAnimationSpeedRatio(kind, horizontalSpeed, this.snapshot.config);
-    if (next === this.currentAnimation) return;
-    this.stopCurrentAnimation();
-    next.play(kind !== 'jump');
-    this.currentAnimation = next;
-  }
-
   private stopCurrentAnimation(): void {
-    this.currentAnimation?.stop();
-    this.currentAnimation = null;
-    this.pausedAvatarAnimation = null;
+    this.embeddedAnimator?.stop();
   }
 
   private updateResetTransition(): void {
@@ -1165,6 +1148,7 @@ export class ManualRoamRuntime {
   private finishResetImmediately(): void {
     this.motionResetThisFrame = true;
     this.skeletalAnimator?.sampleIdle();
+    this.embeddedAnimator?.reset();
     this.footIK?.reset();
     this.resetTransition = null;
     this.collider.position.copyFrom(this.spawnPosition);
@@ -1507,19 +1491,6 @@ function collectBoundsRelativeToNode(
     }
   }
   return minimum && maximum ? { minimum, maximum } : null;
-}
-
-/** 按当前水平速度相对走/跑参考速度缩放内置片段播放倍率。 */
-function resolveEmbeddedAnimationSpeedRatio(
-  kind: 'idle' | 'walk' | 'run' | 'jump',
-  horizontalSpeed: number,
-  config: ManualRoamConfig,
-): number {
-  if (kind === 'idle' || kind === 'jump') return 1;
-  const referenceSpeed = kind === 'run' ? config.runSpeed : config.walkSpeed;
-  if (!(referenceSpeed > 1e-8)) return 1;
-  const ratio = Math.max(0, horizontalSpeed) / referenceSpeed;
-  return Math.max(0.01, ratio);
 }
 
 function vectorToRoam(vector: Vector3): { x: number; y: number; z: number } {

@@ -2,6 +2,16 @@
 
 当前默认使用 v2：`EQ_People_rigged_v2.glb` 与 `locomotion-v2.glb`。原始人物、v1 人物与动作包保留，已有 v1 自定义人物继续匹配 v1 动作，新默认人物和 v2 人物使用 v2 动作。
 
+## 动作衔接与替换预览
+
+- 走跑权重按碰撞后的实际速度连续变化；切换时共享同一支撑相位，并按**当前混合权重**对应的标定步长推进步频，不提前跳到目标动作的步频。停止后不继续推进步态相位；碰撞体仍由原有输入和碰撞控制，不额外添加滑行惯性。
+- 普通人物自动适配失败时，自带动作使用独立的加权播放器，地面动作在 0.18 秒内过渡，空中状态在 0.10 秒内过渡。识别 `Idle/Stand`、`Walk/Move`、`Run/Sprint/Jog`、`Jump/Fall/Land`、`Fly/Hover` 及常见中文名称；有 Back/Left/Right 的走跑片段按实际方向选择。缺跑步可沿用步行动作，缺空中动作可回退待机，不再随机播放第一个动画。未识别或缺少基础动作会明确提示。
+- 自带走跑片段应为 **in-place（无水平根位移）**，并以同一支撑脚相位制作；其步速以场景配置为参考。任意外部片段没有共享动作包的步长、脚部接触标定，不能保证精确锁脚，也不支持任意骨架间直接复用动画。
+- 上传、从项目列表选择和切回默认人物均先进入预览，点击“应用此人物”才更新场景；关闭预览不替换原人物。新增后退、左右移动和“走跑停衔接”（走→跑→走→停）按钮。点击其他动作、手动操作或关闭窗口会取消自动演示。
+- 默认 v2 人物仍随移动方向转身；方向预览不等于新增面朝设备的横移模式。原有按住 Shift 跑步、碰撞、台阶和坡度规则不变。
+
+设计参考：[Viseni 最小接入示例](https://github.com/crazyramirez/BJS_Character_Controller_V2/blob/main/js/examples/app-minimal.js)、[ssatguru 动作映射与混合](https://github.com/ssatguru/BabylonJS-CharacterController)、[Ergoudan 控制器](https://github.com/armomu/ergoudan)、[Babylon 官方人物制作教程](https://doc.babylonjs.com/features/featuresDeepDive/animation/animatedCharacter/)。沿用项目的 Babylon 控制器和碰撞系统，没有引入新的物理引擎或替换现有动作资产。
+
 ## 普通蒙皮人物自动适配
 
 选中“手动漫游初始位置”，在“漫游人物模型”上传自包含 GLB。上传后打开“人物动作预览”，可直接查看站立、行走、跑步、跳跃、飞行和右键转身；点击“应用此人物”才修改场景，关闭预览保留原人物。已有项目人物可通过“预览人物动作”检查。预览使用正式漫游控制器，关闭时释放独立场景、动画、骨架和输入监听。
@@ -52,7 +62,7 @@ v1 将原有行走姿态的网格先烘焙到 T-Pose，再播放动画，产生�
 
 ## 动作来源与制作
 
-前进 Run 保留 [BabylonJS Assets Xbot](https://github.com/BabylonJS/Assets/blob/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb) 来源，固定指纹和 CC BY 4.0 许可全文位于 sources。Idle 为原创对称放松站姿，采用适度脚距、轻微屈膝与呼吸；跑步手腕保留源变化的20%，减少无指骨人物的折腕表现。 前进 Walk 为原创男性上班步态，见“原创上班步态”一节。
+前进 Run 保留 [BabylonJS Assets Xbot](https://github.com/BabylonJS/Assets/blob/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb) 来源，固定指纹和 CC BY 4.0 许可全文位于 sources。Idle 为原创对称放松站姿，采用适度脚距、轻微屈膝与呼吸；跑步手腕保留源变化的20%，减少无指骨人物的折腕表现。跑步上臂摆动与前臂屈肘分别保留源动作相对待机姿态变化的55%和80%，避免二者统一压到30%后形成垂手跑步；四个跑步方向共用该处理，参数记录在清单 `armPose`。2026-11-05 在 Blender 的同源动作副本按每3帧采样，前跑屈肘由约26°–43°改善为55°–99°，不修改下肢、步长、接触曲线或人物蒙皮。 前进 Walk 为原创男性上班步态，见“原创上班步态”一节。
 
 侧移与后退使用 [KayKit Character Animations Free 1.1 官方包](https://kaylousberg.itch.io/kaykit-character-animations)。作者 Kay Lousberg，随包许可证 CC0-1.0。原始 GLB、LICENSE.txt、官方入口、包及文件摘要保存于 `scripts/manual-roam-assets/sources/kaykit-character-animations-1.1`。
 

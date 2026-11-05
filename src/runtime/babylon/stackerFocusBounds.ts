@@ -81,11 +81,17 @@ export function getStackerFocusWorldBounds(model: ModelRuntimeEntry): RuntimeWor
   if (declaredTypes.length > 0 ? declaredTypes[0] !== 'stacker' : !model.stackerCapable) return null;
 
   const allNodes = [model.root, ...model.root.getChildTransformNodes(false)];
+  // miniload 未声明运动节点，用天轨与同级主体的组合识别，避免将单个货叉误认成整机。
+  const miniloadTracks = allNodes.filter(node => node.name === 'DDJtiangui'
+    && allNodes.some(body => body.name === 'DDJzhuti' && body.parent === node.parent));
   const fixedNames = new Set([
     ...STACKER_FALLBACK_FIXED_NODE_NAMES,
     ...configs.flatMap(config => readStringArrayPath(config, ['fixedNodes'])),
   ]);
-  const fixed = new Set<Node>(allNodes.filter(node => fixedNames.has(node.name)));
+  const fixed = new Set<Node>([
+    ...allNodes.filter(node => fixedNames.has(node.name)),
+    ...miniloadTracks,
+  ]);
 
   for (const config of configs) {
     const travelNames = readStringArrayPath(config, ['motion', 'travel', 'nodes']);
@@ -100,6 +106,15 @@ export function getStackerFocusWorldBounds(model: ModelRuntimeEntry): RuntimeWor
         .flatMap(key => readStringArrayPath(config, ['motion', 'fork', key])),
     ]);
     return mergeBodyMeshes(model, allNodes.filter(node => names.has(node.name)), fixed);
+  }
+
+  if (miniloadTracks.length > 0) {
+    // 与模型脚本的随轨道长度移动规则一致，包含平台、皮带和拨指及其动态后代。
+    const parents = new Set(miniloadTracks.map(node => node.parent));
+    const body = allNodes.filter(node => node !== model.root && parents.has(node.parent)
+      && !fixed.has(node) && !/camera/i.test(node.name));
+    const bounds = mergeBodyMeshes(model, body, fixed);
+    if (bounds) return bounds;
   }
 
   const exactNames = new Set(STACKER_FALLBACK_TRAVEL_NODE_NAMES);

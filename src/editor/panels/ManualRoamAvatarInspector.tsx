@@ -65,11 +65,11 @@ export function ManualRoamAvatarInspector(props: {
         <select aria-label="漫游人物模型" value={avatar?.sourceUrl ?? ''} onChange={(event) => {
           setError(null);
           const asset = candidates.find((item) => item.sourceUrl === event.target.value);
-          if (!event.target.value) setAvatar(props.entityId, null);
-          else if (asset) setAvatar(props.entityId, {
+          if (!event.target.value) setPreview({ avatar: null, pending: true, sessionId: sceneSessionId });
+          else if (asset) setPreview({ avatar: {
             name: asset.displayName || asset.name, sourcePath: asset.path,
             sourceUrl: asset.sourceUrl, assetRevision: asset.assetRevision,
-          });
+          }, pending: true, sessionId: sceneSessionId });
         }}>
           <option value="">默认人物</option>
           {avatar && !candidates.some((asset) => asset.sourceUrl === avatar.sourceUrl)
@@ -81,8 +81,8 @@ export function ManualRoamAvatarInspector(props: {
         {busy ? '正在上传…' : '上传人物模型（GLB）'}
       </button>
       <button type="button" disabled={runtimeMode !== 'edit'} onClick={() => setPreview({ avatar: avatar ?? null, pending: false, sessionId: sceneSessionId })}>预览人物动作</button>
-      <p className="muted">上传内嵌纹理的单文件 GLB。有完整人形骨骼和蒙皮的模型会自动适配漫游动作，无需修改骨骼名称或添加专用数据。</p>
-      <p className="muted">上传后可预览并应用人物。不能适配时会说明原因，保留模型自带动画或静态姿态；无骨骼模型不会自动绑骨。</p>
+      <p className="muted">上传内嵌纹理的单文件 GLB。完整人形骨骼和蒙皮、可识别的 Mixamo / UE / Blender 常见骨名可自动适配漫游动作。</p>
+      <p className="muted">选择或上传后先预览，点击“应用此人物”才替换，关闭保留原人物。不能适配时会说明原因，并尝试识别自带动作；无骨骼模型不会自动绑骨。</p>
       {error ? <p role="alert">{error}</p> : null}
     </fieldset>
     {preview && preview.sessionId === sceneSessionId && runtimeMode === 'edit' ? <LazyEditorDialog

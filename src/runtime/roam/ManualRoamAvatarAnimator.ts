@@ -4,7 +4,7 @@ import { AnimatorAvatar } from '@babylonjs/core/Animations/animatorAvatar.js';
 import '../babylon/babylonGltfLoader.js';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { MANUAL_ROAM_RIG_PROFILE, MANUAL_ROAM_RIG_PROFILE_V2, getManualRoamRigProfile, prepareManualRoamReferencePose, validateManualRoamAvatarRig, validateManualRoamRigNodes, validateManualRoamRestCompatibility } from './manualRoamAvatarRig.ts';
-import { MANUAL_ROAM_CLIPS, MANUAL_ROAM_TURN_CLIPS, createManualRoamAnimationState, stepManualRoamAnimationState, type ManualRoamClip, type ManualRoamAnimationFrame, type ManualRoamGaitTiming } from './manualRoamAnimationState.ts';
+import { MANUAL_ROAM_CLIPS, MANUAL_ROAM_TURN_CLIPS, createManualRoamAnimationState, stepManualRoamAnimationState, resolveManualRoamGaitFrequency, type ManualRoamClip, type ManualRoamAnimationFrame, type ManualRoamGaitTiming } from './manualRoamAnimationState.ts';
 import type { ManualRoamTurnClip } from './manualRoamTurnState.ts';
 import { humanoidLegLength, identifyRuntimeHumanoid, prepareHumanoidReference, retargetHumanoidGroup, sampleHumanoidFootReference, type ManualRoamRigBinding } from './manualRoamHumanoid.ts';
 
@@ -109,7 +109,9 @@ export class ManualRoamAvatarAnimator {
   update(frame: ManualRoamAnimationFrame): void {
     if (this.disposed || this.paused) return;
     const previousKind = this.state.kind;
-    this.state = stepManualRoamAnimationState(this.state, { ...frame, worldScale: frame.worldScale * this.legScale }, this.timing);
+    const previousPhase = this.state.phase;
+    const scaledFrame = { ...frame, worldScale: frame.worldScale * this.legScale };
+    this.state = stepManualRoamAnimationState(this.state, scaledFrame, this.timing);
     if(frame.turn&&this.groups.has(frame.turn.clip)&&frame.grounded&&!frame.fly) {
       const weight=Math.max(0,Math.min(1,frame.turn.weight));
       this.state.weights={Idle:1-weight,[frame.turn.clip]:weight};
@@ -120,6 +122,8 @@ export class ManualRoamAvatarAnimator {
       for(const clip of this.clips)this.weights.set(clip,this.state.weights[clip]??0);
       this.transition=null;
     } else this.updateWeights(delta, previousKind);
+    const frequency = resolveManualRoamGaitFrequency(scaledFrame, this.timing, Object.fromEntries(this.weights));
+    this.state.phase = (previousPhase + delta * Math.min(4, frequency / this.state.strideScale)) % 1;
     for (const clip of this.clips) {
       const group = this.groups.get(clip)!;
       const weight = this.weights.get(clip) ?? 0;
@@ -145,7 +149,7 @@ export class ManualRoamAvatarAnimator {
   private updateWeights(delta: number, previousKind: string): void {
     const desired = this.state.weights;
     const family = this.state.kind === 'ground'
-      ? Object.keys(desired).some(clip=>clip.startsWith('Turn'))?'Turn':desired.Idle ? 'Idle' : Object.keys(desired).some(clip => clip.startsWith('Run')) ? 'Run' : 'Walk'
+      ? Object.keys(desired).some(clip=>clip.startsWith('Turn'))?'Turn':desired.Idle ? 'Idle' : 'Locomotion'
       : this.state.kind;
     const differs = this.clips.some(clip => Math.abs((this.weights.get(clip) ?? 0) - (desired[clip] ?? 0)) > 1e-8);
     if ((!this.transition && differs) || (this.transition && this.transition.family !== family)) {
