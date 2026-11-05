@@ -579,7 +579,7 @@ export class HybridShadowCache {
         }
         const alpha = material.needAlphaTestingForMesh(source) || material.needAlphaBlendingForMesh(source);
         const texture = alpha ? material.getAlphaTestTexture() : null;
-        if (texture && (texture.constructor !== Texture || texture.isRenderTarget || texture.animations.length)) {
+        if (texture && (texture.isRenderTarget || texture.animations.length || texture.constructor !== Texture)) {
           return '透明贴图内容可能逐帧变化，使用原生整图实时刷新。';
         }
       }
