@@ -556,7 +556,7 @@ export class SceneRuntime {
     coordinate: { row: number; column: number; layer: number } | null,
   ): void { return this.selection.setExternalSlotHighlight(entityId, coordinate); }
 
-  beginSingleTransformPreview(entityId: string, before: TransformComponent): boolean { return this.document.beginSingleTransformPreview(entityId, before); }
+  beginSingleTransformPreview(entityId: string, before: TransformComponent, translationOnly = false): boolean { return this.document.beginSingleTransformPreview(entityId, before, translationOnly); }
 
   updateSingleTransformPreview(entityId: string, after: TransformComponent): void { return this.document.updateSingleTransformPreview(entityId, after); }
 

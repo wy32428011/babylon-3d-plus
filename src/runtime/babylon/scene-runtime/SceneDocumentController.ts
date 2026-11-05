@@ -1,4 +1,5 @@
 import { equalPreviewTransform } from '../../../editor/store/transformPreviewStore';
+import { EntityGroupTranslationPreview } from '../EntityGroupTranslationPreview';
 import { collectAlarmIndependentEntityIds } from '../../../editor/model/alarmManager';
 import { collectDigitalTwinEffectTargetIds } from '../../../editor/model/digitalTwinEffect';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
@@ -48,7 +49,8 @@ type Dependencies = {
 
 
 type SingleTransformPreview = { entityId: string; before: TransformComponent; after: TransformComponent | null;
-  sceneId: string; document: SceneDocument; derived: SceneDocument | null; pending: boolean };
+  sceneId: string; document: SceneDocument; derived: SceneDocument | null; pending: boolean; translationOnly: boolean;
+  translation: { session: EntityGroupTranslationPreview; baselinePosition: TransformComponent['position'] } | null };
 
 /** SceneDocumentController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class SceneDocumentController {
@@ -67,7 +69,7 @@ export class SceneDocumentController {
   beginDisposal(): boolean {
     if (this.disposed) return false;
     this.disposed = true;
-    this.singleTransformPreview = null;
+    this.endSingleTransformPreview();
     return true;
   }
 
@@ -79,12 +81,12 @@ export class SceneDocumentController {
     this.singleTransformPreview = null;
   }
 
-  /** 将编辑器文档增量同步到 Babylon 运行时场景，并记录完整同步耗时。 */
-  /** 单体拖拽只保持运行时预览；阵列优先沿受控局部同步链更新，未知变更回退完整同步。 */
-  beginSingleTransformPreview(entityId: string, before: TransformComponent): boolean {
+  /** 单体拖拽保留独立预览；阵列纯平移只改矩阵，其余变换沿原同步路径。 */
+  beginSingleTransformPreview(entityId: string, before: TransformComponent, translationOnly = false): boolean {
     if (this.disposed || this.dependencies.telemetry.telemetryPreviewActive || !this.shadowDocument || !this.dependencies.transforms.getGizmoTargetByEntityId(entityId)) return false;
+    this.cancelSingleTranslationPreview();
     this.singleTransformPreview = { entityId, before, after: null, sceneId: this.shadowDocument.id,
-      document: this.shadowDocument, derived: null, pending: false };
+      document: this.shadowDocument, derived: null, pending: false, translationOnly, translation: null };
     return true;
   }
 
@@ -92,16 +94,62 @@ export class SceneDocumentController {
     const preview = this.singleTransformPreview;
     if (!preview || preview.entityId !== entityId) return;
     preview.after = after;
-    // 无独立节点的逻辑实例仍需重建其权威矩阵；不触发 Zustand 文档/面板更新。
-    if (this.dependencies.arrays.resolveModelArrayBatchForEntityId(entityId)) preview.pending = true;
+    // 同一帧只消费最后一次位姿；批次丢失后也要释放已经接入的预览。
+    if (preview.translation || this.dependencies.arrays.resolveModelArrayBatchForEntityId(entityId)) preview.pending = true;
   }
 
-  endSingleTransformPreview(): void { this.singleTransformPreview = null; }
+  endSingleTransformPreview(): void {
+    const preview = this.singleTransformPreview;
+    this.singleTransformPreview = null;
+    preview?.translation?.session.finish();
+  }
+
+  public getSingleTranslationPreviewTransform(entityId: string): TransformComponent | null {
+    const preview = this.singleTransformPreview;
+    return preview?.translationOnly && preview.entityId === entityId ? preview.after ?? preview.before : null;
+  }
+
+  public requestSingleTranslationPreviewRefresh(): void {
+    const preview = this.singleTransformPreview;
+    if (preview?.translationOnly && preview.after) preview.pending = true;
+  }
+
+  private cancelSingleTranslationPreview(): void {
+    const preview = this.singleTransformPreview;
+    if (!preview?.translation) return;
+    const session = preview.translation.session;
+    preview.translation = null;
+    session.cancel();
+  }
+
+  private applySingleTranslationPreview(preview: SingleTransformPreview): boolean {
+    const after = preview.after;
+    const batch = this.dependencies.arrays.resolveModelArrayBatchForEntityId(preview.entityId);
+    const baseline = this.syncedEntities.get(preview.entityId)?.components.transform.position;
+    if (!after || !baseline || !batch?.hasEntityId(preview.entityId)) return false;
+    if (!preview.translation) {
+      const baselinePosition = { ...baseline };
+      preview.translation = {
+        baselinePosition,
+        session: new EntityGroupTranslationPreview([preview.entityId], { [preview.entityId]: baselinePosition }, entityId => {
+          const current = this.dependencies.arrays.resolveModelArrayBatchForEntityId(entityId);
+          return current?.hasEntityId(entityId) ? { kind: 'batch', batch: current } : null;
+        }),
+      };
+    }
+    // 文档重同步后从新的权威位姿起算，不能把原拖动位移叠加到已经预览过的矩阵上。
+    const before = preview.translation.baselinePosition;
+    return preview.translation.session.update({
+      x: after.position.x - before.x, y: after.position.y - before.y, z: after.position.z - before.z,
+    });
+  }
 
   public flushSingleTransformPreview(): void {
     const preview = this.singleTransformPreview;
     if (!preview?.pending) return;
     preview.pending = false;
+    if (preview.translationOnly && this.applySingleTranslationPreview(preview)) return;
+    this.cancelSingleTranslationPreview();
     const document = this.applySingleTransformPreview(preview.document);
     const selectedIds = [...this.dependencies.selection.selectedEntityIds];
     const options = { modelArrayIdentityMode: this.dependencies.arrays.modelArrayIdentityMode };
@@ -116,10 +164,10 @@ export class SceneDocumentController {
     if (!preview || !preview.after) return document;
     if (document === preview.derived) document = preview.document;
     const entity = document.entities[preview.entityId];
-    if (document.id !== preview.sceneId || !entity) { this.singleTransformPreview = null; return document; }
+    if (document.id !== preview.sceneId || !entity) { this.endSingleTransformPreview(); return document; }
     // 权威文档与派生预览分开保存；不能拿上一帧派生坐标误判真实外部编辑。
     if (!equalPreviewTransform(entity.components.transform, preview.before)) {
-      this.singleTransformPreview = null;
+      this.endSingleTransformPreview();
       return document;
     }
     preview.document = document;
@@ -134,6 +182,7 @@ export class SceneDocumentController {
     options: SceneRuntimeSyncOptions = {},
   ): void {
     if (this.disposed) return;
+    this.cancelSingleTranslationPreview();
     document = this.applySingleTransformPreview(document);
     const nextModelArrayIdentityMode = options.modelArrayIdentityMode ?? 'device';
     const modelArrayIdentityModeChanged = this.dependencies.arrays.modelArrayIdentityMode !== nextModelArrayIdentityMode;

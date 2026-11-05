@@ -41,7 +41,7 @@ import { type EntityArrayPreviewSource, type EntityArrayPreviewEntry, readCurren
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
-  readonly document: Pick<SceneDocumentController, 'isEntityTransformEditable' | 'syncedEntities' | 'shadowDocument'>;
+  readonly document: Pick<SceneDocumentController, 'isEntityTransformEditable' | 'syncedEntities' | 'shadowDocument' | 'getSingleTranslationPreviewTransform' | 'requestSingleTranslationPreviewRefresh'>;
   readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayInstanceEntities' | 'resolveModelArrayBatchForEntityId'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'meshes' | 'lightMarkerRuntime' | 'lights' | 'applyTransform' | 'vectorFromTransformPosition' | 'directionFromRotation'>;
@@ -376,6 +376,7 @@ export class SceneTransformPreviewController {
   /** 异步模型或批次就绪后重新解析群组变换目标，并保持上一帧已应用的绝对结果。 */
   public refreshGroupTransformPreviewTargets(): void {
     if (this.disposed) return;
+    this.dependencies.document.requestSingleTranslationPreviewRefresh();
     const translationPreview = this.groupTranslationPreview;
     const rotationPreview = this.groupRotationPreview;
     translationPreview?.refresh();
@@ -1071,6 +1072,9 @@ export class SceneTransformPreviewController {
   /** 为当前选中的矩阵实例复用一个无几何 TransformNode，Gizmo 拖动仍回写该逻辑实体。 */
   public getOrCreateModelArrayGizmoProxy(entity: Entity): TransformNode {
     if (this.disposed) throw new Error('场景变换预览已释放。');
+    const previewTransform = this.dependencies.document.getSingleTranslationPreviewTransform(entity.id);
+    const preservePreviewPose = Boolean(previewTransform && this.modelArrayGizmoProxy?.entityId === entity.id
+      && !this.modelArrayGizmoProxy.node.isDisposed());
     if (!this.modelArrayGizmoProxy || this.modelArrayGizmoProxy.node.isDisposed()) {
       this.modelArrayGizmoProxy = {
         entityId: entity.id,
@@ -1079,7 +1083,10 @@ export class SceneTransformPreviewController {
     }
 
     this.modelArrayGizmoProxy.entityId = entity.id;
-    this.dependencies.presentation.applyTransform(this.modelArrayGizmoProxy.node, entity.components.transform);
+    // 拖动中的原生代理是位姿权威；异步重绑不能用尚未提交的旧文档坐标覆盖它。
+    if (!preservePreviewPose) {
+      this.dependencies.presentation.applyTransform(this.modelArrayGizmoProxy.node, previewTransform ?? entity.components.transform);
+    }
     this.modelArrayGizmoProxy.node.computeWorldMatrix(true);
     return this.modelArrayGizmoProxy.node;
   }

@@ -1159,7 +1159,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
           const currentRuntime = runtimeRef.current ?? runtime;
           if (!currentRuntime || state.runtimeMode !== 'edit' || state.scene.selectedEntityId !== entityId
             || !state.scene.entities[entityId] || isEntityEffectivelyLocked(state.scene.entities, state.scene.entities[entityId])
-            || !currentRuntime.beginSingleTransformPreview(entityId, state.scene.entities[entityId].components.transform)) return false;
+            || !currentRuntime.beginSingleTransformPreview(entityId, state.scene.entities[entityId].components.transform, state.transformTool === 'translate')) return false;
           transformPreviewSessionRef.current = transformPreviewStore.begin(state.sceneSessionId, state.scene, entityId, state.scene.entities[entityId].components.transform);
           return true;
         },
