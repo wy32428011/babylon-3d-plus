@@ -6,6 +6,7 @@ import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.j
 import { createKaykitSampler } from './manual-roam-assets/kaykitMotion.mjs';
 import { TURN_MOTION_DEFINITIONS, sampleTurnPose } from './manual-roam-assets/turnMotion.mjs';
 import { getManualRoamSkinCandidates } from './manual-roam-assets/skinWeights.mjs';
+import { identifyShirtBodyVertices, constrainShirtBodyWeights } from './manual-roam-assets/shirtBodyWeights.mjs';
 import { calibrateFootCycle } from './manual-roam-assets/contactCalibration.mjs';
 import { COMMUTE_WALK, commuteWalkCalibration, createCommuteWalkSampler } from './manual-roam-assets/commuteWalk.mjs';
 
@@ -113,12 +114,20 @@ function buildCharacter(original) {
     }
     const key=cell.join(','),bucket=cells.get(key)??[];bucket.push(i);cells.set(key,bucket);
   });
+  const shirtMaterial=json.materials.findIndex(material=>material.name==='Ren_YiFu_M');
+  const shirtTriangles=json.meshes[0].primitives.filter(primitive=>primitive.material===shirtMaterial).flatMap(primitive=>read(original,primitive.indices));
+  const shirtBody=identifyShirtBodyVertices(vertices,shirtTriangles,names,source);
   const groupedWeights=new Map();
   vertices.forEach((p,i)=>{
     const trousers=materials.get(i)===5,side=p.x>=0?'Left':'Right';
     // 裤腿只受骨盆与对应腿链驱动；排除附近手掌、另一条腿等无解剖关联的影响。
     const candidates=trousers?names.map((name,index)=>({name,index,factor:1})).filter(({name})=>name==='Hips'||name==='Spine'||(name.startsWith(side)&&/UpLeg|Leg|Foot|ToeBase/.test(name))):getManualRoamSkinCandidates(p,materials.get(i),names,source);
-    const ranked=candidates.map(({index,factor})=>({index,raw:factor/(segmentDistance(p,source[index],endpoint(index,source))+0.015)**(trousers?6:4)})).sort((a,b)=>b.raw-a.raw).slice(0,4);
+    const rawFor=(index,factor=1)=>factor/(segmentDistance(p,source[index],endpoint(index,source))+0.015)**(trousers?6:4);
+    let ranked=candidates.map(({index,factor})=>({index,raw:rawFor(index,factor)})).sort((a,b)=>b.raw-a.raw).slice(0,4);
+    if(shirtBody.has(i)){
+      const torso=['Hips','Spine','Spine1','Spine2'].map(name=>{const index=names.indexOf(name);return {index,raw:rawFor(index)};});
+      ranked=constrainShirtBodyWeights(p,ranked,torso,names,source);
+    }
     const raw=ranked.map(item=>item.raw),total=raw.reduce((a,b)=>a+b,0),key=find(i);
     const group=groupedWeights.get(key)??Array(names.length).fill(0);
     ranked.forEach((item,k)=>{group[item.index]+=raw[k]/total;});groupedWeights.set(key,group);

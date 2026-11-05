@@ -14,7 +14,7 @@ export const LEGACY_MANUAL_ROAM_AVATAR_ASSET = Object.freeze({
 export const DEFAULT_MANUAL_ROAM_AVATAR_ASSET = Object.freeze({
   fileName: 'EQ_People_rigged_v2.glb',
   publicPath: DEFAULT_MANUAL_ROAM_AVATAR_PUBLIC_PATH,
-  sha256: '382ccef3e7420936e5bc50ab4b89eb6946a3818de3e81e867225fc754ea32def',
+  sha256: 'b81964a3e5b174177f1d8b84d3f8707369396b2ae07f872a19e507c0f674bd28',
   hasEmbeddedAnimations: false,
   hasSkinnedMesh: true,
 });
