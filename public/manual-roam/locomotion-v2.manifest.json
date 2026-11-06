@@ -412,20 +412,17 @@
     "RunForward": {
       "name": "RunForward",
       "loop": true,
-      "referenceSpeed": 2.3225527114488864,
-      "duration": 0.7,
+      "referenceSpeed": 1.9463674155074155,
+      "duration": 0.8,
       "fps": 30,
-      "cycleDistanceMeters": 1.6257868980142205,
-      "phaseOffset": 0.2857142857142857,
+      "cycleDistanceMeters": 1.5570939324059327,
+      "phaseOffset": 0.041666666666666664,
       "contacts": {
         "left": [
-          0,
-          0,
-          0,
-          0,
-          0,
           0.25,
           0.75,
+          1,
+          1,
           1,
           1,
           1,
@@ -440,27 +437,36 @@
           0,
           0,
           0,
-          0
+          0,
+          0.25,
+          0.5,
+          0.25,
+          0,
+          0,
+          0.25
         ],
         "right": [
           1,
-          1,
-          1,
-          1,
-          1,
           0.75,
           0.25,
           0,
           0,
           0,
           0,
-          0,
-          0,
-          0,
-          0,
+          0.25,
+          0.5,
+          0.25,
           0,
           0.25,
           0.75,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
           1,
           1,
           1,
@@ -469,20 +475,29 @@
       },
       "calibration": "cyclic-ankle-toe-rearward-events-full-support-displacement-median-v1",
       "source": {
-        "kind": "BabylonJS-Assets",
-        "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
-        "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
-        "license": "CC-BY-4.0",
-        "attribution": "BabylonJS Assets contributors",
-        "clip": "run",
-        "derivation": "rest-pose-retarget-in-place-reduced-wrist-motion"
+        "author": "Kay Lousberg",
+        "kind": "KayKit Character Animations 1.1",
+        "url": "https://kaylousberg.itch.io/kaykit-character-animations",
+        "sha256": "11422afd50abf7e8c92ea107e2e0bc94abd38023d6d15f55ad580347efbfa29e",
+        "license": "CC0-1.0",
+        "clip": "Running_B",
+        "derivation": "world-rest-retarget-reduced-leg-swing-and-pelvis-motion",
+        "upperBody": {
+          "kind": "original-authored-run-upper-body",
+          "phaseAlignment": "left-support",
+          "armSwing": 0.55,
+          "elbowBase": 0.45,
+          "elbowSwing": 0.18,
+          "forwardLean": 0.09
+        }
       },
-      "armPose": {
-        "retentionFromNeutral": {
-          "Arm": 0.55,
-          "ForeArm": 0.8
-        },
-        "wristRetention": 0.2
+      "upperBody": {
+        "kind": "original-authored-run-upper-body",
+        "phaseAlignment": "left-support",
+        "armSwing": 0.55,
+        "elbowBase": 0.45,
+        "elbowSwing": 0.18,
+        "forwardLean": 0.09
       }
     },
     "RunBackward": {
@@ -556,21 +571,22 @@
         "license": "CC0-1.0",
         "clip": "Walking_Backwards",
         "upperBody": {
-          "kind": "BabylonJS-Assets",
-          "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
-          "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
-          "license": "CC-BY-4.0",
-          "attribution": "BabylonJS Assets contributors",
-          "clip": "run"
+          "kind": "original-authored-run-upper-body",
+          "phaseAlignment": "left-support",
+          "armSwing": 0.55,
+          "elbowBase": 0.45,
+          "elbowSwing": 0.18,
+          "forwardLean": 0.09
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
-      "armPose": {
-        "retentionFromNeutral": {
-          "Arm": 0.55,
-          "ForeArm": 0.8
-        },
-        "wristRetention": 0.2
+      "upperBody": {
+        "kind": "original-authored-run-upper-body",
+        "phaseAlignment": "left-support",
+        "armSwing": 0.55,
+        "elbowBase": 0.45,
+        "elbowSwing": 0.18,
+        "forwardLean": 0.09
       }
     },
     "RunLeft": {
@@ -646,21 +662,22 @@
         "license": "CC0-1.0",
         "clip": "Running_Strafe_Left",
         "upperBody": {
-          "kind": "BabylonJS-Assets",
-          "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
-          "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
-          "license": "CC-BY-4.0",
-          "attribution": "BabylonJS Assets contributors",
-          "clip": "run"
+          "kind": "original-authored-run-upper-body",
+          "phaseAlignment": "left-support",
+          "armSwing": 0.55,
+          "elbowBase": 0.45,
+          "elbowSwing": 0.18,
+          "forwardLean": 0.09
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
-      "armPose": {
-        "retentionFromNeutral": {
-          "Arm": 0.55,
-          "ForeArm": 0.8
-        },
-        "wristRetention": 0.2
+      "upperBody": {
+        "kind": "original-authored-run-upper-body",
+        "phaseAlignment": "left-support",
+        "armSwing": 0.55,
+        "elbowBase": 0.45,
+        "elbowSwing": 0.18,
+        "forwardLean": 0.09
       }
     },
     "RunRight": {
@@ -736,21 +753,22 @@
         "license": "CC0-1.0",
         "clip": "Running_Strafe_Right",
         "upperBody": {
-          "kind": "BabylonJS-Assets",
-          "url": "https://raw.githubusercontent.com/BabylonJS/Assets/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb",
-          "sha256": "9ef2790c1321574a3425e8c3e6cfdcb2e077484719621cad3c244d2a7e3cb1ac",
-          "license": "CC-BY-4.0",
-          "attribution": "BabylonJS Assets contributors",
-          "clip": "run"
+          "kind": "original-authored-run-upper-body",
+          "phaseAlignment": "left-support",
+          "armSwing": 0.55,
+          "elbowBase": 0.45,
+          "elbowSwing": 0.18,
+          "forwardLean": 0.09
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
-      "armPose": {
-        "retentionFromNeutral": {
-          "Arm": 0.55,
-          "ForeArm": 0.8
-        },
-        "wristRetention": 0.2
+      "upperBody": {
+        "kind": "original-authored-run-upper-body",
+        "phaseAlignment": "left-support",
+        "armSwing": 0.55,
+        "elbowBase": 0.45,
+        "elbowSwing": 0.18,
+        "forwardLean": 0.09
       }
     },
     "JumpStart": {
@@ -1021,7 +1039,7 @@
     },
     "animation": {
       "path": "manual-roam/locomotion-v2.glb",
-      "sha256": "7c5568dec8e50a8d4efceb3acd235fdc88801d1f3177a3a34fd6fc15a2b32822"
+      "sha256": "483d75811df586c6244b9e0b14204716ab1b5cc651ff78d5559ab8060535dc09"
     }
   },
   "sources": [
@@ -1038,6 +1056,14 @@
       "url": "https://kaylousberg.itch.io/kaykit-character-animations",
       "sha256": "8b2317cf81e3f24149e4b791c27e1932bebd46cd378ed962e7d27d642fad8c56",
       "license": "CC0-1.0"
+    },
+    {
+      "author": "Kay Lousberg",
+      "kind": "KayKit Character Animations 1.1",
+      "url": "https://kaylousberg.itch.io/kaykit-character-animations",
+      "sha256": "11422afd50abf7e8c92ea107e2e0bc94abd38023d6d15f55ad580347efbfa29e",
+      "license": "CC0-1.0",
+      "file": "Rig_Medium_MovementBasic.glb"
     }
   ]
 }

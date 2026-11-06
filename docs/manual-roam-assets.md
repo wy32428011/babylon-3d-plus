@@ -63,13 +63,14 @@ v1 将原有行走姿态的网格先烘焙到 T-Pose，再播放动画，产生�
 
 ## 动作来源与制作
 
-前进 Run 保留 [BabylonJS Assets Xbot](https://github.com/BabylonJS/Assets/blob/c81f5d744fe8d41acfebd89eaeb7008c6f9659e3/meshes/Xbot.glb) 来源，固定指纹和 CC BY 4.0 许可全文位于 sources。Idle 为原创对称放松站姿，采用适度脚距、轻微屈膝与呼吸；跑步手腕保留源变化的20%，减少无指骨人物的折腕表现。跑步上臂摆动与前臂屈肘分别保留源动作相对待机姿态变化的55%和80%，避免二者统一压到30%后形成垂手跑步；四个跑步方向共用该处理，参数记录在清单 `armPose`。2026-11-05 在 Blender 的同源动作副本按每3帧采样，前跑屈肘由约26°–43°改善为55°–99°，不修改下肢、步长、接触曲线或人物蒙皮。 前进 Walk 为原创男性上班步态，见“原创上班步态”一节。
+Idle 为原创对称放松站姿，WalkForward 为原创上班步态。RunForward 的下身改用 KayKit `Running_B` 并收敛摆腿和骨盆起伏；跑步上身使用独立调节的原创摆臂，并按左脚支撑相位与四个跑步方向对齐。人物、蒙皮及 v1 动作保持不变；前跑的步长和接触按最终轨道重新标定。
 
 侧移与后退使用 [KayKit Character Animations Free 1.1 官方包](https://kaylousberg.itch.io/kaykit-character-animations)。作者 Kay Lousberg，随包许可证 CC0-1.0。原始 GLB、LICENSE.txt、官方入口、包及文件摘要保存于 `scripts/manual-roam-assets/sources/kaykit-character-animations-1.1`。
 
 | 输出 | 实际依据 |
 | --- | --- |
-| RunLeft/Right | 原生 Running_Strafe_Left/Right 的骨盆、腿链；完整上身来自 Xbot Run 并按支撑相位对齐 |
+| RunForward | 原生 Running_B 的骨盆、腿链经减幅和目标骨架重定向；原创上身按支撑相位对齐 |
+| RunLeft/Right | 原生 Running_Strafe_Left/Right 的骨盆、腿链；原创跑步上身按支撑相位对齐 |
 | WalkLeft/Right | 原生侧跑降低下肢幅度、减少起伏并重定时，明确属于编辑派生，未称为原生侧走动捕 |
 | WalkBackward | 原生 Walking_Backwards 调整迈步幅度，保留方向和膝盖屈伸轴 |
 | RunBackward | 原生 Walking_Backwards 重定时，属于快速后退派生，并非独立后跑动捕 |
@@ -139,6 +140,6 @@ Xbot 源步行两脚支撑时距中线仅5.4/3.7厘米且左右不对称，骨�
 - 骨盆仅侧倾约1.7°、随步扭转约2.9°；胸部相对骨盆反向扭转约4°、前倾约3°，头颈保持平视。双臂与同侧腿反相、外展约9°贴身前后摆，肘部屈曲约15–24°。
 - 该人物腿长仅约身高46%，默认1.6m/s（作者单位约1.67m/s）需较快步频：周期0.87秒（138步/分钟）、周期距离1.455米，运行时步幅系数保持1.0，不依赖足部IK拉伸。速度高于原生步速时仍按原机制有界拉伸（最多1.3）。
 - 步速、周期距离、相位与接触曲线直接由作者参数写入清单（`authored-commute-walk-exact-v1`），不用通用踝/前掌后移标定，避免脚跟、前掌滚动带来的踝部位移被误计为步长。
-- 侧移、后退的上身改用同一原创步行，并按支撑相位对齐；RunForward 仍为 Xbot run。
+- 侧移、后退的上身使用同一原创步行并按支撑相位对齐；RunForward 现使用 KayKit Running_B 派生下身和原创跑步上身。
 
 回归见 `tests/runtime/manualRoamMotionQuality.test.ts`（步宽、对称、支撑腿伸直、骨盆幅度）与 `tests/roam/manualRoamAnimationState.test.ts`（默认步速步频与不拉伸步幅）。

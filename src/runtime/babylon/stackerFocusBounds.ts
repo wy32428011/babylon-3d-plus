@@ -9,6 +9,11 @@ import { STACKER_FALLBACK_FIXED_NODE_NAMES, STACKER_FALLBACK_TRAVEL_NODE_NAMES }
 
 const BODY_PATTERN = /dingbuhuagui|dingbu|dibu|lizhu|dianji|caozuotai|xiang|huocha|顶部|底部|立柱|电机|操作台|载货|货叉|机身|主体/i;
 
+function getMiniloadTracks(nodes: TransformNode[]): TransformNode[] {
+  return nodes.filter(node => node.name === 'DDJtiangui'
+    && nodes.some(body => body.name === 'DDJzhuti' && body.parent === node.parent));
+}
+
 /** 参考图采用梯笼所在端面的正向平视近景；方向随模型世界旋转变化。 */
 export function createStackerFocusView(
   model: ModelRuntimeEntry,
@@ -19,7 +24,9 @@ export function createStackerFocusView(
   // 锚点抬到梯笼中部；仍按机身横向尺寸限高，避免高立柱把镜头带到整机中段。
   center.y = bounds.minimum.y + Math.min(size.y, Math.hypot(size.x, size.z)) * 0.65;
   model.root.computeWorldMatrix(true);
-  const front = model.root.getDirection(new Vector3(0, 0, 1));
+  // miniload 的梯笼正面位于局部 -Z，与传统堆垛机相反。
+  const isMiniload = getMiniloadTracks(model.root.getChildTransformNodes(false)).length > 0;
+  const front = model.root.getDirection(new Vector3(0, 0, isMiniload ? -1 : 1));
   return {
     target: { x: center.x, y: center.y, z: center.z },
     alpha: Math.atan2(front.z, front.x),
@@ -82,8 +89,7 @@ export function getStackerFocusWorldBounds(model: ModelRuntimeEntry): RuntimeWor
 
   const allNodes = [model.root, ...model.root.getChildTransformNodes(false)];
   // miniload 未声明运动节点，用天轨与同级主体的组合识别，避免将单个货叉误认成整机。
-  const miniloadTracks = allNodes.filter(node => node.name === 'DDJtiangui'
-    && allNodes.some(body => body.name === 'DDJzhuti' && body.parent === node.parent));
+  const miniloadTracks = getMiniloadTracks(allNodes);
   const fixedNames = new Set([
     ...STACKER_FALLBACK_FIXED_NODE_NAMES,
     ...configs.flatMap(config => readStringArrayPath(config, ['fixedNodes'])),

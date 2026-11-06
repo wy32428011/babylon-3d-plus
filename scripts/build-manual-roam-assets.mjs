@@ -277,14 +277,6 @@ function flattenFeet(local,footPitch){
   for(const side of ['Left','Right']){const i=names.indexOf(side+'Foot');local[i]=rotation([1,0,0],footPitch[side]).multiply(local[i]).normalize();}
 }
 
-const RUN_ARM_RETENTION={Arm:.55,ForeArm:.8};
-/** 摆臂幅度与屈肘分别保留；二者一起压向待机姿态会使跑步变成垂手摆臂。 */
-function calmRunArms(local,reference){
-  for(const side of ['Left','Right'])for(const [part,factor] of Object.entries(RUN_ARM_RETENTION)){
-    const i=names.indexOf(side+part);local[i]=Quaternion.Slerp(reference[i],local[i],factor).normalize();
-  }
-}
-
 function calibrateStride(name,rest,tracks,hips,times) {
   const direction=name.endsWith('Backward')?new Vector3(0,0,-1):name.endsWith('Left')?new Vector3(1,0,0):name.endsWith('Right')?new Vector3(-1,0,0):new Vector3(0,0,1);
   const feet={Left:[],Right:[]},toes={Left:[],Right:[]};
@@ -300,21 +292,29 @@ function calibrateStride(name,rest,tracks,hips,times) {
   }
   return calibrateFootCycle({name,times,leftFoot:feet.Left,rightFoot:feet.Right,leftToe:toes.Left,rightToe:toes.Right,direction});
 }
-function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kaykitInfo) {
+function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kaykitInfo,kaykitBasic) {
   const w=writer(),json=w.json;json.nodes=skeletonNodes(rest);json.scenes=[{nodes:[0]}];json.scene=0;json.animations=[];
-  const fromXbot=createXbotSampler(source),fromKaykit=createKaykitSampler(kaykit,names,parentNames,rest,read,worldMatrices,sample);
+  const fromXbot=createXbotSampler(source),fromKaykit=createKaykitSampler(kaykit,names,parentNames,rest,read,worldMatrices,sample),fromKaykitBasic=createKaykitSampler(kaykitBasic,names,parentNames,rest,read,worldMatrices,sample);
   const commuteWalk=createCommuteWalkSampler(rest,names,parentNames,footGeometry,footPitch);
-  const manifest={version:2,profile:profile.profile,clips:{},files:{},sources:[sourceInfo,kaykitInfo]};
+  const runUpper=createCommuteWalkSampler(rest,names,parentNames,footGeometry,footPitch,{...COMMUTE_WALK,armSwing:.55,elbowBase:.45,elbowSwing:.18,forwardLean:.09,armHang:.14,chestCounterYaw:.06});
+  const manifest={version:2,profile:profile.profile,clips:{},files:{},sources:[sourceInfo,kaykitInfo,{...kaykitInfo,sha256:hash(kaykitBasic.bytes),file:'Rig_Medium_MovementBasic.glb'}]};
   const configs=[['Idle','idle',2.5,0],...['Walk','Run'].flatMap((kind,i)=>['Forward','Backward','Left','Right'].map(dir=>[kind+dir,i?'run':'walk',i?0.7:29/30,i?3.2:1.6])),...['JumpStart','JumpUp','Fall','Land','FlyIdle','FlyMove'].map(n=>[n,null,{JumpStart:0.3,JumpUp:0.45,Fall:0.8,Land:0.3,FlyIdle:2,FlyMove:1.2}[n],0])];
   for(const [name,sourceClip,duration,speed]of configs){
     const direction=/Left|Right|Backward/.test(name);
     const nativeClip=name.endsWith('Backward')?'Walking_Backwards':name.endsWith('Left')?'Running_Strafe_Left':'Running_Strafe_Right';
     const nativeDuration=name.endsWith('Backward')?32/30:.8;
-    const clipDuration=name==='WalkForward'?COMMUTE_WALK.duration:direction?(name.startsWith('Walk')&&!name.endsWith('Backward')?1.1:name==='RunBackward'?.75:nativeDuration):duration;
+    const clipDuration=name==='WalkForward'?COMMUTE_WALK.duration:name==='RunForward'?.8:direction?(name.startsWith('Walk')&&!name.endsWith('Backward')?1.1:name==='RunBackward'?.75:nativeDuration):duration;
     const count=Math.round(clipDuration*30)+1,times=Array.from({length:count},(_,i)=>clipDuration*i/(count-1)),tracks=names.map(()=>[]),hip=[];
     const loop=!['JumpStart','JumpUp','Land'].includes(name);
     times.forEach((t,frame)=>{
-      const pose=name==='Idle'?relaxedIdlePose(t,duration):name==='WalkForward'?commuteWalk(t):direction?fromKaykit(nativeClip,t/clipDuration*nativeDuration):sourceClip?fromXbot(sourceClip,t):authoredPose(name,t,duration);
+      const pose=name==='Idle'?relaxedIdlePose(t,duration):name==='WalkForward'?commuteWalk(t):name==='RunForward'?fromKaykitBasic('Running_B',t):direction?fromKaykit(nativeClip,t/clipDuration*nativeDuration):sourceClip?fromXbot(sourceClip,t):authoredPose(name,t,duration);
+      if(name==='RunForward') {
+        // 原动画为夸张跨步，按真实巡检人物比例收敛摆腿和腾空高度，再重新标定接触。
+        for(const side of ['Left','Right'])for(const [part,factor] of [['UpLeg',.7],['Leg',.85]]) {
+          const i=names.indexOf(side+part);pose.local[i]=Quaternion.Slerp(identity(),pose.local[i],factor).normalize();
+        }
+        pose.hipY*=.7;
+      }
       if(direction&&name.startsWith('Walk')&&!name.endsWith('Backward')) {
         // 原生侧跑减小屈伸与腾空幅度后重定时为低速侧步，保留膝盖原生屈伸轴。
         for(const side of ['Left','Right'])for(const part of ['Arm','ForeArm','UpLeg','Leg','Foot','ToeBase']) {
@@ -328,11 +328,6 @@ function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kay
         }
         pose.hipY*=.8;
       }
-      if(name==='RunForward')for(const side of ['Left','Right']) {
-        // 原人物没有指骨，保留少量腕部变化，避免源角色的腕部动作被放大为折腕。
-        const i=names.indexOf(side+'Hand');pose.local[i]=Quaternion.Slerp(identity(),pose.local[i],.2).normalize();
-      }
-      if(name==='RunForward')calmRunArms(pose.local,relaxedIdlePose(0,2.5).local);
       // 原创步行已在足部轨迹中计入鞋底放平补偿。
       if(name!=='WalkForward')flattenFeet(pose.local,footPitch);
       pose.local.forEach((q,i)=>{
@@ -344,16 +339,15 @@ function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kay
       hip.push(rest[0].x,loop&&frame===count-1?hip[1]:rest[0].y+pose.hipY,rest[0].z);
     });
     const calibration=name==='WalkForward'?commuteWalkCalibration(times):/^(Walk|Run)/.test(name)?calibrateStride(name,rest,tracks,hip,times):{};
-    if(direction) {
-      const family=name.startsWith('Run')?'Run':'Walk',upperDuration=family==='Run'?.7:COMMUTE_WALK.duration;
-      const phaseShift=manifest.clips[family+'Forward'].phaseOffset-calibration.phaseOffset;
+    if(direction||name==='RunForward') {
+      const family=name.startsWith('Run')?'Run':'Walk',upperDuration=COMMUTE_WALK.duration;
+      const phaseShift=family==='Run'?-calibration.phaseOffset:manifest.clips.WalkForward.phaseOffset-calibration.phaseOffset;
       times.forEach((t,frame)=>{
-        const upperTime=((t/clipDuration+phaseShift+1)%1)*upperDuration,upper=family==='Run'?fromXbot('run',upperTime):commuteWalk(upperTime);
+        const upperTime=((t/clipDuration+phaseShift+1)%1)*upperDuration,upper=family==='Run'?runUpper(upperTime):commuteWalk(upperTime);
         const nativeHip=Quaternion.FromArray(tracks[0].slice(frame*4,frame*4+4));
         const upperSpine=upper.local[0].multiply(upper.local[names.indexOf('Spine')]).normalize();
         // 上身沿完整脊柱链衔接，并在髋部父坐标中重算；局部手臂不能直接拼到另一套胸腔上。
         upper.local[names.indexOf('Spine')]=nativeHip.conjugate().multiply(upperSpine).normalize();
-        if(family==='Run'){for(const side of ['Left','Right']){const i=names.indexOf(side+'Hand');upper.local[i]=Quaternion.Slerp(identity(),upper.local[i],.2).normalize();}calmRunArms(upper.local,relaxedIdlePose(0,2.5).local);}
         names.forEach((bone,i)=>{
           if(i===0||/UpLeg|Leg|Foot|ToeBase/.test(bone))return;
           let q=upper.local[i];if(frame===times.length-1)q=Quaternion.FromArray(tracks[i].slice(0,4));
@@ -366,7 +360,9 @@ function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kay
     tracks.forEach((track,i)=>{const sampler=animation.samplers.push({input,output:w.append(track,'VEC4'),interpolation:'LINEAR'})-1;animation.channels.push({sampler,target:{node:i+1,path:'rotation'}});});
     animation.channels.push({sampler:animation.samplers.length,target:{node:1,path:'translation'}});animation.samplers.push({input,output:w.append(hip,'VEC3'),interpolation:'LINEAR'});json.animations.push(animation);
     manifest.clips[name]={name,loop,referenceSpeed:speed,duration:clipDuration,fps:30,...calibration,source:name==='Idle'?{kind:'original-authored-neutral-idle',author:'project manual-roam asset pipeline',description:'Symmetric relaxed standing with subtle breathing; not motion capture'}:name==='WalkForward'?{...COMMUTE_WALK.source,parameters:Object.fromEntries(Object.entries(COMMUTE_WALK).filter(([key])=>key!=='source'))}:direction?{...kaykitInfo,clip:nativeClip,upperBody:name.startsWith('Run')?{...sourceInfo,clip:'run'}:{...COMMUTE_WALK.source,clip:'WalkForward'},derivation:'native-direction-phase-aligned-complete-upper-body'}:sourceClip?{...sourceInfo,clip:sourceClip,derivation:'rest-pose-retarget-in-place-reduced-wrist-motion'}:{kind:'original-authored-keyframes',author:'project manual-roam asset pipeline',description:'Explicit offline skeletal keyframes; not a downloaded Mixamo clip'}};
-    if(name.startsWith('Run'))manifest.clips[name].armPose={retentionFromNeutral:RUN_ARM_RETENTION,wristRetention:.2};
+    if(name.startsWith('Run'))manifest.clips[name].upperBody={kind:'original-authored-run-upper-body',phaseAlignment:'left-support',armSwing:.55,elbowBase:.45,elbowSwing:.18,forwardLean:.09};
+    if(name==='RunForward')manifest.clips[name].source={...kaykitInfo,sha256:hash(kaykitBasic.bytes),clip:'Running_B',derivation:'world-rest-retarget-reduced-leg-swing-and-pelvis-motion',upperBody:manifest.clips[name].upperBody};
+    else if(name.startsWith('Run'))manifest.clips[name].source.upperBody=manifest.clips[name].upperBody;
   }
   for(const [name,definition] of Object.entries(TURN_MOTION_DEFINITIONS)) {
     const count=Math.round(definition.duration*30)+1,times=Array.from({length:count},(_,i)=>definition.duration*i/(count-1));
@@ -390,9 +386,11 @@ if(hash(sourceBytes)!==sourceInfo.sha256)throw new Error('动作来源文件指�
 const kaykitPath='scripts/manual-roam-assets/sources/kaykit-character-animations-1.1/';
 const kaykitBytes=await fs.readFile(path.join(root,kaykitPath,'Rig_Medium_MovementAdvanced.glb'));
 const kaykitMetadata=JSON.parse(await fs.readFile(path.join(root,kaykitPath,'source.json'),'utf8'));
+const kaykitBasicBytes=await fs.readFile(path.join(root,kaykitPath,'Rig_Medium_MovementBasic.glb'));
+if(hash(kaykitBasicBytes)!==kaykitMetadata.files.find(file=>file.name==='Rig_Medium_MovementBasic.glb')?.sha256)throw new Error('KayKit基础动作来源指纹不符');
 const kaykitInfo={author:kaykitMetadata.author,kind:'KayKit Character Animations 1.1',url:kaykitMetadata.source,sha256:kaykitMetadata.files[0].sha256,license:kaykitMetadata.license};
 if(hash(kaykitBytes)!==kaykitInfo.sha256)throw new Error('KayKit动作来源指纹不符');
-const character=buildCharacter(parseGlb(originalBytes)),animation=buildAnimation(parseGlb(sourceBytes),character.rest,character.footPitch,character.footGeometry,sourceInfo,parseGlb(kaykitBytes),kaykitInfo);
+const character=buildCharacter(parseGlb(originalBytes)),animation=buildAnimation(parseGlb(sourceBytes),character.rest,character.footPitch,character.footGeometry,sourceInfo,parseGlb(kaykitBytes),kaykitInfo,parseGlb(kaykitBasicBytes));
 const fixture=parseGlb(character.bytes);fixture.json.materials[3].pbrMetallicRoughness.baseColorFactor=[0.15,0.4,0.95,1];
 animation.manifest.files={avatar:{path:'manual-roam/EQ_People_rigged_v2.glb',sha256:hash(character.bytes)},animation:{path:'manual-roam/locomotion-v2.glb',sha256:hash(animation.bytes)}};
 await fs.mkdir(path.join(root,'tests/fixtures/roam'),{recursive:true});

@@ -1,0 +1,2929 @@
+// 此文件由模型包参数脚本和运行脚本合并而成，供编辑器以单个 TS 文件读取。
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import { visibleAsBoolean, visibleAsColor3, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
+import { Color3 } from "@babylonjs/core/Maths/math.color";
+import { Matrix, Vector3 } from "@babylonjs/core/Maths/math.vector";
+// 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
+
+// 此文件按模型参数化说明生成，用于 多穿货架 的静态参数配置。
+// 当前版本按 Shelf_横梁货架_修改.glb（__root__→横梁货架→各 Box* / fhb）做部件级变形。
+// 层/列/斜撑复制：ThinInstance（禁止层列 node.clone）；每脚本实例用私有 tiHost，避免共享 InstancedMesh 串扰。
+// 改色：bodyColor → 非横梁；beamColor → Box032；参数色 × baseColor 贴图，保留洞洞板黑洞。
+// 初始色从立柱/横梁 GLB 材质采样；与原色相同或 #000000 时不乘色，保留本来外观。
+// 无阵列时 ensureColorDisplayHosts 建私有宿主，避免 InstancedMesh 串色。
+
+/** 管理 多穿货架 在 Babylon.js Editor Inspector 中展示的静态参数。 */
+export class ParametricModelParamsComponent {
+	@visibleAsString("模型标识")
+	public modelKey: string = "newshelf";
+
+	@visibleAsString("设备类型")
+	public deviceType: string = "多穿库";
+
+	@visibleAsString("设备名称")
+	public deviceName: string = "新多穿货架";
+
+	@visibleAsString("参数说明")
+	public description: string = "Shelf_横梁货架_修改.glb：层/列/斜撑用 ThinInstance 复制（无 clone）；cellHeight 为净层高。";
+
+	@visibleAsNumber("层数", { step: 1 })
+	public layerCount: number = 1;
+
+	@visibleAsNumber("列数", { step: 1 })
+	public columnCount: number = 1;
+
+	@visibleAsNumber("列宽 (m)", { step: 0.1, description: "柱间净宽（Box005.maxX→Box003.minX）；拉伸时柱中心距 = cellWidth + 0.052，−X 柱固定向 +X" })
+	public cellWidth: number = 0.801;
+
+	@visibleAsNumber("层高 (m)", { step: 0.1 })
+	public cellHeight: number = 4.525;
+
+	@visibleAsNumber("货格深度 (m)", { step: 0.1, description: "前后柱排净深；拉伸时柱中心距 = cellDepth + 0.052，−Z 柱排固定向 +Z" })
+	public cellDepth: number = 1.183;
+
+	@visibleAsNumber("支撑脚高度 (m)", { min: 0, step: 0.05 })
+	public supportLegHeight: number = 0.904;
+
+	@visibleAsNumber("立柱延长 (m)", { min: 0, step: 0.05, description: "仅拉长立柱；顶框 Box023/024/020/027 与两侧 Z 型斜撑片数/高度不变" })
+	public postExtension: number = 0;
+
+
+	@visibleAsBoolean("对侧货架")
+	public doubleDeepEnabled: boolean = false;
+
+	@visibleAsNumber("对侧货架间隔 (m)", { step: 0.05 })
+	public deepSlotGap: number = 0.2;
+
+	@visibleAsBoolean("启用内置货格")
+	public enableBuiltInSlots: boolean = false;
+
+	@visibleAsNumber("货格列比例", { min: 1, max: 8, step: 1, description: "1 个实物货格在列向分裂为几个逻辑货位列；逻辑列数 = 列数 × 比例，货架物理结构不变" })
+	public slotColumnRatio: number = 1;
+
+	/** 挡板式：false 时隐藏护板 fhb。 */
+	@visibleAsBoolean("挡板式")
+	public baffleStyle: boolean = true;
+
+	/** 显示脚：false 时隐藏立柱连通件 #0/#2（Box003 调试确认）。 */
+	@visibleAsBoolean("显示脚")
+	public showFeet: boolean = true;
+
+	/** 主体颜色；初始为 (0,0,0)，onStart 从立柱材质采样写入本来颜色。 */
+	@visibleAsColor3("主体颜色")
+	public bodyColor: Color3 = new Color3(0, 0, 0);
+
+	/** 横梁颜色；初始为 (0,0,0)，onStart 从横梁材质采样写入本来颜色。 */
+	@visibleAsColor3("横梁颜色")
+	public beamColor: Color3 = new Color3(0, 0, 0);
+
+	/** 创建 多穿货架 参数配置组件。 */
+	public constructor(public node: TransformNode) { }
+
+	/** 参数组件只负责保存 Inspector 字段，运行时由 ParametricModelRuntimeComponent 读取并应用。 */
+	public onStart(): void {
+		// 静态参数会保存到 metadata.scripts[].values，供同目录运行脚本读取。
+	}
+}
+
+type ValueMap = Record<string, unknown>;
+
+/** 超出实例预算属于可恢复的参数拒绝，不隐藏其他异常。 */
+class InstanceBudgetError extends Error {
+	public constructor(message: string) {
+		super(message);
+		this.name = "InstanceBudgetError";
+		Object.setPrototypeOf(this, InstanceBudgetError.prototype);
+	}
+}
+
+interface NodeSnapshot {
+	position: Vector3;
+	scaling: Vector3;
+	rotation?: Vector3;
+	rotationQuaternion?: any;
+	enabled?: boolean;
+	isVisible?: boolean;
+	useVertexColors?: boolean;
+	material?: any;
+}
+
+interface AxisBounds {
+	minimum: number;
+	maximum: number;
+	center: number;
+	size: number;
+}
+
+interface ShelfPart {
+	node: any;
+	baseName: string;
+}
+
+interface ShelfAxisLayout {
+	source: AxisBounds;
+	target: AxisBounds;
+	scale: number;
+}
+
+interface ShelfColumnLayout {
+	spacing: number;
+	startCenter: number | null;
+	tolerance: number;
+}
+
+interface ShelfGridParts {
+	firstColumn: ShelfPart[];
+	laterColumns: ShelfPart[];
+	firstColumnUpper: ShelfPart[];
+	laterColumnsUpper: ShelfPart[];
+	braceParts: ShelfPart[];
+	laterColumnBraces: ShelfPart[];
+}
+
+interface MeshComponentSnapshot {
+	vertexIndices: number[];
+	minimum: Vector3;
+	maximum: Vector3;
+	center: Vector3;
+	size: Vector3;
+	faceCount: number;
+}
+
+const PARAMETER_SCRIPT_FILENAME = "newshelf.model.ts";
+
+const DEFAULT_VALUES: ValueMap = {
+	modelKey: "newshelf",
+	deviceType: "多穿库",
+	deviceName: "新多穿货架",
+	description: "Shelf_横梁货架_修改.glb：层/列/斜撑用 ThinInstance 复制（无 clone）；cellHeight 为净层高。",
+	layerCount: 1,
+	columnCount: 1,
+	cellWidth: 0.801,
+	cellHeight: 4.525,
+	supportLegHeight: 0.904,
+	postExtension: 0,
+	cellDepth: 1.183,
+	doubleDeepEnabled: false,
+	deepSlotGap: 0.2,
+	enableBuiltInSlots: false,
+	slotColumnRatio: 1,
+	baffleStyle: true,
+	showFeet: true,
+	/** 占位：运行时从立柱/横梁 GLB 材质采样后写入真正初始色。 */
+	bodyColor: "#000000",
+	beamColor: "#000000"
+};
+
+/**
+ * 内置货格绑定映射声明（模型开发者维护，对最终用户透明）。
+ * 与 meta.json 的 builtInSlotBinding 字段保持一致；sync-model-parameters-from-scripts.mjs 负责同步。
+ */
+export const builtInSlotBinding = {
+	/** 启用开关的模型参数 key */
+	enabledParam: "enableBuiltInSlots",
+	/** 货格维度字段 ← 模型参数 key */
+	dimensionMapping: {
+		columns: "columnCount",
+		layers: "layerCount",
+		length: "cellWidth",
+		height: "cellHeight",
+		width: "cellDepth"
+	},
+	/** 列拓展方向（模型局部轴，与脚本 ThinInstance 列复制方向一致） */
+	columnDirection: "+x",
+	/** 列向分裂比例参数：1 个实物货格分裂为 N 个逻辑货位列（逻辑列数 = columnCount × N，物理结构不变） */
+	columnSplitParam: "slotColumnRatio"
+} as const;
+
+/**
+ * Shelf_横梁货架_修改.glb（挂在「横梁货架」下，无 .N 后缀）：
+ * 立柱 Box001/003/004/005；上框 Box023/024/020/027；下黄梁 Box032；
+ * 深向 Box002/025（底）+ Box020/027（顶）；斜撑 Box008/026；护板 fhb。
+ * 旧名对照：Box021→024、Box005.9→002、Box006→025、Box007→026、Box022→027；无独立 Jiao/Box031。
+ */
+const POST_NODE_NAMES = ["Box001", "Box003", "Box004", "Box005"];
+/** 新模型无独立脚节点；脚为立柱 mesh 内连通件 #0/#2（Box003 调试确认）。 */
+const FOOT_COMPONENT_INDICES: readonly number[] = [3, 0];
+/** 新模型无独立脚；底腿基准回退到立柱底。 */
+const FOOT_NODE_NAMES: string[] = [];
+const WIDTH_STRETCH_NODE_NAMES = ["Box023", "Box024", "Box032"];
+const SIDE_TRIANGLE_BRACE_NODE_NAMES = ["Box008", "Box026"];
+const DEPTH_BEAM_NODE_NAMES = ["Box020", "Box002", "Box025", "Box027"];
+const DEPTH_STRETCH_NODE_NAMES = DEPTH_BEAM_NODE_NAMES;
+const LOWER_CROSSBEAM_NODE_NAMES = ["Box032"];
+/** 横梁改色件。 */
+const BEAM_COLOR_PARTS = LOWER_CROSSBEAM_NODE_NAMES;
+const UPPER_LAYER_FRAME_NODE_NAMES = ["Box023", "Box024", "Box020", "Box027"];
+const LAYER_CLONE_NODE_NAMES = ["Box032", "fhb"];
+const GUARD_BOARD_NODE_NAMES = ["fhb"];
+const SHELF_PART_NODE_NAMES = [
+	...POST_NODE_NAMES,
+	...FOOT_NODE_NAMES,
+	...WIDTH_STRETCH_NODE_NAMES,
+	...DEPTH_STRETCH_NODE_NAMES,
+	...SIDE_TRIANGLE_BRACE_NODE_NAMES,
+	...GUARD_BOARD_NODE_NAMES,
+];
+
+const MIN_DIMENSION = 0.001;
+/** 立柱 X 向厚度（GLB 实测）；柱中心距 = cellWidth + POST_WIDTH_X → 柱间净宽 ≈ cellWidth。 */
+const POST_WIDTH_X = 0.052;
+/** 立柱 Z 向厚度（GLB 实测，前柱 minZ 起 0.16m 带）；柱中心距 = cellDepth + POST_WIDTH_Z → 柱排净深 ≈ cellDepth。 */
+const POST_WIDTH_Z = 0.052;
+/** 列宽：横梁/隔板两端各保留刚性比例，只拉中间。 */
+const WIDTH_END_KEEP_RATIO = 0.4;
+/** 深度：隔板/深向件两端各保留刚性比例，只拉中间。 */
+const DEPTH_END_KEEP_RATIO = 0.4;
+/** 立柱高度：底部保留刚性比例，只向上拉上段。 */
+const POST_HEIGHT_BOTTOM_KEEP_RATIO = 0.4;
+const SUPPORT_LEG_CORNER_CLEARANCE = 0.16;
+/** 斜撑堆叠区相对底深向梁顶、顶深向梁底的上下净空（米）；取余只均分到片间。 */
+const TRIANGLE_BRACE_ENDPOINT_CLEARANCE = 0.03;
+const MAX_LAYER_COUNT = 20;
+const MAX_COLUMN_COUNT = 100;
+const MAX_THIN_INSTANCE_COUNT = 100000;
+const PARAMETER_EPSILON = 1e-6;
+
+/** 根据 Inspector 参数对 Shelf_横梁货架_修改.glb 执行部件级静态参数化调整。 */
+export class ParametricModelRuntimeComponent {
+	private readonly snapshots = new Map<any, NodeSnapshot>();
+	private readonly thinInstanceBaseline = new Map<any, number>();
+	/** 本实体私有 ThinInstance 宿主（源 mesh / InstancedMesh → tiHost；禁止写共享 sourceMesh）。 */
+	private readonly thinInstanceHosts = new Map<any, any>();
+	private readonly replicaOffsets = new Map<any, Vector3[]>();
+	/** 列宽跨梁顶点拉伸：先记在源 mesh，ThinInstance 宿主建好后再写到私有几何。 */
+	private readonly pendingWidthVertexStretches = new Map<any, { axisMin: number; axisMax: number; extension: number }>();
+	/** 深度跨度顶点拉伸：隔板/深向梁/斜撑；延后写到私有宿主。 */
+	private readonly pendingDepthVertexStretches = new Map<any, { axisMin: number; axisMax: number; extension: number }>();
+	/** 立柱高度顶点拉伸：底部刚性、向上拉；延后写到私有宿主。 */
+	private readonly pendingPostHeightVertexStretches = new Map<any, { axisMin: number; axisMax: number; extension: number }>();
+	/** 主体色 / 横梁色克隆材质（按 role + 原材质 id 复用）。 */
+	private readonly appearanceMaterials = new Map<string, any>();
+	private readonly appearanceSubMaterials = new Set<any>();
+	/** GLB 立柱 / 横梁采样原色（Inspector 空间，供初始值与“未改色”判定）。 */
+	private sampledBodyColor: Color3 | null = null;
+	private sampledBeamColor: Color3 | null = null;
+	private lastSignature = "";
+	private lastGeometrySignature = "";
+	private lastColorSignature = "";
+	private lastVisibilitySignature = "";
+	private lastBudgetFailureSignature = "";
+	private rollbackBlocked = false;
+	private currentParts: ShelfPart[] = [];
+	private readonly hiddenFootIndices = new Map<any, number[]>();
+	private lastAppliedValues: ValueMap | null = null;
+	private originalSlotLayout: { present: boolean; value: unknown } | null = null;
+	private readonly meshComponents = new Map<any, MeshComponentSnapshot[]>();
+
+	/** 创建 Shelf_横梁货架_修改.glb 静态参数化运行组件。 */
+	public constructor(public node: TransformNode) { }
+
+	/** 启动时记录原始状态，采样材质原色作为颜色初始值，并立即应用当前静态参数。 */
+	public onStart(): void {
+		if (this.rollbackBlocked) { return; }
+		this.originalSlotLayout = {
+			present: Object.prototype.hasOwnProperty.call(this.node.metadata ?? {}, "builtInSlotLayout"),
+			value: this.node.metadata?.builtInSlotLayout,
+		};
+		this.captureSnapshots();
+		this.ensureModelColorDefaults();
+		this.applyIfNeeded(true);
+	}
+
+	/** 每帧检测参数签名变化，变化后恢复基线再重新应用。 */
+	public onUpdate(): void {
+		this.applyIfNeeded(false);
+	}
+
+	/** 停止脚本时先恢复材质，再清理 ThinInstance 宿主与改色材质。 */
+	public onStop(): void {
+		if (this.rollbackBlocked) { return; }
+		try {
+			this.disposeThinInstanceHosts();
+			this.restoreBaseNodes();
+			this.disposeAppearanceMaterials();
+		} catch (error) {
+			this.rollbackBlocked = true;
+			this.reportParameterFailure("cleanup-failed", "停止时无法安全恢复，保留当前状态及剩余资源", error);
+			throw error;
+		}
+		this.snapshots.clear();
+		this.thinInstanceBaseline.clear();
+		this.meshComponents.clear();
+		this.lastSignature = "";
+		this.lastGeometrySignature = "";
+		this.lastColorSignature = "";
+		this.lastVisibilitySignature = "";
+		this.lastBudgetFailureSignature = "";
+		this.currentParts = [];
+		this.hiddenFootIndices.clear();
+		this.clearReplicaOffsets();
+		this.pendingWidthVertexStretches.clear();
+		this.pendingDepthVertexStretches.clear();
+		this.pendingPostHeightVertexStretches.clear();
+		this.lastAppliedValues = null;
+		this.originalSlotLayout = null;
+	}
+
+	/** 在参数变化或强制刷新时重新应用 Shelf 专用节点规则。 */
+	private applyIfNeeded(force: boolean): void {
+		if (this.rollbackBlocked) { return; }
+		this.ensureModelColorDefaults();
+		const rawValues = this.readRawParamValues();
+		const serialize = (value: unknown): string => JSON.stringify(value, (_key, entry) =>
+			typeof entry === "number" && !Number.isFinite(entry) ? String(entry) : entry) ?? "undefined";
+		const geometryKeys = ["layerCount", "columnCount", "cellWidth", "cellHeight", "supportLegHeight",
+			"postExtension", "cellDepth", "doubleDeepEnabled", "deepSlotGap"];
+		const requestedGeometry = serialize(geometryKeys.map((key) => rawValues[key]));
+		const invalid = this.validateShelfValues(rawValues);
+		if (invalid && requestedGeometry !== this.lastBudgetFailureSignature) {
+			this.lastBudgetFailureSignature = requestedGeometry;
+			this.reportParameterFailure("invalid-parameter", invalid);
+		}
+		const rejectedGeometry = !!invalid || requestedGeometry === this.lastBudgetFailureSignature;
+		if (rejectedGeometry && !this.lastAppliedValues) { return; }
+		const values = this.readParamValues(rawValues);
+		if (rejectedGeometry && this.lastAppliedValues) {
+			// 超限或无效的结构保持上次成功值，颜色和显隐仍可独立更新。
+			geometryKeys.forEach((key) => { values[key] = this.lastAppliedValues![key]; });
+		}
+		const signature = serialize(values);
+		if (!force && signature === this.lastSignature) {
+			if (!rejectedGeometry) {
+				this.lastBudgetFailureSignature = "";
+				this.clearParameterFailure();
+			}
+			return;
+		}
+
+		const geometrySignature = serialize(geometryKeys.map((key) => values[key]));
+		const colorSignature = serialize([values.bodyColor, values.beamColor]);
+		const visibilitySignature = serialize([values.baffleStyle, values.showFeet]);
+		try {
+			if (!force && this.lastAppliedValues && geometrySignature === this.lastGeometrySignature) {
+				if (colorSignature !== this.lastColorSignature) { this.refreshAppearanceColors(values); }
+				if (visibilitySignature !== this.lastVisibilitySignature) {
+					this.applyBaffleStyleVisibility(this.currentParts, values);
+					this.applyFootVisibility(this.currentParts, values);
+				}
+			} else {
+				this.resetShelfModel();
+				this.applyShelfParameters(values);
+			}
+			this.lastSignature = signature;
+			this.lastGeometrySignature = geometrySignature;
+			this.lastColorSignature = colorSignature;
+			this.lastVisibilitySignature = visibilitySignature;
+			this.lastAppliedValues = { ...values };
+			if (!rejectedGeometry) {
+				this.lastBudgetFailureSignature = "";
+				this.clearParameterFailure();
+			}
+		} catch (error) {
+			const isBudgetError = error instanceof InstanceBudgetError;
+			if (isBudgetError) { this.lastBudgetFailureSignature = requestedGeometry; }
+			this.reportParameterFailure(isBudgetError ? "instance-budget" : "apply-failed",
+				`参数应用失败：${error instanceof Error ? error.message : String(error)}`, error);
+			try {
+				this.resetShelfModel();
+				this.restoreOriginalSlotLayout();
+				if (this.lastAppliedValues) { this.applyShelfParameters(this.lastAppliedValues); }
+			} catch (rollbackError) {
+				this.rollbackBlocked = true;
+				this.lastSignature = "";
+				this.lastGeometrySignature = "";
+				this.lastAppliedValues = null;
+				this.reportParameterFailure("rollback-failed", "无法恢复上一次完整结果，保留当前状态及资源", rollbackError);
+				throw rollbackError;
+			}
+			if (!isBudgetError) { throw error; }
+		}
+	}
+
+	private reportParameterFailure(code: string, message: string, error?: unknown): void {
+		this.node.metadata = { ...(this.node.metadata ?? {}), _shelfParametricError: { code, message } };
+		console.error(`[shelf] ${message}`, error ?? { node: this.node.name });
+	}
+
+	private clearParameterFailure(): void {
+		if (!this.node.metadata || !("_shelfParametricError" in this.node.metadata)) { return; }
+		const metadata = { ...this.node.metadata };
+		delete metadata._shelfParametricError;
+		this.node.metadata = metadata;
+	}
+
+	private restoreOriginalSlotLayout(): void {
+		if (!this.originalSlotLayout) { return; }
+		const metadata = { ...(this.node.metadata ?? {}) };
+		if (this.originalSlotLayout.present) { metadata.builtInSlotLayout = this.originalSlotLayout.value; }
+		else { delete metadata.builtInSlotLayout; }
+		this.node.metadata = metadata;
+	}
+
+	private resetShelfModel(): void {
+		this.clearReplicaOffsets();
+		this.pendingWidthVertexStretches.clear();
+		this.pendingDepthVertexStretches.clear();
+		this.pendingPostHeightVertexStretches.clear();
+		this.hiddenFootIndices.clear();
+		this.currentParts = [];
+		this.disposeThinInstanceHosts();
+		this.restoreBaseNodes();
+		this.disposeAppearanceMaterials();
+		this.meshComponents.clear();
+	}
+
+	/** 拒绝无效的原始尺寸与超出已有 Inspector 范围的层列数，不能先截断。 */
+	private validateShelfValues(raw: ValueMap): string | null {
+		for (const key of ["layerCount", "columnCount", "cellWidth", "cellHeight", "cellDepth"]) {
+			const value = Number(raw[key]);
+			if (!Number.isFinite(value) || value <= 0) { return `${key} 必须为有效正数`; }
+		}
+		for (const key of ["supportLegHeight", "postExtension"]) {
+			const value = Number(raw[key]);
+			if (!Number.isFinite(value) || value < 0) { return `${key} 必须为有效非负数`; }
+		}
+		if (!Number.isFinite(Number(raw.deepSlotGap))) { return "deepSlotGap 必须为有效数值"; }
+		const layers = Math.round(Number(raw.layerCount));
+		const columns = Math.round(Number(raw.columnCount));
+		if (!Number.isSafeInteger(layers) || !Number.isSafeInteger(columns)
+			|| layers < 1 || layers > MAX_LAYER_COUNT || columns < 1 || columns > MAX_COLUMN_COUNT) {
+			return `层数或列数超出范围（层 1–${MAX_LAYER_COUNT}，列 1–${MAX_COLUMN_COUNT}）`;
+		}
+		return null;
+	}
+
+	/**
+	 * 对齐 glbShelf.ts：从立柱 / 横梁 mesh 采样 albedo 作为 Inspector 初始色。
+	 * 仅在尚未 seed 或当前仍为占位色 (0,0,0)/(红/绿旧默认) 时写入。
+	 */
+	private ensureModelColorDefaults(): void {
+		const meta = (this.node.metadata ?? {}) as {
+			_shelfModelColorsSeeded?: boolean;
+			_shelfDefaultBodyColor?: { r: number; g: number; b: number };
+			_shelfDefaultBeamColor?: { r: number; g: number; b: number };
+		};
+
+		if (!this.sampledBodyColor || !this.sampledBeamColor) {
+			if (meta._shelfModelColorsSeeded && meta._shelfDefaultBodyColor && meta._shelfDefaultBeamColor) {
+				this.sampledBodyColor = new Color3(
+					meta._shelfDefaultBodyColor.r,
+					meta._shelfDefaultBodyColor.g,
+					meta._shelfDefaultBodyColor.b,
+				);
+				this.sampledBeamColor = new Color3(
+					meta._shelfDefaultBeamColor.r,
+					meta._shelfDefaultBeamColor.g,
+					meta._shelfDefaultBeamColor.b,
+				);
+			} else {
+				this.sampledBodyColor = this.samplePartInspectorColor((part) => this.isPostPart(part))
+					?? new Color3(0.75, 0.75, 0.75);
+				this.sampledBeamColor = this.samplePartInspectorColor((part) => this.isLowerCrossbeamPart(part))
+					?? new Color3(0.85, 0.7, 0.15);
+				this.node.metadata = {
+					...meta,
+					_shelfModelColorsSeeded: true,
+					_shelfDefaultBodyColor: {
+						r: this.sampledBodyColor.r,
+						g: this.sampledBodyColor.g,
+						b: this.sampledBodyColor.b,
+					},
+					_shelfDefaultBeamColor: {
+						r: this.sampledBeamColor.r,
+						g: this.sampledBeamColor.g,
+						b: this.sampledBeamColor.b,
+					},
+				};
+			}
+		}
+
+		this.seedColorParamsToSampledDefaults(this.sampledBodyColor, this.sampledBeamColor);
+	}
+
+	/** 只更新明确归属本节点的实例；本地 metadata 写入前复制包装对象。 */
+	private seedColorParamsToSampledDefaults(body: Color3, beam: Color3): void {
+		const bodyHex = this.colorToHexString(body);
+		const beamHex = this.colorToHexString(beam);
+		const meta = this.node.metadata ?? {};
+		const migrateLegacy = !meta._shelfLegacyColorMigrated;
+
+		this.getOwnedParameterScripts().forEach((script) => {
+			const instance = script?.instance ?? script?.component ?? script;
+			// 仅靠无归属的场景或共享描述符无法证明实例独占。
+			if (!instance || (instance.node !== this.node && instance.owner !== this.node)) { return; }
+			if ("bodyColor" in instance && this.shouldSeedColorValue(instance.bodyColor, migrateLegacy)) {
+				instance.bodyColor = body.clone();
+			}
+			if ("beamColor" in instance && this.shouldSeedColorValue(instance.beamColor, migrateLegacy)) {
+				instance.beamColor = beam.clone();
+			}
+		});
+
+		let changed = false;
+		const localScripts = Array.isArray(meta.scripts) ? meta.scripts : [];
+		const scripts = localScripts.map((script: any) => {
+			if (!this.isOwnedParameterScript(script, true) || script instanceof ParametricModelParamsComponent
+				|| !script?.values || typeof script.values !== "object" || Array.isArray(script.values)) { return script; }
+			const values = { ...script.values };
+			let valuesChanged = false;
+			for (const [key, hex] of [["bodyColor", bodyHex], ["beamColor", beamHex]]) {
+				if (!(key in values)) { continue; }
+				const current = values[key];
+				const wrapped = current && typeof current === "object" && "value" in current;
+				if (!this.shouldSeedColorValue(wrapped ? current.value : current, migrateLegacy)) { continue; }
+				values[key] = wrapped ? { ...current, value: hex } : hex;
+				valuesChanged = true;
+			}
+			if (!valuesChanged) { return script; }
+			changed = true;
+			return { ...script, values };
+		});
+		if (changed || !meta._shelfLegacyColorMigrated) {
+			this.node.metadata = { ...meta, ...(changed ? { scripts } : {}), _shelfLegacyColorMigrated: true };
+		}
+	}
+
+	/** 未设置 (0,0,0)，或一次性迁移历史红/绿默认。 */
+	private shouldSeedColorValue(raw: unknown, migrateLegacy: boolean): boolean {
+		if (this.isUnsetColorValue(raw)) { return true; }
+		return migrateLegacy && this.isLegacyPlaceholderColor(raw);
+	}
+
+	private isUnsetColorValue(raw: unknown): boolean {
+		if (raw === undefined || raw === null || raw === "") { return true; }
+		const color = this.readColor3({ c: raw }, "c", "#000000");
+		return Math.max(color.r, color.g, color.b) <= 1e-4;
+	}
+
+	private isLegacyPlaceholderColor(raw: unknown): boolean {
+		const color = this.readColor3({ c: raw }, "c", "#000000");
+		return this.colorsEqual(color, Color3.FromHexString("#ff0000"))
+			|| this.colorsEqual(color, Color3.FromHexString("#00ff00"));
+	}
+
+	/** 从指定部件 mesh 材质采样 albedo，并转到 Inspector（sRGB）空间。 */
+	private samplePartInspectorColor(predicate: (part: ShelfPart) => boolean): Color3 | null {
+		const part = this.getShelfParts().find(predicate);
+		if (!part) { return null; }
+		for (const mesh of this.collectColorableMeshesDeep(part.node)) {
+			const snapshot = this.snapshots.get(mesh);
+			const material = snapshot?.material ?? mesh.material ?? mesh.sourceMesh?.material;
+			const linear = this.readMaterialAlbedoColor(material);
+			if (linear) {
+				return typeof linear.toGammaSpace === "function" ? linear.toGammaSpace() : linear.clone();
+			}
+		}
+		return null;
+	}
+
+	private readMaterialAlbedoColor(material: any): Color3 | null {
+		if (!material) { return null; }
+		if (Array.isArray(material.subMaterials)) {
+			for (const sub of material.subMaterials) {
+				const nested = this.readMaterialAlbedoColor(sub);
+				if (nested) { return nested; }
+			}
+		}
+		if (material.albedoColor?.clone) { return material.albedoColor.clone(); }
+		if (material.diffuseColor?.clone) { return material.diffuseColor.clone(); }
+		if (material.baseColor?.clone) { return material.baseColor.clone(); }
+		return null;
+	}
+
+	private colorsEqual(a: Color3, b: Color3, epsilon = 0.02): boolean {
+		return Math.abs(a.r - b.r) <= epsilon
+			&& Math.abs(a.g - b.g) <= epsilon
+			&& Math.abs(a.b - b.b) <= epsilon;
+	}
+
+	/** 记录当前模型根节点和所有子节点的基础变换与启用状态。 */
+	private captureSnapshots(): void {
+		this.getModelNodes().forEach((target) => {
+			this.rememberSnapshot(target);
+			this.getBoundsMeshes(target).forEach((mesh) => {
+				this.rememberSnapshot(mesh);
+				this.rememberMeshThinInstanceBaseline(mesh);
+			});
+		});
+	}
+
+	/** 保存单个节点的基础状态，后续所有参数应用都以该状态为基线。 */
+	private rememberSnapshot(target: any): NodeSnapshot {
+		if (!this.snapshots.has(target)) {
+			this.snapshots.set(target, {
+				position: target.position?.clone?.() ?? Vector3.Zero(),
+				scaling: target.scaling?.clone?.() ?? new Vector3(1, 1, 1),
+				rotation: target.rotation?.clone?.(),
+				rotationQuaternion: target.rotationQuaternion?.clone?.(),
+				enabled: typeof target.isEnabled === "function" ? target.isEnabled(false) : undefined,
+				isVisible: typeof target.isVisible === "boolean" ? target.isVisible : undefined,
+				useVertexColors: typeof target.useVertexColors === "boolean" ? target.useVertexColors : undefined,
+				material: "material" in target ? target.material : undefined
+			});
+		}
+		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
+	}
+
+	/** 将所有已记录节点恢复到导入时的基础状态。 */
+	private restoreBaseNodes(): void {
+		this.restoreThinInstanceBaselines();
+		this.snapshots.forEach((snapshot, target) => {
+			if (!target || target.isDisposed?.()) { return; }
+			if (target.position) {
+				target.position = snapshot.position.clone();
+			}
+			if (target.scaling) {
+				target.scaling = snapshot.scaling.clone();
+			}
+			if (target.rotation && snapshot.rotation) {
+				target.rotation = snapshot.rotation.clone();
+			}
+			if (target.rotationQuaternion !== undefined) {
+				target.rotationQuaternion = snapshot.rotationQuaternion?.clone?.() ?? null;
+			}
+			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") {
+				target.setEnabled(snapshot.enabled);
+			}
+			if (snapshot.isVisible !== undefined && "isVisible" in target) {
+				target.isVisible = snapshot.isVisible;
+			}
+			if (snapshot.useVertexColors !== undefined && "useVertexColors" in target) {
+				target.useVertexColors = snapshot.useVertexColors;
+			}
+			if (snapshot.material !== undefined && "material" in target && target.getClassName?.() !== "InstancedMesh") {
+				target.material = snapshot.material;
+			}
+		});
+	}
+
+	/** 从模型 metadata、参数脚本实例和运行实例属性中读取参数值。 */
+	private readRawParamValues(): ValueMap {
+		const scriptValues = {
+			...this.readScriptParamValues(),
+			...this.readParamValuesFromScriptInstances(),
+		};
+		const values: ValueMap = {
+			...DEFAULT_VALUES,
+			bodyColor: this.sampledBodyColor ? this.colorToHexString(this.sampledBodyColor) : DEFAULT_VALUES.bodyColor,
+			beamColor: this.sampledBeamColor ? this.colorToHexString(this.sampledBeamColor) : DEFAULT_VALUES.beamColor,
+			...scriptValues,
+		};
+		for (const key of ["layerCount", "columnCount", "cellWidth", "cellHeight", "supportLegHeight", "postExtension",
+			"cellDepth", "doubleDeepEnabled", "deepSlotGap", "baffleStyle", "showFeet", "bodyColor", "beamColor"]) {
+			values[key] = this.readRuntimeValue(key, values[key]);
+		}
+		return values;
+	}
+
+	private readParamValues(mergedValues: ValueMap): ValueMap {
+		const bodyColor = this.colorToHexString(
+			this.readColor3(
+				{ bodyColor: this.readRuntimeValue("bodyColor", mergedValues.bodyColor) },
+				"bodyColor",
+				String(DEFAULT_VALUES.bodyColor),
+			),
+		);
+		const beamColor = this.colorToHexString(
+			this.readColor3(
+				{ beamColor: this.readRuntimeValue("beamColor", mergedValues.beamColor) },
+				"beamColor",
+				String(DEFAULT_VALUES.beamColor),
+			),
+		);
+		return {
+			...mergedValues,
+			layerCount: this.readNumber({ layerCount: this.readRuntimeValue("layerCount", mergedValues.layerCount) }, "layerCount", Number(DEFAULT_VALUES.layerCount)),
+			columnCount: this.readNumber({ columnCount: this.readRuntimeValue("columnCount", mergedValues.columnCount) }, "columnCount", Number(DEFAULT_VALUES.columnCount)),
+			cellWidth: this.readNumber({ cellWidth: this.readRuntimeValue("cellWidth", mergedValues.cellWidth) }, "cellWidth", Number(DEFAULT_VALUES.cellWidth)),
+			cellHeight: this.readNumber({ cellHeight: this.readRuntimeValue("cellHeight", mergedValues.cellHeight) }, "cellHeight", Number(DEFAULT_VALUES.cellHeight)),
+			supportLegHeight: this.readNumber({ supportLegHeight: this.readRuntimeValue("supportLegHeight", mergedValues.supportLegHeight) }, "supportLegHeight", Number(DEFAULT_VALUES.supportLegHeight)),
+			postExtension: Math.max(0, this.readNumber({ postExtension: this.readRuntimeValue("postExtension", mergedValues.postExtension) }, "postExtension", Number(DEFAULT_VALUES.postExtension))),
+			cellDepth: this.readNumber({ cellDepth: this.readRuntimeValue("cellDepth", mergedValues.cellDepth) }, "cellDepth", Number(DEFAULT_VALUES.cellDepth)),
+			doubleDeepEnabled: this.readBoolean({ doubleDeepEnabled: this.readRuntimeValue("doubleDeepEnabled", mergedValues.doubleDeepEnabled) }, "doubleDeepEnabled", Boolean(DEFAULT_VALUES.doubleDeepEnabled)),
+			deepSlotGap: this.readNumber({ deepSlotGap: this.readRuntimeValue("deepSlotGap", mergedValues.deepSlotGap) }, "deepSlotGap", Number(DEFAULT_VALUES.deepSlotGap)),
+			baffleStyle: this.readBoolean({ baffleStyle: this.readRuntimeValue("baffleStyle", mergedValues.baffleStyle) }, "baffleStyle", Boolean(DEFAULT_VALUES.baffleStyle)),
+			showFeet: this.readBoolean({ showFeet: this.readRuntimeValue("showFeet", mergedValues.showFeet) }, "showFeet", Boolean(DEFAULT_VALUES.showFeet)),
+			bodyColor,
+			beamColor
+		};
+	}
+
+	/** 优先读取编辑器注入到运行实例上的实时参数，未注入时保留 metadata 中的参数值。 */
+	private readRuntimeValue(key: string, fallback: unknown): unknown {
+		const value = (this as Record<string, unknown>)[key];
+		return value === undefined ? fallback : value;
+	}
+
+	/** 从已挂载的参数脚本实例读取 live 字段（含 Inspector 刚改的颜色）。 */
+	private readParamValuesFromScriptInstances(): ValueMap {
+		const result: ValueMap = {};
+		this.getOwnedParameterScripts().forEach((script) => {
+			const instance = script?.instance ?? script?.component ?? script;
+			if (!instance || typeof instance !== "object") { return; }
+			Object.keys(DEFAULT_VALUES).forEach((key) => {
+				if (key in instance) { result[key] = (instance as ValueMap)[key]; }
+			});
+		});
+		return this.normalizeValueMap(result);
+	}
+
+	private isParameterClassName(name: unknown): boolean {
+		return typeof name === "string" && /(?:^|[./#])ParametricModelParamsComponent$/.test(name);
+	}
+
+	/** 场景级条目必须明确指向本节点；节点本地条目也不能带有冲突的归属。 */
+	private isOwnedParameterScript(script: any, local: boolean): boolean {
+		const instance = script?.instance ?? script?.component ?? script;
+		if (!instance || typeof instance !== "object") { return false; }
+		const owners = [script?.owner, script?.node, instance?.owner, instance?.node]
+			.filter((owner) => owner !== undefined && owner !== null);
+		if ((!local && owners.length === 0) || owners.some((owner) => owner !== this.node)) { return false; }
+		const filename = script?.scriptFilename;
+		if (typeof filename === "string" && filename && filename !== PARAMETER_SCRIPT_FILENAME) { return false; }
+		const declaredClasses = [script?.className, instance?.className]
+			.filter((name) => typeof name === "string" && name.length > 0);
+		if (declaredClasses.some((name) => !this.isParameterClassName(name))) { return false; }
+		if (instance === this || instance instanceof ParametricModelRuntimeComponent
+			|| [script?.name, instance?.constructor?.name].some((name) => typeof name === "string"
+				&& /(?:^|[./#])ParametricModelRuntimeComponent$/.test(name))) { return false; }
+		if (instance instanceof ParametricModelParamsComponent
+			|| [script?.className, script?.name, instance?.className, instance?.constructor?.name]
+				.some((name) => this.isParameterClassName(name))) { return true; }
+
+		// 参数组件与运行组件共用脚本文件；无类名时只接纳明确归属本节点的普通参数对象。
+		const constructorName = instance?.constructor?.name;
+		return local && filename === PARAMETER_SCRIPT_FILENAME && instance !== script
+			&& (instance.node === this.node || instance.owner === this.node)
+			&& (typeof script?.name !== "string" || !script.name || script.name === filename)
+			&& (!constructorName || constructorName === "Object")
+			&& Object.keys(DEFAULT_VALUES).some((key) =>
+				!["modelKey", "deviceType", "deviceName", "description"].includes(key) && key in instance);
+	}
+
+	private getOwnedParameterScripts(): any[] {
+		const scene = this.node.getScene?.();
+		const local = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
+		const global = Array.isArray(scene?.metadata?.scripts) ? scene.metadata.scripts : [];
+		return [
+			...local.filter((script: any) => this.isOwnedParameterScript(script, true)),
+			...global.filter((script: any) => this.isOwnedParameterScript(script, false)),
+		];
+	}
+
+	/** Color3 / 对象色转稳定十六进制，供参数签名与 metadata 对齐。 */
+	private colorToHexString(color: Color3): string {
+		const toByte = (channel: number): string => {
+			const value = channel > 1 ? channel : channel * 255;
+			return Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0");
+		};
+		return `#${toByte(color.r)}${toByte(color.g)}${toByte(color.b)}`;
+	}
+
+	/** 从 metadata.scripts[] 中读取参数脚本保存的 values。 */
+	private readScriptParamValues(): ValueMap {
+		const scripts = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
+		for (const script of scripts) {
+			const instance = script?.instance ?? script?.component ?? script;
+			const owners = [script?.owner, script?.node, instance?.owner, instance?.node]
+				.filter((owner) => owner !== undefined && owner !== null);
+			if (owners.some((owner) => owner !== this.node)) { continue; }
+			if (typeof script?.scriptFilename === "string" && script.scriptFilename
+				&& script.scriptFilename !== PARAMETER_SCRIPT_FILENAME) { continue; }
+			if (instance === this || instance instanceof ParametricModelRuntimeComponent
+				|| [script?.name, instance?.constructor?.name].some((name) => typeof name === "string"
+					&& /(?:^|[./#])ParametricModelRuntimeComponent$/.test(name))) { continue; }
+			if (typeof instance?.className === "string" && instance.className
+				&& !this.isParameterClassName(instance.className)) { continue; }
+			const scriptName = String(script?.className || script?.name || script?.scriptFilename || "");
+			const values = {
+				...this.readFieldDefaults(script),
+				...this.normalizeValueMap(script?.values),
+				...this.normalizeValueMap(script?.properties),
+				...this.normalizeValueMap(script?.config)
+			};
+			const hasExplicitClass = typeof script?.className === "string" && script.className.length > 0;
+			if (!hasExplicitClass && typeof script?.name === "string" && script.name
+				&& script.name !== PARAMETER_SCRIPT_FILENAME && !this.isParameterClassName(script.name)) { continue; }
+			if (this.isParameterClassName(scriptName)
+				|| (!hasExplicitClass
+					&& (script?.scriptFilename === PARAMETER_SCRIPT_FILENAME || script?.name === PARAMETER_SCRIPT_FILENAME)
+					&& Object.keys(values).some((key) => key in DEFAULT_VALUES))) {
+				return values;
+			}
+		}
+		return {};
+	}
+
+	/** 读取 meta 字段列表中的默认值，保证 Inspector 尚未保存时也能取得参数。 */
+	private readFieldDefaults(script: any): ValueMap {
+		const fields = Array.isArray(script?.fields) ? script.fields : [];
+		return fields.reduce((result: ValueMap, field: any) => {
+			const key = String(field?.key ?? field?.propertyKey ?? "");
+			if (key) {
+				result[key] = field.defaultValue ?? field.value;
+			}
+			return result;
+		}, {});
+	}
+
+	/** 将 values/properties/config 的包装结构转换为普通键值表。 */
+	private normalizeValueMap(source: unknown): ValueMap {
+		if (!source || typeof source !== "object") {
+			return {};
+		}
+		if (Array.isArray(source)) {
+			return source.reduce((result: ValueMap, item: any) => {
+				const key = String(item?.key ?? item?.propertyKey ?? item?.name ?? "");
+				if (key) {
+					result[key] = item.value ?? item.currentValue ?? item.defaultValue;
+				}
+				return result;
+			}, {});
+		}
+		return Object.entries(source as Record<string, unknown>).reduce((result: ValueMap, [key, value]) => {
+			if (value && typeof value === "object") {
+				const record = value as Record<string, unknown>;
+				if ("value" in record || "currentValue" in record || "defaultValue" in record) {
+					result[key] = record.value ?? record.currentValue ?? record.defaultValue;
+					return result;
+				}
+			}
+			result[key] = value;
+			return result;
+		}, {});
+	}
+
+	/** 读取 Shelf 部件并按宽、高、深、底腿、层数和列数生成目标形态。 */
+	private applyShelfParameters(values: ValueMap): void {
+		const parts = this.getShelfParts();
+		const bounds = this.getNodesMeterBounds(parts.map((part) => part.node));
+		if (!bounds || parts.length === 0) {
+			throw new Error("未找到可测量的货架部件");
+		}
+		this.currentParts = parts;
+
+		const targetWidth = this.readPositiveNumber(values, "cellWidth", bounds.size.x);
+		const targetHeight = this.readPositiveNumber(values, "cellHeight", bounds.size.y);
+		const targetSupportLegHeight = Math.max(0, this.readNumber(values, "supportLegHeight", Number(DEFAULT_VALUES.supportLegHeight)));
+		const effectiveSupportLegHeight = this.resolveSupportLegHeight(targetSupportLegHeight);
+		const targetDepth = this.readPositiveNumber(values, "cellDepth", bounds.size.z);
+		const layers = this.clamp(Math.round(this.readNumber(values, "layerCount", 1)), 1, MAX_LAYER_COUNT);
+		const columns = this.clamp(Math.round(this.readNumber(values, "columnCount", 1)), 1, MAX_COLUMN_COUNT);
+		const footTopY = this.getFootTopY(parts) ?? bounds.minimum.y;
+		const lowerCrossbeamBounds = this.getLowerCrossbeamBounds(parts);
+		const sourceSupportLegHeight = this.getSourceSupportLegHeight(parts, footTopY);
+		const targetCrossbeamMinY = footTopY + effectiveSupportLegHeight;
+		const supportLegDelta = lowerCrossbeamBounds ? targetCrossbeamMinY - lowerCrossbeamBounds.minimum : effectiveSupportLegHeight - sourceSupportLegHeight;
+		const layerClearHeight = Math.max(MIN_DIMENSION, targetHeight);
+		const postExtension = Math.max(0, this.readNumber(values, "postExtension", Number(DEFAULT_VALUES.postExtension)));
+
+		this.applySingleLayerDimensions(parts, bounds, targetWidth, targetDepth, supportLegDelta);
+		const layerBoardHeight = this.getLayerBoardHeight(parts);
+		const layerStepY = layerClearHeight + layerBoardHeight / 2;
+		// 柱顶/顶框与 ThinInstance 层步距一致：底腿 + (层数−1)×步距 + 顶层板厚 + 顶层净高。
+		const targetRackTopY = footTopY
+			+ effectiveSupportLegHeight
+			+ Math.max(0, layers - 1) * layerStepY
+			+ layerBoardHeight
+			+ layerClearHeight;
+		const targetPostTopY = targetRackTopY + postExtension;
+		const rackContentHeight = targetRackTopY - footTopY;
+		if (![targetRackTopY, targetPostTopY, rackContentHeight, layerStepY].every(Number.isFinite)) {
+			throw new InstanceBudgetError("货架尺寸过大，无法安全计算层高和斜撑");
+		}
+		this.applyPostTotalHeight(parts, footTopY, targetPostTopY);
+		this.applyUpperLayerFrameToPostTop(parts, targetRackTopY);
+		// 斜撑片数始终按 postExtension=0（架顶/Box020 底）计算，不随立柱延长增减。
+		const braceStack = this.applySideTriangleBraceStackLayout(parts, bounds.minimum.y, rackContentHeight);
+		const columnLayout = this.createColumnLayout(parts, targetWidth);
+		const depthCount = this.readBoolean(values, "doubleDeepEnabled", false) ? 2 : 1;
+		const deepOffsetZ = targetDepth + this.readNumber(values, "deepSlotGap", 0);
+		if (!Number.isFinite(deepOffsetZ)) {
+			throw new InstanceBudgetError("深位偏移超出安全数值范围");
+		}
+		const gridParts = this.prepareShelfGridParts(parts, columnLayout);
+		this.assertShelfInstanceBudget(gridParts, layers, columns, depthCount, braceStack?.count ?? 0);
+		this.instanceShelfGrid(gridParts, layers, columns, layerStepY, columnLayout, depthCount, deepOffsetZ);
+		this.instanceTriangleBracesForGrid(gridParts, braceStack, columns, columnLayout, depthCount, deepOffsetZ);
+		this.flushReplicas();
+		// 无层/列/对侧时也要私有显示宿主：InstancedMesh 改 material 会写到共享 sourceMesh，必须先 clone 再乘色。
+		this.ensureColorDisplayHosts(parts);
+		// 宿主私有几何上做列宽/深度两端保留、立柱底部刚性向上拉（避免写共享 sourceMesh）。
+		this.flushWidthVertexStretches();
+		this.flushDepthVertexStretches();
+		this.flushPostHeightVertexStretches();
+		this.applyAppearanceColors(values);
+		this.applyBaffleStyleVisibility(parts, values);
+		this.applyFootVisibility(parts, values);
+		this.writeBuiltInSlotLayout(bounds, targetCrossbeamMinY, layerBoardHeight, layerStepY, columnLayout);
+	}
+
+	/** 输出内置货格对齐所需的实测布局；编辑器运行时按此放置绑定货格，key 与内置货格运行时约定一致。 */
+	private writeBuiltInSlotLayout(
+		bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 },
+		firstLayerBoardMinY: number,
+		layerBoardHeight: number,
+		layerStepY: number,
+		columnLayout: ShelfColumnLayout
+	): void {
+		const firstCellCenterX = (columnLayout.startCenter ?? bounds.center.x - columnLayout.spacing / 2) + columnLayout.spacing / 2;
+		this.node.metadata = {
+			...(this.node.metadata ?? {}),
+			builtInSlotLayout: {
+				firstCellCenterX,
+				firstLayerSurfaceY: firstLayerBoardMinY + layerBoardHeight,
+				columnSpacing: columnLayout.spacing,
+				layerStepY,
+				depthCenterZ: bounds.center.z
+			}
+		};
+	}
+
+	/** 对原始第一层应用宽深尺寸和底腿高度，贴地支撑保持原位；护板高度对齐黄梁。 */
+	private applySingleLayerDimensions(parts: ShelfPart[], bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetWidth: number, targetDepth: number, supportLegDelta: number): void {
+		this.applyShelfWidthLayout(parts, bounds, targetWidth);
+		this.applyShelfDepthLayout(parts, bounds, targetDepth);
+
+		parts.filter((part) => this.isLowerCrossbeamPart(part)).forEach((part) => {
+			this.moveNodeMeterAxisBy(part.node, "y", supportLegDelta);
+		});
+		this.alignGuardBoardsToLowerCrossbeam(parts);
+	}
+
+	/** 护板 fhb 与下方黄梁 Box032 同高（中心 Y 对齐）。 */
+	private alignGuardBoardsToLowerCrossbeam(parts: ShelfPart[]): void {
+		const beamBounds = this.getLowerCrossbeamBounds(parts);
+		if (!beamBounds) {
+			return;
+		}
+		parts.filter((part) => this.isGuardBoardPart(part)).forEach((part) => {
+			const guardBounds = this.getNodesMeterAxisBounds([part.node], "y");
+			if (!guardBounds) {
+				return;
+			}
+			this.moveNodeMeterAxisBy(part.node, "y", beamBounds.center - guardBounds.center);
+		});
+	}
+
+	/** 顶框顶边对齐柱顶（targetPostTopY 与层复制步距公式一致）。 */
+	private applyUpperLayerFrameToPostTop(parts: ShelfPart[], targetPostTopY: number): void {
+		parts.filter((part) => this.isUpperLayerFramePart(part)).forEach((part) => {
+			const nodeBounds = this.getNodesMeterAxisBounds([part.node], "y");
+			if (nodeBounds) {
+				this.moveNodeMeterAxisBy(part.node, "y", targetPostTopY - nodeBounds.maximum);
+			}
+		});
+	}
+
+	/** 读取 Box032 层板 Y 轴厚度；层高克隆步距 = cellHeight + 该厚度。 */
+	private getLayerBoardHeight(parts: ShelfPart[]): number {
+		const box032Nodes = parts.filter((part) => this.matchesBaseName(part.baseName, "Box032")).map((part) => part.node);
+		const boardBounds = this.getNodesMeterAxisBounds(box032Nodes.length > 0 ? box032Nodes : parts.filter((part) => this.isLowerCrossbeamPart(part)).map((part) => part.node), "y");
+		return boardBounds && boardBounds.size > MIN_DIMENSION ? boardBounds.size : 0;
+	}
+
+	/** 黄梁底边相对底脚顶面的目标高度：固定拐角间隙 0.03 m，再叠加参数值。 */
+	private resolveSupportLegHeight(targetSupportLegHeight: number): number {
+		return SUPPORT_LEG_CORNER_CLEARANCE + targetSupportLegHeight;
+	}
+
+	/** 读取下方黄色横梁 Y 轴包围盒。 */
+	private getLowerCrossbeamBounds(parts: ShelfPart[]): AxisBounds | null {
+		return this.getNodesMeterAxisBounds(
+			parts.filter((part) => this.isLowerCrossbeamPart(part)).map((part) => part.node),
+			"y"
+		);
+	}
+
+	/** 读取底脚顶面 Y；无独立脚时用立柱底面。 */
+	private getFootTopY(parts: ShelfPart[]): number | null {
+		const footNodes = parts.filter((part) => this.isFootPart(part)).map((part) => part.node);
+		if (footNodes.length > 0) {
+			const maximums = footNodes
+				.map((node) => this.getNodesMeterAxisBounds([node], "y")?.maximum)
+				.filter((maximum): maximum is number => typeof maximum === "number" && Number.isFinite(maximum));
+			return maximums.length > 0 ? Math.max(...maximums) : null;
+		}
+		const postMins = parts
+			.filter((part) => this.isPostPart(part))
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "y")?.minimum)
+			.filter((minimum): minimum is number => typeof minimum === "number" && Number.isFinite(minimum));
+		return postMins.length > 0 ? Math.min(...postMins) : null;
+	}
+
+	/** 读取原始下方黄色横梁底边相对底脚顶面的高度，作为底腿参数的稳定基准。 */
+	private getSourceSupportLegHeight(parts: ShelfPart[], footTopY: number): number {
+		const lowerCrossbeamBounds = this.getLowerCrossbeamBounds(parts);
+		if (!lowerCrossbeamBounds) {
+			return Number(DEFAULT_VALUES.supportLegHeight);
+		}
+		return Math.max(0, lowerCrossbeamBounds.minimum - footTopY);
+	}
+
+	/**
+	 * 列宽：cellWidth 为柱间净宽；柱中心距目标 = cellWidth + POST_WIDTH_X。
+	 * 先移柱，再让横梁/隔板按同一增量拉伸（两端各 WIDTH_END_KEEP_RATIO 刚性）。
+	 */
+	private applyShelfWidthLayout(parts: ShelfPart[], bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetWidth: number): void {
+		this.pendingWidthVertexStretches.clear();
+		const layout = this.createPostSpacingWidthLayout(parts, targetWidth);
+		if (!layout) {
+			return;
+		}
+		const extension = layout.target.size - layout.source.size;
+		// 先登记拉伸（仍用移动前包围盒），再移柱，避免量到已偏位置。
+		parts.filter((part) => this.isWidthStretchPart(part) || this.isGuardBoardPart(part)).forEach((part) => {
+			this.registerWidthKeepEndsStretch(part, extension);
+		});
+		parts.filter((part) => !this.isWidthStretchPart(part) && !this.isGuardBoardPart(part)).forEach((part) => {
+			this.moveConnectedPartWithWidthEndpoint(part, layout);
+		});
+	}
+
+	/**
+	 * 以左右立柱中心为锚：−X 侧不动，+X 侧移到柱中心距 = cellWidth + POST_WIDTH_X。
+	 */
+	private createPostSpacingWidthLayout(parts: ShelfPart[], targetWidth: number): ShelfAxisLayout | null {
+		const centers = parts
+			.filter((part) => this.isPostPart(part))
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "x")?.center)
+			.filter((center): center is number => typeof center === "number" && Number.isFinite(center));
+		if (centers.length < 2) {
+			return null;
+		}
+		const sourceMinimum = Math.min(...centers);
+		const sourceMaximum = Math.max(...centers);
+		const sourceSize = sourceMaximum - sourceMinimum;
+		if (sourceSize <= PARAMETER_EPSILON) {
+			return null;
+		}
+		const targetSize = Math.max(MIN_DIMENSION, targetWidth + POST_WIDTH_X);
+		const source: AxisBounds = {
+			minimum: sourceMinimum,
+			maximum: sourceMaximum,
+			center: (sourceMinimum + sourceMaximum) / 2,
+			size: sourceSize,
+		};
+		const target: AxisBounds = {
+			minimum: sourceMinimum,
+			maximum: sourceMinimum + targetSize,
+			center: sourceMinimum + targetSize / 2,
+			size: targetSize,
+		};
+		return { source, target, scale: this.createSafeRatio(target.size, source.size) };
+	}
+
+	/** 横梁/隔板按柱距增量登记顶点拉伸；两端刚性比例在 flush 时统一为 WIDTH_END_KEEP_RATIO。 */
+	private registerWidthKeepEndsStretch(part: ShelfPart, extension: number): void {
+		if (!Number.isFinite(extension) || Math.abs(extension) < PARAMETER_EPSILON) {
+			return;
+		}
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "x");
+		if (!nodeBounds || nodeBounds.size <= PARAMETER_EPSILON) {
+			return;
+		}
+		this.getBoundsMeshes(part.node).forEach((mesh) => {
+			this.pendingWidthVertexStretches.set(mesh, {
+				axisMin: nodeBounds.minimum,
+				axisMax: nodeBounds.maximum,
+				extension,
+			});
+		});
+	}
+
+	/** 将登记的列宽拉伸写到私有显示 mesh（优先 tiHost）。 */
+	private flushWidthVertexStretches(): void {
+		this.pendingWidthVertexStretches.forEach((params, mesh) => {
+			const host = this.thinInstanceHosts.get(mesh);
+			const target = host && !host.isDisposed?.()
+				? host
+				: (mesh.getClassName?.() === "InstancedMesh" || this.isSharedSourceMesh(mesh) ? null : mesh);
+			if (!target) {
+				return;
+			}
+			this.stretchMeshMeterAxisKeepEndsFromMin(
+				target,
+				"x",
+				params.axisMin,
+				params.axisMax,
+				WIDTH_END_KEEP_RATIO,
+				WIDTH_END_KEEP_RATIO,
+				params.extension,
+			);
+		});
+		this.pendingWidthVertexStretches.clear();
+	}
+
+	/**
+	 * 米空间分段拉伸：min/max 端各保留刚性区；min 端不动，max 端 +extension，只拉中间。
+	 * 缩小时若中间不够缩，自动减小两端刚性比例，仍不够则退化为整段 FromMin。
+	 */
+	private stretchMeshMeterAxisKeepEndsFromMin(
+		mesh: any,
+		axis: "x" | "y" | "z",
+		axisMin: number,
+		axisMax: number,
+		minKeepRatio: number,
+		maxKeepRatio: number,
+		extension: number,
+	): void {
+		if (Math.abs(extension) < PARAMETER_EPSILON) {
+			return;
+		}
+		const span = axisMax - axisMin;
+		if (span <= PARAMETER_EPSILON) {
+			return;
+		}
+		const nextSpan = span + extension;
+		if (nextSpan <= PARAMETER_EPSILON) {
+			return;
+		}
+
+		let minRatio = Math.max(0, Math.min(0.49, minKeepRatio));
+		let maxRatio = Math.max(0, Math.min(0.49, maxKeepRatio));
+		if (extension < 0) {
+			const minMiddleRatio = 0.05;
+			const maxKeepSum = Math.max(0, 1 + extension / span - minMiddleRatio);
+			const wantSum = minRatio + maxRatio;
+			if (wantSum > maxKeepSum + PARAMETER_EPSILON) {
+				if (maxKeepSum <= PARAMETER_EPSILON) {
+					minRatio = 0;
+					maxRatio = 0;
+				} else {
+					const scale = maxKeepSum / wantSum;
+					minRatio *= scale;
+					maxRatio *= scale;
+				}
+			}
+		}
+
+		const minKeep = Math.max(PARAMETER_EPSILON, span * minRatio);
+		const maxKeep = Math.max(PARAMETER_EPSILON, span * maxRatio);
+		if (minKeep + maxKeep >= span - PARAMETER_EPSILON) {
+			this.stretchMeshMeterAxisFromMin(mesh, axis, axisMin, axisMax, extension);
+			return;
+		}
+		const middleStart = axisMin + minKeep;
+		const middleEnd = axisMax - maxKeep;
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= PARAMETER_EPSILON) {
+			this.stretchMeshMeterAxisFromMin(mesh, axis, axisMin, axisMax, extension);
+			return;
+		}
+		const middleTarget = middleLength + extension;
+		if (middleTarget <= PARAMETER_EPSILON) {
+			this.stretchMeshMeterAxisFromMin(mesh, axis, axisMin, axisMax, extension);
+			return;
+		}
+		const middleScale = middleTarget / middleLength;
+
+		const positions = this.readVertexPositions(mesh);
+		const worldMatrix = mesh.computeWorldMatrix?.(true);
+		const inverseWorldMatrix = worldMatrix?.clone?.();
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) {
+			return;
+		}
+		inverseWorldMatrix.invert();
+		const nextPositions = positions.slice();
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+			const world = Vector3.TransformCoordinates(local, worldMatrix);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const source = meterPoint[axis];
+			let next = source;
+			if (source <= middleStart) {
+				next = source;
+			} else if (source >= middleEnd) {
+				next = source + extension;
+			} else {
+				next = middleStart + (source - middleStart) * middleScale;
+			}
+			if (Math.abs(next - source) < PARAMETER_EPSILON) {
+				continue;
+			}
+			const delta = next - source;
+			const nextMeter = new Vector3(
+				meterPoint.x + (axis === "x" ? delta : 0),
+				meterPoint.y + (axis === "y" ? delta : 0),
+				meterPoint.z + (axis === "z" ? delta : 0),
+			);
+			const nextWorld = Vector3.TransformCoordinates(nextMeter, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
+			nextPositions[index] = nextLocal.x;
+			nextPositions[index + 1] = nextLocal.y;
+			nextPositions[index + 2] = nextLocal.z;
+		}
+		this.writeVertexPositions(mesh, nextPositions);
+	}
+
+	/** 米空间轴向拉伸：min 端不动，max 端 +extension，中间按比例伸长。 */
+	private stretchMeshMeterAxisFromMin(
+		mesh: any,
+		axis: "x" | "y" | "z",
+		axisMin: number,
+		axisMax: number,
+		extension: number,
+	): void {
+		if (Math.abs(extension) < PARAMETER_EPSILON) {
+			return;
+		}
+		const span = axisMax - axisMin;
+		if (span <= PARAMETER_EPSILON) {
+			return;
+		}
+		const nextSpan = span + extension;
+		if (nextSpan <= PARAMETER_EPSILON) {
+			return;
+		}
+		const scale = nextSpan / span;
+		const positions = this.readVertexPositions(mesh);
+		const worldMatrix = mesh.computeWorldMatrix?.(true);
+		const inverseWorldMatrix = worldMatrix?.clone?.();
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) {
+			return;
+		}
+		inverseWorldMatrix.invert();
+		const nextPositions = positions.slice();
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+			const world = Vector3.TransformCoordinates(local, worldMatrix);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const source = meterPoint[axis];
+			const next = axisMin + (source - axisMin) * scale;
+			if (Math.abs(next - source) < PARAMETER_EPSILON) {
+				continue;
+			}
+			const delta = next - source;
+			const nextMeter = new Vector3(
+				meterPoint.x + (axis === "x" ? delta : 0),
+				meterPoint.y + (axis === "y" ? delta : 0),
+				meterPoint.z + (axis === "z" ? delta : 0),
+			);
+			const nextWorld = Vector3.TransformCoordinates(nextMeter, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
+			nextPositions[index] = nextLocal.x;
+			nextPositions[index + 1] = nextLocal.y;
+			nextPositions[index + 2] = nextLocal.z;
+		}
+		this.writeVertexPositions(mesh, nextPositions);
+	}
+
+	private getMeterSpaceMatrices(): { entityRootWorldMatrix: any; inverseEntityRootWorldMatrix: any } | null {
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseEntityRootWorldMatrix?.invert) {
+			return null;
+		}
+		inverseEntityRootWorldMatrix.invert();
+		return { entityRootWorldMatrix, inverseEntityRootWorldMatrix };
+	}
+
+	private readVertexPositions(target: any): number[] | undefined {
+		if (typeof target?.getVerticesData !== "function") {
+			return undefined;
+		}
+		const positions = target.getVerticesData("position");
+		return positions ? Array.from(positions as ArrayLike<number>) : undefined;
+	}
+
+	private writeVertexPositions(target: any, positions: number[]): void {
+		if (typeof target?.setVerticesData !== "function") {
+			return;
+		}
+		target.setVerticesData("position", positions.slice(), true);
+		target.refreshBoundingInfo?.(true, true);
+		target.computeWorldMatrix?.(true);
+	}
+
+	/** 非横梁/隔板连接件随柱中心端点移动：靠近 −X 柱跟 −X，靠近 +X 柱跟 +X。 */
+	private moveConnectedPartWithWidthEndpoint(part: ShelfPart, layout: ShelfAxisLayout): void {
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "x");
+		if (!nodeBounds || !part.node.position) {
+			return;
+		}
+		this.moveNodeMeterAxisBy(part.node, "x", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
+	}
+
+	/**
+	 * 深度：cellDepth 为柱排净深；柱中心距目标 = cellDepth + POST_WIDTH_Z。
+	 * 先登记拉伸，再移柱，端梁跟柱平移，Box032 只拉伸不平移。
+	 */
+	private applyShelfDepthLayout(parts: ShelfPart[], _bounds: { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 }, targetDepth: number): void {
+		this.pendingDepthVertexStretches.clear();
+		const layout = this.createPostSpacingDepthLayout(parts, targetDepth);
+		if (!layout) {
+			return;
+		}
+		const extension = layout.target.size - layout.source.size;
+		parts.filter((part) => this.isDepthSpanStretchPart(part)).forEach((part) => {
+			this.registerDepthKeepEndsStretch(part, extension);
+		});
+		// 先移柱，再让前后端黄梁（Box023/024）跟同一增量；Box032 跨深拉伸不整段平移。
+		parts.filter((part) => this.isPostPart(part)).forEach((part) => {
+			this.moveConnectedPartWithDepthEndpoint(part, layout);
+		});
+		parts.filter((part) => this.isWidthStretchPart(part) && !this.isLowerCrossbeamPart(part)).forEach((part) => {
+			this.moveWidthBeamWithDepthPosts(part, layout, extension);
+		});
+		parts.filter((part) => !this.isDepthSpanStretchPart(part) && !this.isWidthStretchPart(part) && !this.isPostPart(part)).forEach((part) => {
+			this.moveConnectedPartWithDepthEndpoint(part, layout);
+		});
+	}
+
+	/**
+	 * 以前后立柱中心为锚：−Z 侧不动，+Z 侧移到柱中心距 = cellDepth + POST_WIDTH_Z。
+	 */
+	private createPostSpacingDepthLayout(parts: ShelfPart[], targetDepth: number): ShelfAxisLayout | null {
+		const centers = parts
+			.filter((part) => this.isPostPart(part))
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "z")?.center)
+			.filter((center): center is number => typeof center === "number" && Number.isFinite(center));
+		if (centers.length < 2) {
+			return null;
+		}
+		const sourceMinimum = Math.min(...centers);
+		const sourceMaximum = Math.max(...centers);
+		const sourceSize = sourceMaximum - sourceMinimum;
+		if (sourceSize <= PARAMETER_EPSILON) {
+			return null;
+		}
+		const targetSize = Math.max(MIN_DIMENSION, targetDepth + POST_WIDTH_Z);
+		const source: AxisBounds = {
+			minimum: sourceMinimum,
+			maximum: sourceMaximum,
+			center: (sourceMinimum + sourceMaximum) / 2,
+			size: sourceSize,
+		};
+		const target: AxisBounds = {
+			minimum: sourceMinimum,
+			maximum: sourceMinimum + targetSize,
+			center: sourceMinimum + targetSize / 2,
+			size: targetSize,
+		};
+		return { source, target, scale: this.createSafeRatio(target.size, source.size) };
+	}
+
+	/**
+	 * 深度方向随柱距拉伸的件：
+	 * Box002/025/020/027、黄梁 Box032、隔板 fhb、侧面斜撑；增量 = 移动后柱距 − 原柱距。
+	 * Box032 跨前后两端，两端各 40% 刚性，只拉中间间距。
+	 */
+	private isDepthSpanStretchPart(part: ShelfPart): boolean {
+		return this.isDepthBeamPart(part)
+			|| this.isLowerCrossbeamPart(part)
+			|| this.isGuardBoardPart(part)
+			|| this.isSideTriangleBracePart(part);
+	}
+
+	/** 深向梁：Box002 / Box025 / Box020 / Box027。 */
+	private isDepthBeamPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, DEPTH_STRETCH_NODE_NAMES);
+	}
+
+	/**
+	 * 端梁 Box023/024 跟深度柱距：落在 +Z 半侧则平移 extension，−Z 侧不动。
+	 * （跨深黄梁 Box032 走顶点拉伸，不走此位移。）
+	 */
+	private moveWidthBeamWithDepthPosts(part: ShelfPart, layout: ShelfAxisLayout, extension: number): void {
+		if (!Number.isFinite(extension) || Math.abs(extension) < PARAMETER_EPSILON) {
+			return;
+		}
+		const sideCenter = this.getDepthSideCenter(part);
+		if (sideCenter === null) {
+			return;
+		}
+		if (sideCenter < layout.source.center) {
+			return;
+		}
+		this.moveNodeMeterAxisBy(part.node, "z", extension);
+	}
+
+	/** 取部件深度侧判定中心：优先米空间包围盒，其次节点 position.z。 */
+	private getDepthSideCenter(part: ShelfPart): number | null {
+		const bounds = this.getNodesMeterAxisBounds([part.node], "z");
+		if (bounds) {
+			return bounds.center;
+		}
+		const z = part.node?.position?.z;
+		return typeof z === "number" && Number.isFinite(z) ? z : null;
+	}
+
+	/** 隔板/深向梁/斜撑按前后柱距增量登记顶点拉伸。 */
+	private registerDepthKeepEndsStretch(part: ShelfPart, extension: number): void {
+		if (!Number.isFinite(extension) || Math.abs(extension) < PARAMETER_EPSILON) {
+			return;
+		}
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "z");
+		if (!nodeBounds || nodeBounds.size <= PARAMETER_EPSILON) {
+			return;
+		}
+		this.getBoundsMeshes(part.node).forEach((mesh) => {
+			this.pendingDepthVertexStretches.set(mesh, {
+				axisMin: nodeBounds.minimum,
+				axisMax: nodeBounds.maximum,
+				extension,
+			});
+		});
+	}
+
+	/** 将登记的深度拉伸写到私有显示 mesh（优先 tiHost）。 */
+	private flushDepthVertexStretches(): void {
+		this.pendingDepthVertexStretches.forEach((params, mesh) => {
+			const host = this.thinInstanceHosts.get(mesh);
+			const target = host && !host.isDisposed?.()
+				? host
+				: (mesh.getClassName?.() === "InstancedMesh" || this.isSharedSourceMesh(mesh) ? null : mesh);
+			if (!target) {
+				return;
+			}
+			this.stretchMeshMeterAxisKeepEndsFromMin(
+				target,
+				"z",
+				params.axisMin,
+				params.axisMax,
+				DEPTH_END_KEEP_RATIO,
+				DEPTH_END_KEEP_RATIO,
+				params.extension,
+			);
+		});
+		this.pendingDepthVertexStretches.clear();
+	}
+
+	/** 非深度跨拉件、非宽度横梁：随前后柱中心端点移动。 */
+	private moveConnectedPartWithDepthEndpoint(part: ShelfPart, layout: ShelfAxisLayout): void {
+		const nodeBounds = this.getNodesMeterAxisBounds([part.node], "z");
+		if (!nodeBounds || !part.node.position) {
+			return;
+		}
+		this.moveNodeMeterAxisBy(part.node, "z", this.getEndpointConnectedCenter(nodeBounds, layout) - nodeBounds.center);
+	}
+
+	/** 计算连接件的新中心：靠近最小端跟最小端，靠近最大端跟最大端，中间件才按中心比例移动。 */
+	private getEndpointConnectedCenter(nodeBounds: AxisBounds, layout: ShelfAxisLayout): number {
+		const centerDeadZone = Math.max(MIN_DIMENSION, layout.source.size * 0.08);
+		if (nodeBounds.center < layout.source.center - centerDeadZone) {
+			return layout.target.minimum + (nodeBounds.center - layout.source.minimum);
+		}
+		if (nodeBounds.center > layout.source.center + centerDeadZone) {
+			return layout.target.maximum + (nodeBounds.center - layout.source.maximum);
+		}
+		return layout.target.center + (nodeBounds.center - layout.source.center) * layout.scale;
+	}
+
+	/**
+	 * 立柱高度顶点拉伸；新 GLB 无独立脚，目标顶 = targetPostTopY（从 footTop 量，与层步距一致）。
+	 */
+	private applyPostTotalHeight(parts: ShelfPart[], footTopY: number, targetPostTopY: number): void {
+		this.pendingPostHeightVertexStretches.clear();
+		const postMinimum = this.getPostMinimumY(parts);
+		if (postMinimum === null) {
+			return;
+		}
+		const targetMaximum = Math.max(postMinimum + MIN_DIMENSION, Math.max(footTopY, targetPostTopY));
+		parts.filter((part) => this.isPostPart(part)).forEach((part) => {
+			const nodeBounds = this.getNodesMeterAxisBounds([part.node], "y");
+			if (!nodeBounds || nodeBounds.size <= MIN_DIMENSION) {
+				return;
+			}
+			const extension = targetMaximum - nodeBounds.maximum;
+			if (!Number.isFinite(extension) || Math.abs(extension) < PARAMETER_EPSILON) {
+				return;
+			}
+			this.getBoundsMeshes(part.node).forEach((mesh) => {
+				this.pendingPostHeightVertexStretches.set(mesh, {
+					axisMin: nodeBounds.minimum,
+					axisMax: nodeBounds.maximum,
+					extension,
+				});
+			});
+		});
+	}
+
+	/** 将立柱高度拉伸写到私有显示 mesh（优先 tiHost）。 */
+	private flushPostHeightVertexStretches(): void {
+		this.pendingPostHeightVertexStretches.forEach((params, mesh) => {
+			const host = this.thinInstanceHosts.get(mesh);
+			const target = host && !host.isDisposed?.()
+				? host
+				: (mesh.getClassName?.() === "InstancedMesh" || this.isSharedSourceMesh(mesh) ? null : mesh);
+			if (!target) {
+				return;
+			}
+			this.stretchMeshMeterAxisKeepEndsFromMin(
+				target,
+				"y",
+				params.axisMin,
+				params.axisMax,
+				POST_HEIGHT_BOTTOM_KEEP_RATIO,
+				0,
+				params.extension,
+			);
+		});
+		this.pendingPostHeightVertexStretches.clear();
+	}
+
+	/** 汇总全部立柱当前世界 Y 轴投影最低点，作为高度拉伸时不变的底端锚点。 */
+	private getPostMinimumY(parts: ShelfPart[]): number | null {
+		const minimums = parts
+			.filter((part) => this.isPostPart(part))
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "y")?.minimum)
+			.filter((minimum): minimum is number => typeof minimum === "number" && Number.isFinite(minimum));
+		return minimums.length > 0 ? Math.min(...minimums) : null;
+	}
+
+	/**
+	 * 三角斜撑堆叠（Box008 / Box026）：
+	 * 区间 = Box002 顶+0.03 ～ Box020 底−0.03；不受 postExtension 影响。
+	 */
+	private applySideTriangleBraceStackLayout(
+		parts: ShelfPart[],
+		rackMinimumY: number,
+		totalHeight: number,
+	): { count: number; verticalStepY: number } | null {
+		const metrics = this.getSideTriangleBraceStackMetrics(parts, rackMinimumY, totalHeight);
+		if (!metrics || metrics.count <= 0) {
+			this.setSideTriangleBracePartsVisible(parts, false);
+			return null;
+		}
+		this.setSideTriangleBracePartsVisible(parts, true);
+		parts.filter((part) => this.isSideTriangleBracePart(part)).forEach((part) => {
+			const braceBounds = this.getNodesMeterAxisBounds([part.node], "y");
+			if (!braceBounds) { return; }
+			this.moveNodeMeterAxisBy(part.node, "y", metrics.stackBottomY - braceBounds.minimum);
+		});
+		return { count: metrics.count, verticalStepY: metrics.verticalStepY };
+	}
+
+	private getSideTriangleBraceStackMetrics(
+		parts: ShelfPart[],
+		rackMinimumY: number,
+		totalHeight: number,
+	): { count: number; verticalStepY: number; stackBottomY: number } | null {
+		const pieceHeight = this.getTriangleBraceHeight(parts);
+		const stackBottomY = this.getTriangleBraceStackBottomY(parts);
+		const stackTopY = this.getTriangleBraceStackTopY(parts, rackMinimumY, totalHeight);
+		if (pieceHeight === null || stackBottomY === null || stackTopY === null) {
+			return null;
+		}
+		const availableHeight = Math.max(0, stackTopY - stackBottomY);
+		const count = Math.floor(availableHeight / pieceHeight);
+		if (count <= 0) {
+			return { count: 0, verticalStepY: pieceHeight, stackBottomY };
+		}
+		return {
+			count,
+			verticalStepY: this.getDistributedBraceVerticalStepY(availableHeight, count, pieceHeight),
+			stackBottomY,
+		};
+	}
+
+	/** 取余均分到 (count−1) 个片间；上下端仅保留 TRIANGLE_BRACE_ENDPOINT_CLEARANCE。 */
+	private getDistributedBraceVerticalStepY(availableHeight: number, braceCount: number, braceHeight: number): number {
+		if (braceCount <= 1) {
+			return braceHeight;
+		}
+		const remainder = Math.max(0, availableHeight - braceCount * braceHeight);
+		if (remainder <= MIN_DIMENSION) {
+			return braceHeight;
+		}
+		return braceHeight + remainder / (braceCount - 1);
+	}
+
+	/** 堆叠下界：Box002 顶 + 0.03；回退 Box025 顶。 */
+	private getTriangleBraceStackBottomY(parts: ShelfPart[]): number | null {
+		const box002MeshBounds = this.getMeshMeterAxisBoundsByNameAcrossParts(parts, "Box002", "y");
+		if (box002MeshBounds) {
+			return box002MeshBounds.maximum + TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+		}
+		const baseBeamPart = parts.find((part) => this.matchesBaseName(part.baseName, "Box002"));
+		if (baseBeamPart) {
+			const beamBounds = this.getNodesMeterAxisBounds([baseBeamPart.node], "y");
+			if (beamBounds) {
+				return beamBounds.maximum + TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+			}
+		}
+		const fallbackPart = parts.find((part) => this.matchesBaseName(part.baseName, "Box025"));
+		if (fallbackPart) {
+			const beamBounds = this.getNodesMeterAxisBounds([fallbackPart.node], "y");
+			if (beamBounds) {
+				return beamBounds.maximum + TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+			}
+		}
+		return null;
+	}
+
+	/** 堆叠上界：Box020 底 − 0.03；回退架顶。 */
+	private getTriangleBraceStackTopY(parts: ShelfPart[], rackMinimumY: number, totalHeight: number): number | null {
+		const box020MeshBounds = this.getMeshMeterAxisBoundsByNameAcrossParts(parts, "Box020", "y");
+		if (box020MeshBounds) {
+			return box020MeshBounds.minimum - TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+		}
+		const upperBeamPart = parts.find((part) => this.matchesBaseName(part.baseName, "Box020"));
+		if (upperBeamPart) {
+			const beamBounds = this.getNodesMeterAxisBounds([upperBeamPart.node], "y");
+			if (beamBounds) {
+				return beamBounds.minimum - TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+			}
+		}
+		return rackMinimumY + Math.max(MIN_DIMENSION, totalHeight) - TRIANGLE_BRACE_ENDPOINT_CLEARANCE;
+	}
+
+	/** 在全部部件 mesh 中按名称查找单轴包围盒。 */
+	private getMeshMeterAxisBoundsByNameAcrossParts(
+		parts: ShelfPart[],
+		meshName: string,
+		axis: "x" | "y" | "z",
+	): AxisBounds | null {
+		for (const part of parts) {
+			const meshes = this.getBoundsMeshes(part.node);
+			for (const mesh of meshes) {
+				const name = String(mesh?.name ?? "");
+				if (name === meshName || name.startsWith(`${meshName}.`) || name.startsWith(`${meshName}_`)) {
+					const bounds = this.getMeshMeterAxisBounds(mesh, axis);
+					if (bounds) { return bounds; }
+				}
+			}
+			const partName = String(part.node?.name ?? "");
+			if (partName === meshName || partName.startsWith(`${meshName}.`) || partName.startsWith(`${meshName}_`)) {
+				const bounds = this.getNodesMeterAxisBounds([part.node], axis);
+				if (bounds) { return bounds; }
+			}
+		}
+		return null;
+	}
+
+	/** 读取 Box008 变换后的 Y 轴高度，作为三角斜撑片高。 */
+	private getTriangleBraceHeight(parts: ShelfPart[]): number | null {
+		const bracePart = parts.find((part) => this.matchesBaseName(part.baseName, "Box008"))
+			?? parts.find((part) => this.isSideTriangleBracePart(part));
+		if (!bracePart) {
+			return null;
+		}
+		const braceBounds = this.getNodesMeterAxisBounds([bracePart.node], "y");
+		if (!braceBounds || braceBounds.size <= MIN_DIMENSION) {
+			return null;
+		}
+		return braceBounds.size;
+	}
+
+	/** 显示或隐藏全部三角斜撑原件（Box008 / Box026）。 */
+	private setSideTriangleBracePartsVisible(parts: ShelfPart[], visible: boolean): void {
+		parts.filter((part) => this.isSideTriangleBracePart(part)).forEach((part) => {
+			if (typeof part.node.setEnabled === "function") {
+				part.node.setEnabled(visible);
+			}
+		});
+	}
+
+	/**
+	 * 挡板式：false 隐藏护板 fhb（含私有显示宿主）；true 显示。
+	 * 注意：ensureColorDisplayHosts 后源 mesh 已 isVisible=false，画面由 tiHost 承担；
+	 * 不能用 getBoundsMeshes（会过滤不可见 mesh），否则永远找不到宿主。
+	 */
+	private applyBaffleStyleVisibility(parts: ShelfPart[], values: ValueMap): void {
+		const showBaffle = this.readBoolean(values, "baffleStyle", Boolean(DEFAULT_VALUES.baffleStyle));
+		const guardParts: ShelfPart[] = parts.filter((part) =>
+			this.matchesAnyBaseName(part.baseName, GUARD_BOARD_NODE_NAMES),
+		);
+		if (guardParts.length === 0) {
+			this.getModelNodes().forEach((node) => {
+				const name = String(node?.name ?? "");
+				if (this.isGuardBoardName(name)) {
+					guardParts.push({ node, baseName: "fhb" });
+				}
+			});
+		}
+		const controlledHosts = new Set<any>();
+		guardParts.forEach((part) => {
+			const sources = new Set<any>([part.node, ...this.collectColorableMeshesDeep(part.node)]);
+			let hostFound = false;
+			sources.forEach((mesh) => {
+				const host = this.thinInstanceHosts.get(mesh);
+				if (!host || host.isDisposed?.()) {
+					return;
+				}
+				hostFound = true;
+				controlledHosts.add(host);
+				this.setNodeTreeVisible(host, showBaffle);
+			});
+			if (hostFound) {
+				// 宿主可能位于部件容器或另一源 mesh 下，不能禁用其祖先。
+				if (!this.thinInstanceHosts.has(part.node)) {
+					this.setNodeTreeVisible(part.node, showBaffle);
+				}
+				sources.forEach((mesh) => {
+					if (!this.thinInstanceHosts.has(mesh)) { return; }
+					if ("isVisible" in mesh) {
+						mesh.isVisible = false;
+						mesh.setEnabled?.(true);
+					} else {
+						mesh.setEnabled?.(false);
+					}
+				});
+			} else {
+				sources.forEach((mesh) => this.setNodeTreeVisible(mesh, showBaffle));
+			}
+		});
+		// 兜底：parts 未命中时，仍按宿主/源名关掉 fhb_tiHost。
+		this.thinInstanceHosts.forEach((host, source) => {
+			if (controlledHosts.has(host) || host?.isDisposed?.()) {
+				return;
+			}
+			if (!this.isGuardBoardRelated(source) && !this.isGuardBoardRelated(host)) {
+				return;
+			}
+			this.setNodeTreeVisible(host, showBaffle);
+			if (source && "isVisible" in source) {
+				source.isVisible = false;
+				source.setEnabled?.(true);
+			} else if (source) {
+				source.setEnabled?.(false);
+			}
+		});
+	}
+
+	/** 显示脚：false 时从立柱显示 mesh 去掉连通件 #0/#2 的三角面。 */
+	private applyFootVisibility(parts: ShelfPart[], values: ValueMap): void {
+		const showFeet = this.readBoolean(values, "showFeet", Boolean(DEFAULT_VALUES.showFeet));
+		if (showFeet) {
+			this.hiddenFootIndices.forEach((indices, mesh) => {
+				if (mesh && !mesh.isDisposed?.() && typeof mesh.setIndices === "function") {
+					mesh.setIndices(indices);
+					mesh.refreshBoundingInfo?.(true, true);
+				}
+			});
+			this.hiddenFootIndices.clear();
+			return;
+		}
+		const processed = new Set<any>();
+		const hideOnMesh = (mesh: any | null | undefined): void => {
+			const display = mesh ? this.resolveColorDisplayMesh(mesh) : null;
+			if (!display || display.isDisposed?.() || processed.has(display) || this.hiddenFootIndices.has(display)) {
+				return;
+			}
+			processed.add(display);
+			this.meshComponents.delete(display);
+			this.hideMeshComponentIndices(display, FOOT_COMPONENT_INDICES);
+		};
+
+		parts.filter((part) => this.isPostPart(part)).forEach((part) => {
+			hideOnMesh(part.node);
+			this.collectColorableMeshesDeep(part.node).forEach((mesh) => hideOnMesh(mesh));
+		});
+
+		this.thinInstanceHosts.forEach((host, source) => {
+			if (this.isPostPart({ node: source, baseName: this.getShelfBaseName(source) })
+				|| this.isPostPart({ node: host, baseName: this.getShelfBaseName(host) })) {
+				hideOnMesh(host);
+			}
+		});
+	}
+
+	private hideMeshComponentIndices(mesh: any, componentIndices: readonly number[]): void {
+		if (typeof mesh.getIndices !== "function" || typeof mesh.setIndices !== "function") {
+			return;
+		}
+		const rawIndices = mesh.getIndices();
+		if (!rawIndices || rawIndices.length < 3) {
+			return;
+		}
+		const components = this.getMeshComponents(mesh, true);
+		if (components.length === 0) {
+			return;
+		}
+		const hiddenVertices = new Set<number>();
+		componentIndices.forEach((componentIndex) => {
+			const component = components[componentIndex];
+			if (!component) {
+				return;
+			}
+			component.vertexIndices.forEach((vertexIndex) => hiddenVertices.add(vertexIndex));
+		});
+		if (hiddenVertices.size === 0) {
+			return;
+		}
+		const indices = Array.from(rawIndices as ArrayLike<number>);
+		const nextIndices: number[] = [];
+		for (let index = 0; index + 2 < indices.length; index += 3) {
+			const a = indices[index];
+			const b = indices[index + 1];
+			const c = indices[index + 2];
+			if (hiddenVertices.has(a) || hiddenVertices.has(b) || hiddenVertices.has(c)) {
+				continue;
+			}
+			nextIndices.push(a, b, c);
+		}
+		if (nextIndices.length === indices.length) {
+			return;
+		}
+		if (!this.hiddenFootIndices.has(mesh)) { this.hiddenFootIndices.set(mesh, indices); }
+		mesh.setIndices(nextIndices);
+		mesh.refreshBoundingInfo?.(true, true);
+		mesh.computeWorldMatrix?.(true);
+	}
+
+	private isGuardBoardName(name: string): boolean {
+		return GUARD_BOARD_NODE_NAMES.some((n) => name === n || name.startsWith(`${n}.`) || name.startsWith(`${n}_`));
+	}
+
+	private isGuardBoardRelated(node: any): boolean {
+		const candidates = [
+			String(node?.name ?? ""),
+			String(node?.metadata?.parametricHostOf ?? ""),
+			String(node?.metadata?.sourceNodeName ?? ""),
+		];
+		return candidates.some((name) => this.isGuardBoardName(name));
+	}
+
+	private setNodeTreeVisible(target: any, visible: boolean): void {
+		if (!target || target.isDisposed?.()) {
+			return;
+		}
+		if (typeof target.setEnabled === "function") {
+			target.setEnabled(visible);
+		}
+		if ("isVisible" in target) {
+			target.isVisible = visible;
+		}
+	}
+
+	/** 预先归类，列边界和部件包围盒不在层列深循环中反复计算。 */
+	private prepareShelfGridParts(parts: ShelfPart[], columnLayout: ShelfColumnLayout): ShelfGridParts {
+		const firstColumn = parts.filter((part) => !this.isSideTriangleBracePart(part));
+		const laterColumns = firstColumn.filter((part) => !this.isColumnStartSupportPart(part, columnLayout));
+		const braceParts = parts.filter((part) => this.isSideTriangleBracePart(part));
+		return {
+			firstColumn,
+			laterColumns,
+			firstColumnUpper: firstColumn.filter((part) => this.isLayerClonePart(part)),
+			laterColumnsUpper: laterColumns.filter((part) => this.isLayerClonePart(part)),
+			braceParts,
+			laterColumnBraces: braceParts.filter((part) => !this.isColumnStartBracePart(part, columnLayout)),
+		};
+	}
+
+	/** 使用变形后的斜撑片数和实际 mesh 数求总上界，再允许生成任何阵列偏移。 */
+	private assertShelfInstanceBudget(
+		grid: ShelfGridParts, layers: number, columns: number, depthCount: number, braceCount: number,
+	): void {
+		if (!Number.isSafeInteger(braceCount) || braceCount < 0) {
+			throw new InstanceBudgetError(`斜撑片数无效或超出安全范围：${braceCount}`);
+		}
+		const meshCounts = new Map<ShelfPart, number>();
+		const weight = (part: ShelfPart): number => {
+			if (!meshCounts.has(part)) {
+				// 即使节点没有可见 mesh，也要计入为其分配的偏移对象。
+				meshCounts.set(part, Math.max(1, this.getBoundsMeshes(part.node).length));
+			}
+			return meshCounts.get(part)!;
+		};
+		const sum = (parts: ShelfPart[]): number => parts.reduce((total, part) => total + weight(part), 0);
+		const later = columns - 1;
+		// 即使某列没有可复制部件，循环仍会创建临时偏移，次数也必须受预算约束。
+		const offsetIterations = depthCount * columns * (layers + braceCount);
+		if (!Number.isSafeInteger(offsetIterations) || offsetIterations > MAX_THIN_INSTANCE_COUNT) {
+			throw new InstanceBudgetError(`层列深位及斜撑需要 ${offsetIterations} 次偏移计算，超过预算 ${MAX_THIN_INSTANCE_COUNT}`);
+		}
+		const matrices = depthCount * (
+			sum(grid.firstColumn) + later * sum(grid.laterColumns)
+			+ (layers - 1) * (sum(grid.firstColumnUpper) + later * sum(grid.laterColumnsUpper))
+			+ braceCount * (sum(grid.braceParts) + later * sum(grid.laterColumnBraces))
+		);
+		if (!Number.isSafeInteger(matrices) || matrices > MAX_THIN_INSTANCE_COUNT) {
+			throw new InstanceBudgetError(`层列深位及斜撑最多需要 ${matrices} 个实例矩阵，超过预算 ${MAX_THIN_INSTANCE_COUNT}`);
+		}
+	}
+
+	/** 在每个列位和深位上，按「片高 + 取余均分片间距」ThinInstance 纵向复制斜撑。 */
+	private instanceTriangleBracesForGrid(
+		grid: ShelfGridParts,
+		braceStack: { count: number; verticalStepY: number } | null,
+		columns: number,
+		columnLayout: ShelfColumnLayout,
+		depthCount: number,
+		deepOffsetZ: number,
+	): void {
+		if (!braceStack || braceStack.count <= 0) {
+			return;
+		}
+		for (let depth = 0; depth < depthCount; depth += 1) {
+			for (let column = 0; column < columns; column += 1) {
+				const columnParts = column === 0 ? grid.braceParts : grid.laterColumnBraces;
+				for (let index = 0; index < braceStack.count; index += 1) {
+					if (column === 0 && depth === 0 && index === 0) {
+						continue;
+					}
+					const offset = this.createShelfGridOffset(
+						column,
+						index,
+						depth,
+						columnLayout.spacing,
+						braceStack.verticalStepY,
+						deepOffsetZ,
+					);
+					for (const part of columnParts) {
+						this.addReplicaOffset(part.node, offset);
+					}
+				}
+			}
+		}
+	}
+
+	/** 按层、列、深位 ThinInstance 复制；后续层复制 Box032 与护板 fhb（无 clone）。 */
+	private instanceShelfGrid(
+		grid: ShelfGridParts, layers: number, columns: number, spacingY: number,
+		columnLayout: ShelfColumnLayout, depthCount: number, deepOffsetZ: number,
+	): void {
+		for (let depth = 0; depth < depthCount; depth += 1) {
+			for (let column = 0; column < columns; column += 1) {
+				const baseParts = column === 0 ? grid.firstColumn : grid.laterColumns;
+				const upperParts = column === 0 ? grid.firstColumnUpper : grid.laterColumnsUpper;
+				for (let layer = 0; layer < layers; layer += 1) {
+					if (depth === 0 && column === 0 && layer === 0) {
+						continue;
+					}
+					const offset = this.createShelfGridOffset(column, layer, depth, columnLayout.spacing, spacingY, deepOffsetZ);
+					for (const part of layer === 0 ? baseParts : upperParts) {
+						this.addReplicaOffset(part.node, offset);
+					}
+				}
+			}
+		}
+	}
+
+	private addReplicaOffset(source: any, offsetMeters: Vector3): void {
+		if (!source) { return; }
+		let list = this.replicaOffsets.get(source);
+		if (!list) {
+			list = [];
+			this.replicaOffsets.set(source, list);
+		}
+		list.push(offsetMeters.clone?.() ?? new Vector3(offsetMeters.x, offsetMeters.y, offsetMeters.z));
+	}
+
+	private clearReplicaOffsets(): void {
+		this.replicaOffsets.clear();
+	}
+
+	/** 将累计偏移写入 ThinInstance；宿主不可用时显式失败并回滚。 */
+	private flushReplicas(): void {
+		this.replicaOffsets.forEach((offsets, source) => {
+			this.applyThinInstancesForNode(source, offsets);
+		});
+		this.replicaOffsets.clear();
+	}
+
+	/**
+	 * 无阵列时也为本实体每个货架 mesh 建私有显示宿主。
+	 * 编辑器多拖入共用 InstancedMesh/sourceMesh，直接改色会串台；宿主与层列复制共用同一套 tiHost。
+	 */
+	private ensureColorDisplayHosts(parts: ShelfPart[]): void {
+		parts.forEach((part) => {
+			this.collectColorableMeshesDeep(part.node).forEach((mesh) => {
+				if (!mesh || mesh.isDisposed?.()) { return; }
+				if (mesh?.metadata?.parametricThinInstanceHost === true) { return; }
+				if (this.thinInstanceHosts.has(mesh)) { return; }
+				if (!this.ensureThinInstanceHost(mesh)) {
+					throw new Error(`无法创建私有显示宿主：${String(mesh.name ?? "<未命名>")}`);
+				}
+			});
+		});
+	}
+
+	private applyThinInstancesForNode(source: any, meterOffsets: Vector3[]): void {
+		if (!source || meterOffsets.length === 0) { return; }
+		if (meterOffsets.length + 1 > MAX_THIN_INSTANCE_COUNT) {
+			throw new InstanceBudgetError(`实例矩阵超出预算：${String(source.name ?? "<未命名>")}`);
+		}
+		const meshes = this.getBoundsMeshes(source);
+		if (meshes.length === 0) { return; }
+		const thinMeshes = meshes.map((mesh) => {
+			const host = this.ensureThinInstanceHost(mesh);
+			if (!host) { throw new Error(`无法创建 ThinInstance 宿主：${String(mesh.name ?? "<未命名>")}`); }
+			return host;
+		});
+		const offsetsWithBase = [Vector3.Zero(), ...meterOffsets];
+		thinMeshes.forEach((mesh) => {
+			this.rememberMeshThinInstanceBaseline(mesh);
+			const instanceCount = offsetsWithBase.length;
+			const matrixData = new Float32Array(instanceCount * 16);
+			offsetsWithBase.forEach((offset, index) => {
+				this.computeThinInstanceMatrix(mesh, offset).copyToArray(matrixData, index * 16);
+			});
+			if (typeof mesh.thinInstanceEnableUpdate === "function") {
+				mesh.thinInstanceEnableUpdate(true);
+			}
+			if (typeof mesh.thinInstanceSetBuffer === "function") {
+				mesh.thinInstanceSetBuffer("matrix", matrixData, 16, true);
+			}
+			mesh.thinInstanceCount = instanceCount;
+			if (typeof mesh.thinInstanceBufferUpdated === "function") {
+				mesh.thinInstanceBufferUpdated("matrix");
+			}
+			if (typeof mesh.thinInstanceRefreshBoundingInfo === "function") {
+				mesh.thinInstanceRefreshBoundingInfo(true);
+			}
+		});
+	}
+
+	private isThinInstanceCapable(mesh: any): boolean {
+		return typeof mesh?.thinInstanceSetBuffer === "function"
+			&& typeof mesh?.thinInstanceBufferUpdated === "function";
+	}
+
+	/**
+	 * 为当前脚本实体准备私有 ThinInstance 宿主。
+	 * 编辑器对同模型多拖入使用共享 AssetContainer + InstancedMesh；
+	 * 绝不能把 thinInstanceSetBuffer 写到共享 sourceMesh，否则会串扰先前货架（斜撑/对侧尤甚）。
+	 */
+	private ensureThinInstanceHost(mesh: any): any | null {
+		if (!mesh || mesh.isDisposed?.()) { return null; }
+		const cached = this.thinInstanceHosts.get(mesh);
+		if (cached && !cached.isDisposed?.()) {
+			this.syncHostTransformFromInstance(cached, mesh);
+			return this.isThinInstanceCapable(cached) ? cached : null;
+		}
+
+		const isInstanced = mesh.getClassName?.() === "InstancedMesh";
+		const sourceForClone = isInstanced ? mesh.sourceMesh : mesh;
+		if (!sourceForClone || typeof sourceForClone.clone !== "function") { return null; }
+
+		const host = sourceForClone.clone(`${String(mesh.name ?? "mesh")}_tiHost`, mesh.parent, true);
+		if (!host || host === sourceForClone || host === mesh) { return null; }
+		// 提前登记，后续步骤失败时才能清理部分构建的宿主。
+		this.thinInstanceHosts.set(mesh, host);
+		if (typeof host.makeGeometryUnique !== "function" || !this.isThinInstanceCapable(host)) { return null; }
+		host.makeGeometryUnique();
+		this.clearMeshThinInstances(host);
+		this.syncHostTransformFromInstance(host, mesh);
+		if ("material" in host) { host.material = mesh.material; }
+		host.doNotSerialize = true;
+		host.isVisible = mesh.isVisible !== false;
+		host.metadata = {
+			...(host.metadata ?? {}),
+			parametricThinInstanceHost: true,
+			parametricHostOf: String(mesh.name ?? ""),
+			parametricOwnerNodeId: String(this.node?.uniqueId ?? ""),
+		};
+		if (typeof host.setEnabled === "function") { host.setEnabled(mesh.isEnabled?.(false) !== false); }
+
+		if (isInstanced) {
+			// 只关掉本实体的 InstancedMesh，不动共享 sourceMesh。
+			if (typeof mesh.setEnabled === "function") { mesh.setEnabled(false); }
+		} else {
+			// 只隐藏源 mesh，原有 ThinInstance 缓冲区保持不变。
+			mesh.isVisible = false;
+		}
+
+		this.rememberMeshThinInstanceBaseline(host);
+		return host;
+	}
+
+	/** 已被其它 InstancedMesh 引用的共享母体，不可直接写 ThinInstance。 */
+	private isSharedSourceMesh(mesh: any): boolean {
+		return Array.isArray(mesh?.instances) && mesh.instances.length > 0;
+	}
+
+	private clearMeshThinInstances(mesh: any): void {
+		if (!mesh || typeof mesh.thinInstanceCount !== "number") { return; }
+		mesh.thinInstanceCount = 0;
+		if (typeof mesh.thinInstanceBufferUpdated === "function") {
+			mesh.thinInstanceBufferUpdated("matrix");
+		}
+	}
+
+	private syncHostTransformFromInstance(host: any, instance: any): void {
+		if (host.position && instance.position?.clone) { host.position = instance.position.clone(); }
+		if (host.rotation && instance.rotation?.clone) { host.rotation = instance.rotation.clone(); }
+		if (host.rotationQuaternion !== undefined) {
+			host.rotationQuaternion = instance.rotationQuaternion?.clone?.() ?? null;
+		}
+		if (host.scaling && instance.scaling?.clone) { host.scaling = instance.scaling.clone(); }
+		host.computeWorldMatrix?.(true);
+	}
+
+	private disposeThinInstanceHosts(): void {
+		this.thinInstanceHosts.forEach((host, source) => {
+			this.snapshots.delete(host);
+			this.thinInstanceBaseline.delete(host);
+			if (host && !host.isDisposed?.()) {
+				host.dispose?.(false, false);
+			}
+			if (!source || source.isDisposed?.()) { return; }
+			if (source.getClassName?.() === "InstancedMesh") {
+				if (typeof source.setEnabled === "function") { source.setEnabled(true); }
+			} else {
+				source.isVisible = true;
+			}
+		});
+		this.thinInstanceHosts.clear();
+	}
+
+	private computeThinInstanceMatrix(mesh: any, meterOffset: Vector3): Matrix {
+		if (
+			Math.abs(meterOffset.x) < PARAMETER_EPSILON
+			&& Math.abs(meterOffset.y) < PARAMETER_EPSILON
+			&& Math.abs(meterOffset.z) < PARAMETER_EPSILON
+		) {
+			return Matrix.Identity();
+		}
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const worldDelta = entityRootWorldMatrix
+			? Vector3.TransformNormal(meterOffset, entityRootWorldMatrix)
+			: new Vector3(meterOffset.x, meterOffset.y, meterOffset.z);
+		if (typeof mesh.unfreezeWorldMatrix === "function") {
+			mesh.unfreezeWorldMatrix();
+		}
+		mesh.computeWorldMatrix?.(true);
+		const baseWorld = mesh.getWorldMatrix?.()?.clone?.();
+		if (!baseWorld) {
+			return Matrix.Translation(worldDelta.x, worldDelta.y, worldDelta.z);
+		}
+		const inverseBaseWorld = baseWorld.clone();
+		if (!inverseBaseWorld?.invert || !inverseBaseWorld.invert()) {
+			return Matrix.Translation(worldDelta.x, worldDelta.y, worldDelta.z);
+		}
+		const localDelta = Vector3.TransformNormal(worldDelta, inverseBaseWorld);
+		return Matrix.Translation(localDelta.x, localDelta.y, localDelta.z);
+	}
+
+	private rememberMeshThinInstanceBaseline(mesh: any): void {
+		if (!mesh) { return; }
+		if (!this.thinInstanceBaseline.has(mesh)) {
+			this.thinInstanceBaseline.set(mesh, Number(mesh.thinInstanceCount ?? 0));
+		}
+	}
+
+	private restoreThinInstanceBaselines(): void {
+		this.thinInstanceBaseline.forEach((baselineCount, mesh) => {
+			if (!mesh || mesh.isDisposed?.()) { return; }
+			mesh.thinInstanceCount = baselineCount;
+			if (typeof mesh.thinInstanceBufferUpdated === "function") {
+				mesh.thinInstanceBufferUpdated("matrix");
+			}
+		});
+	}
+
+	/** 生成单元格组合偏移；参数单位为米。 */
+	private createShelfGridOffset(column: number, layer: number, depth: number, spacingX: number, spacingY: number, deepOffsetZ: number): Vector3 {
+		const offset = Vector3.Zero();
+		offset.addInPlace(this.createMeterAxisVector("x", column * spacingX));
+		offset.addInPlace(this.createMeterAxisVector("y", layer * spacingY));
+		offset.addInPlace(this.createMeterAxisVector("z", depth * deepOffsetZ));
+		return offset;
+	}
+
+	/** 一次性从全部支撑计算列中心距、起始中心和容差，保证多列复制共享中间立柱。 */
+	private createColumnLayout(parts: ShelfPart[], fallback: number): ShelfColumnLayout {
+		const supportCenters = parts
+			.filter((part) => this.isSupportPart(part))
+			.map((part) => this.getNodesMeterAxisBounds([part.node], "x")?.center)
+			.filter((center): center is number => typeof center === "number" && Number.isFinite(center));
+		const spacing = this.getColumnCenterSpacingFromCenters(supportCenters, fallback + POST_WIDTH_X);
+		return {
+			spacing,
+			startCenter: supportCenters.length > 0 ? Math.min(...supportCenters) : null,
+			tolerance: Math.max(0.01, spacing * 0.05)
+		};
+	}
+
+	/** 根据全部支撑中心计算列 0 单元宽，失败时退回 cellWidth。 */
+	private getColumnCenterSpacingFromCenters(supportCenters: number[], fallback: number): number {
+		if (supportCenters.length < 2) {
+			return fallback;
+		}
+		const spacing = Math.abs(Math.max(...supportCenters) - Math.min(...supportCenters));
+		return spacing > MIN_DIMENSION ? spacing : fallback;
+	}
+
+	/** 判断三角斜撑是否位于起始侧支撑线上，新增列时与共用立柱一样跳过克隆。 */
+	private isColumnStartBracePart(part: ShelfPart, columnLayout: ShelfColumnLayout): boolean {
+		if (columnLayout.startCenter === null || !this.isSideTriangleBracePart(part)) {
+			return false;
+		}
+		const center = this.getNodesMeterAxisBounds([part.node], "x")?.center;
+		return center !== undefined && Math.abs(center - columnLayout.startCenter) <= columnLayout.tolerance;
+	}
+
+	/** 判断部件是否处于起始侧支撑线上，新增列会跳过这些节点以形成连续共享立柱。 */
+	private isColumnStartSupportPart(part: ShelfPart, columnLayout: ShelfColumnLayout): boolean {
+		if (columnLayout.startCenter === null || !this.isSupportPart(part)) {
+			return false;
+		}
+		const center = this.getNodesMeterAxisBounds([part.node], "x")?.center;
+		return center !== undefined && Math.abs(center - columnLayout.startCenter) <= columnLayout.tolerance;
+	}
+
+	/** 判断节点是否为四根立柱之一。 */
+	private isPostPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, POST_NODE_NAMES);
+	}
+
+	/** 判断节点是否为四个底脚之一。 */
+	private isFootPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, FOOT_NODE_NAMES);
+	}
+
+	/** 判断节点是否为立柱或底脚。 */
+	private isSupportPart(part: ShelfPart): boolean {
+		return this.isPostPart(part) || this.isFootPart(part);
+	}
+
+	/** 判断节点是否为下方黄色横梁；底腿高度只移动该组，不随层数重复。 */
+	private isLowerCrossbeamPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, LOWER_CROSSBEAM_NODE_NAMES);
+	}
+
+	/** 颜色变化不重建阵列；先恢复私有宿主的原材质再释放旧颜色克隆。 */
+	private refreshAppearanceColors(values: ValueMap): void {
+		this.thinInstanceHosts.forEach((host) => {
+			const snapshot = this.snapshots.get(host);
+			if (!snapshot || !host || host.isDisposed?.()) { return; }
+			if (snapshot.material !== undefined && "material" in host) { host.material = snapshot.material; }
+			if (snapshot.useVertexColors !== undefined && "useVertexColors" in host) {
+				host.useVertexColors = snapshot.useVertexColors;
+			}
+		});
+		this.disposeAppearanceMaterials();
+		this.applyAppearanceColors(values);
+	}
+
+	/**
+	 * 主体色 / 横梁色（对齐 glbShelf.ts）：
+	 * - bodyColor → 非横梁（含全部立柱）
+	 * - beamColor → Box032
+	 * - #000000 → 保留 GLB 原色
+	 * 只改本实体私有显示宿主（tiHost）；保留 baseColor 贴图，最终色 = 贴图 × 参数色（洞洞黑洞保留）。
+	 */
+	private applyAppearanceColors(values: ValueMap): void {
+		const bodyTint = this.resolveAppearanceTint(
+			this.readColor3(values, "bodyColor", String(DEFAULT_VALUES.bodyColor)),
+			this.sampledBodyColor,
+		);
+		const beamTint = this.resolveAppearanceTint(
+			this.readColor3(values, "beamColor", String(DEFAULT_VALUES.beamColor)),
+			this.sampledBeamColor,
+		);
+		if (!bodyTint && !beamTint) { return; }
+
+		const meshRoles = new Map<any, "body" | "beam">();
+		const addDisplay = (mesh: any, role: "body" | "beam"): void => {
+			const display = this.resolveColorDisplayMesh(mesh);
+			if (!display || display.isDisposed?.() || !this.isColorableMesh(display)) { return; }
+			meshRoles.set(display, role);
+		};
+
+		this.getShelfParts().forEach((part) => {
+			const role: "body" | "beam" = this.isBeamColorPart(part.baseName) ? "beam" : "body";
+			this.collectColorableMeshesDeep(part.node).forEach((mesh) => addDisplay(mesh, role));
+		});
+
+		this.thinInstanceHosts.forEach((host, source) => {
+			const role = this.resolveColorRoleForNode(source)
+				?? this.resolveColorRoleForNode(host)
+				?? "body";
+			addDisplay(host, role);
+		});
+
+		meshRoles.forEach((role, mesh) => {
+			const snapshot = this.rememberSnapshot(mesh);
+			const baseMaterial = snapshot.material ?? mesh.material;
+			const tint = role === "beam" ? beamTint : bodyTint;
+			if (!tint) {
+				if (baseMaterial !== undefined) { mesh.material = baseMaterial; }
+				return;
+			}
+			if (!baseMaterial) { return; }
+			if (typeof baseMaterial.clone !== "function") {
+				throw new Error(`材质不支持安全改色：${String(mesh.name ?? "<未命名>")}`);
+			}
+			const appearanceMaterial = this.getOrCreateAppearanceMaterial(baseMaterial, role);
+			if (!appearanceMaterial) { return; }
+			this.setMaterialColor(appearanceMaterial, tint);
+			// 顶点色再乘一层会更偏色；贴图已保留洞洞，这里关掉顶点色。
+			if (mesh.useVertexColors === true) { mesh.useVertexColors = false; }
+			mesh.material = appearanceMaterial;
+		});
+	}
+
+	/**
+	 * 解析本实体可安全改色的显示 mesh：优先 tiHost；
+	 * 跳过 InstancedMesh（改它等于改共享母体，会造成多货架串色）。
+	 */
+	private resolveColorDisplayMesh(mesh: any): any | null {
+		if (!mesh || mesh.isDisposed?.()) { return null; }
+		if (mesh?.metadata?.parametricThinInstanceHost === true) { return mesh; }
+		const existing = this.thinInstanceHosts.get(mesh);
+		if (existing && !existing.isDisposed?.()) { return existing; }
+		if (mesh.getClassName?.() === "InstancedMesh" || this.isSharedSourceMesh(mesh)) {
+			this.ensureThinInstanceHost(mesh);
+			const host = this.thinInstanceHosts.get(mesh);
+			return host && !host.isDisposed?.() ? host : null;
+		}
+		return mesh;
+	}
+
+	/** 收集节点自身及子孙可着色 mesh（不依赖 isVisible）。 */
+	private collectColorableMeshesDeep(target: any): any[] {
+		const meshes: any[] = [];
+		const seen = new Set<any>();
+		const add = (mesh: any): void => {
+			if (!mesh || seen.has(mesh) || !this.isColorableMesh(mesh)) { return; }
+			seen.add(mesh);
+			meshes.push(mesh);
+		};
+		add(target);
+		if (typeof target?.getChildMeshes === "function") {
+			target.getChildMeshes(false).forEach((child: any) => add(child));
+		}
+		return meshes;
+	}
+
+	/** 沿父链解析部件名，判定主体色 / 横梁色。 */
+	private resolveColorRoleForNode(node: any): "body" | "beam" | null {
+		let current: any = node;
+		while (current && current !== this.node) {
+			const baseName = this.getShelfBaseName(current);
+			if (this.matchesAnyBaseName(baseName, SHELF_PART_NODE_NAMES)) {
+				return this.isBeamColorPart(baseName) ? "beam" : "body";
+			}
+			const rawName = String(current?.name ?? "");
+			if (rawName) {
+				if (BEAM_COLOR_PARTS.some((name) => rawName === name || rawName.startsWith(`${name}.`) || rawName.startsWith(`${name}_`))) {
+					return "beam";
+				}
+				if (SHELF_PART_NODE_NAMES.some((name) => rawName === name || rawName.startsWith(`${name}.`) || rawName.startsWith(`${name}_`))) {
+					return "body";
+				}
+			}
+			current = current.parent;
+		}
+		return null;
+	}
+
+	/** 横梁改色判定：Box032。 */
+	private isBeamColorPart(baseName: string): boolean {
+		return this.matchesAnyBaseName(baseName, BEAM_COLOR_PARTS);
+	}
+
+	private isColorableMesh(target: any): boolean {
+		if (!target || target.isDisposed?.()) { return false; }
+		if (!("material" in target)) { return false; }
+		const vertexCount = typeof target.getTotalVertices === "function"
+			? Number(target.getTotalVertices())
+			: Number(target.sourceMesh?.getTotalVertices?.() ?? 0);
+		return Number.isFinite(vertexCount) && vertexCount > 0;
+	}
+
+	/** (0,0,0) 或与采样原色一致 → 不乘色，保留 GLB 贴图/原貌。 */
+	private resolveAppearanceTint(color: Color3, sampled: Color3 | null): Color3 | null {
+		const tint = this.normalizeAppearanceColor(color);
+		if (!tint) { return null; }
+		if (sampled && this.colorsEqual(tint, sampled)) { return null; }
+		return tint;
+	}
+
+	/** (0,0,0) 保留原色；分量 >1 时按 0～255 归一化。 */
+	private normalizeAppearanceColor(color: Color3): Color3 | null {
+		if (Math.max(color.r, color.g, color.b) <= 1e-4) { return null; }
+		let r = color.r;
+		let g = color.g;
+		let b = color.b;
+		if (r > 1 || g > 1 || b > 1) {
+			r /= 255;
+			g /= 255;
+			b /= 255;
+		}
+		return new Color3(
+			Math.min(1, Math.max(0, r)),
+			Math.min(1, Math.max(0, g)),
+			Math.min(1, Math.max(0, b)),
+		);
+	}
+
+	private readColor3(values: ValueMap, key: string, fallback: string): Color3 {
+		const raw = values[key];
+		if (raw instanceof Color3) { return (raw as Color3).clone(); }
+		if (typeof raw === "string" && raw.trim()) {
+			try {
+				return Color3.FromHexString(raw.startsWith("#") ? raw : `#${raw}`);
+			} catch { /* fall through */ }
+		}
+		if (raw && typeof raw === "object" && "r" in (raw as object)) {
+			const color = raw as { r: number; g: number; b: number };
+			return new Color3(Number(color.r) || 0, Number(color.g) || 0, Number(color.b) || 0);
+		}
+		try {
+			return Color3.FromHexString(fallback.startsWith("#") ? fallback : `#${fallback}`);
+		} catch {
+			return Color3.Black();
+		}
+	}
+
+	private getOrCreateAppearanceMaterial(baseMaterial: any, role: "body" | "beam"): any | null {
+		if (!baseMaterial || typeof baseMaterial.clone !== "function") { return null; }
+		const materialId = String(baseMaterial.uniqueId ?? baseMaterial.id ?? baseMaterial.name ?? "material");
+		const cacheKey = `${role}:${materialId}`;
+		const cached = this.appearanceMaterials.get(cacheKey);
+		if (cached && cached.isDisposed?.() !== true) { return cached; }
+		const name = `${String(baseMaterial.name ?? "material")}_shelf_${role}_${this.appearanceMaterials.size}`;
+		const cloned = Array.isArray(baseMaterial.subMaterials)
+			? baseMaterial.clone(name, true)
+			: baseMaterial.clone(name);
+		if (!cloned || cloned === baseMaterial) { throw new Error(`无法隔离着色材质：${name}`); }
+		// 先登记材质，保证子材质检查或着色抛错时可以回收。
+		this.appearanceMaterials.set(cacheKey, cloned);
+		this.trackAppearanceSubMaterials(baseMaterial, cloned);
+		this.prepareAppearanceMaterialKeepTexture(cloned);
+		if (Array.isArray(cloned.subMaterials)) {
+			cloned.subMaterials.forEach((sub: any) => this.prepareAppearanceMaterialKeepTexture(sub));
+		}
+		return cloned;
+	}
+
+	/** 多材质必须深克隆子材质；否则改色会污染共享原件。 */
+	private trackAppearanceSubMaterials(original: any, cloned: any): void {
+		const originals = new Set<any>();
+		const pendingOriginals = [original];
+		while (pendingOriginals.length) {
+			const material = pendingOriginals.pop();
+			if (!material || originals.has(material)) { continue; }
+			originals.add(material);
+			if (Array.isArray(material.subMaterials)) { pendingOriginals.push(...material.subMaterials); }
+		}
+		const visited = new Set<any>();
+		const pending = Array.isArray(cloned.subMaterials) ? [...cloned.subMaterials] : [];
+		let shared = false;
+		while (pending.length) {
+			const material = pending.pop();
+			if (!material || material === cloned || visited.has(material)) { continue; }
+			visited.add(material);
+			if (originals.has(material)) { shared = true; continue; }
+			this.appearanceSubMaterials.add(material);
+			if (Array.isArray(material.subMaterials)) { pending.push(...material.subMaterials); }
+		}
+		if (shared) { throw new Error("多材质子项仍与原始模型共享，无法安全改色"); }
+		if (Array.isArray(original.subMaterials)
+			&& (!Array.isArray(cloned.subMaterials) || cloned.subMaterials.length !== original.subMaterials.length
+				|| original.subMaterials.some((material: any, index: number) => material && !cloned.subMaterials[index]))) {
+			throw new Error("多材质克隆缺少原有子材质，无法安全改色");
+		}
+	}
+
+	/**
+	 * 保留 baseColor/albedo 贴图（洞洞黑洞在贴图里），不把贴图挪到 ambient：
+	 * 原材质底色先置白，再由 setMaterialColor 写入参数色 → 最终 = 贴图 × 参数色。
+	 */
+	private prepareAppearanceMaterialKeepTexture(material: any): void {
+		if (!material) { return; }
+		const white = Color3.White();
+		if (material.albedoColor?.copyFrom) { material.albedoColor.copyFrom(white); }
+		else if ("albedoColor" in material) { material.albedoColor = white.clone(); }
+		if (material.diffuseColor?.copyFrom) { material.diffuseColor.copyFrom(white); }
+		else if ("diffuseColor" in material) { material.diffuseColor = white.clone(); }
+		if (material.baseColor?.copyFrom) { material.baseColor.copyFrom(white); }
+		else if ("baseColor" in material) { material.baseColor = white.clone(); }
+		if (material.ambientColor?.copyFrom) { material.ambientColor.copyFrom(white); }
+		else if ("ambientColor" in material) { material.ambientColor = white.clone(); }
+		if (material.emissiveColor?.copyFrom) { material.emissiveColor.copyFrom(Color3.Black()); }
+		if ("useVertexColors" in material) { material.useVertexColors = false; }
+		// albedoTexture / baseTexture / metallicRoughnessTexture / normalTexture 等一律保留
+	}
+
+	/** 写入参数色；与保留的贴图相乘得到最终外观。 */
+	private setMaterialColor(material: any, color: Color3): void {
+		if (!material) { return; }
+		if (Array.isArray(material.subMaterials)) {
+			material.subMaterials.forEach((sub: any) => this.setMaterialColor(sub, color));
+		}
+		if (material.albedoColor?.copyFrom) { material.albedoColor.copyFrom(color); }
+		else if ("albedoColor" in material) { material.albedoColor = color.clone(); }
+		if (material.diffuseColor?.copyFrom) { material.diffuseColor.copyFrom(color); }
+		else if ("diffuseColor" in material) { material.diffuseColor = color.clone(); }
+		if (material.baseColor?.copyFrom) { material.baseColor.copyFrom(color); }
+		else if ("baseColor" in material) { material.baseColor = color.clone(); }
+		if (material.ambientColor?.copyFrom) { material.ambientColor.copyFrom(Color3.White()); }
+		else if ("ambientColor" in material) { material.ambientColor = Color3.White(); }
+		if (material.emissiveColor?.copyFrom) { material.emissiveColor.copyFrom(Color3.Black()); }
+		if ("useVertexColors" in material) { material.useVertexColors = false; }
+	}
+
+	private disposeAppearanceMaterials(): void {
+		this.appearanceMaterials.forEach((material) => {
+			material.dispose?.(false, false, false);
+		});
+		this.appearanceMaterials.clear();
+		this.appearanceSubMaterials.forEach((material) => {
+			material.dispose?.(false, false, false);
+		});
+		this.appearanceSubMaterials.clear();
+	}
+
+	/** 判断节点是否为每层顶部的黄色横梁和两侧深向支架。 */
+	private isUpperLayerFramePart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, UPPER_LAYER_FRAME_NODE_NAMES);
+	}
+
+	/** 判断节点是否为逐层复制件：黄梁 Box032、护板 fhb。 */
+	private isLayerClonePart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, LAYER_CLONE_NODE_NAMES);
+	}
+
+	/** 判断节点是否为宽度变化时唯一允许沿 X 拉伸的横梁或层板。 */
+	private isWidthStretchPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, WIDTH_STRETCH_NODE_NAMES);
+	}
+
+	private isGuardBoardPart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, GUARD_BOARD_NODE_NAMES);
+	}
+
+	/** 判断节点是否为侧面三角斜撑，斜撑参与深度拉伸、底腿高度适配和逐层复制。 */
+	private isSideTriangleBracePart(part: ShelfPart): boolean {
+		return this.matchesAnyBaseName(part.baseName, SIDE_TRIANGLE_BRACE_NODE_NAMES);
+	}
+
+	/** 收集横梁货架下可作为参数化部件的节点（新 GLB 为 mesh 自身）。 */
+	private getShelfParts(): ShelfPart[] {
+		const nodes = this.getModelNodes().filter((candidate) => candidate !== this.node && !this.isGeneratedRuntimeClone(candidate));
+		const candidates = nodes
+			.map((node) => ({ node, baseName: this.getShelfBaseName(node) }))
+			.filter((part) => this.matchesAnyBaseName(part.baseName, SHELF_PART_NODE_NAMES) && this.getBoundsMeshes(part.node).length > 0);
+		const candidateNodes = new Set(candidates.map((part) => part.node));
+		const parts = candidates.filter((part) => !part.node.parent || !candidateNodes.has(part.node.parent));
+		return this.dedupePartsByNode(parts);
+	}
+
+	/** 去重 Shelf 部件，防止 TransformNode 和 Mesh 同时命中同一个可渲染结构。 */
+	private dedupePartsByNode(parts: ShelfPart[]): ShelfPart[] {
+		const seen = new Set<any>();
+		return parts.filter((part) => {
+			if (seen.has(part.node)) {
+				return false;
+			}
+			seen.add(part.node);
+			return true;
+		});
+	}
+
+	/** 获取节点的稳定基础名，兼容父节点名、sourceNodeName 和匿名 node 编号。 */
+	private getShelfBaseName(node: any): string {
+		const metadataName = String(node?.metadata?.sourceNodeName ?? "");
+		const ownName = String(node?.name ?? "");
+		const parentName = String(node?.parent?.name ?? "");
+		const candidates = [metadataName, ownName, parentName].filter(Boolean);
+		for (const candidate of candidates) {
+			const cleaned = candidate.replace(/_(?:shelf_layer|shelf_column|double_deep).*$/i, "");
+			// 最长匹配优先，避免短名误吃长名。
+			const matches = SHELF_PART_NODE_NAMES.filter((name) => this.matchesBaseName(cleaned, name));
+			if (matches.length > 0) {
+				return matches.sort((a, b) => b.length - a.length)[0];
+			}
+		}
+		return ownName || parentName;
+	}
+
+	/** 判断节点基础名是否匹配任一候选名。 */
+	private matchesAnyBaseName(baseName: string, names: string[]): boolean {
+		return names.some((name) => this.matchesBaseName(baseName, name));
+	}
+
+	/** 判断节点基础名是否匹配指定候选名（兼容旧 .N 后缀）。 */
+	private matchesBaseName(baseName: string, name: string): boolean {
+		return new RegExp(`^${this.escapeRegExp(name)}(?:\\.|_|$)`, "i").test(baseName);
+	}
+
+	/** 转义正则特殊字符，保证节点名按字面量匹配。 */
+	private escapeRegExp(value: string): string {
+		return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+
+	/** 将节点在实体根米空间的指定轴缩放并居中到目标包围盒。 */
+	private fitNodeMeterAxisToBounds(target: any, meterAxis: "x" | "y" | "z", localScaleAxis: "x" | "y" | "z", targetBounds: AxisBounds): void {
+		if (!target.scaling || !target.position) {
+			return;
+		}
+		const nodeBounds = this.getNodesMeterAxisBounds([target], meterAxis);
+		if (!nodeBounds || nodeBounds.size <= MIN_DIMENSION) {
+			return;
+		}
+
+		const snapshot = this.rememberSnapshot(target);
+		const scaleFactor = targetBounds.size / nodeBounds.size;
+		if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+			return;
+		}
+		target.scaling[localScaleAxis] = snapshot.scaling[localScaleAxis] * scaleFactor;
+		const fittedBounds = this.getNodesMeterAxisBounds([target], meterAxis);
+		if (fittedBounds) {
+			this.moveNodeMeterAxisBy(target, meterAxis, targetBounds.center - fittedBounds.center);
+		}
+	}
+
+	/** 按实体根米空间轴移动节点，写入前转换为父节点本地位移。 */
+	private moveNodeMeterAxisBy(target: any, meterAxis: "x" | "y" | "z", meterDelta: number): void {
+		if (!target.position || !Number.isFinite(meterDelta) || Math.abs(meterDelta) <= MIN_DIMENSION) {
+			return;
+		}
+		const localDelta = this.meterVectorToParentLocal(target, this.createMeterAxisVector(meterAxis, meterDelta));
+		if (typeof target.position.addInPlace === "function") {
+			target.position.addInPlace(localDelta);
+			return;
+		}
+		if (typeof target.position.add === "function") {
+			target.position = target.position.add(localDelta);
+		}
+	}
+
+	/** 创建实体根米空间指定轴上的位移向量。 */
+	private createMeterAxisVector(axis: "x" | "y" | "z", value: number): Vector3 {
+		return this.createLocalAxis(axis).scale(value);
+	}
+
+	/** 创建模型局部参数轴单位向量。 */
+	private createLocalAxis(axis: "x" | "y" | "z"): Vector3 {
+		if (axis === "x") {
+			return new Vector3(1, 0, 0);
+		}
+		if (axis === "y") {
+			return new Vector3(0, 1, 0);
+		}
+		return new Vector3(0, 0, 1);
+	}
+
+	/** 将实体根米空间位移转换到目标父节点本地坐标。 */
+	private meterVectorToParentLocal(target: any, meterVector: Vector3): Vector3 {
+		const entityRoot = this.node.parent;
+		const targetParent = target?.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const targetParentWorldMatrix = targetParent?.computeWorldMatrix?.(true) ?? targetParent?.getWorldMatrix?.();
+		const inverseTargetParentWorldMatrix = targetParentWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseTargetParentWorldMatrix?.invert) {
+			return meterVector.clone?.() ?? meterVector;
+		}
+		inverseTargetParentWorldMatrix.invert();
+		const worldVector = Vector3.TransformNormal(meterVector, entityRootWorldMatrix);
+		return Vector3.TransformNormal(worldVector, inverseTargetParentWorldMatrix);
+	}
+
+	/** 获取当前模型根节点及其子树内的节点。 */
+	private getModelNodes(): any[] {
+		const scene = this.node.getScene?.();
+		const nodes = [this.node, ...(scene?.transformNodes ?? []), ...(scene?.meshes ?? [])];
+		return [...new Set(nodes.filter((candidate) => candidate === this.node || candidate.isDescendantOf?.(this.node)))];
+	}
+
+	/** 判断节点是否为 ThinInstance 宿主（排除出参数化部件扫描）。 */
+	private isGeneratedRuntimeClone(node: any): boolean {
+		return node?.metadata?.parametricThinInstanceHost === true
+			|| (node?.metadata?.generatedByParametricRuntime === true && (node.metadata.sourceNodeName !== undefined || node.metadata.reason !== undefined));
+	}
+
+	/** 合并一组节点和子 mesh 在实体根米空间中的包围盒。 */
+	private getNodesMeterBounds(nodes: any[]): { minimum: Vector3; maximum: Vector3; center: Vector3; size: Vector3 } | null {
+		const xBounds = this.getNodesMeterAxisBounds(nodes, "x");
+		const yBounds = this.getNodesMeterAxisBounds(nodes, "y");
+		const zBounds = this.getNodesMeterAxisBounds(nodes, "z");
+		if (!xBounds || !yBounds || !zBounds) {
+			return null;
+		}
+		const minimum = new Vector3(xBounds.minimum, yBounds.minimum, zBounds.minimum);
+		const maximum = new Vector3(xBounds.maximum, yBounds.maximum, zBounds.maximum);
+		const center = minimum.add(maximum).scale(0.5);
+		const size = maximum.subtract(minimum);
+		return { minimum, maximum, center, size };
+	}
+
+	/** 读取一组节点在实体根米空间单轴上的最小值、最大值、中心点和尺寸。 */
+	private getNodesMeterAxisBounds(nodes: any[], axis: "x" | "y" | "z"): AxisBounds | null {
+		let minimum = Number.POSITIVE_INFINITY;
+		let maximum = Number.NEGATIVE_INFINITY;
+		nodes.forEach((node) => {
+			this.getBoundsMeshes(node).forEach((mesh) => {
+				const bounds = this.getMeshMeterAxisBounds(mesh, axis);
+				if (!bounds) {
+					return;
+				}
+				minimum = Math.min(minimum, bounds.minimum);
+				maximum = Math.max(maximum, bounds.maximum);
+			});
+		});
+		if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) {
+			return null;
+		}
+		const size = Math.max(0, maximum - minimum);
+		return { minimum, maximum, center: (minimum + maximum) / 2, size };
+	}
+
+	/** 收集可用于包围盒计算的真实 mesh；基线排除生成节点，生成节点自测时允许自身子树参与。 */
+	private getBoundsMeshes(target: any): any[] {
+		const meshes: any[] = [];
+		const includeGenerated = this.isGeneratedParametricNode(target);
+		if (this.isBoundsMesh(target, includeGenerated)) {
+			meshes.push(target);
+		}
+		if (typeof target?.getChildMeshes === "function") {
+			meshes.push(...target.getChildMeshes(false).filter((child: any) => this.isBoundsMesh(child, includeGenerated)));
+		}
+		return [...new Set(meshes)];
+	}
+
+	/** 判断节点是否为当前参数脚本生成的节点或其后代。 */
+	private isGeneratedParametricNode(node: any): boolean {
+		let current = node;
+		while (current && current !== this.node) {
+			if (current.metadata?.generatedByParametricRuntime || current.metadata?.parametricThinInstanceHost) {
+				return true;
+			}
+			current = current.parent;
+		}
+		return false;
+	}
+
+	/** 判断节点是否为有顶点且符合当前测量上下文的 Babylon mesh。 */
+	private isBoundsMesh(node: any, includeGenerated: boolean): boolean {
+		return typeof node?.getBoundingInfo === "function"
+			&& !node.isDisposed?.()
+			&& node.isEnabled?.(false) !== false
+			&& node.isVisible !== false
+			&& Number(node.visibility ?? 1) > 0
+			&& Number(node.getTotalVertices?.() ?? 0) > 0
+			&& (includeGenerated || !this.isGeneratedParametricNode(node));
+	}
+
+	/** 将单个 mesh 的包围盒角点转换到实体根米空间后读取单轴范围。 */
+	private getMeshMeterAxisBounds(mesh: any, axis: "x" | "y" | "z"): AxisBounds | null {
+		mesh.refreshBoundingInfo?.();
+		mesh.computeWorldMatrix?.(true);
+		const corners = Array.isArray(mesh.getBoundingInfo?.().boundingBox?.vectorsWorld)
+			? mesh.getBoundingInfo().boundingBox.vectorsWorld
+			: [];
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (corners.length === 0 || !inverseEntityRootWorldMatrix?.invert) {
+			return null;
+		}
+		inverseEntityRootWorldMatrix.invert();
+		let minimum = Number.POSITIVE_INFINITY;
+		let maximum = Number.NEGATIVE_INFINITY;
+		corners.forEach((corner: Vector3) => {
+			const meterPoint = Vector3.TransformCoordinates(corner, inverseEntityRootWorldMatrix);
+			const value = meterPoint[axis];
+			minimum = Math.min(minimum, value);
+			maximum = Math.max(maximum, value);
+		});
+		if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) {
+			return null;
+		}
+		const size = Math.max(0, maximum - minimum);
+		return { minimum, maximum, center: (minimum + maximum) / 2, size };
+	}
+
+	/** 读取数值字段，无法转换时使用默认值。 */
+	private readNumber(values: ValueMap, key: string, fallback: number): number {
+		const value = Number(values[key]);
+		return Number.isFinite(value) ? value : fallback;
+	}
+
+	/** 读取正数数值字段，非正数或无效值使用默认值。 */
+	private readPositiveNumber(values: ValueMap, key: string, fallback: number): number {
+		const value = this.readNumber(values, key, fallback);
+		return value > 0 ? value : fallback;
+	}
+
+	/** 读取布尔字段，兼容字符串形式的 true/false。 */
+	private readBoolean(values: ValueMap, key: string, fallback: boolean): boolean {
+		const value = values[key];
+		if (typeof value === "boolean") {
+			return value;
+		}
+		if (typeof value === "string") {
+			return ["true", "1", "yes", "是", "启用"].includes(value.toLowerCase());
+		}
+		return fallback;
+	}
+
+	/** 生成安全比例，避免除零和非法尺寸污染模型变换。 */
+	private createSafeRatio(target: number, baseline: number): number {
+		if (!Number.isFinite(target) || !Number.isFinite(baseline) || Math.abs(baseline) <= MIN_DIMENSION) {
+			return 1;
+		}
+		return Math.max(MIN_DIMENSION, target / baseline);
+	}
+
+	/** 将数值限制在指定范围内。 */
+	private clamp(value: number, min: number, max: number): number {
+		return Math.max(min, Math.min(max, value));
+	}
+
+	/** 读取单 Mesh 内按三角形连通性焊接后的组件（faceCount 降序 #0..N）。 */
+	private getMeshComponents(mesh: any, useCurrentVertices = false): MeshComponentSnapshot[] {
+		if (!useCurrentVertices) {
+			const cached = this.meshComponents.get(mesh);
+			if (cached) {
+				return cached;
+			}
+		}
+		const positions = this.readVertexPositions(mesh);
+		const rawIndices = typeof mesh.getIndices === "function" ? mesh.getIndices() : null;
+		if (!positions || !rawIndices || rawIndices.length < 3) {
+			if (!useCurrentVertices) {
+				this.meshComponents.set(mesh, []);
+			}
+			return [];
+		}
+
+		const indices = Array.from(rawIndices as ArrayLike<number>);
+		const coordinateKeys: string[] = [];
+		const vertexIndicesByKey = new Map<string, number[]>();
+		for (let vertexIndex = 0; vertexIndex < positions.length / 3; vertexIndex += 1) {
+			const offset = vertexIndex * 3;
+			const key = `${positions[offset].toFixed(5)},${positions[offset + 1].toFixed(5)},${positions[offset + 2].toFixed(5)}`;
+			coordinateKeys[vertexIndex] = key;
+			const existing = vertexIndicesByKey.get(key) ?? [];
+			existing.push(vertexIndex);
+			vertexIndicesByKey.set(key, existing);
+		}
+
+		const parents = new Map<string, string>();
+		const findRoot = (key: string): string => {
+			const parent = parents.get(key);
+			if (!parent) {
+				parents.set(key, key);
+				return key;
+			}
+			if (parent === key) {
+				return key;
+			}
+			const root = findRoot(parent);
+			parents.set(key, root);
+			return root;
+		};
+		const union = (left: string, right: string): void => {
+			const leftRoot = findRoot(left);
+			const rightRoot = findRoot(right);
+			if (leftRoot !== rightRoot) {
+				parents.set(rightRoot, leftRoot);
+			}
+		};
+
+		for (let index = 0; index + 2 < indices.length; index += 3) {
+			const first = coordinateKeys[indices[index]];
+			const second = coordinateKeys[indices[index + 1]];
+			const third = coordinateKeys[indices[index + 2]];
+			if (!first || !second || !third) {
+				continue;
+			}
+			union(first, second);
+			union(second, third);
+		}
+
+		const verticesByRoot = new Map<string, Set<number>>();
+		vertexIndicesByKey.forEach((vertexIndices, key) => {
+			const root = findRoot(key);
+			const target = verticesByRoot.get(root) ?? new Set<number>();
+			vertexIndices.forEach((vertexIndex) => target.add(vertexIndex));
+			verticesByRoot.set(root, target);
+		});
+		const facesByRoot = new Map<string, number>();
+		for (let index = 0; index + 2 < indices.length; index += 3) {
+			const key = coordinateKeys[indices[index]];
+			if (!key) {
+				continue;
+			}
+			const root = findRoot(key);
+			facesByRoot.set(root, (facesByRoot.get(root) ?? 0) + 1);
+		}
+
+		const components = [...verticesByRoot.entries()].map(([root, vertexSet]) => {
+			let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+			let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+			const vertexIndices = [...vertexSet];
+			vertexIndices.forEach((vertexIndex) => {
+				const offset = vertexIndex * 3;
+				const point = new Vector3(positions[offset], positions[offset + 1], positions[offset + 2]);
+				minimum = Vector3.Minimize(minimum, point);
+				maximum = Vector3.Maximize(maximum, point);
+			});
+			return {
+				vertexIndices,
+				minimum,
+				maximum,
+				center: minimum.add(maximum).scale(0.5),
+				size: maximum.subtract(minimum),
+				faceCount: facesByRoot.get(root) ?? 0,
+			};
+		}).sort((left, right) => right.faceCount - left.faceCount);
+
+		if (!useCurrentVertices) {
+			this.meshComponents.set(mesh, components);
+		}
+		return components;
+	}
+}

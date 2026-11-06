@@ -1,0 +1,1350 @@
+// 此文件由模型包参数脚本和运行脚本合并而成，供编辑器以单个 TS 文件读取。
+//
+// =============================================================================
+// 多穿小车（多穿小车.glb）参数化脚本 — 运行说明
+// =============================================================================
+//
+// 【文件结构】
+//   1. dataDriven              — 运行时运动语义（货叉），编辑器静态解析，勿删。
+//   2. ParametricModelParamsComponent   — Inspector 侧边栏参数定义，值写入 metadata。
+//   3. ParametricModelRuntimeComponent  — 每帧读取参数并改模型（当前仅骨架，业务待补）。
+//
+// 【运行流程】
+//   onStart()
+//     └─ captureSnapshots()     首次记录模型下所有节点的 TRS / enabled 基线
+//     └─ ensureModelDimensionDefaults()  仅启动一次：实测原尺寸锁定 + 写回 Inspector 占位
+//     └─ applyIfNeeded(true)    强制应用一次
+//
+//   onUpdate()（每帧）
+//     └─ applyIfNeeded(false)   参数签名未变则跳过（移动模型不重测、不拉伸）
+//           restoreBaseNodes()    恢复到导入时的基线
+//           applyModelParameters()  ← 在此逐步添加小车参数化逻辑
+//
+//   onStop()
+//     └─ restoreBaseNodes()       卸载脚本时还原模型
+//
+// 【当前 Inspector 参数】
+//   巷道编号 / 走行速度 / 伸叉速度 / 小车长度 / 小车宽度 / 载货板宽度 / 主体颜色 / 隐藏拨指
+//   尺寸默认值 = GLB 实测跨度；目标等于原尺寸时跳过拉伸与侧架重排，进编辑器保持原貌（同货架）。
+//   速度参数由遥测驱动读取：Inspector 配置优先，缺省回退 dataDriven 速度常量。
+//
+// 【已实现】
+//   vehicleLength    → 对象022/021/020 沿 Z 拉伸 + 右侧跟随平移（对齐 Car.ts）
+//   vehicleWidth     → 以 huocha1 为基准沿 X 拉伸 + 后侧跟随 + zaihuo/zaihuo01 两端各 40% 保留、只拉中间 20%
+//   cargoPlateWidth  → zaihuo / zaihuo01 两端各 40% 不拉、只拉中间 20%（Z）；相向伸长受间隙钳制
+//   mainColor        → 对象008 / waike2 乘色并保留贴图（logo 仍可见）
+//   hideFingers      → cha1 / cha2 显隐
+//
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
+import { visibleAsBoolean, visibleAsColor3, visibleAsNumber, visibleAsString } from "babylonjs-editor-tools";
+import { Color3 } from "@babylonjs/core/Maths/math.color";
+import { Vector3 } from "@babylonjs/core/Maths/math.vector";
+// 参数长度统一使用米；contentRoot 的基础 scaling 已由编辑器包含源单位换算。
+
+/**
+ * 声明多穿小车的数据驱动运动语义，编辑器导入时会静态解析该对象。
+ */
+export const dataDriven = {
+	device: {
+		devType: "shuttle",
+		defaultAssetCode: "Shuttle01",
+		deviceIdField: "e",
+		assetCodeField: "assetCode",
+		interpolationMs: 200
+	},
+	motion: {
+		travel: {
+			speed: 1.0
+		},
+		// 载货平面（环抱机构收回后承载货物底面的台面板件）：货物底面贴其包围盒顶面
+		cargoDeckNodes: ["对象020", "对象021", "对象022"],
+		fork: {
+			fields: ["x", "y", "to_x", "to_y", "to_Depth", "Status", "task", "containerCode"],
+			kind: "translate",
+			axis: "x",
+			speed: 0.25,
+			stage1Nodes: ["对象004", "对象003"],
+			stage2Nodes: ["huocha1", "对象001", "cha1", "cha2"],
+			fallbackPattern: "fork|叉|huocha|cha\\d*"
+		}
+	}
+} as const;
+
+/**
+ * 管理多穿小车在 Babylon.js Editor Inspector 中展示的静态参数。
+ */
+export class ParametricModelParamsComponent {
+	@visibleAsString("模型标识")
+	public modelKey: string = "multi-shuttle";
+
+	@visibleAsString("设备类型")
+	public deviceType: string = "多穿库";
+
+	@visibleAsString("设备名称")
+	public deviceName: string = "穿梭车";
+
+	@visibleAsString("参数说明")
+	public description: string = "支持小车长度、小车宽度、载货板宽度、主体颜色与拨指显隐参数化。";
+
+	@visibleAsString("巷道编号")
+	public aisleCode: string = "";
+
+	@visibleAsNumber("走行速度 (m/s)", { step: 0.05, min: 0.05, description: "水平走行速度；MQTT 上报有效 rpm_x 时按实时转速驱动。" })
+	public travelSpeed: number = 1.0;
+
+	@visibleAsNumber("伸叉速度 (m/s)", { step: 0.05, min: 0.05, description: "货叉伸缩速度；MQTT 上报有效 front/back_rpm_z 时按实时转速驱动。" })
+	public forkSpeed: number = 0.25;
+
+	@visibleAsNumber("小车长度", { step: 0.1, description: "默认=模型实测长度（米），与实际尺寸 Z 对齐" })
+	public vehicleLength: number = 1.008;
+
+	@visibleAsNumber("小车宽度", { step: 0.1, description: "默认=模型实测宽度（米），与实际尺寸 X 对齐" })
+	public vehicleWidth: number = 0.9844;
+
+	@visibleAsNumber("载货板宽度", { step: 0.1, description: "默认=载货板实测跨度（米）；占位时启动写入" })
+	public cargoPlateWidth: number = 0.1453;
+
+	@visibleAsColor3("主体颜色", { description: "默认 (0,0,0) 保留原色；支持 0～1 或 0～255" })
+	public mainColor: Color3 = Color3.Black();
+
+	@visibleAsBoolean("隐藏拨指", { description: "控制 cha1 / cha2 显隐" })
+	public hideFingers: boolean = false;
+
+	public constructor(public node: TransformNode) {}
+
+	public onStart(): void {
+		// 静态参数会保存到 metadata.scripts[].values，供同目录运行脚本读取。
+	}
+}
+
+type ValueMap = Record<string, unknown>;
+
+interface NodeSnapshot {
+	position: Vector3;
+	scaling: Vector3;
+	rotation?: Vector3;
+	rotationQuaternion?: any;
+	enabled?: boolean;
+	vertexPositions?: number[];
+	material?: any;
+}
+
+const DEFAULT_VALUES: ValueMap = {
+	modelKey: "multi-shuttle",
+	deviceType: "多穿库",
+	deviceName: "穿梭车",
+	description: "支持小车长度、小车宽度、载货板宽度、主体颜色与拨指显隐参数化。",
+	aisleCode: "",
+	/** 与 dataDriven.motion 速度缺省一致；Inspector 可调，MQTT rpm 字段优先。 */
+	travelSpeed: 1.0,
+	forkSpeed: 0.25,
+	/** 与 GLB 实际尺寸同量级；onStart 只对缺失或无效尺寸使用锁定的实测值。 */
+	vehicleLength: 1.008,
+	vehicleWidth: 0.9844,
+	cargoPlateWidth: 0.1453,
+	mainColor: "#000000",
+	hideFingers: false,
+};
+
+const DIMENSION_PARAM_KEYS = ["vehicleLength", "vehicleWidth", "cargoPlateWidth"] as const;
+type DimensionParamKey = (typeof DIMENSION_PARAM_KEYS)[number];
+
+/** 拨指：hideFingers 控制 cha1 / cha2 显隐。 */
+const FINGER_NODE_NAMES = ["cha1", "cha2"] as const;
+
+/** 长度拉伸目标：node0 下的三根结构件。 */
+const LENGTH_STRETCH_NODE_NAMES = ["对象022", "对象021", "对象020"];
+/** 长度拉伸后随 max-Z 端整体平移的零件（对齐 Car.ts _rightRepositionNodeNames）。 */
+const LENGTH_FOLLOW_NODE_NAMES = [
+	"zaihuo01", "对象001", "waike2", "对象023", "对象016", "对象024", "对象025", "对象029",
+	"对象018", "对象030", "对象019", "对象017", "对象004", "cha2", "对象005",
+];
+/** 小车长度沿实体根米空间 Z 轴变化。 */
+const LENGTH_PARAMETRIC_AXIS = "z" as const;
+
+/** 宽度基准件（对齐 Car.ts WIDTH_REF_PART）。 */
+const WIDTH_REF_NODE_NAME = "huocha1";
+/** 宽度拉伸件：沿 X、min-X 锚定（载货板不在此列，随后按相同 extension 分段拉）。 */
+const WIDTH_STRETCH_NODE_NAMES = [
+	"huocha1", "对象008", "waike2", "对象001", "cha2", "cha1",
+	"对象023", "对象004", "对象005", "对象026", "对象003", "对象002",
+];
+/** 载货板：按 cargoPlateWidth 两端保留、只拉中间（Z）；小车宽度时沿 X 同样两端保留拉伸。 */
+const CARGO_PLATE_NODE_NAMES = ["zaihuo", "zaihuo01"];
+/** 载货板两端刚性区比例（相对原跨度）：两侧各 40%，只拉伸中间 20%。 */
+const CARGO_PLATE_END_KEEP_RATIO = 0.47;
+/** 两块载货板相向拉伸时保留的最小间隙（m），防止中间重叠闪烁。 */
+const CARGO_PLATE_MIN_CLEARANCE_METERS = 0.002;
+/** 载货板「宽度」参数沿实体根米空间 Z（与小车长度同向）。 */
+const CARGO_PLATE_PARAMETRIC_AXIS = "z" as const;
+/** 宽度拉伸后随动（对齐 Car.ts _backRepositionNodeNames；米空间 min-X 锚定后自由端为 +X）。 */
+const WIDTH_FOLLOW_NODE_NAMES = [
+	"对象024", "对象006", "对象010", "对象011", "对象012", "对象016", "对象017", "对象022",
+];
+/** 侧架内移对齐：对象020/022 内侧面贴到 zaihuo 两端各 10% 处。 */
+const WIDTH_SIDE_FRAME_ALIGN_RATIO = 0.1;
+const WIDTH_SIDE_FRAME_NODE_NAMES = ["对象020", "对象022"];
+const WIDTH_SIDE_FRAME_CARGO_REF_NAME = "zaihuo";
+/** 宽度/长度后，X 中心对齐到 022 与 020 中点（对齐 Car.ts X_CENTER_ALIGN_PARTS）。 */
+const WIDTH_X_CENTER_ALIGN_NODE_NAMES = ["对象021", "对象031", "对象009"];
+const WIDTH_X_ALIGN_REF_NODE_NAMES = ["对象022", "对象020"];
+/** 小车宽度沿实体根米空间 X 轴变化。 */
+const WIDTH_PARAMETRIC_AXIS = "x" as const;
+/** 主体上色目标：外壳 + logo 件均乘色，保留贴图（对齐 Car.ts COLOR_PARTS）。 */
+const COLOR_NODE_NAMES = ["对象008", "waike2"];
+const PARAMETER_EPSILON = 0.0001;
+
+/**
+ * 根据 Inspector 参数对多穿小车执行静态参数化调整。
+ */
+export class ParametricModelRuntimeComponent {
+	private readonly snapshots = new Map<any, NodeSnapshot>();
+	private readonly appearanceMaterials = new Map<string, any>();
+	private readonly startupValues: ValueMap;
+	private modelNodes: any[] | null = null;
+	private readonly modelNodesByName = new Map<string, any[]>();
+	private readonly modelNodeOrder = new Map<any, number>();
+	/** 导入时锁定的几何原尺寸；拉伸基准只用它，避免移动时重测抖动导致误拉伸。 */
+	private sourceDims: { vehicleLength: number; vehicleWidth: number; cargoPlateWidth: number } | null = null;
+	private minimumDimensions = { vehicleLength: PARAMETER_EPSILON, vehicleWidth: PARAMETER_EPSILON };
+	private rejectedDimensionsSignature = "";
+	private lastSignature = "";
+	private lastColorSignature = "";
+	private lastFingerSignature = "";
+
+	public constructor(public node: TransformNode) {
+		this.startupValues = this.readParamValuesFromMetadata();
+	}
+
+	public onStart(): void {
+		this.captureSnapshots();
+		this.ensureModelDimensionDefaults();
+		this.applyIfNeeded(true);
+	}
+
+	public onUpdate(): void {
+		// 不再每帧重测/写回默认值：移动模型时 AABB 抖动会改 DEFAULT，造成「参数没变却拉伸」。
+		this.applyIfNeeded(false);
+	}
+
+	public onStop(): void {
+		this.disposeAppearanceMaterials();
+		this.restoreBaseNodes();
+		this.modelNodes = null;
+		this.modelNodesByName.clear();
+		this.modelNodeOrder.clear();
+		this.lastSignature = "";
+		this.lastColorSignature = "";
+		this.lastFingerSignature = "";
+		if (this.rejectedDimensionsSignature) {
+			const metadata = { ...this.node.metadata };
+			delete metadata.parametricShuttleDimensionDiagnostic;
+			this.node.metadata = metadata;
+			this.rejectedDimensionsSignature = "";
+		}
+	}
+
+	private applyIfNeeded(force: boolean): void {
+		const values = this.readParamValues();
+		// 运动速度、巷道、颜色及显隐均不触发静态几何重建。
+		const signature = JSON.stringify([values.vehicleLength, values.vehicleWidth, values.cargoPlateWidth]);
+		const colorSignature = JSON.stringify([values.mainColor]);
+		const fingerSignature = JSON.stringify([values.hideFingers]);
+		let geometryChanged = force || signature !== this.lastSignature;
+		const colorChanged = force || colorSignature !== this.lastColorSignature;
+		const fingersChanged = force || fingerSignature !== this.lastFingerSignature;
+		const invalidDimensions = DIMENSION_PARAM_KEYS.filter((key) => {
+			const value = Number(values[key]);
+			const minimum = key === "cargoPlateWidth" ? PARAMETER_EPSILON : this.minimumDimensions[key];
+			return !Number.isFinite(value) || value < minimum;
+		});
+		if (invalidDimensions.length > 0) {
+			if (this.rejectedDimensionsSignature !== signature) {
+				const message = `尺寸无效或小于固定端部所需空间：${invalidDimensions.join("、")}；保留上一次完整模型`;
+				this.node.metadata = { ...this.node.metadata, parametricShuttleDimensionDiagnostic: { message, minimum: { ...this.minimumDimensions } } };
+				console.warn("[multi-shuttle]", message);
+				this.rejectedDimensionsSignature = signature;
+			}
+			geometryChanged = false;
+		} else if (this.rejectedDimensionsSignature) {
+			const metadata = { ...this.node.metadata };
+			delete metadata.parametricShuttleDimensionDiagnostic;
+			this.node.metadata = metadata;
+			this.rejectedDimensionsSignature = "";
+		}
+		if (!geometryChanged && !colorChanged && !fingersChanged) { return; }
+		this.modelNodes = null;
+		this.modelNodesByName.clear();
+		this.modelNodeOrder.clear();
+		if (geometryChanged) {
+			this.disposeAppearanceMaterials();
+			this.restoreBaseNodes();
+			this.applyModelParameters(values);
+		} else {
+			if (colorChanged) {
+				const ownedMaterials = new Set(this.appearanceMaterials.values());
+				this.snapshots.forEach((snapshot, target) => {
+					if (snapshot.material !== undefined && ownedMaterials.has(target.material)) {
+						target.material = snapshot.material;
+					}
+				});
+				this.disposeAppearanceMaterials();
+				this.applyMainColor(values);
+			}
+			if (fingersChanged) { this.applyFingerVisibility(values); }
+		}
+		if (invalidDimensions.length === 0) { this.lastSignature = signature; }
+		this.lastColorSignature = colorSignature;
+		this.lastFingerSignature = fingerSignature;
+	}
+
+	/** 仅 onStart 调用：锁定实测基准，只补缺失、非有限或非正的尺寸。 */
+	private ensureModelDimensionDefaults(): void {
+		const rootMeta = (this.node.metadata ?? (this.node.metadata = {})) as {
+			_multiShuttleDimsSeeded?: boolean;
+			_multiShuttleSourceDims?: { vehicleLength: number; vehicleWidth: number; cargoPlateWidth: number };
+		};
+
+		if (!this.sourceDims) {
+			if (rootMeta._multiShuttleSourceDims) {
+				this.sourceDims = { ...rootMeta._multiShuttleSourceDims };
+			} else {
+				const measured = this.measureModelDimensionDefaults();
+				if (!measured) { return; }
+				const rounded = {
+					vehicleLength: this.roundDimension(measured.vehicleLength),
+					vehicleWidth: this.roundDimension(measured.vehicleWidth),
+					cargoPlateWidth: this.roundDimension(measured.cargoPlateWidth),
+				};
+				this.sourceDims = { ...rounded };
+				rootMeta._multiShuttleSourceDims = { ...rounded };
+			}
+		}
+
+		// 刚性端部不能缩成负长度；校验基线只在首次形变前记录。
+		this.minimumDimensions = {
+			vehicleLength: Math.max(PARAMETER_EPSILON, this.sourceDims.vehicleLength
+				- this.getBoundsAxisSpan(this.getNodesMeterBounds(this.findLengthStretchNodes()), "z") + PARAMETER_EPSILON),
+			vehicleWidth: Math.max(PARAMETER_EPSILON, this.sourceDims.vehicleWidth
+				- this.getBoundsAxisSpan(this.getNodesMeterBounds(this.findNodesByNames(WIDTH_STRETCH_NODE_NAMES)), "x") + PARAMETER_EPSILON),
+		};
+		const dimensions = { ...this.sourceDims };
+		const values = this.readParamValues();
+		for (const key of DIMENSION_PARAM_KEYS) {
+			// 保存值与正式运行器注入值优先，不能凭数值或缺少完成标志推断用户未修改。
+			if (!this.shouldSeedDimension(values[key])) { dimensions[key] = Number(values[key]); }
+			if (this.shouldSeedDimension(dimensions[key])) { continue; }
+			if (this.shouldSeedDimension(this.startupValues[key])) {
+				this.startupValues[key] = dimensions[key];
+			}
+		}
+
+		// contentRoot 的直接父节点才是本实体的米制根；绝不向祖父或同型号的其他实体写参数。
+		const hosts = [this.node, this.node.parent].filter(Boolean) as any[];
+		for (const host of hosts) {
+			const scripts = Array.isArray(host.metadata?.scripts) ? host.metadata.scripts : [];
+			if (host !== this.node && this.hasOtherRuntimeScript(scripts)) { break; }
+
+			const parameterScripts = scripts.filter((script: any) => this.isOwnedParameterScript(script, host));
+			parameterScripts.forEach((script: any) => this.seedDimensionIntoScript(script, dimensions));
+			if (!this.canSeedHostMetadata(host, scripts, parameterScripts)) { continue; }
+
+			const meta = (host.metadata ?? (host.metadata = {})) as Record<string, unknown>;
+			this.seedDimensionIntoValueMap(meta, dimensions);
+			if (meta.modelParameterValues && typeof meta.modelParameterValues === "object") {
+				this.seedDimensionIntoValueMap(meta.modelParameterValues as Record<string, unknown>, dimensions);
+			}
+			if (meta.parameters && typeof meta.parameters === "object") {
+				this.seedDimensionIntoValueMap(meta.parameters as Record<string, unknown>, dimensions);
+			}
+		}
+		rootMeta._multiShuttleDimsSeeded = true;
+	}
+
+	private seedDimensionIntoScript(
+		script: any,
+		dimensions: { vehicleLength: number; vehicleWidth: number; cargoPlateWidth: number },
+	): void {
+		const instance = script.instance ?? script.attachedScript ?? script.behavior ?? script.component;
+		if (instance && typeof instance === "object") {
+			for (const key of DIMENSION_PARAM_KEYS) {
+				const value = dimensions[key];
+				if (this.shouldSeedDimension(value)) { continue; }
+				if (this.shouldSeedDimension((instance as Record<string, unknown>)[key])) {
+					(instance as Record<string, unknown>)[key] = value;
+				}
+			}
+		}
+		for (const bagName of ["values", "properties", "config", "fields"] as const) {
+			const bag = script[bagName];
+			if (bag && typeof bag === "object") {
+				this.seedDimensionIntoValueMap(bag as Record<string, unknown>, dimensions);
+			}
+		}
+	}
+
+	private seedDimensionIntoValueMap(
+		bag: Record<string, unknown>,
+		dimensions: { vehicleLength: number; vehicleWidth: number; cargoPlateWidth: number },
+	): void {
+		if (Array.isArray(bag)) {
+			bag.forEach((item: any) => {
+				const key = String(item?.key ?? item?.propertyKey ?? item?.name ?? "") as DimensionParamKey;
+				if (!DIMENSION_PARAM_KEYS.includes(key) || this.shouldSeedDimension(dimensions[key])) { return; }
+				const saved = [item.value, item.currentValue, item.defaultValue]
+					.find((value) => !this.shouldSeedDimension(value));
+				const value = saved ?? dimensions[key];
+				let hasValue = false;
+				for (const field of ["value", "currentValue", "defaultValue"] as const) {
+					if (!(field in item)) { continue; }
+					hasValue = true;
+					if (this.shouldSeedDimension(item[field])) { item[field] = value; }
+				}
+				if (!hasValue) { item.value = value; }
+			});
+			return;
+		}
+		for (const key of DIMENSION_PARAM_KEYS) {
+			const value = dimensions[key];
+			if (this.shouldSeedDimension(value)) { continue; }
+			this.seedWrappedNumberValue(bag, key, value);
+		}
+	}
+
+	private roundDimension(value: number): number {
+		if (!Number.isFinite(value) || value <= PARAMETER_EPSILON) { return 0; }
+		return Math.round(value * 10000) / 10000;
+	}
+
+	/** 实测与「实际尺寸」同量级：长≈整车 Z，宽≈整车 X，载货板≈ zaihuo 跨度。 */
+	private measureModelDimensionDefaults(): { vehicleLength: number; vehicleWidth: number; cargoPlateWidth: number } | null {
+		const content = this.getContentMeterBounds();
+		const contentLength = this.getBoundsAxisSpan(content, "z");
+		const contentWidth = this.getBoundsAxisSpan(content, "x");
+
+		const lengthNodes = this.findLengthStretchNodes();
+		const lengthBounds = this.getNodesMeterBounds(lengthNodes);
+		const vehicleLength = contentLength > PARAMETER_EPSILON
+			? contentLength : this.getBoundsAxisSpan(lengthBounds, "z");
+
+		const stretchBounds = this.getNodesMeterBounds(this.findNodesByNames(WIDTH_STRETCH_NODE_NAMES));
+		const vehicleWidth = contentWidth > PARAMETER_EPSILON
+			? contentWidth : this.getBoundsAxisSpan(stretchBounds, "x");
+
+		const plates = this.getCargoPlateAxisBounds(CARGO_PLATE_PARAMETRIC_AXIS);
+		const cargoPlateWidth = plates.length > 0
+			? plates.reduce((sum, p) => sum + p.span, 0) / plates.length
+			: 0;
+
+		if (vehicleLength <= PARAMETER_EPSILON && vehicleWidth <= PARAMETER_EPSILON && cargoPlateWidth <= PARAMETER_EPSILON) {
+			return null;
+		}
+		return {
+			vehicleLength: Math.max(vehicleLength, 0),
+			vehicleWidth: Math.max(vehicleWidth, 0),
+			cargoPlateWidth: Math.max(cargoPlateWidth, 0),
+		};
+	}
+
+	/** 内容根下可渲染件的合并包围盒（米），对齐编辑器「实际尺寸」。 */
+	private getContentMeterBounds(): { minimum: Vector3; maximum: Vector3 } | null {
+		const nodes = this.getModelNodes().filter((candidate) => candidate !== this.node);
+		return this.getNodesMeterBounds(nodes.length > 0 ? nodes : [this.node]);
+	}
+
+	private getBoundsAxisSpan(bounds: { minimum: Vector3; maximum: Vector3 } | null | undefined, axis: "x" | "y" | "z"): number {
+		if (!bounds?.minimum || !bounds?.maximum) { return 0; }
+		const span = bounds.maximum[axis] - bounds.minimum[axis];
+		return Number.isFinite(span) ? Math.max(0, span) : 0;
+	}
+
+	private shouldSeedDimension(value: unknown): boolean {
+		const n = (typeof value === "number" || (typeof value === "string" && value.trim())) ? Number(value) : NaN;
+		return !Number.isFinite(n) || n <= 0;
+	}
+
+	/** 合法正数就是目标尺寸；旧默认数值或相对原尺寸的比例不能作为失效依据。 */
+	private resolveDimensionTarget(values: ValueMap, key: DimensionParamKey, baseline: number): number {
+		return this.shouldSeedDimension(values[key]) ? baseline : this.readPositiveNumber(values, key, baseline);
+	}
+
+	private seedWrappedNumberValue(
+		values: Record<string, unknown>,
+		key: DimensionParamKey,
+		measured: number,
+	): void {
+		const current = values[key];
+		if (current && typeof current === "object" && ("value" in current || "currentValue" in current || "defaultValue" in current)) {
+			const record = current as { value?: unknown; currentValue?: unknown; defaultValue?: unknown };
+			const saved = [record.value, record.currentValue, record.defaultValue]
+				.find((value) => !this.shouldSeedDimension(value));
+			for (const field of ["value", "currentValue", "defaultValue"] as const) {
+				if (field in record && this.shouldSeedDimension(record[field])) {
+					record[field] = saved ?? measured;
+				}
+			}
+			return;
+		}
+		if (this.shouldSeedDimension(current)) { values[key] = measured; }
+	}
+
+	/**
+	 * 多穿小车专用参数化入口（顺序对齐 Car.ts）：
+	 * 长度 → 宽度 → 载货板宽度 →（仅尺寸变化时）侧架内移 / X 中心对齐 → 主体颜色。
+	 * 与货架一致：目标=模型原尺寸时不做几何变形，进编辑器保持 GLB 原貌。
+	 */
+	private applyModelParameters(values: ValueMap): void {
+		const lengthChanged = this.applyVehicleLength(values);
+		const widthChanged = this.applyVehicleWidth(values);
+		const cargoChanged = this.applyCargoPlateWidth(values);
+		if (lengthChanged || widthChanged || cargoChanged) {
+			this.insetSideFramesToCargoBeamMarks();
+			this.placeXCenterAlignedParts();
+		}
+		this.applyMainColor(values);
+		this.applyFingerVisibility(values);
+	}
+
+	/**
+	 * 小车长度：对 node0 下 对象022/021/020 沿米空间 Z 等比缩放，
+	 * 组最小端（min-Z）锚定；自由端伸长量 extension 同步平移跟随件。
+	 * 参数语义=整车长度；基准用 onStart 锁定的 sourceDims（不跟移动重测）。
+	 * @returns 是否发生几何变化
+	 */
+	private applyVehicleLength(values: ValueMap): boolean {
+		const nodes = this.findLengthStretchNodes();
+		if (nodes.length === 0) { return false; }
+		const bounds = this.getNodesMeterBounds(nodes);
+		if (!bounds) { return false; }
+		const baseline = this.getSourceDimension("vehicleLength", this.getBoundsAxisSpan(bounds, "z"));
+		if (baseline <= PARAMETER_EPSILON) { return false; }
+		const target = this.resolveDimensionTarget(values, "vehicleLength", baseline);
+		const extension = target - baseline;
+		if (Math.abs(extension) < PARAMETER_EPSILON) { return false; }
+		const partSpan = this.getBoundsAxisSpan(bounds, "z");
+		if (partSpan <= PARAMETER_EPSILON) { return false; }
+		// 长度参数是整车长度，固定端部不参与缩放，伸长量只分配给中部结构件。
+		const ratio = Math.max(PARAMETER_EPSILON, partSpan + extension) / partSpan;
+		const stretchNodes = nodes;
+		const stretchBounds = bounds;
+		const anchorMinZ = stretchBounds.minimum.z;
+		stretchNodes.forEach((node) => this.scaleNodeAxis(node, LENGTH_PARAMETRIC_AXIS, ratio));
+		const after = this.getNodesMeterBounds(stretchNodes);
+		if (after) {
+			const deltaZ = anchorMinZ - after.minimum.z;
+			if (Math.abs(deltaZ) >= PARAMETER_EPSILON) {
+				stretchNodes.forEach((node) => this.offsetNodeMeters(node, new Vector3(0, 0, deltaZ)));
+			}
+		}
+
+		const followNodes = this.findNodesByNames(LENGTH_FOLLOW_NODE_NAMES);
+		if (followNodes.length > 0 && Math.abs(extension) >= PARAMETER_EPSILON) {
+			followNodes.forEach((node) => this.offsetNodeMeters(node, new Vector3(0, 0, extension)));
+		}
+		return true;
+	}
+
+	/**
+	 * 小车宽度以整车 X 跨度为基准，伸缩量分配给 WIDTH_STRETCH，保持 min-X 锚定；
+	 * 后侧跟随；zaihuo/zaihuo01 同步分段拉。基准用锁定的 sourceDims。
+	 * @returns 是否发生几何变化
+	 */
+	private applyVehicleWidth(values: ValueMap): boolean {
+		const stretchNodes = this.findNodesByNames(WIDTH_STRETCH_NODE_NAMES);
+		const stretchBounds = this.getNodesMeterBounds(stretchNodes);
+		if (!stretchBounds) { return false; }
+		const baseline = this.getSourceDimension("vehicleWidth", this.getBoundsAxisSpan(stretchBounds, "x"));
+		if (baseline <= PARAMETER_EPSILON) { return false; }
+		const target = this.resolveDimensionTarget(values, "vehicleWidth", baseline);
+		const extension = target - baseline;
+		if (Math.abs(extension) < PARAMETER_EPSILON) { return false; }
+		const partSpan = this.getBoundsAxisSpan(stretchBounds, "x");
+		if (partSpan <= PARAMETER_EPSILON) { return false; }
+		const ratio = Math.max(PARAMETER_EPSILON, partSpan + extension) / partSpan;
+
+		const anchorMinX = stretchBounds.minimum.x;
+		stretchNodes.forEach((node) => this.scaleNodeAxis(node, WIDTH_PARAMETRIC_AXIS, ratio));
+		const after = this.getNodesMeterBounds(stretchNodes);
+		if (after) {
+			const deltaX = anchorMinX - after.minimum.x;
+			if (Math.abs(deltaX) >= PARAMETER_EPSILON) {
+				stretchNodes.forEach((node) => this.offsetNodeMeters(node, new Vector3(deltaX, 0, 0)));
+			}
+		}
+
+		const followNodes = this.findNodesByNames(WIDTH_FOLLOW_NODE_NAMES);
+		if (followNodes.length > 0 && Math.abs(extension) >= PARAMETER_EPSILON) {
+			followNodes.forEach((node) => this.offsetNodeMeters(node, new Vector3(extension, 0, 0)));
+		}
+
+		this.applyCargoPlateStretchByExtension(WIDTH_PARAMETRIC_AXIS, extension);
+		return true;
+	}
+
+	/**
+	 * 载货板宽度：zaihuo / zaihuo01 沿 Z 两端各保留不变形，只拉中间。
+	 * @returns 是否发生几何变化
+	 */
+	private applyCargoPlateWidth(values: ValueMap): boolean {
+		const plates = this.getCargoPlateAxisBounds(CARGO_PLATE_PARAMETRIC_AXIS);
+		if (plates.length === 0) { return false; }
+		const liveAvg = plates.reduce((sum, p) => sum + p.span, 0) / plates.length;
+		const avgBaseline = this.getSourceDimension("cargoPlateWidth", liveAvg);
+		const targetSpan = this.resolveDimensionTarget(values, "cargoPlateWidth", avgBaseline);
+		const extension = targetSpan - avgBaseline;
+		if (Math.abs(extension) < PARAMETER_EPSILON) { return false; }
+		this.applyCargoPlateStretchByExtension(CARGO_PLATE_PARAMETRIC_AXIS, extension);
+		return true;
+	}
+
+	/** 优先用 onStart 锁定的原尺寸作拉伸基准。 */
+	private getSourceDimension(key: (typeof DIMENSION_PARAM_KEYS)[number], liveFallback: number): number {
+		const locked = this.sourceDims?.[key];
+		if (typeof locked === "number" && locked > PARAMETER_EPSILON) {
+			return locked;
+		}
+		return liveFallback;
+	}
+
+	/**
+	 * 载货板按统一 extension 分段拉伸（两端保留）。
+	 * 相向锚定时钳制 extension，保证拉伸后仍留 CARGO_PLATE_MIN_CLEARANCE_METERS 间隙。
+	 */
+	private applyCargoPlateStretchByExtension(axis: "x" | "y" | "z", extension: number): void {
+		if (Math.abs(extension) < PARAMETER_EPSILON) { return; }
+		const plates = this.getCargoPlateAxisBounds(axis);
+		if (plates.length === 0) { return; }
+
+		let safeExtension = extension;
+		if (extension > 0 && axis === CARGO_PLATE_PARAMETRIC_AXIS && plates.length >= 2) {
+			// Z 向：zaihuo 往 +Z、zaihuo01 往 −Z，中间空隙最多对半分，避免中间叠住闪烁
+			const sorted = [...plates].sort((a, b) => a.min - b.min);
+			const low = sorted[0];
+			const high = sorted[sorted.length - 1];
+			const gap = high.min - low.max;
+			const maxPerSide = Math.max(0, (gap - CARGO_PLATE_MIN_CLEARANCE_METERS) * 0.5);
+			safeExtension = Math.min(extension, maxPerSide);
+		}
+		if (Math.abs(safeExtension) < PARAMETER_EPSILON) { return; }
+
+		for (const plate of plates) {
+			const anchorMax = plate.name === "zaihuo01" && axis !== WIDTH_PARAMETRIC_AXIS;
+			const meshes = this.getMeshesForNodes(plate.nodes);
+			meshes.forEach((mesh) => {
+				this.stretchMeshMeterAxisKeepEnds(
+					mesh,
+					axis,
+					plate.min,
+					plate.max,
+					CARGO_PLATE_END_KEEP_RATIO,
+					safeExtension,
+					anchorMax,
+				);
+			});
+		}
+	}
+
+	private getCargoPlateAxisBounds(axis: "x" | "y" | "z"): Array<{
+		name: string;
+		nodes: any[];
+		min: number;
+		max: number;
+		span: number;
+	}> {
+		const result: Array<{ name: string; nodes: any[]; min: number; max: number; span: number }> = [];
+		for (const name of CARGO_PLATE_NODE_NAMES) {
+			const nodes = this.findNodesByNames([name]);
+			if (nodes.length === 0) { continue; }
+			const bounds = this.getNodesMeterBounds(nodes);
+			if (!bounds) { continue; }
+			const span = bounds.maximum[axis] - bounds.minimum[axis];
+			if (span <= PARAMETER_EPSILON) { continue; }
+			result.push({
+				name,
+				nodes,
+				min: bounds.minimum[axis],
+				max: bounds.maximum[axis],
+				span,
+			});
+		}
+		return result;
+	}
+
+	/**
+	 * 米空间轴向分段拉伸：两端各保留 endKeepRatio 刚性区，中间按 extension 伸长。
+	 * anchorMax=false：min 端不动，max 端 +extension；
+	 * anchorMax=true：max 端不动，min 端 -extension（往里拉）。
+	 */
+	private stretchMeshMeterAxisKeepEnds(
+		mesh: any,
+		axis: "x" | "y" | "z",
+		axisMin: number,
+		axisMax: number,
+		endKeepRatio: number,
+		extension: number,
+		anchorMax = false,
+	): void {
+		if (Math.abs(extension) < PARAMETER_EPSILON) { return; }
+		const span = axisMax - axisMin;
+		if (span <= PARAMETER_EPSILON) { return; }
+		const keep = Math.max(PARAMETER_EPSILON, span * Math.min(0.49, Math.max(0, endKeepRatio)));
+		const middleStart = axisMin + keep;
+		const middleEnd = axisMax - keep;
+		const middleLength = middleEnd - middleStart;
+		if (middleLength <= PARAMETER_EPSILON) { return; }
+		const middleScale = (middleLength + extension) / middleLength;
+
+		const positions = this.readVertexPositions(mesh);
+		const worldMatrix = mesh.computeWorldMatrix?.(true);
+		const inverseWorldMatrix = worldMatrix?.clone?.();
+		const meterSpace = this.getMeterSpaceMatrices();
+		if (!positions || !worldMatrix || !inverseWorldMatrix?.invert || !meterSpace) { return; }
+		inverseWorldMatrix.invert();
+		const nextPositions = positions.slice();
+		for (let index = 0; index < nextPositions.length; index += 3) {
+			const local = new Vector3(positions[index], positions[index + 1], positions[index + 2]);
+			const world = Vector3.TransformCoordinates(local, worldMatrix);
+			const meterPoint = Vector3.TransformCoordinates(world, meterSpace.inverseEntityRootWorldMatrix);
+			const source = meterPoint[axis];
+			let next = source;
+			if (anchorMax) {
+				if (source >= middleEnd) {
+					next = source;
+				} else if (source <= middleStart) {
+					next = source - extension;
+				} else {
+					next = middleEnd - (middleEnd - source) * middleScale;
+				}
+			} else if (source <= middleStart) {
+				next = source;
+			} else if (source >= middleEnd) {
+				next = source + extension;
+			} else {
+				next = middleStart + (source - middleStart) * middleScale;
+			}
+			if (Math.abs(next - source) < PARAMETER_EPSILON) { continue; }
+			const delta = next - source;
+			const nextMeter = new Vector3(
+				meterPoint.x + (axis === "x" ? delta : 0),
+				meterPoint.y + (axis === "y" ? delta : 0),
+				meterPoint.z + (axis === "z" ? delta : 0),
+			);
+			const nextWorld = Vector3.TransformCoordinates(nextMeter, meterSpace.entityRootWorldMatrix);
+			const nextLocal = Vector3.TransformCoordinates(nextWorld, inverseWorldMatrix);
+			nextPositions[index] = nextLocal.x;
+			nextPositions[index + 1] = nextLocal.y;
+			nextPositions[index + 2] = nextLocal.z;
+		}
+		this.writeVertexPositions(mesh, nextPositions);
+	}
+
+	private getMeshesForNodes(nodes: any[]): any[] {
+		const meshes: any[] = [];
+		nodes.forEach((node) => meshes.push(...this.getBoundsMeshes(node)));
+		return [...new Set(meshes)];
+	}
+
+	private getMeterSpaceMatrices(): { entityRootWorldMatrix: any; inverseEntityRootWorldMatrix: any } | null {
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseEntityRootWorldMatrix?.invert) { return null; }
+		inverseEntityRootWorldMatrix.invert();
+		return { entityRootWorldMatrix, inverseEntityRootWorldMatrix };
+	}
+
+	private writeVertexPositions(mesh: any, positions: number[]): void {
+		if (typeof mesh.setVerticesData !== "function") { return; }
+		mesh.setVerticesData("position", positions, true);
+		mesh.refreshBoundingInfo?.(true, true);
+		mesh.computeWorldMatrix?.(true);
+	}
+
+	/**
+	 * 对象020 / 对象022 内移：内侧面分别对齐 zaihuo 左端 10%、右端 10% 处。
+	 */
+	private insetSideFramesToCargoBeamMarks(): void {
+		const cargoBounds = this.getNodesMeterBounds(this.findNodesByNames([WIDTH_SIDE_FRAME_CARGO_REF_NAME]));
+		if (!cargoBounds) { return; }
+		const span = cargoBounds.maximum.x - cargoBounds.minimum.x;
+		if (span <= PARAMETER_EPSILON) { return; }
+		const ratio = Math.min(0.45, Math.max(0, WIDTH_SIDE_FRAME_ALIGN_RATIO));
+		const leftMark = cargoBounds.minimum.x + span * ratio;
+		const rightMark = cargoBounds.maximum.x - span * ratio;
+
+		const sides = this.resolveSideFrameNodes();
+		if (!sides) { return; }
+		const leftDelta = leftMark - sides.leftBounds.maximum.x;
+		if (Math.abs(leftDelta) >= PARAMETER_EPSILON) {
+			this.offsetNodeMeters(sides.leftNode, new Vector3(leftDelta, 0, 0));
+		}
+		const rightDelta = rightMark - sides.rightBounds.minimum.x;
+		if (Math.abs(rightDelta) >= PARAMETER_EPSILON) {
+			this.offsetNodeMeters(sides.rightNode, new Vector3(rightDelta, 0, 0));
+		}
+	}
+
+	/** 按 X 中心区分左右侧架（020 / 022）。 */
+	private resolveSideFrameNodes(): {
+		leftNode: any;
+		rightNode: any;
+		leftBounds: { minimum: Vector3; maximum: Vector3 };
+		rightBounds: { minimum: Vector3; maximum: Vector3 };
+	} | null {
+		const node020 = this.findNodesByNames([WIDTH_SIDE_FRAME_NODE_NAMES[0]])[0];
+		const node022 = this.findNodesByNames([WIDTH_SIDE_FRAME_NODE_NAMES[1]])[0];
+		const bounds020 = this.getNodeMeterBounds(node020);
+		const bounds022 = this.getNodeMeterBounds(node022);
+		if (!node020 || !node022 || !bounds020 || !bounds022) { return null; }
+		const center020 = (bounds020.minimum.x + bounds020.maximum.x) * 0.5;
+		const center022 = (bounds022.minimum.x + bounds022.maximum.x) * 0.5;
+		if (center020 < center022) {
+			return { leftNode: node020, rightNode: node022, leftBounds: bounds020, rightBounds: bounds022 };
+		}
+		return { leftNode: node022, rightNode: node020, leftBounds: bounds022, rightBounds: bounds020 };
+	}
+
+	/**
+	 * 指定件 X 中心对齐到 对象022 与 对象020 的 X 中心中点（对齐 Car.ts placeXCenterAlignedParts）。
+	 */
+	private placeXCenterAlignedParts(): void {
+		const refNodes = WIDTH_X_ALIGN_REF_NODE_NAMES.map((name) => this.findNodesByNames([name])[0]).filter(Boolean);
+		if (refNodes.length < 2) { return; }
+		const centers: number[] = [];
+		for (const node of refNodes) {
+			const bounds = this.getNodeMeterBounds(node);
+			if (!bounds) { return; }
+			centers.push((bounds.minimum.x + bounds.maximum.x) / 2);
+		}
+		const targetCenterX = (centers[0] + centers[1]) / 2;
+		this.findNodesByNames(WIDTH_X_CENTER_ALIGN_NODE_NAMES).forEach((node) => {
+			const bounds = this.getNodeMeterBounds(node);
+			if (!bounds) { return; }
+			const currentCenterX = (bounds.minimum.x + bounds.maximum.x) / 2;
+			const delta = targetCenterX - currentCenterX;
+			if (Math.abs(delta) < PARAMETER_EPSILON) { return; }
+			this.offsetNodeMeters(node, new Vector3(delta, 0, 0));
+		});
+	}
+
+	/** hideFingers：隐藏 cha1 / cha2。 */
+	private applyFingerVisibility(values: ValueMap): void {
+		const visible = !this.readBoolean(values, "hideFingers", false);
+		this.findNodesByNames([...FINGER_NODE_NAMES]).forEach((node) => {
+			if (typeof node.setEnabled === "function") {
+				node.setEnabled(visible);
+			}
+		});
+	}
+
+	/**
+	 * 主体颜色：对象008 / waike2 与 waike2 相同方式乘色，保留全部贴图；
+	 * mainColor 为 (0,0,0) 时恢复原材质。
+	 */
+	private applyMainColor(values: ValueMap): void {
+		const tint = this.normalizeMainColor(this.readColor3(values, "mainColor", "#000000"));
+		this.findNodesByNames(COLOR_NODE_NAMES).forEach((node) => {
+			const meshes = [node, ...(typeof node?.getChildMeshes === "function" ? node.getChildMeshes(false) : [])];
+			[...new Set(meshes)].forEach((mesh: any) => {
+				if (!this.isColorableMesh(mesh) || typeof mesh.getBoundingInfo !== "function"
+					|| mesh.isVisible === false || Number(mesh.visibility ?? 1) <= 0) { return; }
+				const snapshot = this.rememberSnapshot(mesh);
+				// 拨指暂时隐藏时也更新其材质，之后显示无需重建几何。
+				if (snapshot.enabled === false) { return; }
+				const baseMaterial = snapshot.material ?? mesh.material;
+				if (!tint) {
+					if (baseMaterial !== undefined) { mesh.material = baseMaterial; }
+					return;
+				}
+				const appearanceMaterial = this.getOrCreateAppearanceMaterial(baseMaterial);
+				if (!appearanceMaterial) { return; }
+				this.setMaterialColor(appearanceMaterial, tint);
+				mesh.material = appearanceMaterial;
+			});
+		});
+	}
+
+	private isColorableMesh(target: any): boolean {
+		return !target?.isDisposed?.()
+			&& typeof target.getTotalVertices === "function"
+			&& target.getTotalVertices() > 0
+			&& "material" in target;
+	}
+
+	/** (0,0,0) 表示保留原色；分量 >1 时按 0～255 归一化。 */
+	private normalizeMainColor(color: Color3): Color3 | null {
+		if (color.r === 0 && color.g === 0 && color.b === 0) { return null; }
+		let r = color.r;
+		let g = color.g;
+		let b = color.b;
+		if (r > 1 || g > 1 || b > 1) {
+			r /= 255;
+			g /= 255;
+			b /= 255;
+		}
+		return new Color3(
+			Math.min(1, Math.max(0, r)),
+			Math.min(1, Math.max(0, g)),
+			Math.min(1, Math.max(0, b)),
+		);
+	}
+
+	private readColor3(values: ValueMap, key: string, fallback: string): Color3 {
+		const raw = values[key];
+		if (raw instanceof Color3) { return raw.clone(); }
+		if (typeof raw === "string" && raw.trim()) {
+			try {
+				return Color3.FromHexString(raw.startsWith("#") ? raw : `#${raw}`);
+			} catch { /* fall through */ }
+		}
+		if (raw && typeof raw === "object" && "r" in (raw as object)) {
+			const color = raw as { r: number; g: number; b: number };
+			return new Color3(Number(color.r) || 0, Number(color.g) || 0, Number(color.b) || 0);
+		}
+		try { return Color3.FromHexString(fallback); } catch { return Color3.Black(); }
+	}
+
+	/** 克隆材质但保留贴图（logo/花纹），只改乘色。 */
+	private getOrCreateAppearanceMaterial(baseMaterial: any): any | null {
+		if (!baseMaterial || typeof baseMaterial.clone !== "function") { return null; }
+		const cacheKey = String(baseMaterial.uniqueId ?? baseMaterial.id ?? baseMaterial.name ?? "material");
+		const cached = this.appearanceMaterials.get(cacheKey);
+		if (cached) { return cached; }
+		const cloned = baseMaterial.clone(`${String(baseMaterial.name ?? "material")}_shuttle_${this.appearanceMaterials.size}`);
+		if (!cloned) { return null; }
+		this.appearanceMaterials.set(cacheKey, cloned);
+		return cloned;
+	}
+
+	private setMaterialColor(material: any, color: Color3): void {
+		if (material.albedoColor?.copyFrom) { material.albedoColor.copyFrom(color); }
+		if (material.diffuseColor?.copyFrom) { material.diffuseColor.copyFrom(color); }
+		if ("baseColor" in material && material.baseColor?.copyFrom) { material.baseColor.copyFrom(color); }
+	}
+
+	private disposeAppearanceMaterials(): void {
+		this.appearanceMaterials.forEach((material) => {
+			if (typeof material?.dispose === "function" && material.isDisposed?.() !== true) {
+				material.dispose();
+			}
+		});
+		this.appearanceMaterials.clear();
+	}
+
+	/** 在 node0 子树内按名称查找长度拉伸件（兼容 对象020.1 等后缀）。 */
+	private findLengthStretchNodes(): any[] {
+		const node0 = this.findNode0();
+		return this.findNodesByNames(LENGTH_STRETCH_NODE_NAMES).filter((candidate) =>
+			!node0 || (candidate !== node0 && candidate.isDescendantOf?.(node0)));
+	}
+
+	/** 按名称索引查找当前模型子树，保留原来的后缀匹配及顺序。 */
+	private findNodesByNames(names: string[]): any[] {
+		this.getModelNodes();
+		const matched = new Set<any>();
+		names.forEach((name) => {
+			const candidates = this.modelNodesByName.get(name) ?? [];
+			if (candidates.length > 1) { candidates.sort((a, b) => this.getModelNodeOrder(a) - this.getModelNodeOrder(b)); }
+			candidates.forEach((candidate) => matched.add(candidate));
+		});
+		return [...matched];
+	}
+
+	/** 同名节点才查询场景注册顺序，避免改变原有首个匹配的选择。 */
+	private getModelNodeOrder(candidate: any): number {
+		if (candidate === this.node) { return -1; }
+		const cached = this.modelNodeOrder.get(candidate);
+		if (cached !== undefined) { return cached; }
+		const scene = this.node.getScene?.();
+		const transforms = scene?.transformNodes ?? [];
+		const meshes = scene?.meshes ?? [];
+		const transformIndex = transforms.indexOf(candidate);
+		const meshIndex = transformIndex < 0 ? meshes.indexOf(candidate) : -1;
+		const order = transformIndex >= 0 ? transformIndex : meshIndex >= 0 ? transforms.length + meshIndex : Number.MAX_SAFE_INTEGER;
+		this.modelNodeOrder.set(candidate, order);
+		return order;
+	}
+
+	private findNode0(): any | null {
+		const matches = this.getModelNodes().filter((candidate) => {
+			const name = String(candidate.name ?? "");
+			return /^node0$/i.test(name) || /^node.?0$/i.test(name);
+		});
+		if (matches.length > 1) { matches.sort((a, b) => this.getModelNodeOrder(a) - this.getModelNodeOrder(b)); }
+		return matches[0] ?? null;
+	}
+
+	private captureSnapshots(): void {
+		this.getModelNodes().forEach((target) => this.rememberSnapshot(target));
+	}
+
+	private rememberSnapshot(target: any): NodeSnapshot {
+		if (!this.snapshots.has(target)) {
+			this.snapshots.set(target, {
+				position: target.position?.clone?.() ?? Vector3.Zero(),
+				scaling: target.scaling?.clone?.() ?? new Vector3(1, 1, 1),
+				rotation: target.rotation?.clone?.(),
+				rotationQuaternion: target.rotationQuaternion?.clone?.(),
+				enabled: typeof target.isEnabled === "function" ? target.isEnabled() : undefined,
+				vertexPositions: this.readVertexPositions(target),
+				material: "material" in target ? target.material : undefined,
+			});
+		}
+		return this.snapshots.get(target) ?? { position: Vector3.Zero(), scaling: new Vector3(1, 1, 1) };
+	}
+
+	private restoreBaseNodes(): void {
+		this.snapshots.forEach((snapshot, target) => {
+			if (target.position) { target.position = snapshot.position.clone(); }
+			if (target.scaling) { target.scaling = snapshot.scaling.clone(); }
+			if (target.rotation && snapshot.rotation) { target.rotation = snapshot.rotation.clone(); }
+			if (snapshot.rotationQuaternion && target.rotationQuaternion !== undefined) {
+				target.rotationQuaternion = snapshot.rotationQuaternion.clone();
+			}
+			if (snapshot.enabled !== undefined && typeof target.setEnabled === "function") {
+				target.setEnabled(snapshot.enabled);
+			}
+			if (snapshot.vertexPositions) {
+				this.restoreVertexPositions(target, snapshot.vertexPositions);
+			}
+			if ("material" in target && snapshot.material !== undefined) {
+				target.material = snapshot.material;
+			}
+		});
+	}
+
+	private readParamValues(): ValueMap {
+		const metadataValues = this.readParamValuesFromMetadata();
+		const instanceValues = this.readParamValuesFromScriptInstances();
+		const values: ValueMap = {
+			...DEFAULT_VALUES,
+			...this.startupValues,
+			...metadataValues,
+			...instanceValues,
+		};
+		for (const key of DIMENSION_PARAM_KEYS) {
+			// 正式运行器直接向运行组件赋值，metadata.scripts 不含 instance 指针。
+			const candidates = [(this as unknown as ValueMap)[key], instanceValues[key], metadataValues[key], this.startupValues[key]];
+			const saved = candidates.find((value) => !this.shouldSeedDimension(value));
+			values[key] = saved ?? this.sourceDims?.[key] ?? DEFAULT_VALUES[key];
+		}
+		return values;
+	}
+
+	private isScriptOwnedByCurrentEntity(script: any, host: any = this.node): boolean {
+		if (host !== this.node && host !== this.node.parent) { return false; }
+		const instance = script?.instance ?? script?.attachedScript ?? script?.behavior ?? script?.component;
+		const owners = [script?.owner, script?.node, instance?.owner, instance?.node];
+		return owners.every((owner) => owner == null || owner === this.node || owner === this.node.parent);
+	}
+
+	private readModelKey(source: any): unknown {
+		if (!source || typeof source !== "object") { return undefined; }
+		if (Array.isArray(source)) {
+			const field = source.find((item: any) => String(item?.key ?? item?.propertyKey ?? item?.name ?? "") === "modelKey");
+			return field?.value ?? field?.currentValue ?? field?.defaultValue;
+		}
+		const value = source.modelKey;
+		return value && typeof value === "object" ? value.value ?? value.currentValue ?? value.defaultValue : value;
+	}
+
+	private getScriptModelKeys(script: any): unknown[] {
+		const instance = script?.instance ?? script?.attachedScript ?? script?.behavior ?? script?.component;
+		return [script, instance, script?.values, script?.properties, script?.config, script?.fields]
+			.map((source) => this.readModelKey(source));
+	}
+
+	private looksLikeParameterScript(script: any): boolean {
+		if (!script || typeof script !== "object") { return false; }
+		const instance = script.instance ?? script.attachedScript ?? script.behavior ?? script.component;
+		const names = [script.className, script.name, instance?.constructor?.name];
+		return names.some((name) => String(name ?? "").includes("ParametricModelParamsComponent"))
+			|| this.getScriptModelKeys(script).some((key) => key != null && key !== "");
+	}
+
+	private isOwnedParameterScript(script: any, host: any): boolean {
+		if (!script || typeof script !== "object" || !this.isScriptOwnedByCurrentEntity(script, host)) { return false; }
+		const instance = script.instance ?? script.attachedScript ?? script.behavior ?? script.component;
+		const declaredClass = String(script.className ?? "");
+		const names = [declaredClass, script.name, instance?.constructor?.name].map((name) => String(name ?? ""));
+		if (declaredClass && !declaredClass.includes("ParametricModelParamsComponent")) { return false; }
+		if (names.some((name) => name.includes("ParametricModelRuntimeComponent"))) { return false; }
+		const keys = this.getScriptModelKeys(script);
+		if (keys.some((key) => key != null && key !== "" && key !== DEFAULT_VALUES.modelKey)) { return false; }
+		const matchesKey = keys.some((key) => key === DEFAULT_VALUES.modelKey);
+		const matchesClass = names.some((name) => name.includes("ParametricModelParamsComponent"));
+		const matchesFile = /(?:^|[\\/])multi-shuttle\.model\.ts$/i.test(String(script.scriptFilename ?? script.name ?? ""));
+		// 参数类名被多个模型复用；没有模型标识时还需脚本文件或具体类实例佐证。
+		return matchesKey || (matchesClass && (matchesFile || instance instanceof ParametricModelParamsComponent));
+	}
+
+	private hasOtherRuntimeScript(scripts: any[]): boolean {
+		return scripts.some((script) => {
+			const instance = script?.instance ?? script?.attachedScript ?? script?.behavior ?? script?.component;
+			const names = [script?.className, script?.name, instance?.constructor?.name];
+			if (!names.some((name) => String(name ?? "").includes("ParametricModelRuntimeComponent"))) { return false; }
+			if (instance == null) {
+				return ![script?.owner, script?.node].some((owner) => owner === this.node || owner === this.node.parent);
+			}
+			return instance !== this && instance.node != null && instance.node !== this.node;
+		});
+	}
+
+	private canSeedHostMetadata(host: any, scripts: any[], parameterScripts: any[]): boolean {
+		const meta = host.metadata;
+		const keys = [meta, meta?.modelParameterValues, meta?.parameters].map((source) => this.readModelKey(source));
+		if (keys.some((key) => key != null && key !== "" && key !== DEFAULT_VALUES.modelKey)) { return false; }
+		if (host !== this.node && scripts.some((script) => this.looksLikeParameterScript(script) && !parameterScripts.includes(script))) {
+			return false;
+		}
+		// 型号相同不代表同一实体，尺寸写回只允许内容根及其直接米制父根。
+		return host === this.node || host === this.node.parent;
+	}
+
+	private readParamValuesFromMetadata(): ValueMap {
+		const scripts = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
+		for (const script of scripts) {
+			if (!this.isScriptOwnedByCurrentEntity(script)) { continue; }
+			const scriptName = String(script?.className ?? script?.name ?? script?.scriptFilename ?? "");
+			const savedValues = this.normalizeValueMap(script?.values);
+			const values = {
+				...this.readFieldDefaults(script),
+				...savedValues,
+				...this.normalizeValueMap(script?.properties),
+				...this.normalizeValueMap(script?.config),
+			};
+			// 正式绑定控制器把保存尺寸同步到 values[key].value，旧配置包不能覆盖其合法正值。
+			for (const key of DIMENSION_PARAM_KEYS) {
+				if (!this.shouldSeedDimension(savedValues[key])) { values[key] = savedValues[key]; }
+			}
+			if (scriptName.includes("ParametricModelParamsComponent") || Object.keys(values).some((key) => key in DEFAULT_VALUES)) {
+				return values;
+			}
+		}
+		return {};
+	}
+
+	private readParamValuesFromScriptInstances(): ValueMap {
+		const result: ValueMap = {};
+		const scripts = Array.isArray(this.node.metadata?.scripts) ? this.node.metadata.scripts : [];
+		for (const script of scripts) {
+			if (!this.isScriptOwnedByCurrentEntity(script)) { continue; }
+			const className = String(script?.className ?? script?.name ?? "");
+			if (!className.includes("ParametricModelParamsComponent")) { continue; }
+			const instance = script?.instance ?? script?.attachedScript ?? script?.behavior;
+			if (!instance || typeof instance !== "object") { continue; }
+			for (const key of Object.keys(DEFAULT_VALUES)) {
+				if (key in instance) {
+					result[key] = (instance as Record<string, unknown>)[key];
+				}
+			}
+		}
+		return this.normalizeValueMap(result);
+	}
+
+	private readFieldDefaults(script: any): ValueMap {
+		const fields = Array.isArray(script?.fields) ? script.fields : [];
+		return fields.reduce((result: ValueMap, field: any) => {
+			const key = String(field?.key ?? field?.propertyKey ?? "");
+			if (DIMENSION_PARAM_KEYS.includes(key as DimensionParamKey)) {
+				result[key] = [field.value, field.currentValue, field.defaultValue]
+					.find((value) => !this.shouldSeedDimension(value));
+			} else if (key) {
+				result[key] = field.defaultValue ?? field.value;
+			}
+			return result;
+		}, {});
+	}
+
+	private normalizeValueMap(source: unknown): ValueMap {
+		if (!source || typeof source !== "object") { return {}; }
+		if (Array.isArray(source)) {
+			return source.reduce((result: ValueMap, item: any) => {
+				const key = String(item?.key ?? item?.propertyKey ?? item?.name ?? "");
+				if (key) { result[key] = item.value ?? item.currentValue ?? item.defaultValue; }
+				return result;
+			}, {});
+		}
+		return Object.entries(source as Record<string, unknown>).reduce((result: ValueMap, [key, value]) => {
+			if (value && typeof value === "object") {
+				const record = value as Record<string, unknown>;
+				if ("value" in record || "currentValue" in record || "defaultValue" in record) {
+					result[key] = record.value ?? record.currentValue ?? record.defaultValue;
+					return result;
+				}
+				if ("r" in record && "g" in record && "b" in record) {
+					const color = value as { r: number; g: number; b: number };
+					result[key] = `#${[color.r, color.g, color.b].map((channel) => {
+						const n = Number(channel);
+						const byte = Math.round(Math.min(255, Math.max(0, n <= 1 ? n * 255 : n)));
+						return byte.toString(16).padStart(2, "0");
+					}).join("")}`;
+					return result;
+				}
+			}
+			result[key] = value;
+			return result;
+		}, {});
+	}
+
+	private getModelNodes(): any[] {
+		if (this.modelNodes) { return this.modelNodes; }
+		const nodes: any[] = [this.node];
+		if (typeof this.node.getDescendants === "function") {
+			nodes.push(...this.node.getDescendants(false));
+		} else if (typeof this.node.getChildren === "function") {
+			const stack = [...this.node.getChildren(undefined, false)].reverse();
+			while (stack.length > 0) {
+				const current = stack.pop();
+				if (!current) { continue; }
+				nodes.push(current);
+				if (typeof current.getChildren === "function") {
+					stack.push(...current.getChildren(undefined, false).reverse());
+				}
+			}
+		}
+		this.modelNodes = [...new Set(nodes)];
+		this.modelNodes.forEach((candidate) => {
+			const name = String(candidate.name ?? "");
+			const keys = new Set<string>([name]);
+			for (let index = 0; index < name.length; index += 1) {
+				if (name[index] === "." || name[index] === "_") { keys.add(name.slice(0, index)); }
+			}
+			keys.forEach((key) => {
+				const matches = this.modelNodesByName.get(key) ?? [];
+				matches.push(candidate);
+				this.modelNodesByName.set(key, matches);
+			});
+		});
+		return this.modelNodes;
+	}
+
+	/** 相对基线 scaling，仅缩放指定轴。 */
+	private scaleNodeAxis(target: any, axis: "x" | "y" | "z", ratio: number): void {
+		const snapshot = this.rememberSnapshot(target);
+		if (!target.scaling) { return; }
+		const next = snapshot.scaling.clone();
+		next[axis] = snapshot.scaling[axis] * ratio;
+		target.scaling = next;
+		target.computeWorldMatrix?.(true);
+	}
+
+	/** 在当前位置叠加实体根米空间偏移。 */
+	private offsetNodeMeters(target: any, offsetMeters: Vector3): void {
+		if (!target.position) { return; }
+		target.position = target.position.add(this.meterOffsetToParentLocal(target, offsetMeters));
+		target.computeWorldMatrix?.(true);
+	}
+
+	private meterOffsetToParentLocal(target: any, offsetMeters: Vector3): Vector3 {
+		const entityRoot = this.node.parent;
+		const targetParent = target?.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const targetParentWorldMatrix = targetParent?.computeWorldMatrix?.(true) ?? targetParent?.getWorldMatrix?.();
+		const inverseTargetParentWorldMatrix = targetParentWorldMatrix?.clone?.();
+		if (!entityRootWorldMatrix || !inverseTargetParentWorldMatrix?.invert) {
+			return offsetMeters.clone?.() ?? offsetMeters;
+		}
+		inverseTargetParentWorldMatrix.invert();
+		const worldOffset = Vector3.TransformNormal(offsetMeters, entityRootWorldMatrix);
+		return Vector3.TransformNormal(worldOffset, inverseTargetParentWorldMatrix);
+	}
+
+	private getNodesMeterBounds(nodes: any[]): { minimum: Vector3; maximum: Vector3 } | null {
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		nodes.forEach((node) => {
+			const bounds = this.getNodeMeterBounds(node);
+			if (!bounds) { return; }
+			minimum = Vector3.Minimize(minimum, bounds.minimum);
+			maximum = Vector3.Maximize(maximum, bounds.maximum);
+		});
+		return Number.isFinite(minimum.x) && Number.isFinite(maximum.x) ? { minimum, maximum } : null;
+	}
+
+	private getNodeMeterBounds(target: any): { minimum: Vector3; maximum: Vector3 } | null {
+		const meshes = this.getBoundsMeshes(target);
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		meshes.forEach((mesh) => {
+			const bounds = this.getMeshMeterBounds(mesh);
+			if (!bounds) { return; }
+			minimum = Vector3.Minimize(minimum, bounds.minimum);
+			maximum = Vector3.Maximize(maximum, bounds.maximum);
+		});
+		return Number.isFinite(minimum.x) && Number.isFinite(maximum.x) ? { minimum, maximum } : null;
+	}
+
+	private getBoundsMeshes(target: any): any[] {
+		const meshes: any[] = [];
+		if (this.isBoundsMesh(target)) { meshes.push(target); }
+		if (typeof target?.getChildMeshes === "function") {
+			meshes.push(...target.getChildMeshes(false).filter((child: any) => this.isBoundsMesh(child)));
+		}
+		return [...new Set(meshes)];
+	}
+
+	private isBoundsMesh(node: any): boolean {
+		return typeof node?.getBoundingInfo === "function"
+			&& !node.isDisposed?.()
+			&& node.isEnabled?.(false) !== false
+			&& node.isVisible !== false
+			&& Number(node.visibility ?? 1) > 0
+			&& Number(node.getTotalVertices?.() ?? 0) > 0;
+	}
+
+	private getMeshMeterBounds(mesh: any): { minimum: Vector3; maximum: Vector3 } | null {
+		mesh.refreshBoundingInfo?.();
+		mesh.computeWorldMatrix?.(true);
+		const corners = Array.isArray(mesh.getBoundingInfo?.().boundingBox?.vectorsWorld)
+			? mesh.getBoundingInfo().boundingBox.vectorsWorld
+			: [];
+		const entityRoot = this.node.parent;
+		const entityRootWorldMatrix = entityRoot?.computeWorldMatrix?.(true) ?? entityRoot?.getWorldMatrix?.();
+		const inverseEntityRootWorldMatrix = entityRootWorldMatrix?.clone?.();
+		if (corners.length === 0 || !inverseEntityRootWorldMatrix?.invert) { return null; }
+		inverseEntityRootWorldMatrix.invert();
+		let minimum = new Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
+		let maximum = new Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
+		corners.forEach((corner: Vector3) => {
+			const meterPoint = Vector3.TransformCoordinates(corner, inverseEntityRootWorldMatrix);
+			minimum = Vector3.Minimize(minimum, meterPoint);
+			maximum = Vector3.Maximize(maximum, meterPoint);
+		});
+		return Number.isFinite(minimum.x) && Number.isFinite(maximum.x) ? { minimum, maximum } : null;
+	}
+
+	private readVertexPositions(target: any): number[] | undefined {
+		if (typeof target?.getVerticesData !== "function") { return undefined; }
+		const positions = target.getVerticesData("position");
+		return positions ? Array.from(positions as ArrayLike<number>) : undefined;
+	}
+
+	private restoreVertexPositions(target: any, positions: number[]): void {
+		if (typeof target?.setVerticesData !== "function") { return; }
+		target.setVerticesData("position", positions.slice(), true);
+		target.refreshBoundingInfo?.(true, true);
+	}
+
+	private readBoolean(values: ValueMap, key: string, fallback: boolean): boolean {
+		const value = values[key];
+		if (typeof value === "boolean") { return value; }
+		if (typeof value === "string") {
+			const normalized = value.trim().toLowerCase();
+			if (normalized === "true" || normalized === "1") { return true; }
+			if (normalized === "false" || normalized === "0") { return false; }
+		}
+		if (typeof value === "number") { return value !== 0; }
+		return fallback;
+	}
+
+	private readNumber(values: ValueMap, key: string, fallback: number): number {
+		const value = Number(values[key]);
+		return Number.isFinite(value) ? value : fallback;
+	}
+
+	private readPositiveNumber(values: ValueMap, key: string, fallback: number): number {
+		const value = this.readNumber(values, key, fallback);
+		return value > 0 ? value : fallback;
+	}
+}

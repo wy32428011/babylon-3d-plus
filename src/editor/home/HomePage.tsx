@@ -7,6 +7,7 @@ import { beginHomeProjectOpenTrace, beginProjectOpenRequest, finishProjectOpenTr
 import type { ProjectOpenTraceContext } from '../../../electron/shared/projectOpenTrace';
 
 type HomePageProps = {
+  onEnterParametricWorkbench?: () => void;
   onEnterBlankEditor: () => void;
   onEnterProjectEditor: (openTrace?: ProjectOpenTraceContext) => void;
   onNewScene: () => void;
@@ -110,6 +111,7 @@ async function requestOpenDataPlatformProject(projectId: string, trace?: Project
 
 /** 渲染进入编辑器前的启动台，集中承载项目与场景入口。 */
 export function HomePage({
+  onEnterParametricWorkbench,
   onEnterBlankEditor,
   onEnterProjectEditor,
   onNewScene,
@@ -593,6 +595,7 @@ export function HomePage({
           <p>项目启动台</p>
         </div>
         <div className="home-actions" aria-label="首页操作">
+          {onEnterParametricWorkbench ? <button disabled={isOpeningDataPlatformProject} onClick={onEnterParametricWorkbench} type="button">参数化工作台</button> : null}
           <button disabled={isOpeningDataPlatformProject} onClick={onNewScene} type="button">新建场景</button>
           <button
             disabled={isOpeningDataPlatformProject || busyActionId === 'open-scene-dialog'}

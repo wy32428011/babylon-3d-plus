@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { UnsavedSceneDialog } from './editor/ui/UnsavedSceneDialog';
 import { confirmSceneLeave, isSceneLeaveApprovalCurrent } from './editor/project/sceneLeaveGuard';
 import stackerMqttDemoSceneContent from '../examples/scenes/stacker-mqtt-demo.scene.json?raw';
@@ -13,7 +13,8 @@ import { useEditorStore } from './editor/store/editorStore';
 import { beginProjectOpenSceneCommit, bindProjectOpenScene, completeProjectOpenResources } from './editor/loading/projectOpenTrace';
 import type { ProjectOpenTraceContext } from '../electron/shared/projectOpenTrace';
 
-type AppView = 'home' | 'editor';
+type AppView = 'home' | 'editor' | 'parametric';
+const ParametricWorkbench = lazy(() => import('./editor/authoring/ParametricWorkbench'));
 
 const DEMO_SCENES: Record<string, { label: string; content: string }> = {
   'stacker-mqtt': {
@@ -34,13 +35,16 @@ function readDemoSceneKey(): string | null {
 
 /** 应用根组件负责首页和编辑器工作台之间的启动状态切换。 */
 export default function App() {
-  const [view, setView] = useState<AppView>('home');
+  const [view, setView] = useState<AppView>(() => new URLSearchParams(window.location.search).get('tool') === 'parametric' ? 'parametric' : 'home');
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const authoringDirtyRef = useRef(false);
   const demoSceneLoadedRef = useRef(false);
   const deepLinkOpeningRef = useRef(false);
   const returningHomeRef = useRef(false);
 
   useEffect(() => {
-    if (demoSceneLoadedRef.current) return;
+    if (demoSceneLoadedRef.current || viewRef.current === 'parametric') return;
     demoSceneLoadedRef.current = true;
 
     const demoSceneKey = readDemoSceneKey();
@@ -59,6 +63,7 @@ export default function App() {
   useEffect(() => {
     if (!window.editorApi?.onDataPlatformDeepLink) return undefined;
     return window.editorApi.onDataPlatformDeepLink((deepLink) => {
+      if (viewRef.current === 'parametric' && authoringDirtyRef.current && !window.confirm('参数化工程有未保存修改，是否放弃并打开数据中台项目？')) return;
       if (deepLinkOpeningRef.current) return;
       deepLinkOpeningRef.current = true;
       void (async () => {
@@ -174,9 +179,13 @@ export default function App() {
     return window.editorApi.onWindowCloseRequest(async requestId => {
       let allowed = false;
       try {
-        useEditorStore.getState().stopRuntimePreview();
-        const approval = await confirmSceneLeave(useEditorStore.getState, '关闭编辑器');
-        allowed = Boolean(approval && isSceneLeaveApprovalCurrent(useEditorStore.getState(), approval));
+        if (viewRef.current === 'parametric') {
+          allowed = !authoringDirtyRef.current || window.confirm('参数化工程有未保存修改，是否关闭编辑器？');
+        } else {
+          useEditorStore.getState().stopRuntimePreview();
+          const approval = await confirmSceneLeave(useEditorStore.getState, '关闭编辑器');
+          allowed = Boolean(approval && isSceneLeaveApprovalCurrent(useEditorStore.getState(), approval));
+        }
       } catch (error) {
         useEditorStore.getState().pushLog(`关闭编辑器前检查失败：${error instanceof Error ? error.message : String(error)}`);
       }
@@ -184,9 +193,23 @@ export default function App() {
     });
   }, []);
 
+  if (view === 'parametric') {
+    return <Suspense fallback={<main className="app-shell" role="status">正在打开参数化工作台…</main>}><ParametricWorkbench
+      onDirtyChange={value => { authoringDirtyRef.current = value; }}
+      onBackToHome={() => {
+        authoringDirtyRef.current = false;
+        const url = new URL(window.location.href);
+        url.searchParams.delete('tool');
+        window.history.replaceState(null, '', url);
+        setView('home');
+      }}
+    /></Suspense>;
+  }
+
   if (view === 'home') {
     return (
       <><UnsavedSceneDialog /><HomePage
+        onEnterParametricWorkbench={() => setView('parametric')}
         onEnterBlankEditor={enterBlankEditor}
         onEnterProjectEditor={enterEditorWithProject}
         onNewScene={handleNewScene}
