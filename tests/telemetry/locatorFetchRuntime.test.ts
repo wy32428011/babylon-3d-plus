@@ -88,6 +88,73 @@ test('isEmpty 空货位不渲染货物', async () => {
   }
 });
 
+test('isEmpty 拆分显示：空货位命中规则覆盖模型，非空货位回退共享模板', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const emptySlotTarget: ModelGeneratorTarget = {
+      kind: 'mesh', meshKind: 'sphere', displayName: '空货位', materialColor: '#8ab4f8',
+    };
+    const generatorComponent: ModelGeneratorComponent = {
+      defaultTarget: { kind: 'mesh', meshKind: 'cube', displayName: '货物', materialColor: '#8ab4f8' },
+      rules: [{ id: 'rule_empty', attributeName: 'isEmpty', attributeValue: 'true', target: emptySlotTarget }],
+    };
+
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(1, 1, { isEmpty: true }), createRecord(2, 1, { isEmpty: false })],
+      locatorEntry,
+      locatorComponent,
+      generatorComponent,
+      (_locator, column) => Matrix.Translation(column * 10, 0, 0),
+      () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+
+    const batchMeshes = findBatchMeshes(scene);
+    assert.equal(batchMeshes.length, 2, '空/非空货位各渲染一个批次');
+    const sphereBatch = batchMeshes.find((mesh) => mesh.getTotalVertices() > 24);
+    const cubeBatch = batchMeshes.find((mesh) => mesh.getTotalVertices() === 24);
+    assert.ok(sphereBatch && cubeBatch, '空货位必须是球体批次，非空货位必须是立方体批次');
+    const sphereX = sphereBatch.thinInstanceGetWorldMatrices()[0].getTranslation().x;
+    const cubeX = cubeBatch.thinInstanceGetWorldMatrices()[0].getTranslation().x;
+    assert.ok(Math.abs(sphereX - 10) < 1e-6, `空货位实例必须落在 1 号格口，实际 x=${sphereX}`);
+    assert.ok(Math.abs(cubeX - 20) < 1e-6, `非空货位实例必须落在 2 号格口，实际 x=${cubeX}`);
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+test('字符串或缺失 isEmpty 归一后按非空渲染：字符串 "false" 不再被误丢弃', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [
+        createRecord(1, 1, { isEmpty: 'false' as unknown as boolean }),
+        createRecord(2, 1, { isEmpty: 'true' as unknown as boolean }),
+        createRecord(3, 1, { isEmpty: undefined as unknown as boolean }),
+      ],
+      locatorEntry,
+      locatorComponent,
+      null,
+      () => Matrix.Identity(),
+      () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+
+    const batchMeshes = findBatchMeshes(scene);
+    assert.equal(batchMeshes.length, 1, '无生成器时非空记录回退内置立方体单批');
+    assert.equal(batchMeshes[0].thinInstanceCount, 2,
+      '字符串 "false" 与缺失 isEmpty 按非空渲染；字符串 "true" 按空货位跳过');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
 test('留存格口持久抑制：普通同步与 clearSuppressedCells 都不渲染，释放后恢复', async () => {
   const engine = new NullEngine();
   const scene = new Scene(engine);

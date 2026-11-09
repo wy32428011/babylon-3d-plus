@@ -67,6 +67,22 @@ export function createFetchCellKey(column: number, layer: number): string {
 }
 
 /**
+ * 归一 record 的 isEmpty 语义：布尔直接使用；字符串/数字按文本兼容（dataflow 可能发 "false"/0）；
+ * 缺失或无法识别时视为非空，与旧行为（未提供 isEmpty 的记录正常渲染）保持一致。
+ */
+export function readFetchRecordIsEmpty(record: FetchContainerRecord): boolean {
+  const value = (record as unknown as Record<string, unknown>).isEmpty;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0' || normalized === '') return false;
+  }
+  return false;
+}
+
+/**
  * 定位线框 fetch 数据驱动的 thinInstance 渲染运行时。
  * 每个实例只服务一条定位线框：HTTP 请求编排由 SceneRuntime 负责，本类只接收本排 records
  * 并完成规则匹配与 thinInstance 合批渲染。
@@ -143,7 +159,7 @@ export class LocatorFetchRuntime {
     // 服务端已确认本排无货的抑制格口视为设备交接已完成，解除抑制；否则该格口会永久屏蔽后续入库的新货
     if (releaseAbsentSuppressedCells && this.suppressedCellKeys.size > 0) {
       const occupiedCellKeys = new Set(
-        rowRecords.filter((record) => !record.isEmpty)
+        rowRecords.filter((record) => !readFetchRecordIsEmpty(record))
           .map((record) => createFetchCellKey(record.column, record.layer)),
       );
       for (const key of [...this.suppressedCellKeys]) {
@@ -151,8 +167,7 @@ export class LocatorFetchRuntime {
       }
     }
     const ownRecords = rowRecords.filter(
-      (record) => !record.isEmpty
-        && !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer))
+      (record) => !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer))
         && !this.retainedCellKeys.has(createFetchCellKey(record.column, record.layer)),
     );
 
@@ -161,9 +176,12 @@ export class LocatorFetchRuntime {
 
     const nextInstances: CargoInstance[] = [];
     for (const record of ownRecords) {
+      const isEmpty = readFetchRecordIsEmpty(record);
+      // isEmpty 不再硬过滤：所有记录都进规则匹配；无规则命中时空货位不渲染（保持旧行为），
+      // 有货位回退共享模板/内置立方体；配置 isEmpty 规则即可拆分空/非空货位显示。
       const target = generatorComponent
-        ? this.matchRule(generatorComponent.rules, record) ?? generatorComponent.defaultTarget
-        : fallbackTarget;
+        ? this.matchRule(generatorComponent.rules, record) ?? (isEmpty ? null : generatorComponent.defaultTarget)
+        : (isEmpty ? null : fallbackTarget);
       if (!target) continue;
 
       nextInstances.push({
