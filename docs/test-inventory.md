@@ -4,10 +4,10 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：981；测试/runner/smoke 候选：863；fixture/helper/治理工具：118。
-- npm 测试/smoke 入口：147；有静态入口的候选：697；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：982；测试/runner/smoke 候选：864；fixture/helper/治理工具：118。
+- npm 测试/smoke 入口：147；有静态入口的候选：698；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
-- CI 静态可达候选：161。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
+- CI 静态可达候选：162。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
 - 解析 package.json 名称含 test/smoke 的入口（排除 test:inventory 工具）、npm run 递归、node/electron 的显式文件与 * / ** glob。构建/打包只记录前置，不运行。动态编译与 Electron runner 使用已核对的限定适配；其他动态调用保守标记待复核。
 - CI 只读取 workflow 单行 run；可达表示配置选中，不代表远端执行成功。平台为源码线索，未标 Windows 的文件也未证明跨平台。
@@ -857,6 +857,7 @@
 | tests/telemetry/liftMotionState.test.ts | NullEngine | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/telemetry/locatorFetchRuntime.test.ts | NullEngine | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/telemetry/locatorPlatformPersistence.test.ts | Node 测试候选 | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
+| tests/telemetry/miniloadFetchTransition.test.ts | NullEngine | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/telemetry/mqttBrowserClientSuback.test.ts | Node 测试候选 | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/telemetry/mqttConnectionTest.test.ts | Node 测试候选 | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/telemetry/mqttConnectionTestUiContract.test.ts | 包含文件/源码断言候选 | test、test:ci、test:lift-motion-arrows、test:optimization-p1、test:telemetry | 未证明跨平台；junction/symlink 权限 | Node 原生 transform-types；runner 临时 tsc 编译；junction；清理临时输出；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |

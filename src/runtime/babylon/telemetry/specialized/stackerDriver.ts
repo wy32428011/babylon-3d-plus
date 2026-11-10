@@ -363,6 +363,10 @@ export class StackerTelemetryDriver {
       return;
     }
     if (command === 3 || command === 4) {
+      // 货物在叉上但本侧没有放货目标格：这是取货后携带转场（真实设备缩回到位后位置才跳变，
+      // 新帧可能已是下一段放货相位），货物必须继续随叉搬运到真正放货格，不得在中转格口解绑丢货。
+      const placeTarget = side === 'front' ? state.frontCargoPlaceTarget : state.backCargoPlaceTarget;
+      if (!placeTarget) return;
       this.unbindStackerCargo(model, cell?.locator ?? null, cell?.supportPosition ?? null, side);
       this.completeStackerPlace(model, cell?.locator ?? null, cell?.supportPosition ?? null, side);
     }
@@ -723,6 +727,17 @@ export class StackerTelemetryDriver {
           : null;
         if (side === 'front') state.frontCargoPlaceTarget = placeTarget;
         else state.backCargoPlaceTarget = placeTarget;
+        // 夹抱式已绑定货物随放货相位更新滑移目标格（放货伸出时货物被拨指推到该格）。
+        // 跳变保护：取货携带转场的中转帧（货叉部分伸出且本帧无伸出指令）不得覆盖取货滑移参数，
+        // 否则货物会被拉回中转格口；放货伸出指令生效（targetOffset 非零）时持续更新目标格与行程。
+        const boundForSlide = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
+        const slideExists = side === 'front' ? state.frontCargoClampSlide !== null : state.backCargoClampSlide !== null;
+        const offsetNow = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+        const targetOffsetNow = side === 'front' ? state.frontForkTargetOffset : state.backForkTargetOffset;
+        const slidingOut = Math.abs(targetOffsetNow) > 1e-6;
+        if (boundForSlide && placeTarget && (!slideExists || slidingOut || Math.abs(offsetNow) < 0.02)) {
+          this.setupStackerCargoClampSlide(model, side, placeTarget.supportPosition);
+        }
         const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
         if (lockedRow === null) {
           const fetchRow = frontX !== null && frontY !== null
@@ -858,6 +873,8 @@ export class StackerTelemetryDriver {
       state.backCargoBoundToFork = true;
       state.backCargoBindOffset = slotOffset;
     }
+    const placeTarget = side === 'front' ? state.frontCargoPlaceTarget : state.backCargoPlaceTarget;
+    this.setupStackerCargoClampSlide(model, side, placeTarget?.supportPosition ?? null);
   }
 
   /** 伸叉结束，货物绑定到叉尖，之后随货叉一同运动；绑定瞬间锁定货物当前世界朝向（货叉托举不改变货物姿态）。
@@ -873,6 +890,7 @@ export class StackerTelemetryDriver {
       state.frontCargoBindOffset = state.frontCargoHoldPosition
         ? state.frontCargoHoldPosition.subtract(this.getStackerForkCargoPosition(model, side))
         : null;
+      if (state.frontCargoHoldPosition) this.setupStackerCargoClampSlide(model, side, state.frontCargoHoldPosition);
       state.frontCargoBoundToFork = true;
       state.frontCargoHoldPosition = null;
       state.frontCargoHoldRotation = carriedRotation ?? state.frontCargoHoldRotation;
@@ -882,6 +900,7 @@ export class StackerTelemetryDriver {
       state.backCargoBindOffset = state.backCargoHoldPosition
         ? state.backCargoHoldPosition.subtract(this.getStackerForkCargoPosition(model, side))
         : null;
+      if (state.backCargoHoldPosition) this.setupStackerCargoClampSlide(model, side, state.backCargoHoldPosition);
       state.backCargoBoundToFork = true;
       state.backCargoHoldPosition = null;
       state.backCargoHoldRotation = carriedRotation ?? state.backCargoHoldRotation;
@@ -1081,8 +1100,17 @@ export class StackerTelemetryDriver {
     );
     let targetPosition: Vector3;
     if (bound || !holdPosition) {
-      const forkPosition = this.getStackerForkCargoPosition(model, side);
-      targetPosition = bound && bindOffset ? forkPosition.add(bindOffset) : forkPosition;
+      const clampSlide = bound && bindOffset
+        ? (side === 'front' ? state.frontCargoClampSlide : state.backCargoClampSlide)
+        : null;
+      const forkOffset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+      if (clampSlide) {
+        // 夹抱式：货物在货叉收回位与格口之间随货叉伸出比例滑移（收叉回零精确停在收回位中心）
+        targetPosition = this.resolveStackerClampSlidePosition(model, side, clampSlide, forkOffset);
+      } else {
+        const forkPosition = this.getStackerForkCargoPosition(model, side);
+        targetPosition = bound && bindOffset ? forkPosition.add(bindOffset) : forkPosition;
+      }
     } else {
       targetPosition = holdPosition;
     }
@@ -1092,37 +1120,88 @@ export class StackerTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
   }
 
+  /** 货叉（锚点叉节点）当前世界中心减去当前伸缩量，即收回原位中心（随大车走行/升降实时）；叉节点缺失时返回 null。 */
+  private resolveStackerForkHomeCenter(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 | null {
+    const forkAxis = getModelAxis(model.root, 'x');
+    const bounds = getNodesWorldBounds(this.resolveForkAnchorNodes(model, side));
+    if (!bounds) return null;
+    const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const offset = side === 'front' ? model.stackerTelemetry.frontForkOffset : model.stackerTelemetry.backForkOffset;
+    return center.subtract(forkAxis.scale(offset));
+  }
+
+  /** 读取载货台面锚点（世界）：包围盒中心与顶面在模型竖直轴上的投影；未声明 cargoPlatformNodes 或解析不到时返回 null。 */
+  private resolveStackerCargoPlatformAnchor(model: ModelRuntimeEntry): { center: Vector3; top: number } | null {
+    const upAxis = getModelAxis(model.root, 'y');
+    const platformNodes = this.resolveStackerCargoPlatformNodes(model);
+    if (platformNodes.length === 0) return null;
+    const platformBounds = getNodesWorldBounds(platformNodes);
+    if (!platformBounds) return null;
+    const center = platformBounds.minimum.add(platformBounds.maximum).scale(0.5);
+    const top = projectWorldBoundsOntoAxis(platformBounds, upAxis).max;
+    return { center, top };
+  }
+
   /**
-   * 叉上货物锚点：夹抱式模型声明 dataDriven.motion.cargoPlatformNodes 时，水平随叉（取放货货物随二段叉进出），
-   * 竖直落在载货台面顶面（货物停留台面而非叉顶）；未声明保持叉顶面锚定（叉托式）。
-   * 竖直间隙已计入升降瞄准基点，锚点不再叠加，避免绑定瞬间二次偏移。
+   * 叉上货物锚点：夹抱式模型声明 dataDriven.motion.cargoPlatformNodes 时，水平仍取货叉锚点中心
+   * （货叉收回位中心即视觉上正确的载货停位中心，与叉托式一致），竖直改落载货台面顶面
+   * （cargoPlatformNodes 只覆盖竖直参照）；已绑定货物的实际位姿走滑移插值（resolveStackerClampSlidePosition），
+   * 收叉回零时精确停在收回位中心（与几何解算伸出行程的误差无关）。
+   * 未声明保持叉顶面锚定（叉托式）。竖直间隙已计入升降瞄准基点，锚点不再叠加，避免绑定瞬间二次偏移。
    */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
     const upAxis = getModelAxis(model.root, 'y');
-    const platformNodes = this.resolveStackerCargoPlatformNodes(model);
-    if (platformNodes.length > 0) {
-      const forkNodes = this.resolveForkAnchorNodes(model, side);
-      const forkBounds = getNodesWorldBounds(forkNodes);
-      const platformBounds = getNodesWorldBounds(platformNodes);
-      if (forkBounds && platformBounds) {
-        const center = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
-        const platformTop = projectWorldBoundsOntoAxis(platformBounds, upAxis).max;
-        return center.add(upAxis.scale(platformTop - Vector3.Dot(center, upAxis)));
-      }
-      if (platformBounds) {
-        const center = platformBounds.minimum.add(platformBounds.maximum).scale(0.5);
-        const topOffset = projectWorldBoundsOntoAxis(platformBounds, upAxis).max - Vector3.Dot(center, upAxis);
-        return center.add(upAxis.scale(topOffset));
-      }
-    }
-
     const nodes = this.resolveForkAnchorNodes(model, side);
     const bounds = getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
+    const platformTop = this.resolveStackerCargoPlatformAnchor(model)?.top;
+    if (platformTop !== undefined) {
+      return center.add(upAxis.scale(platformTop - Vector3.Dot(center, upAxis)));
+    }
     const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
     return center.add(upAxis.scale(topOffset));
+  }
+
+  /**
+   * 夹抱式绑定货物的滑移位姿：货物在「货叉收回位中心（随大车走行/升降实时）」与格口位之间按货叉伸出比例插值，
+   * 竖直落在载货台面顶面。绑定瞬间比例=1（货物在格口，零跳变），收叉回零比例=0（货物精确停在收回位中心，
+   * 与几何解算伸出行程的误差无关——退化解算回退全行程也不会带偏停位）；放货伸出比例 0→1，货物被拨指推出到目标格。
+   */
+  private resolveStackerClampSlidePosition(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    slide: { cell: Vector3; home: Vector3; reach: number },
+    offset: number,
+  ): Vector3 {
+    const upAxis = getModelAxis(model.root, 'y');
+    const homeNow = this.resolveStackerForkHomeCenter(model, side) ?? slide.home;
+    const top = this.resolveStackerCargoPlatformAnchor(model)?.top ?? Vector3.Dot(homeNow, upAxis);
+    const ratio = Math.abs(slide.reach) > 1e-6 ? offset / slide.reach : 0;
+    const center = homeNow.add(slide.cell.subtract(slide.home).scale(ratio));
+    return center.add(upAxis.scale(top - Vector3.Dot(center, upAxis)));
+  }
+
+  /** 夹抱式货物绑定/放货补建时登记滑移参数；非夹抱式（未声明 cargoPlatformNodes）返回 false，位姿继续走叉面锚点+锁存偏移。reach 有符号（与货叉 offset 同号），两侧取放的比例计算才能一致。 */
+  private setupStackerCargoClampSlide(model: ModelRuntimeEntry, side: StackerForkSide, cellPosition: Vector3 | null): boolean {
+    if (!this.resolveStackerCargoPlatformAnchor(model)) return false;
+    const home = this.resolveStackerForkHomeCenter(model, side);
+    if (!home) return false;
+    const state = model.stackerTelemetry;
+    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+    const targetOffset = side === 'front' ? state.frontForkTargetOffset : state.backForkTargetOffset;
+    const reach = Math.abs(targetOffset) > 1e-6
+      ? targetOffset
+      : (Math.abs(offset) > 1e-6 ? offset : 0);
+    const slide = {
+      cell: cellPosition ?? home,
+      home,
+      reach,
+    };
+    if (side === 'front') state.frontCargoClampSlide = slide;
+    else state.backCargoClampSlide = slide;
+    return true;
   }
 
   /** 读取模型脚本 dataDriven.motion.cargoPlatformNodes 声明的载货台面节点；未声明或解析不到时返回空数组，回退叉顶面锚定。 */
@@ -1171,6 +1250,7 @@ export class StackerTelemetryDriver {
       state.frontCargoKey = null;
       state.frontCargoBoundToFork = false;
       state.frontCargoBindOffset = null;
+      state.frontCargoClampSlide = null;
       state.frontCargoHoldPosition = null;
       state.frontCargoHoldRotation = null;
       state.frontCargoHoldScaling = null;
@@ -1183,6 +1263,7 @@ export class StackerTelemetryDriver {
     state.backCargoKey = null;
     state.backCargoBoundToFork = false;
     state.backCargoBindOffset = null;
+    state.backCargoClampSlide = null;
     state.backCargoHoldPosition = null;
     state.backCargoHoldRotation = null;
     state.backCargoHoldScaling = null;

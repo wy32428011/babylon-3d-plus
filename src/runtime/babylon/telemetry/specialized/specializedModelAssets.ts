@@ -512,6 +512,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoHoldPosition: null,
     frontCargoBindOffset: null,
     backCargoBindOffset: null,
+    frontCargoClampSlide: null,
+    backCargoClampSlide: null,
     frontCargoHoldRotation: null,
     backCargoHoldRotation: null,
     frontCargoHoldScaling: null,

@@ -3464,7 +3464,7 @@
     },
     {
       "file": "scripts/smoke-real-project-loading.mjs",
-      "sha256": "75d040aab38ad693dfb27afcfdf2c7e57b3734651fbd9584ba34adb034564451",
+      "sha256": "a07b94464c7bbf015e50233e50e778562d8bd096589f74afb82368680f033daf",
       "disposition": "asset-required",
       "domain": null,
       "command": "node scripts/smoke-real-project-loading.mjs --paired --url <中台地址> --project-id <项目ID> --freeze-scene <scene> --read-only-manifest <manifest> --resolved-baseline <baseline> --budget-file <budget> --cold 5 --warm 5 --output <全新output>",
@@ -3480,11 +3480,11 @@
           "text": "const p0Mode = values.paired || values['prepare-read-only-manifest'];"
         },
         {
-          "line": 450,
+          "line": 464,
           "text": "async function p0CopyPreparationReport(target) {"
         },
         {
-          "line": 494,
+          "line": 508,
           "text": "async function runSceneOpenP0() {"
         }
       ]

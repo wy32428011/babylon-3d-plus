@@ -865,6 +865,11 @@ test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定
       mesh.position.set(0, centerY, 0);
     };
     addBox('pidai.top', 0.05, 0.5);
+    // 模拟 GLB 里货叉装配偏差：货叉收床位中心偏离载货台中心 0.3（料箱仍应停在载货台正中）
+    for (const forkName of ['huocha.9', 'huocha2.10']) {
+      const forkMesh = h.scene.getMeshByName(forkName);
+      if (forkMesh) forkMesh.position.x = 0.3;
+    }
     h.model.root.computeWorldMatrix(true);
     // 夹抱式模型脚本声明：货物底面对应载货台面 DDJpidai 上表面
     (h.model as { externalScriptRuntime: unknown }).externalScriptRuntime = {
@@ -878,22 +883,27 @@ test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定
       `升降瞄准必须按载货台面顶面 0.525 对位支撑位 2（lift=1.475），实际 ${h.model.stackerTelemetry.liftOffset}（叉顶 0.3 对位会给 1.7）`,
     );
 
-    // 放货相位未经历取货：叉上补建货物并立即绑定锚点（pidai.top 不参与 travel/lift，锚点即原始台面位置）
+    // 放货相位未经历取货：叉上补建货物并立即绑定锚点（pidai.top 不参与 travel/lift，台面顶 0.525）
     const PLACE_FRAME = { ...POSITION_FRAME, front_command: 3, front_task: 8006 };
     h.apply(PLACE_FRAME, 0.1, 5);
     const cargo = [...h.state.stackerCargoMeshes.values()][0];
     assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
+    // 水平停位参照 = 货叉收回位中心（该 harness 货叉网格偏置 +0.3，即用户验证正确的落位参照），而非皮带包围盒中心 0
+    assert.ok(
+      Math.abs(cargo.root.position.x - 0.3) < 1e-6,
+      `收叉停位必须落在货叉收回位中心 x=0.3（皮带包围盒中心为 0），实际 x=${cargo.root.position.x}`,
+    );
     assert.ok(
       Math.abs(cargo.root.position.y - 0.525) < 1e-6,
       `夹抱式货物底面必须落在载货台面顶 0.525，实际 y=${cargo.root.position.y}（叉顶锚定会给 0.3）`,
     );
 
-    // 伸叉取放期间货物水平随叉进出，竖直仍保持台面高度
+    // 伸叉取放期间货物被拨指从载货台推向货格（朝格口方向滑移），竖直仍保持台面高度
     h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 10);
     assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset) > 0.02, '伸叉必须产生前叉位移');
     assert.ok(
-      Math.abs(cargo.root.position.x) > 0.02,
-      `绑定货物必须随叉水平移动（伸出 ${h.model.stackerTelemetry.frontForkOffset}m），实际 x=${cargo.root.position.x}`,
+      Math.abs(cargo.root.position.z) > 0.02,
+      `绑定货物必须随伸叉向货格滑移（伸出 ${h.model.stackerTelemetry.frontForkOffset}m），实际 z=${cargo.root.position.z}`,
     );
     assert.ok(
       Math.abs(cargo.root.position.y - 0.525) < 1e-6,

@@ -224,6 +224,14 @@ export type StackerModelTelemetryState = {
   /** 取货绑定时锁存的「持货位 − 叉面锚点」世界偏移：货叉插入货槽不推动货物，绑定瞬间保持原位，随叉运动后在目的地同源抵消；放货流程直接锚定叉面，为 null。 */
   frontCargoBindOffset: Vector3 | null;
   backCargoBindOffset: Vector3 | null;
+  /**
+   * 夹抱式（声明 cargoPlatformNodes）绑定货物的滑移参数：货物在「货叉收回位中心（随大车走行/升降）」与
+   * 目标格支撑位之间按货叉伸出比例插值——绑定瞬间比例=1 货物在格口零跳变，收叉回零比例=0 货物精确停在
+   * 货叉收回位中心（即视觉上正确的载货停位中心，与几何解算伸出行程的误差无关）；放货伸出时比例 0→1。
+   * reach 为货叉伸出比例的分母，带符号（与货叉 offset 同号），保证货叉轴两侧取放比例一致。
+   */
+  frontCargoClampSlide: { cell: Vector3; home: Vector3; reach: number } | null;
+  backCargoClampSlide: { cell: Vector3; home: Vector3; reach: number } | null;
   /** 货物朝向：未绑定时为所在箱位朝向；绑定瞬间锁定为货物当前世界朝向，随叉全程保持（货叉托举不改变货物姿态）。 */
   frontCargoHoldRotation: Quaternion | null;
   backCargoHoldRotation: Quaternion | null;
