@@ -853,3 +853,53 @@ test('mode!=4 时忽略 signalBits：仍按 front_command 判定取放', () => {
     h.dispose();
   }
 });
+
+test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定载货台面、水平随叉伸缩', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 载货台面节点：顶面 0.525（与叉顶 0.3 区分）；命名不匹配 travel/lift/fork 任何兜底正则，位置保持原始
+    const addBox = (name: string, height: number, centerY: number) => {
+      const mesh = MeshBuilder.CreateBox(name, { width: 0.4, height, depth: 0.4 }, h.scene);
+      mesh.parent = h.model.root;
+      mesh.position.set(0, centerY, 0);
+    };
+    addBox('pidai.top', 0.05, 0.5);
+    h.model.root.computeWorldMatrix(true);
+    // 夹抱式模型脚本声明：货物底面对应载货台面 DDJpidai 上表面
+    (h.model as { externalScriptRuntime: unknown }).externalScriptRuntime = {
+      getDataDrivenConfigs: () => [{ motion: { cargoPlatformNodes: ['pidai.top'] } }],
+    };
+
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply(POSITION_FRAME, 0.1, 400);
+    assert.ok(
+      Math.abs(h.model.stackerTelemetry.liftOffset - 1.475) < 1e-6,
+      `升降瞄准必须按载货台面顶面 0.525 对位支撑位 2（lift=1.475），实际 ${h.model.stackerTelemetry.liftOffset}（叉顶 0.3 对位会给 1.7）`,
+    );
+
+    // 放货相位未经历取货：叉上补建货物并立即绑定锚点（pidai.top 不参与 travel/lift，锚点即原始台面位置）
+    const PLACE_FRAME = { ...POSITION_FRAME, front_command: 3, front_task: 8006 };
+    h.apply(PLACE_FRAME, 0.1, 5);
+    const cargo = [...h.state.stackerCargoMeshes.values()][0];
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '放货补建货物必须立即绑定');
+    assert.ok(
+      Math.abs(cargo.root.position.y - 0.525) < 1e-6,
+      `夹抱式货物底面必须落在载货台面顶 0.525，实际 y=${cargo.root.position.y}（叉顶锚定会给 0.3）`,
+    );
+
+    // 伸叉取放期间货物水平随叉进出，竖直仍保持台面高度
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 10);
+    assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset) > 0.02, '伸叉必须产生前叉位移');
+    assert.ok(
+      Math.abs(cargo.root.position.x) > 0.02,
+      `绑定货物必须随叉水平移动（伸出 ${h.model.stackerTelemetry.frontForkOffset}m），实际 x=${cargo.root.position.x}`,
+    );
+    assert.ok(
+      Math.abs(cargo.root.position.y - 0.525) < 1e-6,
+      `伸叉期间货物竖直必须保持载货台面高度 0.525，实际 y=${cargo.root.position.y}`,
+    );
+  } finally {
+    h.dispose();
+  }
+});

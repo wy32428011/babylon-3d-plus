@@ -840,7 +840,7 @@ export class StackerTelemetryDriver {
     }
   }
 
-  /** 直接进入放货流程时补建叉上货物：初始即绑定叉尖（挂槽携带：货物底面 = 叉顶面 − 竖直间隙，与取货锁存偏移一致，落货零跳变），等待伸叉到位后解绑落入目标箱位。 */
+  /** 直接进入放货流程时补建叉上货物：初始即绑定货物锚点（挂槽携带：货物底面 = 锚点 − 竖直间隙；锚点默认叉顶面，夹抱式模型按 dataDriven.motion.cargoPlatformNodes 声明锚定载货台面），与取货锁存偏移一致，落货零跳变），等待伸叉到位后解绑落入目标箱位。 */
   private beginStackerPlaceWithCargo(model: ModelRuntimeEntry, snapshot: StackerTelemetrySnapshot, side: StackerForkSide): void {
     this.disposeStackerCargoByKey(this.getStackerCargoKey(model.assetCode, side));
     this.clearStackerForkCargoState(model, side);
@@ -1092,16 +1092,49 @@ export class StackerTelemetryDriver {
     this.host.setGeneratedCargoRootPose(cargo, pose.position, pose.rotation, bound ? null : holdScaling);
   }
 
-  /** 货物底面锚定二段叉包围盒顶面（无二段时回退一段/全叉）；竖直间隙已计入升降瞄准基点，叉面锚点不再叠加，避免绑定瞬间二次偏移。 */
+  /**
+   * 叉上货物锚点：夹抱式模型声明 dataDriven.motion.cargoPlatformNodes 时，水平随叉（取放货货物随二段叉进出），
+   * 竖直落在载货台面顶面（货物停留台面而非叉顶）；未声明保持叉顶面锚定（叉托式）。
+   * 竖直间隙已计入升降瞄准基点，锚点不再叠加，避免绑定瞬间二次偏移。
+   */
   private getStackerForkCargoPosition(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 {
+    const upAxis = getModelAxis(model.root, 'y');
+    const platformNodes = this.resolveStackerCargoPlatformNodes(model);
+    if (platformNodes.length > 0) {
+      const forkNodes = this.resolveForkAnchorNodes(model, side);
+      const forkBounds = getNodesWorldBounds(forkNodes);
+      const platformBounds = getNodesWorldBounds(platformNodes);
+      if (forkBounds && platformBounds) {
+        const center = forkBounds.minimum.add(forkBounds.maximum).scale(0.5);
+        const platformTop = projectWorldBoundsOntoAxis(platformBounds, upAxis).max;
+        return center.add(upAxis.scale(platformTop - Vector3.Dot(center, upAxis)));
+      }
+      if (platformBounds) {
+        const center = platformBounds.minimum.add(platformBounds.maximum).scale(0.5);
+        const topOffset = projectWorldBoundsOntoAxis(platformBounds, upAxis).max - Vector3.Dot(center, upAxis);
+        return center.add(upAxis.scale(topOffset));
+      }
+    }
+
     const nodes = this.resolveForkAnchorNodes(model, side);
     const bounds = getNodesWorldBounds(nodes);
     if (!bounds) return model.root.getAbsolutePosition();
 
-    const upAxis = getModelAxis(model.root, 'y');
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
     const topOffset = projectWorldBoundsOntoAxis(bounds, upAxis).max - Vector3.Dot(center, upAxis);
     return center.add(upAxis.scale(topOffset));
+  }
+
+  /** 读取模型脚本 dataDriven.motion.cargoPlatformNodes 声明的载货台面节点；未声明或解析不到时返回空数组，回退叉顶面锚定。 */
+  private resolveStackerCargoPlatformNodes(model: ModelRuntimeEntry): TransformNode[] {
+    for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+      const names = readStringArrayPath(dataDriven, ['motion', 'cargoPlatformNodes']);
+      if (names.length === 0) continue;
+      const nodes = findModelNodesByName(model, this.scene, names);
+      if (nodes.length > 0) return nodes;
+    }
+
+    return [];
   }
 
   /** 货物锚点/伸出方向/目标行程共用的叉节点选择链：二段优先，回退一段，再回退该侧全部叉节点。 */
@@ -1286,16 +1319,20 @@ export class StackerTelemetryDriver {
   /**
    * 读取并缓存货叉收回位的顶面中心（前/后锚点叉节点并集），作为行走/升降定位参考：
    * 定位后叉顶面对齐货格支撑位 + 货物竖直间隙（间隙在 resolveStackerTargetMotionOffsets 计入），货物在叉锚点与货格支撑位间交接无竖直跳变；缺失货叉时回退到载货台。
+   * 夹抱式模型声明 dataDriven.motion.cargoPlatformNodes 时改按载货台面顶面中心定位：载货台面对齐货格支撑位，货物底（停留台面）与货格底面平齐。
    */
   getStackerTargetReferencePosition(model: ModelRuntimeEntry): Vector3 {
     const state = model.stackerTelemetry;
     if (state.targetReferencePosition) return state.targetReferencePosition;
 
+    const platformNodes = this.resolveStackerCargoPlatformNodes(model);
+    const platformBounds = platformNodes.length > 0 ? getNodesWorldBounds(platformNodes) : null;
     const anchorNodes = uniqueTransformNodes([
       ...this.resolveForkAnchorNodes(model, 'front'),
       ...this.resolveForkAnchorNodes(model, 'back'),
     ]);
-    const bounds = getNodesWorldBounds(anchorNodes)
+    const bounds = platformBounds
+      ?? getNodesWorldBounds(anchorNodes)
       ?? getNodesWorldBounds(this.findStackerPlatformNodes(model));
     if (!bounds) {
       state.targetReferencePosition = state.rootBasePosition.clone();
