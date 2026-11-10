@@ -2,12 +2,13 @@ node_modules
 dist
 dist-electron
 .idea/
+# 本机 Claude 配置、技能安装和运行产物继续保持本地。
 .claude
+/CLAUDE.local.md
 .omc
 .playwright-mcp
 .playwright-cli
 release/
-CLAUDE.md
 *.tsbuildinfo
 __pycache__/
 *.py[cod]

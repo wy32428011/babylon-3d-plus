@@ -251,7 +251,7 @@ export function useSceneSelectionHandlers({
           } else {
             runtimeRef.current?.setLocalSlotHighlight('', null);
           }
-          if (resolution.effects.includes('focus')) {
+          if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
             const bounds = runtimeRef.current?.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
             if (bounds) {
               manualRoamRef.current?.setEnabled(false);
@@ -278,7 +278,7 @@ export function useSceneSelectionHandlers({
               state.selectEntity(null);
             }
           }
-          if (resolution.effects.includes('focus')) {
+          if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
             if (hasEntityTarget) {
               state.requestSceneFocusForSelection([resolution.entityId], {
                 animate: true,

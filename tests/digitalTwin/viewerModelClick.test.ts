@@ -83,46 +83,63 @@ test('无绑定沿用默认点击；接管时未注册目标忽略，空白清�
   assert.deepEqual(bound.highlights, [{ id: '', cell: null }]);
 });
 
-test('命中 show-chart 效果时向宿主页面发送点击事件载荷', () => {
-  const sourceUrl = 'editor-asset://local/shelf.glb';
-  const scene = {
-    entities: {
-      model: { id: 'model', components: { modelAsset: { sourceUrl, assetCode: '001005', builtInSlotBindingConfig: { dimensionMapping: { columns: 'columns', layers: 'layers' } } } } },
-      locator: { id: 'locator', components: { locator: { builtInBinding: { hostEntityId: 'model' } } } },
-      binding: { id: 'binding', components: { clickEventBinding: {
-        deviceSlots: [{ deviceType: { sourceUrl } }],
-        events: [
-          { eventType: 'click', effects: ['highlight', 'show-chart'], chart: { id: 'chart-click', projectId: 'project-1', screenId: 'screen-click', name: '点击大屏' } },
-          { eventType: 'click-cell', effects: ['show-chart'], chart: { id: 'chart-cell', projectId: 'project-1', screenId: 'screen-cell', name: '单元大屏' } },
-        ],
-      } } },
-    },
-  } as unknown as SceneDocument;
-  const emitted: unknown[] = [];
-  const shownScreens: unknown[] = [];
-  const handler = createViewerModelClickHandler(scene, {
-    updateSelection: () => {},
-    setSlotHighlight: () => {},
-    focusTarget: () => {},
-    triggerManualEvents: () => {},
-    setHighlightExcludeTrack: () => {},
-    emitAssetClicked: (payload) => emitted.push(payload),
-    showScreen: (screen) => shownScreens.push(screen),
-  });
-
-  handler('model', null, { focus: false });
-  assert.deepEqual(emitted, [{ assetCode: '001005', chartId: 'chart-click' }]);
-  assert.deepEqual(shownScreens, [{ projectId: 'project-1', screenId: 'screen-click' }]);
-
-  handler('locator', { locatorEntityId: 'locator', row: 2, column: 3, layer: 1 }, { focus: false });
-  assert.deepEqual(emitted, [
-    { assetCode: '001005', chartId: 'chart-click' },
-    { assetCode: '001005', slot: { row: 2, column: 3, layer: 1 }, chartId: 'chart-cell' },
-  ]);
-  assert.deepEqual(shownScreens, [
-    { projectId: 'project-1', screenId: 'screen-click' },
-    { projectId: 'project-1', screenId: 'screen-cell' },
-  ]);
+test('模型、货格和生成产物禁用聚焦时保留选中、高亮、手动事件及大屏，恢复后可聚焦', () => {
+  const f = fixture(['highlight', 'focus', 'show-chart']);
+  f.scene.entities.model.components.modelAsset!.assetCode = '001005';
+  const chart = { id: 'chart-click', projectId: 'project-1', screenId: 'screen-click', name: '点击大屏' };
+  const binding = f.scene.entities.binding.components.clickEventBinding!;
+  binding.events[0].chart = chart;
+  binding.events.push({ eventType: 'click-cell', effects: ['highlight', 'focus', 'show-chart'], chart });
+  const generated = generatorFixture([{
+    eventType: 'click', effects: ['highlight', 'focus', 'show-chart'], chart,
+  }]);
+  const generatedUnit = {
+    bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'runtime_conveyor_cargo:1',
+    unitKind: 'cargo' as const, containerCode: '000317', hostEntityId: 'host',
+  };
+  const cell = { row: 2, column: 3, layer: 1 };
+  for (const target of ['model', 'cell', 'generated'] as const) {
+    const calls: { begin: number; selections: string[][]; highlights: unknown[]; focuses: unknown[];
+      events: string[]; emitted: unknown[]; screens: unknown[] } = {
+      begin: 0, selections: [], highlights: [], focuses: [], events: [], emitted: [], screens: [],
+    };
+    const handler = createViewerModelClickHandler(target === 'generated' ? generated.scene : f.scene, {
+      beginSelection: () => { calls.begin++; },
+      updateSelection: (ids) => calls.selections.push([...ids]),
+      setSlotHighlight: (id, cell) => calls.highlights.push({ id, cell }),
+      focusTarget: (id, cell) => calls.focuses.push({ id, cell }),
+      triggerManualEvents: (id) => calls.events.push(id),
+      setHighlightExcludeTrack: () => {},
+      emitAssetClicked: (payload) => calls.emitted.push(payload),
+      showScreen: (screen) => calls.screens.push(screen),
+    });
+    // 同一处理器依次禁止、恢复、再次禁止聚焦，其他副作用始终一致。
+    for (const focus of [false, true, false]) {
+      calls.begin = 0;
+      calls.selections.length = calls.highlights.length = calls.focuses.length = 0;
+      calls.events.length = calls.emitted.length = calls.screens.length = 0;
+      handler(target === 'generated' ? null : target === 'cell' ? 'locator' : 'model',
+        target === 'cell' ? { locatorEntityId: 'locator', ...cell } : null,
+        { focus, ...(target === 'generated' ? { generatedUnit } : {}) });
+      const entityId = target === 'generated' ? generatedUnit.highlightEntityId : 'model';
+      assert.equal(calls.begin, 1);
+      assert.deepEqual(calls.selections, [target === 'cell' ? [] : [entityId]]);
+      assert.deepEqual(calls.highlights, [target === 'cell' ? { id: 'locator', cell } : { id: '', cell: null }]);
+      assert.deepEqual(calls.events, [entityId]);
+      assert.deepEqual(calls.focuses, focus ? [{
+        id: target === 'cell' ? 'locator' : entityId, cell: target === 'cell' ? cell : undefined,
+      }] : []);
+      assert.deepEqual(calls.emitted, [{
+        assetCode: '001005', chartId: 'chart-click',
+        ...(target === 'cell' ? { slot: cell } : {}),
+        ...(target === 'generated' ? {
+          unit: { kind: 'cargo', containerCode: '000317' },
+          host: { entityId: 'host', assetCode: '999999' },
+        } : {}),
+      }]);
+      assert.deepEqual(calls.screens, [{ projectId: 'project-1', screenId: 'screen-click' }]);
+    }
+  }
 });
 
 test('效果不含 show-chart 时不发送宿主事件', () => {
