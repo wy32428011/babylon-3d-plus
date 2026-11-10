@@ -28,7 +28,7 @@ const [{ focusArcRotateCameraViewOnBounds }, { ArcRotateCameraViewController },
 );
 
 /** 从实际 UI 入口提取调用，避免测试另写一份聚焦参数而漏掉入口回归。 */
-function getFocusOptions(entry: 'preview' | 'viewer', cell = false, focusBounds?: unknown) {
+function getClickSource(entry: 'preview' | 'viewer') {
   let sourcePath = 'src/player/PlayerApp.tsx';
   if (entry === 'preview') {
     const panelPath = 'src/editor/panels/SceneViewPanel.tsx';
@@ -42,7 +42,11 @@ function getFocusOptions(entry: 'preview' | 'viewer', cell = false, focusBounds?
     assert.match(panelText, /onPointerUp=\{handleCanvasPointerUp\}/, '实际 Canvas 必须消费此 Hook 的指针释放入口');
     sourcePath = path.resolve(path.dirname(panelPath), hookImport.moduleSpecifier.text + '.ts');
   }
-  const source = ts.createSourceFile(sourcePath, readFileSync(sourcePath, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  return ts.createSourceFile(sourcePath, readFileSync(sourcePath, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+}
+
+function getFocusOptions(entry: 'preview' | 'viewer', cell = false, focusBounds?: unknown) {
+  const source = getClickSource(entry);
   let expression: string | undefined;
   function visit(node: ts.Node) {
     if (entry === 'preview' && ts.isCallExpression(node)
@@ -168,3 +172,104 @@ test('正交和显式保留方向的聚焦不应用堆垛机透视角度，显�
     }
   } finally { scene.dispose(); engine.dispose(); }
 });
+
+/** 执行源码分支/鼠标回调，保留漫游状态的读取时机。 */
+function getClickCallback(entry: 'preview' | 'viewer', scope: Record<string, unknown>) {
+  const source = getClickSource(entry);
+  const matches: string[] = [];
+  function visit(node: ts.Node) {
+    if (entry === 'preview' && ts.isIfStatement(node)
+      && node.expression.getText(source) === "resolution.kind === 'trigger-cell'") {
+      matches.push(`(resolution) => { ${node.getText(source)} }`);
+    }
+    if (entry === 'viewer' && ts.isCallExpression(node)
+      && node.expression.getText(source) === 'bindSceneModelSelectionPointer') {
+      const options = node.arguments[1];
+      assert.ok(options && ts.isObjectLiteralExpression(options));
+      const callback = options.properties.find(property => ts.isPropertyAssignment(property)
+        && property.name.getText(source) === 'onSelectionClick');
+      assert.ok(callback && ts.isPropertyAssignment(callback));
+      matches.push(callback.initializer.getText(source));
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.equal(matches.length, 1, `${entry} 应有唯一真实点击入口`);
+  return new Function(...Object.keys(scope), ts.transpile(`return (${matches[0]})`, {
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+  }))(...Object.values(scope));
+}
+
+for (const target of ['model', 'cell', 'generated'] as const) {
+  test(`预览 ${target} 点击在同一分支读取当前漫游状态，仅禁止聚焦`, () => {
+    const entityId = target === 'generated' ? 'spawned:1' : 'model';
+    const cell = { row: 2, column: 3, layer: 1 };
+    const bounds = { center: { x: 1, y: 2, z: 3 }, radiusMeters: 4 };
+    const highlights: unknown[] = [];
+    const focuses: unknown[] = [];
+    const disabled: boolean[] = [];
+    let enabled = false;
+    const roam = { getSnapshot: () => ({ enabled }), setEnabled: (value: boolean) => disabled.push(value) };
+    const manualRoamRef: { current: typeof roam | undefined } = { current: undefined };
+    const click = getClickCallback('preview', {
+      manualRoamRef,
+      runtimeRef: { current: {
+        setLocalSlotHighlight: (id: string, value: unknown) => { if (value) highlights.push({ id, cell: value }); },
+        setLocalHighlightEntityIds: (ids: string[]) => { if (ids.length) highlights.push(ids); },
+        setClickHighlightTrackExclusion: () => {},
+        getLocatorCellWorldBounds: () => bounds,
+        getEntitiesFocusBounds: () => bounds,
+      } },
+      viewportRef: { current: { focusOnBounds: (value: unknown) => focuses.push(value) } },
+      clickProductHighlightIdRef: { current: null },
+      state: {
+        scene: { entities: { model: {} } },
+        setEnvironmentAdjustmentActive: () => {},
+        selectEntity: (id: string | null) => { if (id) highlights.push([id]); },
+        requestSceneFocusForSelection: (ids: string[]) => focuses.push(ids),
+      },
+      CLICK_EVENT_FOCUS_DURATION_MS, CLICK_EVENT_FOCUS_RADIUS_SCALE,
+    });
+    for (const state of [undefined, false, true, false, true, undefined]) {
+      enabled = state ?? false;
+      manualRoamRef.current = state === undefined ? undefined : roam;
+      highlights.length = focuses.length = disabled.length = 0;
+      click({ kind: target === 'cell' ? 'trigger-cell' : 'trigger', entityId,
+        locatorEntityId: 'locator', cell, effects: ['highlight', 'focus', 'show-chart'] });
+      assert.deepEqual(highlights, target === 'cell' ? [{ id: 'locator', cell }] : [[entityId]]);
+      assert.deepEqual(focuses, state === true ? [] : [target === 'model' ? [entityId] : bounds],
+        `enabled=${state} 时仅非漫游点击可聚焦`);
+      assert.deepEqual(disabled, state === false && target !== 'model' ? [false] : [],
+        '漫游中的点击不能关闭漫游');
+    }
+  });
+
+  test(`Viewer ${target} 真实鼠标回调读取最新漫游状态并保留拾取结果`, () => {
+    const cell = { locatorEntityId: 'locator', row: 2, column: 3, layer: 1 };
+    const generatedUnit = { bindingEntityId: 'generator', highlightEntityId: 'spawned:1' };
+    for (const hasRuntime of [false, true]) {
+      let enabled = false;
+      const calls: unknown[][] = [];
+      const click = getClickCallback('viewer', {
+        disposed: false, canvas: {}, pauseHistoryReplay: () => {},
+        chartMarkerClickRef: { current: null },
+        manualRoam: hasRuntime ? { getSnapshot: () => ({ enabled }) } : undefined,
+        runtime: {
+          pickChartMarkerClickAtCanvasPoint: () => null,
+          pickRuntimeModelHitAtCanvasPoint: () => ({ entityId: 'model', precise: true, distance: 3 }),
+          pickBuiltInSlotCellAtCanvasPoint: () => target === 'cell' ? { ...cell, hostEntityId: 'model', distance: 2 } : null,
+          pickGeneratedUnitClickTargetAtCanvasPoint: () => target === 'generated' ? { hit: generatedUnit, distance: 1 } : null,
+        },
+        handleModelClick: (...args: unknown[]) => calls.push(args),
+      });
+      for (enabled of [false, true, false, true]) {
+        calls.length = 0;
+        click({ clientX: 10, clientY: 20 });
+        assert.deepEqual(calls, [['model', target === 'cell' ? cell : null, {
+          generatedUnit: target === 'generated' ? generatedUnit : null,
+          focus: !hasRuntime || !enabled,
+        }]]);
+      }
+    }
+  });
+}

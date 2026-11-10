@@ -1001,7 +1001,10 @@ export function PlayerApp() {
             const generatedUnit = generatedHit && (!modelHit || !modelHit.precise || generatedHit.distance < modelHit.distance)
               ? generatedHit.hit
               : null;
-            handleModelClick(entityId, pickedCell, { generatedUnit });
+            handleModelClick(entityId, pickedCell, {
+              generatedUnit,
+              focus: !manualRoam?.getSnapshot().enabled,
+            });
           },
           onDragStarted: () => {
             if (parsedConfig.viewer.allowCameraControl) notifyManualInput();
