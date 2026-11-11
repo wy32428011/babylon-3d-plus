@@ -60,6 +60,7 @@ import {
   STACKER_FALLBACK_FIXED_NODE_NAMES,
   STACKER_FALLBACK_TRAVEL_NODE_NAMES,
   STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER,
+  STACKER_CLAMP_FORK_ENGAGE_METERS,
   STACKER_MAX_CATCH_UP_SPEED_METERS_PER_SECOND,
   STACKER_RPM_TO_METERS_PER_SECOND,
   STACKER_CARGO_PRESENT_SIGNAL_BIT,
@@ -602,6 +603,8 @@ export class StackerTelemetryDriver {
    * 按货格几何求单侧货叉目标行程（带方向符号）：锚点叉中心对准货格中心即停，
    * 绑定时货物锚点（叉顶面中心）与货格支撑位重合，交接无跳变；
    * 行程不按货叉模型长度钳位，货格纵深超过叉长时允许悬空。无货格（输送线侧）或货格不在伸出方向上时回退全行程。
+   * 夹抱式模型（声明 cargoPlatformNodes）改按叉尖对标：货叉尖端（二段叉沿伸出方向最远端）推进到
+   * 货格中心 + 夹抱咬合深度即停——两侧都只伸到"恰好够到料箱"，与货叉停放位置是否居中无关。
    */
   private resolveForkTargetOffset(
     model: ModelRuntimeEntry,
@@ -613,6 +616,9 @@ export class StackerTelemetryDriver {
     // 实测叉长只作无货格/方向不明时的全行程回退；有货格时目标由几何解算，不再受叉长限制
     if (!cell) return stroke.total > 0 ? direction * stroke.total : 0;
 
+    const clampTipTarget = this.resolveStackerClampForkTipTarget(model, side, direction, cell);
+    if (clampTipTarget !== null) return clampTipTarget;
+
     const forkAxis = getModelAxis(model.root, 'x');
     const centerHome = this.resolveForkCenterHomeCoordinate(model, side, forkAxis);
     if (centerHome === null) return direction * stroke.total;
@@ -621,6 +627,50 @@ export class StackerTelemetryDriver {
     const needed = direction * (Vector3.Dot(cell.supportPosition, forkAxis) - centerHome);
     if (!Number.isFinite(needed) || needed <= 0.001) return direction * stroke.total;
     return direction * needed;
+  }
+
+  /**
+   * 夹抱式（声明 cargoPlatformNodes）伸出行程：货叉尖端（二段叉模型沿伸出方向的最远端，
+   * 左右取相反端点）推进到货箱远侧面 + 夹抱咬合深度（dataDriven.motion.fork.clampEngage，默认 0.05m）即停，
+   * 行程覆盖货物整个几何体。货箱几何（刷在格口的料箱）与货叉几何都已知，左右两侧各自恰好够到料箱。
+   * 货格紧邻叉尖时只需微伸（不再回退全行程）；叉节点缺失时返回 null 走原中心对标链路。
+   */
+  private resolveStackerClampForkTipTarget(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    direction: number,
+    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 },
+  ): number | null {
+    if (!this.resolveStackerCargoPlatformAnchor(model)) return null;
+    const forkAxis = getModelAxis(model.root, 'x');
+    const projected = getNodesProjectedBounds(this.resolveForkAnchorNodes(model, side), forkAxis);
+    if (!projected) return null;
+    const state = model.stackerTelemetry;
+    const offset = side === 'front' ? state.frontForkOffset : state.backForkOffset;
+    // 收回态叉尖投影 = 当前叉尖减去当前伸出位移（叉整体刚性平移）
+    const tipNow = direction > 0 ? projected.max : projected.min;
+    const tipHome = tipNow - offset;
+    const engage = this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'clampEngage'])
+      ?? STACKER_CLAMP_FORK_ENGAGE_METERS;
+    // 行程须覆盖货物整个几何体：目标投影 = 货格中心 + 沿伸出方向的货物半深 + 咬合深度，
+    // 叉尖越过货箱远侧面才算够到（只到中心等于货箱还有一半悬空在叉外）。
+    const cargoDepthHalf = this.resolveStackerForkCargoHalfDepth(model, side, forkAxis);
+    // 与收回态叉尖的差值即带符号目标行程（无需再乘 direction——差值自身符号已表示伸缩方向）。
+    const signed = Vector3.Dot(cell.supportPosition, forkAxis) + direction * (cargoDepthHalf + engage) - tipHome;
+    if (!Number.isFinite(signed)) return null;
+    return signed;
+  }
+
+  /** 取货侧已刷出货物沿货叉轴的半深（世界包围盒投影的一半）；货物未建/无包围盒时返回 0（回退中心对标）。 */
+  private resolveStackerForkCargoHalfDepth(model: ModelRuntimeEntry, side: StackerForkSide, forkAxis: Vector3): number {
+    const state = model.stackerTelemetry;
+    const cargoKey = side === 'front' ? state.frontCargoKey : state.backCargoKey;
+    const cargo = cargoKey ? this.state.stackerCargoMeshes.get(cargoKey) : undefined;
+    if (!cargo) return 0;
+    const bounds = getNodesWorldBounds([cargo.root]);
+    if (!bounds) return 0;
+    const projected = projectWorldBoundsOntoAxis(bounds, forkAxis);
+    return Math.max(0, (projected.max - projected.min) / 2);
   }
 
   /** 单侧货叉几何行程：一段/二段节点沿货叉轴的实测长度，仅作无货格时的默认全行程回退，不再钳位；缓存于遥测状态。 */
@@ -1830,7 +1880,7 @@ export class StackerTelemetryDriver {
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
   }
 
-  /** 使用 rpm 字段换算速度；没有有效 rpm 时回退 Inspector 速度参数、dataDriven.motion.<motionKey>.speed 或模型默认速度。 */
+  /** 使用 rpm 字段换算速度；rpm 符号只表示旋转方向（负 rpm 同样在运动，如 11 排 mv3 伸叉 rpm_z=-6），取绝对值；无 rpm 字段时回退 Inspector 速度参数、dataDriven.motion.<motionKey>.speed 或模型默认速度。 */
   private readSpeed(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
@@ -1842,8 +1892,8 @@ export class StackerTelemetryDriver {
       ?? this.readStackerDataDrivenNumber(model, ['motion', motionKey, 'speed'])
       ?? fallbackSpeed;
     const rpm = readNumberField(snapshot.fields, rpmKey);
-    if (rpm === null || rpm <= 0) return defaultSpeed;
+    if (rpm === null) return defaultSpeed;
     const rpmScale = this.readStackerDataDrivenNumber(model, ['device', 'rpmToMetersPerSecond']) ?? STACKER_RPM_TO_METERS_PER_SECOND;
-    return Math.max(defaultSpeed * 0.25, rpm * rpmScale);
+    return Math.max(defaultSpeed * 0.25, Math.abs(rpm) * rpmScale);
   }
 }

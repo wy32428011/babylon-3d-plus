@@ -899,7 +899,8 @@ test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定
     );
 
     // 伸叉取放期间货物被拨指从载货台推向货格（朝格口方向滑移），竖直仍保持台面高度
-    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 10);
+    // 先取 4 帧（×0.25m/s=0.1m < 0.15m 行程）验证滑动中段位姿；伸满会触发解绑落货，分开断言
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 4);
     assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset) > 0.02, '伸叉必须产生前叉位移');
     assert.ok(
       Math.abs(cargo.root.position.z) > 0.02,
@@ -908,6 +909,13 @@ test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定
     assert.ok(
       Math.abs(cargo.root.position.y - 0.525) < 1e-6,
       `伸叉期间货物竖直必须保持载货台面高度 0.525，实际 y=${cargo.root.position.y}`,
+    );
+    // 继续伸满：夹抱式按叉尖对标（huocha.9 位于 0.1~0.5，货格中心 x=0，货箱半深 0.2，咬合 0.05）
+    // → 叉尖须越过货箱远侧面停在中心+半深+咬合，目标行程 −(0.2+0.05)−0.1=−0.35
+    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 10);
+    assert.ok(
+      Math.abs(h.model.stackerTelemetry.frontForkOffset - (-0.35)) < 1e-6,
+      `夹抱式伸叉必须按叉尖对标停在 −0.35（叉尖覆盖货箱整个几何体，恰到远侧面+咬合），实际 ${h.model.stackerTelemetry.frontForkOffset}`,
     );
   } finally {
     h.dispose();

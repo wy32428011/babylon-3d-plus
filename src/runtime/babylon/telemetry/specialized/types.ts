@@ -17,6 +17,8 @@ export const STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND = 0.3;
 export const STACKER_DEFAULT_FORK_SPEED_METERS_PER_SECOND = 0.25;
 /** front_ 变化触发动作收尾时，货叉收回速度倍率。 */
 export const STACKER_FORK_CATCH_UP_SPEED_MULTIPLIER = 4;
+/** 夹抱式（cargoPlatformNodes）伸叉的叉尖咬合深度默认值：叉尖推进到货格中心再深入该距离即停。 */
+export const STACKER_CLAMP_FORK_ENGAGE_METERS = 0.05;
 /** 自适应追赶速度的估算窗口下限/上限（秒）：按 front_ 变化间隔估算，夹在 0.25s~2s。 */
 export const STACKER_CATCH_UP_MIN_WINDOW_SECONDS = 0.25;
 export const STACKER_CATCH_UP_MAX_WINDOW_SECONDS = 2;
