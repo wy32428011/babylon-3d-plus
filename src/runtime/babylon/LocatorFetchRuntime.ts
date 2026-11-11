@@ -68,7 +68,8 @@ export function createFetchCellKey(column: number, layer: number): string {
 
 /**
  * 归一 record 的 isEmpty 语义：布尔直接使用；字符串/数字按文本兼容（dataflow 可能发 "false"/0）；
- * 缺失或无法识别时视为非空，与旧行为（未提供 isEmpty 的记录正常渲染）保持一致。
+ * 缺失或无法识别时视为非空。isEmpty 仅用于业务簿记（格口抑制解除），不控制渲染；
+ * 空/非空拆分显示需显式配置生成规则（attributeName='isEmpty'）。
  */
 export function readFetchRecordIsEmpty(record: FetchContainerRecord): boolean {
   const value = (record as unknown as Record<string, unknown>).isEmpty;
@@ -166,6 +167,14 @@ export class LocatorFetchRuntime {
         if (!occupiedCellKeys.has(key)) this.suppressedCellKeys.delete(key);
       }
     }
+    // 本排无记录时忽略本排渲染结果：不重建批次、不强制清空既有货物，
+    // 防止服务端瞬时异常/空数据把整排抹空；抑制解除 bookkeeping 已在上一步完成，不受影响。
+    // isEmpty 记录不触发此跳过：空货位仍走正常规则匹配/渲染逻辑。
+    if (rowRecords.length === 0) {
+      this.statisticsPhase = 'ready';
+      this.queueStatisticsChanged();
+      return;
+    }
     const ownRecords = rowRecords.filter(
       (record) => !this.suppressedCellKeys.has(createFetchCellKey(record.column, record.layer))
         && !this.retainedCellKeys.has(createFetchCellKey(record.column, record.layer)),
@@ -176,12 +185,11 @@ export class LocatorFetchRuntime {
 
     const nextInstances: CargoInstance[] = [];
     for (const record of ownRecords) {
-      const isEmpty = readFetchRecordIsEmpty(record);
-      // isEmpty 不再硬过滤：所有记录都进规则匹配；无规则命中时空货位不渲染（保持旧行为），
-      // 有货位回退共享模板/内置立方体；配置 isEmpty 规则即可拆分空/非空货位显示。
+      // isEmpty 只是业务标志，不控制数字孪生渲染：所有记录都进规则匹配并正常渲染；
+      // 需要空/非空拆分显示时，在生成规则里显式配置 isEmpty 属性匹配（rule.attributeName='isEmpty'）。
       const target = generatorComponent
-        ? this.matchRule(generatorComponent.rules, record) ?? (isEmpty ? null : generatorComponent.defaultTarget)
-        : (isEmpty ? null : fallbackTarget);
+        ? this.matchRule(generatorComponent.rules, record) ?? generatorComponent.defaultTarget
+        : fallbackTarget;
       if (!target) continue;
 
       nextInstances.push({

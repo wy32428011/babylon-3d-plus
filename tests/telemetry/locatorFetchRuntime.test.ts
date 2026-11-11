@@ -64,7 +64,7 @@ test('内置立方体目标：批次几何底部中心锚定原点，实例矩�
   }
 });
 
-test('isEmpty 空货位不渲染货物', async () => {
+test('isEmpty 不影响渲染：业务标志不控制数字孪生，空货位记录同样渲染', async () => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   try {
@@ -80,7 +80,7 @@ test('isEmpty 空货位不渲染货物', async () => {
 
     const batchMeshes = findBatchMeshes(scene);
     assert.equal(batchMeshes.length, 1);
-    assert.equal(batchMeshes[0].thinInstanceCount, 1, '3 条记录中 2 条 isEmpty，只渲染 1 个实例');
+    assert.equal(batchMeshes[0].thinInstanceCount, 3, 'isEmpty 是业务标志：3 条记录全部渲染');
     runtime.dispose();
   } finally {
     scene.dispose();
@@ -145,9 +145,9 @@ test('字符串或缺失 isEmpty 归一后按非空渲染：字符串 "false" �
     );
 
     const batchMeshes = findBatchMeshes(scene);
-    assert.equal(batchMeshes.length, 1, '无生成器时非空记录回退内置立方体单批');
-    assert.equal(batchMeshes[0].thinInstanceCount, 2,
-      '字符串 "false" 与缺失 isEmpty 按非空渲染；字符串 "true" 按空货位跳过');
+    assert.equal(batchMeshes.length, 1, '无生成器时记录回退内置立方体单批');
+    assert.equal(batchMeshes[0].thinInstanceCount, 3,
+      'isEmpty 是业务标志不影响渲染：字符串 "false"/"true" 与缺失 isEmpty 全部渲染');
     runtime.dispose();
   } finally {
     scene.dispose();
@@ -390,6 +390,63 @@ test('抑制时的重放沿用旧数据，不会按“本排无记录”误解�
     );
 
     assert.equal(findBatchMeshes(scene).length, 0, '重放不得解除抑制');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+test('全部 isEmpty 的记录走正常逻辑：业务标志不影响渲染，也不触发无记录跳过', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(1, 1), createRecord(2, 1)], locatorEntry, locatorComponent, null,
+      () => Matrix.Identity(), () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+    assert.equal(findBatchMeshes(scene)[0].thinInstanceCount, 2, '初始渲染 2 箱');
+
+    // 本排全部 isEmpty：不触发跳过，也不抑制渲染——isEmpty 只是业务标志，2 箱照常显示
+    await runtime.applyRecords(
+      [createRecord(1, 1, { isEmpty: true }), createRecord(2, 1, { isEmpty: true })],
+      locatorEntry, locatorComponent, null,
+      () => Matrix.Identity(), () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+    assert.equal(findBatchMeshes(scene)[0].thinInstanceCount, 2, '全 isEmpty 也正常渲染，不跳过不清空');
+
+    // 混合记录正常重建
+    await runtime.applyRecords(
+      [createRecord(1, 1, { isEmpty: true }), createRecord(2, 1)],
+      locatorEntry, locatorComponent, null,
+      () => Matrix.Identity(), () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+    assert.equal(findBatchMeshes(scene)[0].thinInstanceCount, 2, '混合记录正常渲染全部记录');
+    runtime.dispose();
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+test('全空排忽略渲染结果：本排无记录也不强制清空既有货物', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const runtime = new LocatorFetchRuntime(scene, 'loc1');
+    await runtime.applyRecords(
+      [createRecord(1, 1)], locatorEntry, locatorComponent, null,
+      () => Matrix.Identity(), () => Promise.reject(new Error('内置几何体目标不应走模型模板加载')),
+    );
+    assert.equal(findBatchMeshes(scene)[0].thinInstanceCount, 1);
+
+    await runtime.applyRecords(
+      [], locatorEntry, locatorComponent, null,
+      () => Matrix.Identity(), () => Promise.reject(new Error('不应重建批次')),
+    );
+    const batches = findBatchMeshes(scene);
+    assert.equal(batches.length, 1, '本排无记录时保留既有批次');
+    assert.equal(batches[0].thinInstanceCount, 1, '本排无记录时保留既有实例');
     runtime.dispose();
   } finally {
     scene.dispose();

@@ -240,7 +240,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
     <fieldset className="transform-fieldset model-generator-fieldset">
       <legend>模型生成器</legend>
 
-      <p className="muted">本生成器仅作为货箱模板库；在设备的遥测绑定面板或定位线框的 Fetch 数据驱动中选择本生成器作为货箱来源。规则属性名在 MQTT 下读取遥测快照字段、在 Fetch 下读取 record 字段（缺省比较 containerType）。Fetch 下可按 isEmpty=true / isEmpty=false 两条规则拆分空货位与非空货位的显示模型；无规则命中的空货位不渲染。</p>
+      <p className="muted">本生成器仅作为货箱模板库；在设备的遥测绑定面板或定位线框的 Fetch 数据驱动中选择本生成器作为货箱来源。规则属性名在 MQTT 下读取遥测快照字段、在 Fetch 下读取 record 字段（缺省比较 containerType）。Fetch 下可按 isEmpty=true / isEmpty=false 两条规则拆分空货位与非空货位的显示模型；isEmpty 仅作业务标志，无规则命中时所有记录照常渲染，不会隐式抑制空货位。</p>
 
       {renderTargetSlot(
         'default-target',
