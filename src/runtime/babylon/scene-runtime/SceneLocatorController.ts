@@ -809,8 +809,9 @@ export class SceneLocatorController {
   }
 
   /**
-   * 为每列顶部创建列号标签（billboard 平面 + 数字纹理），仅在选中高亮时由 applyLocatorStyle 启用。
-   * 位置公式与格子中心同源（列 × 列步距），合批/薄实例两种渲染模式共用一套坐标；
+   * 为每列顶部创建列号标签（定位锚点 + billboard 平面 + 数字纹理），仅在选中高亮时由 applyLocatorStyle 启用。
+   * 锚点位置公式与格子中心同源（列 × 列步距），合批/薄实例两种渲染模式共用一套坐标；
+   * billboard 会剥离父节点旋转，因此列偏移必须放在普通锚点上，不能放在平面自身。
    * 列号文案按 columnReversed 换算业务列号。无 canvas 环境（NullEngine 测试）直接返回空数组。
    */
   public buildLocatorColumnLabels(
@@ -855,20 +856,23 @@ export class SceneLocatorController {
       material.opacityTexture = texture;
       material.emissiveColor = Color3.White();
 
+      const anchor = new TransformNode(`${entityId}_locatorColumnLabelAnchor_${col}`, this.context.scene);
+      anchor.parent = labelsRoot;
+      anchor.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
+
       const plane = MeshBuilder.CreatePlane(`${entityId}_locatorColumnLabelPlane_${col}`, { size: 1 }, this.context.scene);
       this.hideEntranceMesh(plane);
-      plane.parent = labelsRoot;
+      plane.parent = anchor;
       plane.scaling.setAll(size);
-      plane.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
       plane.billboardMode = Mesh.BILLBOARDMODE_ALL;
       plane.material = material;
       plane.isPickable = false;
-      labels.push({ mesh: plane, material, texture });
+      labels.push({ anchor, mesh: plane, material, texture });
     }
     return labels;
   }
 
-  /** 拓扑与文案不变时的列号标签原地更新：复用纹理/材质/网格，仅按新步距刷新位置与缩放。 */
+  /** 拓扑与文案不变时的列号标签原地更新：复用纹理/材质/网格，仅按新步距刷新锚点位置与缩放。 */
   public syncLocatorColumnLabelsInPlace(
     locator: LocatorComponent,
     cellSteps: LocatorBindingSteps,
@@ -882,16 +886,17 @@ export class SceneLocatorController {
     );
     labels.forEach((label, col) => {
       label.mesh.scaling.setAll(size);
-      label.mesh.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
+      label.anchor.position.set(col * cellSteps.columnStepX, topY + size * 0.6, 0);
     });
   }
 
-  /** 销毁列号标签网格及其独立材质纹理；labelsRoot 本身随 locator root 统一销毁。 */
+  /** 销毁列号标签锚点、网格及其独立材质纹理；labelsRoot 本身随 locator root 统一销毁。 */
   public disposeLocatorColumnLabels(entry: LocatorRuntimeEntry): void {
     const labels = entry.columnLabels;
     entry.columnLabels = [];
     for (const [index, label] of labels.entries()) {
       runSceneRuntimeCleanup(this.context, `定位器列号网格 ${entry.entityId}/${index}`, () => label.mesh.dispose(false, false));
+      runSceneRuntimeCleanup(this.context, `定位器列号锚点 ${entry.entityId}/${index}`, () => label.anchor.dispose(false, false));
       runSceneRuntimeCleanup(this.context, `定位器列号材质 ${entry.entityId}/${index}`, () => label.material.dispose(false, false));
       runSceneRuntimeCleanup(this.context, `定位器列号纹理 ${entry.entityId}/${index}`, () => label.texture.dispose());
     }

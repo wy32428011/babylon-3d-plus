@@ -269,6 +269,7 @@ export type ModelParameterBaselineValue = boolean | number | string | Vector3Dat
 
 /** 定位线框单个列号标签的渲染资源；texture 在 NullEngine 等无 canvas 环境为 null（不创建标签）。 */
 export type LocatorColumnLabel = {
+  anchor: TransformNode;
   mesh: Mesh;
   material: StandardMaterial;
   texture: DynamicTexture;
