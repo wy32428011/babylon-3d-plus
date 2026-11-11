@@ -1056,3 +1056,52 @@ test('夹抱式主动放货：伸满解绑落货后自动收叉，command 切换
   }
 });
 
+
+test('货叉轴配置：motion.fork.axis=z 时按 Z 轴解算伸出方向、行程与节点位移', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 货叉收回位中心移到 z=0.3（与货格支撑位 z=11 形成 Z 向距离）；X 向二者均为 0，可区分用错轴
+    for (const forkName of ['huocha.9', 'huocha2.10']) {
+      const forkMesh = h.scene.getMeshByName(forkName);
+      if (forkMesh) forkMesh.position.z = 0.3;
+    }
+    h.model.root.computeWorldMatrix(true);
+    (h.model as { externalScriptRuntime: unknown }).externalScriptRuntime = {
+      getDataDrivenConfigs: () => [{ motion: { fork: { axis: 'z' }, travel: { axis: 'x' } } }],
+    };
+    // locator 不旋转：列沿世界 X，支撑位 = (列步距×列下标, 层步距×层下标, root.z)
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11), rootRotationY: 0 });
+    h.apply({ ...POSITION_FRAME, front_x: 1 }, 0.1, 400);
+    h.apply({ ...POSITION_FRAME, front_x: 1, front_command: 1, front_movement_z: 1 }, 0.1, 5);
+    // 中心对标：目标 = 支撑位 z(11) − 叉收回位中心 z(0.3) = 10.7；若误用 X 轴则 diff=0 回退全行程（远小于 10.7）
+    assert.ok(Math.abs(h.model.stackerTelemetry.frontForkTargetOffset - 10.7) < 1e-6,
+      `fork.axis=z 时目标行程必须按 Z 轴解算为 10.7，实际 ${h.model.stackerTelemetry.frontForkTargetOffset}`);
+    const offset = h.model.stackerTelemetry.frontForkOffset;
+    assert.ok(offset > 0.1, `货叉必须伸出，实际 ${offset}`);
+    const forkMesh = h.scene.getMeshByName('huocha.9')!;
+    assert.ok(Math.abs(forkMesh.position.z - (0.3 + offset)) < 1e-6,
+      `二段叉节点必须沿 Z 轴平移 offset，实际 z=${forkMesh.position.z}（offset=${offset}）`);
+    assert.ok(Math.abs(forkMesh.position.x) < 1e-6, '货叉不得沿 X 轴移动');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('行走轴配置：motion.travel.axis=x 时大车沿 X 轴行走', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    (h.model as { externalScriptRuntime: unknown }).externalScriptRuntime = {
+      getDataDrivenConfigs: () => [{ motion: { travel: { axis: 'x' } } }],
+    };
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11), rootRotationY: 0 });
+    // 当前位 x=0；目标列 5 → 支撑位 x=4。travel.axis=x 时大车应沿 X 推进
+    h.apply({ ...POSITION_FRAME, front_x: 1, to_x: 5, to_y: 1, to_z: 2 }, 0.1, 10);
+    const rootPosition = h.model.stackerTelemetry.rootPosition!;
+    assert.ok(rootPosition.x > 0.2, `travel.axis=x 时大车必须沿 X 行走，实际 x=${rootPosition.x}`);
+    assert.ok(Math.abs(rootPosition.z) < 1e-6, `大车不得沿 Z 行走，实际 z=${rootPosition.z}`);
+  } finally {
+    h.dispose();
+  }
+});

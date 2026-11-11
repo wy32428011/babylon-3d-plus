@@ -6,6 +6,7 @@ import type { Scene } from '@babylonjs/core';
 import type { StackerMotionArrowChannel, StackerMotionArrowChannelConfig } from '../../../editor/model/stackerMotionArrows';
 import type { ModelRuntimeEntry } from '../SceneRuntime';
 import { getHorizontalModelAxis, getModelAxis, getModelTransformNodes, getNodeMeshes, mergeWorldBounds, transformWorldBounds, type RuntimeWorldBounds } from '../runtimeNodeGeometry';
+import { readStackerMotionAxis, readStackerTravelAxis } from '../telemetry/specialized/specializedModelAssets';
 import { readStringArrayPath } from '../runtimeValueUtils';
 
 type MeasuredMesh = { mesh: AbstractMesh; matrix?: Matrix; bounds?: RuntimeWorldBounds; transformed?: RuntimeWorldBounds | null };
@@ -184,8 +185,9 @@ export function resolveStackerArrowPlacement(surface: StackerArrowSurface, model
   const inverse = hostFrame.clone().invert();
   const bounds = measure(surface.meshes, inverse);
   if (!bounds) return '挂点没有有效几何范围。';
-  const worldAxis = channel === 'travel' ? getHorizontalModelAxis(surface.host.root, 'z')
-    : getModelAxis(surface.host.root, channel === 'lift' ? 'y' : 'x');
+  const configs = surface.host.externalScriptRuntime?.getDataDrivenConfigs() ?? [];
+  const worldAxis = channel === 'travel' ? getHorizontalModelAxis(surface.host.root, readStackerTravelAxis(configs))
+    : getModelAxis(surface.host.root, channel === 'lift' ? 'y' : readStackerMotionAxis(configs, 'fork'));
   const along = Vector3.TransformNormal(worldAxis, inverse).normalize();
   let normal = channel === 'lift' || (channel === 'travel' && config.face === 'side') ? Vector3.Right()
     : config.face === 'side' ? Vector3.Forward() : Vector3.Up();

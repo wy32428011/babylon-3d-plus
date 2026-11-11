@@ -24,6 +24,7 @@ import {
   worldDeltaToParentLocalDelta,
 } from '../../runtimeNodeGeometry';
 import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
+import { readStackerMotionAxis, readStackerTravelAxis } from './specializedModelAssets';
 import {
   readIntegerField,
   readNumberField,
@@ -111,7 +112,7 @@ export class StackerTelemetryDriver {
     this.trackStackerFrontCellChange(model, frontCell.key, frontCell.cell, frontOffsets ?? targetOffsets, frontCommand, backCommand);
 
     // 从吸附/相位校正之后开始采样；先钳制采样基准，排除轨道或升降范围变化产生的纠偏。
-    const motionTravelAxis = getHorizontalModelAxis(model.root, 'z');
+    const motionTravelAxis = getHorizontalModelAxis(model.root, readStackerTravelAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []));
     const previousTravelPosition = this.constrainStackerTravelPosition(model, state.rootPosition ?? state.rootBasePosition, motionTravelAxis);
     const previousTravel = Vector3.Dot(previousTravelPosition, motionTravelAxis);
     const previousLift = this.clampStackerLiftOffset(model, state.liftOffset);
@@ -311,7 +312,7 @@ export class StackerTelemetryDriver {
     targetOffsets: { travelOffset: number; liftOffset: number },
   ): void {
     const state = model.stackerTelemetry;
-    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+    const travelAxis = getHorizontalModelAxis(model.root, readStackerTravelAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []));
     state.rootPosition = this.constrainStackerTravelPosition(
       model,
       state.rootBasePosition.add(travelAxis.scale(targetOffsets.travelOffset)),
@@ -434,7 +435,7 @@ export class StackerTelemetryDriver {
   /** 按货叉初始世界锚点把 Locator 绝对坐标换算成运行时偏移；升降目标叠加货物竖直间隙，叉顶面定位到支撑位 + 间隙，整机（含载货）在移动定位时整体偏移。 */
   private resolveStackerTargetMotionOffsets(model: ModelRuntimeEntry, targetPosition: Vector3) {
     const referencePosition = this.getStackerTargetReferencePosition(model);
-    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+    const travelAxis = getHorizontalModelAxis(model.root, readStackerTravelAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []));
     return resolveStackerStorageTargetOffsets({
       targetTravelCoordinate: Vector3.Dot(targetPosition, travelAxis),
       targetLiftCoordinate: targetPosition.y + this.resolveStackerCargoGapY(model),
@@ -451,7 +452,7 @@ export class StackerTelemetryDriver {
     deltaSeconds: number,
   ): boolean {
     const state = model.stackerTelemetry;
-    const travelAxis = getHorizontalModelAxis(model.root, 'z');
+    const travelAxis = getHorizontalModelAxis(model.root, readStackerTravelAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []));
     state.rootPosition ??= state.rootBasePosition.clone();
 
     let moving = false;
@@ -678,7 +679,7 @@ export class StackerTelemetryDriver {
     cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
   ): number | null {
     if (!cell) return null;
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const homeCenter = this.resolveForkCenterHomeCoordinate(model, side, forkAxis);
     if (homeCenter === null) return null;
     const diff = Vector3.Dot(cell.supportPosition, forkAxis) - homeCenter;
@@ -719,7 +720,7 @@ export class StackerTelemetryDriver {
     const clampTipTarget = this.resolveStackerClampForkTipTarget(model, side, direction, cell);
     if (clampTipTarget !== null) return clampTipTarget;
 
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const centerHome = this.resolveForkCenterHomeCoordinate(model, side, forkAxis);
     if (centerHome === null) return direction * stroke.total;
 
@@ -742,7 +743,7 @@ export class StackerTelemetryDriver {
     cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 },
   ): number | null {
     if (!this.resolveStackerCargoPlatformAnchor(model)) return null;
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const projected = getNodesProjectedBounds(this.resolveForkAnchorNodes(model, side), forkAxis);
     if (!projected) return null;
     const state = model.stackerTelemetry;
@@ -769,7 +770,7 @@ export class StackerTelemetryDriver {
     if (cached) return cached;
 
     const groups = this.findStackerForkNodeGroups(model);
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const measure = (nodes: TransformNode[]): number => {
       const projected = getNodesProjectedBounds(nodes, forkAxis);
       return projected ? Math.max(0, projected.max - projected.min) : 0;
@@ -1261,7 +1262,7 @@ export class StackerTelemetryDriver {
 
   /** 货叉（锚点叉节点）当前世界中心减去当前伸缩量，即收回原位中心（随大车走行/升降实时）；叉节点缺失时返回 null。 */
   private resolveStackerForkHomeCenter(model: ModelRuntimeEntry, side: StackerForkSide): Vector3 | null {
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const bounds = getNodesWorldBounds(this.resolveForkAnchorNodes(model, side));
     if (!bounds) return null;
     const center = bounds.minimum.add(bounds.maximum).scale(0.5);
@@ -1634,7 +1635,7 @@ export class StackerTelemetryDriver {
     const travelPosition = state.rootPosition ?? state.rootBasePosition;
     const travelWorldOffset = travelPosition.subtract(state.rootBasePosition);
     const liftWorldOffset = getModelAxis(model.root, 'y').scale(state.liftOffset);
-    const forkAxis = getModelAxis(model.root, 'x');
+    const forkAxis = getModelAxis(model.root, readStackerMotionAxis(model.externalScriptRuntime?.getDataDrivenConfigs() ?? [], 'fork'));
     const frontOffset = this.splitForkOffset(state.frontForkOffset);
     const backOffset = this.splitForkOffset(state.backForkOffset);
     const {

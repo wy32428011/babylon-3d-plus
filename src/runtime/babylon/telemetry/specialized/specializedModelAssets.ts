@@ -14,6 +14,25 @@ import {
   type StackerModelTelemetryState,
 } from './types';
 
+/** 堆垛机运动轴配置：dataDriven.motion.<motionKey>.axis 可选声明（'x'/'y'/'z'）；缺省 fork='x'、travel='z'（旧模型与普通堆垛机约定）。 */
+export function readStackerMotionAxis(configs: readonly unknown[], motionKey: 'travel' | 'fork'): 'x' | 'y' | 'z' {
+  for (const config of configs) {
+    if (!isPlainRecord(config)) continue;
+    const motion = config.motion;
+    if (!isPlainRecord(motion)) continue;
+    const motionConfig = motion[motionKey];
+    if (!isPlainRecord(motionConfig)) continue;
+    const axis = motionConfig.axis;
+    if (axis === 'x' || axis === 'y' || axis === 'z') return axis;
+  }
+  return motionKey === 'fork' ? 'x' : 'z';
+}
+
+/** 堆垛机行走轴（仅水平 x/z；dataDriven.motion.travel.axis 误配其他值时回退默认 z）。 */
+export function readStackerTravelAxis(configs: readonly unknown[]): 'x' | 'z' {
+  return readStackerMotionAxis(configs, 'travel') === 'x' ? 'x' : 'z';
+}
+
 /** 判断当前模型是否具备输送线驱动能力，脚本声明 devType=conveyor 或文件名兜底识别即接入。 */
 export function isConveyorRuntimeModel(model: ModelRuntimeEntry): boolean {
   if (model.conveyorCapable) return true;
