@@ -92,14 +92,14 @@ export class StackerTelemetryDriver {
     // 异常帧间隔不能传入插值，否则 NaN/Infinity 会污染后续遥测运行态。
     deltaSeconds = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0;
     const state = model.stackerTelemetry;
-    const frontCell = this.resolveStackerFrontCell(snapshot);
+    const frontCell = this.resolveStackerFrontCell(model, snapshot);
     this.reportStackerRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
 
     const frontOffsets = frontCell.cell ? this.resolveStackerTargetMotionOffsets(model, frontCell.cell.supportPosition) : null;
     // to_x/to_y/to_z（WCS 目标货格）非全 0 且能匹配已绑定货格时，以目标格支撑位为行走/升降终点：
     // 任务下发即给出目的地，本体连续滑向目标，不等当前位 front_ 到位跳变再追赶；全 0/失配回退当前位驱动
-    const toCell = this.resolveStackerToCell(snapshot);
+    const toCell = this.resolveStackerToCell(model, snapshot);
     const targetOffsets = toCell ? this.resolveStackerTargetMotionOffsets(model, toCell.supportPosition) : frontOffsets;
     // 有效 command 每帧只解析一次（mode==4 时推进 signalBits 锁存机），三处消费点共用同一值
     const frontCommand = this.resolveStackerSideCommand(model, snapshot, 'front');
@@ -124,7 +124,7 @@ export class StackerTelemetryDriver {
     } else {
       const travelMoving = this.applyStackerRootMotion(model, snapshot, targetOffsets?.travelOffset ?? null, deltaSeconds);
       const liftMoving = this.applyStackerLiftMotion(model, snapshot, targetOffsets?.liftOffset ?? null, deltaSeconds);
-      this.applyStackerForkMotion(model, snapshot, frontCell.cell, deltaSeconds, travelMoving || liftMoving, frontCell.mismatch);
+      this.applyStackerForkMotion(model, snapshot, frontCell.cell, deltaSeconds, travelMoving || liftMoving, frontCell.mismatch, frontCommand, backCommand);
     }
     this.applyStackerNodeMotionOffsets(model);
     this.applyStackerCargoMotion(model, snapshot, frontCell.cell?.locator ?? null, frontCell.cell?.supportPosition ?? null, deltaSeconds, frontCommand, backCommand);
@@ -146,6 +146,7 @@ export class StackerTelemetryDriver {
    * key 为三字段组成的库位键，供首帧吸附与变化检测使用。
    */
   private resolveStackerFrontCell(
+    model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
   ): { cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null; mismatch: boolean; key: string | null } {
     const frontX = readIntegerField(snapshot.fields, 'front_x');
@@ -156,7 +157,7 @@ export class StackerTelemetryDriver {
     }
     if (frontX === 0 && frontY === 0 && frontZ === 0) return { cell: null, mismatch: false, key: null };
     const key = JSON.stringify([frontX, frontY, frontZ]);
-    const locator = this.host.findLocatorByDevice(snapshot.assetCode, frontX, frontY, frontZ);
+    const locator = this.resolveStackerLocator(model, snapshot.assetCode, frontX, frontY, frontZ);
     if (!locator) {
       this.reportStackerFrontCellMiss(snapshot, frontX, frontY, frontZ);
       return { cell: null, mismatch: true, key };
@@ -173,6 +174,7 @@ export class StackerTelemetryDriver {
    * 目标货格只决定行走/升降的移动终点，货叉几何、库位键跟踪与交接判定仍由 front_ 当前位承担。
    */
   private resolveStackerToCell(
+    model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
   ): { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null {
     const toX = readIntegerField(snapshot.fields, 'to_x');
@@ -180,12 +182,13 @@ export class StackerTelemetryDriver {
     const toZ = readIntegerField(snapshot.fields, 'to_z');
     if (!snapshot.assetCode || toX === null || toY === null || toZ === null) return null;
     if (toX === 0 && toY === 0 && toZ === 0) return null;
-    const locator = this.host.findLocatorByDevice(snapshot.assetCode, toX, toY, toZ);
+    const locator = this.resolveStackerLocator(model, snapshot.assetCode, toX, toY, toZ);
     if (!locator) {
       const reportKey = `${snapshot.sourceId}:${snapshot.deviceType}:${snapshot.assetCode}:to-cell:${toZ}:${toX}:${toY}`;
       if (!this.state.reportedMissingTargets.has(reportKey)) {
         this.state.reportedMissingTargets.add(reportKey);
-        this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 目标位（排${toZ} 列${toX} 层${toY}）未匹配到任何已绑定货格，回退当前位驱动。`);
+        const aisleNote = model.telemetryBinding?.aisleCode?.trim() ? '（含关联巷道回退）' : '';
+        this.host.pushLog(`错误：Stacker ${snapshot.assetCode} 目标位（排${toZ} 列${toX} 层${toY}）未匹配到任何已绑定货格${aisleNote}，回退当前位驱动。`);
       }
       return null;
     }
@@ -353,9 +356,11 @@ export class StackerTelemetryDriver {
     if (side === 'front') {
       state.frontSignalAction = null;
       state.frontSignalExtended = false;
+      state.frontClampPhase = 'done';
     } else {
       state.backSignalAction = null;
       state.backSignalExtended = false;
+      state.backClampPhase = 'done';
     }
     if (!this.getStackerForkCargoKey(model, side)) return;
     if (command === 1 || command === 2) {
@@ -513,6 +518,8 @@ export class StackerTelemetryDriver {
     deltaSeconds: number,
     bodyMoving: boolean,
     extensionBlocked: boolean,
+    frontCommand: number | null,
+    backCommand: number | null,
   ): void {
     // 当前位匹配失败时禁止伸叉（1/3 归一为静止），收回（2/4）始终可用
     const rawFrontMovement = readIntegerField(snapshot.fields, 'front_movement_z');
@@ -527,11 +534,104 @@ export class StackerTelemetryDriver {
     if (bodyMoving) {
       state.frontForkOffset = moveNumberTowards(state.frontForkOffset, 0, frontForkSpeed * deltaSeconds);
       state.backForkOffset = moveNumberTowards(state.backForkOffset, 0, backForkSpeed * deltaSeconds);
+      state.frontClampPhase = 'idle';
+      state.backClampPhase = 'idle';
+      return;
+    }
+
+    // 夹抱式：主动相位状态机（伸满即绑定/解绑并自动收叉，不等 movement_z 收放指令）
+    if (this.resolveStackerCargoPlatformAnchor(model)) {
+      state.frontForkOffset = this.updateClampForkOffset(model, 'front', state.frontForkOffset, frontMovement, frontForkSpeed, cell, snapshot.faulted, deltaSeconds, frontCommand);
+      state.backForkOffset = this.updateClampForkOffset(model, 'back', state.backForkOffset, backMovement, backForkSpeed, cell, snapshot.faulted, deltaSeconds, backCommand);
       return;
     }
 
     state.frontForkOffset = this.updateForkOffset(model, 'front', state.frontForkOffset, frontMovement, frontForkSpeed, cell, snapshot.faulted, deltaSeconds);
     state.backForkOffset = this.updateForkOffset(model, 'back', state.backForkOffset, backMovement, backForkSpeed, cell, snapshot.faulted, deltaSeconds);
+  }
+
+  /**
+   * 夹抱式单侧主动取放相位：command 决定取/放，movement_z 1/3 仅作伸出启动信号；
+   * 伸到叉尖覆盖货箱全深即由货物状态机绑定/解绑，随后自动收回原点，归零后进入 done 等待 command 相位退出。
+   * 无货格/当前位失配时回退原 movement_z 遥测语义（全行程伸出/收回），保证输送线侧与异常帧行为不变。
+   */
+  private updateClampForkOffset(
+    model: ModelRuntimeEntry,
+    side: StackerForkSide,
+    currentOffset: number,
+    movement: number | null,
+    speed: number,
+    cell: { locator: LocatorRuntimeEntry; supportPosition: Vector3 } | null,
+    faulted: boolean,
+    deltaSeconds: number,
+    command: number | null,
+  ): number {
+    const state = model.stackerTelemetry;
+    const phaseKey = side === 'front' ? 'frontClampPhase' : 'backClampPhase';
+    const lastCommand = side === 'front' ? state.frontLastCommand : state.backLastCommand;
+    let phase = state[phaseKey];
+    // command 切换（含取货完成转放货）允许新一轮主动取放；同一 command 相位的 done 不被 movement 持续伸出重启
+    if (lastCommand !== command) phase = 'idle';
+
+    const writeTarget = (target: number): void => {
+      if (side === 'front') state.frontForkTargetOffset = target;
+      else state.backForkTargetOffset = target;
+    };
+    const retract = (): number => {
+      writeTarget(0);
+      return moveNumberTowards(currentOffset, 0, speed * deltaSeconds);
+    };
+
+    if (faulted) {
+      state[phaseKey] = phase;
+      return currentOffset;
+    }
+    if (!cell) {
+      state[phaseKey] = 'idle';
+      return this.updateForkOffset(model, side, currentOffset, movement, speed, cell, faulted, deltaSeconds);
+    }
+
+    const isFetch = command === 1 || command === 2;
+    const isPlace = command === 3 || command === 4;
+    if (!isFetch && !isPlace) {
+      state[phaseKey] = 'idle';
+      return retract();
+    }
+    if (phase === 'done') {
+      state[phaseKey] = phase;
+      return retract();
+    }
+
+    if (phase === 'idle') {
+      if (movement === 1 || movement === 3) {
+        phase = 'extending';
+      } else {
+        state[phaseKey] = phase;
+        return retract();
+      }
+    }
+
+    if (phase === 'extending') {
+      const direction = this.resolveForkExtendDirection(model, side, cell) ?? (Math.sign(currentOffset) || 1);
+      const target = this.resolveForkTargetOffset(model, side, direction, cell, this.getStackerForkStroke(model, side));
+      writeTarget(target);
+      const next = moveNumberTowards(currentOffset, target, speed * deltaSeconds);
+      // 到位判定与 isStackerForkFullyExtended 同余量：本帧到位后，货物状态机在同一帧绑定/解绑，下一帧起自动收叉
+      if (Math.abs(target) > 0.001 && Math.abs(next) >= Math.abs(target) - 0.02) phase = 'retracting';
+      state[phaseKey] = phase;
+      return next;
+    }
+
+    const next = retract();
+    if (Math.abs(next) < 1e-4) {
+      state[phaseKey] = 'done';
+      // 主动相位在 command 尚未退出时已完结：放货当场落账（解绑/留存/交接），
+      // 与后续 completeStackerCargoOnPhaseExit 的相位退出兜底幂等；取货货物保持绑定等转场。
+      if (isPlace) this.completeStackerPlace(model, cell.locator, cell.supportPosition, side);
+      return 0;
+    }
+    state[phaseKey] = 'retracting';
+    return next;
   }
 
   /** 更新单侧货叉偏移：movement_z 1/3 向目标行程伸出，2/4 收回原点，其余保持；目标行程由当前货格几何决定，超出叉长允许悬空。 */
@@ -631,8 +731,8 @@ export class StackerTelemetryDriver {
 
   /**
    * 夹抱式（声明 cargoPlatformNodes）伸出行程：货叉尖端（二段叉模型沿伸出方向的最远端，
-   * 左右取相反端点）推进到货箱远侧面 + 夹抱咬合深度（dataDriven.motion.fork.clampEngage，默认 0.05m）即停，
-   * 行程覆盖货物整个几何体。货箱几何（刷在格口的料箱）与货叉几何都已知，左右两侧各自恰好够到料箱。
+   * 左右取相反端点）推进到货格远端面 + 夹抱咬合深度（dataDriven.motion.fork.clampEngage，默认 0.05m）即停。
+   * 行程完全由货格几何决定（cellSize.width 在货叉轴上的投影），不依赖货箱异步加载与包围盒测量。
    * 货格紧邻叉尖时只需微伸（不再回退全行程）；叉节点缺失时返回 null 走原中心对标链路。
    */
   private resolveStackerClampForkTipTarget(
@@ -652,25 +752,14 @@ export class StackerTelemetryDriver {
     const tipHome = tipNow - offset;
     const engage = this.readStackerDataDrivenNumber(model, ['motion', 'fork', 'clampEngage'])
       ?? STACKER_CLAMP_FORK_ENGAGE_METERS;
-    // 行程须覆盖货物整个几何体：目标投影 = 货格中心 + 沿伸出方向的货物半深 + 咬合深度，
-    // 叉尖越过货箱远侧面才算够到（只到中心等于货箱还有一半悬空在叉外）。
-    const cargoDepthHalf = this.resolveStackerForkCargoHalfDepth(model, side, forkAxis);
+    // 目标投影 = 货格中心 + 沿伸出方向的货格半深 + 咬合深度（叉尖到货格远端面外 engage 处）。
+    // 货格局部 Z 为排深方向，按其在货叉轴上的投影换算世界半深。
+    const locatorDepthAxis = getModelAxis(cell.locator.root, 'z');
+    const cellDepthHalf = (cell.locator.cellSize.width / 2) * Math.abs(Vector3.Dot(locatorDepthAxis, forkAxis));
     // 与收回态叉尖的差值即带符号目标行程（无需再乘 direction——差值自身符号已表示伸缩方向）。
-    const signed = Vector3.Dot(cell.supportPosition, forkAxis) + direction * (cargoDepthHalf + engage) - tipHome;
+    const signed = Vector3.Dot(cell.supportPosition, forkAxis) + direction * (cellDepthHalf + engage) - tipHome;
     if (!Number.isFinite(signed)) return null;
     return signed;
-  }
-
-  /** 取货侧已刷出货物沿货叉轴的半深（世界包围盒投影的一半）；货物未建/无包围盒时返回 0（回退中心对标）。 */
-  private resolveStackerForkCargoHalfDepth(model: ModelRuntimeEntry, side: StackerForkSide, forkAxis: Vector3): number {
-    const state = model.stackerTelemetry;
-    const cargoKey = side === 'front' ? state.frontCargoKey : state.backCargoKey;
-    const cargo = cargoKey ? this.state.stackerCargoMeshes.get(cargoKey) : undefined;
-    if (!cargo) return 0;
-    const bounds = getNodesWorldBounds([cargo.root]);
-    if (!bounds) return 0;
-    const projected = projectWorldBoundsOntoAxis(bounds, forkAxis);
-    return Math.max(0, (projected.max - projected.min) / 2);
   }
 
   /** 单侧货叉几何行程：一段/二段节点沿货叉轴的实测长度，仅作无货格时的默认全行程回退，不再钳位；缓存于遥测状态。 */
@@ -1878,6 +1967,24 @@ export class StackerTelemetryDriver {
   private readStackerInspectorSpeed(model: ModelRuntimeEntry, key: string): number | null {
     const value = model.entitySnapshot?.components.modelAsset?.parameterValues?.[key];
     return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  /**
+   * 按设备编号查找货格；未命中时若绑定配置了关联巷道（telemetryBinding.aisleCode），回退匹配同一巷道编号的货格
+   * （货格可只绑巷道不绑本机 assetCode）。巷道回退同样要求 (x, y, z) 唯一命中。
+   */
+  private resolveStackerLocator(
+    model: ModelRuntimeEntry,
+    assetCode: string,
+    x: number,
+    y: number,
+    z: number,
+  ): LocatorRuntimeEntry | null {
+    const locator = this.host.findLocatorByDevice(assetCode, x, y, z);
+    if (locator) return locator;
+    const aisleCode = model.telemetryBinding?.aisleCode?.trim() ?? '';
+    if (!aisleCode) return null;
+    return this.host.findLocatorByAisle(aisleCode, x, y, z);
   }
 
   /** 使用 rpm 字段换算速度；rpm 符号只表示旋转方向（负 rpm 同样在运动，如 11 排 mv3 伸叉 rpm_z=-6），取绝对值；无 rpm 字段时回退 Inspector 速度参数、dataDriven.motion.<motionKey>.speed 或模型默认速度。 */

@@ -148,6 +148,9 @@ export type StackerLiftConstraint = {
 
 export type StackerForkSide = 'front' | 'back';
 
+/** 夹抱式货叉主动相位：idle 等待伸出指令 → extending 伸到叉尖覆盖货箱 → retracting 自动收叉 → done 等待 command 相位退出。 */
+export type StackerClampForkPhase = 'idle' | 'extending' | 'retracting' | 'done';
+
 export type StackerForkReachConfig = {
   stageOne: number;
   stageTwo: number;
@@ -252,6 +255,9 @@ export type StackerModelTelemetryState = {
   /** command 边沿检测：取货/放货完成只触发一次。 */
   frontLastCommand: number | null;
   backLastCommand: number | null;
+  /** 夹抱式（cargoPlatformNodes）主动取放相位：伸满即绑定/解绑并自动收叉，不等 movement_z 收放指令；普通堆垛机不使用。 */
+  frontClampPhase: StackerClampForkPhase;
+  backClampPhase: StackerClampForkPhase;
   /** mode==4 时按 signalBits 在伸叉起点锁存的动作（command 此时不可靠）；保持到该侧货叉收叉回零。 */
   frontSignalAction: 'fetch' | 'place' | null;
   backSignalAction: 'fetch' | 'place' | null;

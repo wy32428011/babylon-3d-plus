@@ -44,6 +44,8 @@ function makeLocator(
     rootPosition?: Vector3;
     rootRotationY?: number;
     retainCargo?: boolean;
+    deviceAssetCode?: string;
+    aisleCode?: string;
   },
 ): LocatorRuntimeEntry {
   const root = new TransformNode('locator_root', scene);
@@ -65,8 +67,8 @@ function makeLocator(
     startColumn: options.startColumn,
     startLayer: options.startLayer ?? 1,
     columnReversed: false,
-    deviceAssetCode: 'STK1',
-    aisleCode: '',
+    deviceAssetCode: options.deviceAssetCode ?? 'STK1',
+    aisleCode: options.aisleCode ?? '',
     rowNumber: 2,
     storageDepth: 'near',
     retainCargo: options.retainCargo === true,
@@ -93,15 +95,23 @@ function makeHarness() {
   const host = {
     pushLog: (message: string) => { logs.push(message); },
     collectModels: () => [{ entityId: 'e1', model }],
-    // 与 SceneRuntime.findLocatorByDevice 同规则：排号一致且列/层落在货格范围内才命中
-    findLocatorByDevice: (_assetCode: string, x: number, y: number, z: number) => {
+    // 与 SceneRuntime.findLocatorByDevice 同规则：设备绑定一致、排号一致且列/层落在货格范围内才命中
+    findLocatorByDevice: (assetCode: string, x: number, y: number, z: number) => {
       const locator = ref.locator;
-      if (!locator || locator.rowNumber !== z) return null;
+      if (!locator || locator.deviceAssetCode !== assetCode || locator.rowNumber !== z) return null;
       return x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers
         ? locator
         : null;
     },
-    findLocatorsByDevice: () => (ref.locator ? [ref.locator] : []),
+    // 与 SceneRuntime.findLocatorByAisle 同规则：巷道编号一致 + 排号一致 + 列/层落在范围内才命中
+    findLocatorByAisle: (aisleCode: string, x: number, y: number, z: number) => {
+      const locator = ref.locator;
+      if (!locator || locator.aisleCode !== aisleCode || locator.rowNumber !== z) return null;
+      return x >= locator.startColumn && x < locator.startColumn + locator.columns && y >= locator.startLayer && y < locator.startLayer + locator.layers
+        ? locator
+        : null;
+    },
+    findLocatorsByDevice: (assetCode: string) => (ref.locator && ref.locator.deviceAssetCode === assetCode ? [ref.locator] : []),
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
     resolveFetchDriveRowForLocator: () => null,
@@ -910,14 +920,139 @@ test('声明 cargoPlatformNodes 的夹抱式堆垛机：叉上货物竖直锚定
       Math.abs(cargo.root.position.y - 0.525) < 1e-6,
       `伸叉期间货物竖直必须保持载货台面高度 0.525，实际 y=${cargo.root.position.y}`,
     );
-    // 继续伸满：夹抱式按叉尖对标（huocha.9 位于 0.1~0.5，货格中心 x=0，货箱半深 0.2，咬合 0.05）
-    // → 叉尖须越过货箱远侧面停在中心+半深+咬合，目标行程 −(0.2+0.05)−0.1=−0.35
-    h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 10);
+    // 继续伸满：主动相位到位即解绑并自动收叉，行程须跟踪过程最大值（收叉归零后最终值为 0）
+    let maxExtend = 0;
+    for (let i = 0; i < 40; i += 1) {
+      h.apply({ ...PLACE_FRAME, front_movement_z: 1 }, 0.1, 1);
+      maxExtend = Math.max(maxExtend, Math.abs(h.model.stackerTelemetry.frontForkOffset));
+    }
     assert.ok(
-      Math.abs(h.model.stackerTelemetry.frontForkOffset - (-0.35)) < 1e-6,
-      `夹抱式伸叉必须按叉尖对标停在 −0.35（叉尖覆盖货箱整个几何体，恰到远侧面+咬合），实际 ${h.model.stackerTelemetry.frontForkOffset}`,
+      Math.abs(maxExtend - 0.65) < 1e-6,
+      `夹抱式伸叉必须按叉尖对标停在 −0.65（叉尖到货格远端面+咬合），实际最大行程 ${maxExtend}`,
     );
   } finally {
     h.dispose();
   }
 });
+
+test('堆垛机关联巷道回退：本设备未绑定的货格按巷道编号匹配，未配置巷道仍拒绝命中', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    // 货格绑给别的设备（STK9），但巷道编号为 6
+    h.ref.locator = makeLocator(h.scene, {
+      columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11),
+      deviceAssetCode: 'STK9', aisleCode: '6',
+    });
+
+    // 负例：未配置关联巷道 → 设备绑定不匹配即失配，伸叉被禁、报错
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1 }, 0.1, 20);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '未配置巷道时货格不命中，货叉不得伸出');
+    assert.ok(h.logs.some((m) => m.includes('未匹配到任何已绑定货格')), '未配置巷道时必须报未匹配错误');
+
+    // 正例：配置关联巷道 6 → 同一货格按巷道命中，伸叉正常
+    (h.model as { telemetryBinding: unknown }).telemetryBinding = { aisleCode: '6' };
+    h.logs.length = 0;
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1 }, 0.1, 400);
+    assert.ok(Math.abs(h.model.stackerTelemetry.frontForkOffset) > 0.02, `巷道回退命中后货叉必须伸出，实际 ${h.model.stackerTelemetry.frontForkOffset}`);
+    assert.equal(h.logs.filter((m) => m.includes('未匹配到任何已绑定货格')).length, 0, '巷道回退命中后不得再报未匹配');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('堆垛机模型参数速度覆盖：parameterValues.forkSpeed 覆盖模型默认伸叉速度', () => {
+  const h = makeHarness();
+  try {
+    makeStackerGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 默认伸叉速度 0.25 m/s：0.1s × 5 帧 = 0.125m
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1 }, 0.1, 5);
+    const defaultOffset = Math.abs(h.model.stackerTelemetry.frontForkOffset);
+    assert.ok(Math.abs(defaultOffset - 0.125) < 1e-6, `默认伸叉速度 0.25m/s 五帧应走 0.125m，实际 ${defaultOffset}`);
+
+    // 模型参数覆盖 1.0 m/s：先收叉归零再伸，0.1s × 5 帧 = 0.5m
+    (h.model as { entitySnapshot: unknown }).entitySnapshot = {
+      components: { modelAsset: { parameterValues: { forkSpeed: 1.0 } } },
+    };
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 2 }, 0.1, 20);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '覆盖前先收叉归零');
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1 }, 0.1, 5);
+    const overrideOffset = Math.abs(h.model.stackerTelemetry.frontForkOffset);
+    assert.ok(Math.abs(overrideOffset - 0.5) < 1e-6, `forkSpeed=1.0 五帧应走 0.5m，实际 ${overrideOffset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+/** 夹抱式测试台：载货台 pidai.top + 二段叉偏置 0.3（验证正确的载货停位参照）。 */
+function setupClampStacker(h: ReturnType<typeof makeHarness>): void {
+  makeStackerGeometry(h);
+  const addBox = (name: string, height: number, centerY: number) => {
+    const mesh = MeshBuilder.CreateBox(name, { width: 0.4, height, depth: 0.4 }, h.scene);
+    mesh.parent = h.model.root;
+    mesh.position.set(0, centerY, 0);
+  };
+  addBox('pidai.top', 0.05, 0.5);
+  for (const forkName of ['huocha.9', 'huocha2.10']) {
+    const forkMesh = h.scene.getMeshByName(forkName);
+    if (forkMesh) forkMesh.position.x = 0.3;
+  }
+  h.model.root.computeWorldMatrix(true);
+  (h.model as { externalScriptRuntime: unknown }).externalScriptRuntime = {
+    getDataDrivenConfigs: () => [{ motion: { cargoPlatformNodes: ['pidai.top'] } }],
+  };
+}
+
+test('夹抱式主动取货：伸满绑定后自动收叉回零，command 不退出不重复伸叉', () => {
+  const h = makeHarness();
+  try {
+    setupClampStacker(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    h.apply(POSITION_FRAME, 0.1, 400);
+    const FETCH = { ...POSITION_FRAME, front_command: 1, front_movement_z: 1 };
+    let maxOffset = 0;
+    for (let i = 0; i < 400; i += 1) {
+      h.apply(FETCH, 0.1, 1);
+      maxOffset = Math.max(maxOffset, Math.abs(h.model.stackerTelemetry.frontForkOffset));
+    }
+    assert.ok(maxOffset > 0.02, `主动取货必须伸出到货箱全深，实际最大行程 ${maxOffset}`);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '伸满绑定后必须自动收叉回零（不等 movement_z=2/4）');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, true, '取货收叉后货物必须保持绑定在载货台');
+    assert.equal(h.model.stackerTelemetry.frontClampPhase, 'done', '收叉归零后进入 done，等待 command 相位退出');
+    const cargo = [...h.state.stackerCargoMeshes.values()][0];
+    assert.ok(Math.abs(cargo.root.position.x - 0.3) < 1e-6, `收叉后货物停在载货停位中心 x=0.3，实际 ${cargo.root.position.x}`);
+    // command=1 + movement=1 持续存在时不得再次伸出
+    h.apply(FETCH, 0.1, 50);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, 'done 相位内不得重复伸叉');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('夹抱式主动放货：伸满解绑落货后自动收叉，command 切换后允许下一轮', () => {
+  const h = makeHarness();
+  try {
+    setupClampStacker(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11), retainCargo: true });
+    h.apply(POSITION_FRAME, 0.1, 400);
+    const PLACE = { ...POSITION_FRAME, front_command: 3, front_movement_z: 1 };
+    h.apply(PLACE, 0.1, 400);
+    assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '主动放货伸满解绑后必须自动收叉回零');
+    assert.equal(h.model.stackerTelemetry.frontCargoBoundToFork, false, '放货后货物不得仍绑定货叉');
+    assert.equal(h.model.stackerTelemetry.frontCargoKey, null, '放货落位后本机货物键必须清除');
+    assert.equal(h.model.stackerTelemetry.frontClampPhase, 'done');
+    assert.equal(h.state.slotRetainedCargoMeshes.size, 1, '放货货物必须留存在目标格口');
+    // command 从放货切成取货：允许新一轮伸出（取回刚放下的同一货物）
+    const FETCH = { ...POSITION_FRAME, front_command: 1, front_movement_z: 1 };
+    let refetchMaxOffset = 0;
+    for (let i = 0; i < 60; i += 1) {
+      h.apply(FETCH, 0.1, 1);
+      refetchMaxOffset = Math.max(refetchMaxOffset, Math.abs(h.model.stackerTelemetry.frontForkOffset));
+    }
+    assert.ok(refetchMaxOffset > 0.02, 'command 切换后必须允许新一轮主动伸叉');
+  } finally {
+    h.dispose();
+  }
+});
+

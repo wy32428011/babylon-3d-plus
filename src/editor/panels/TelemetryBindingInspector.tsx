@@ -594,6 +594,15 @@ function LiftLayerBindingsEditor(props: {
       ) : null}
       {binding.deviceType === 'stacker' ? (
         <>
+          <label className="inspector-row">
+            <span>巷道编号</span>
+            <input
+              disabled={props.disabled}
+              value={binding.aisleCode ?? ''}
+              onChange={(event) => commit({ aisleCode: event.target.value || undefined })}
+            />
+          </label>
+          <p className="muted">关联巷道编号：找不到本设备（assetCode）绑定的货格时，回退匹配同一巷道编号的货格；留空时不回退。</p>
           <label className="number-row">
             <span>货物竖直间隙(m)</span>
             <input

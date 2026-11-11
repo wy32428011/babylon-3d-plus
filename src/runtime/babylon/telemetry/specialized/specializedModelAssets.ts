@@ -526,6 +526,8 @@ export function createStackerTelemetryState(root: TransformNode): StackerModelTe
     backCargoPendingPlatformLocatorId: null,
     frontLastCommand: null,
     backLastCommand: null,
+    frontClampPhase: 'idle',
+    backClampPhase: 'idle',
     frontSignalAction: null,
     backSignalAction: null,
     frontSignalExtended: false,

@@ -56,7 +56,7 @@ export type TelemetryBindingComponent = {
   incomingLayerBindings?: Record<string, string[]>;
   /** 提升机专用：送料层号(十进制正整数字符串) → 送料 conveyor 实体 ID 列表；reference_upper_step=2 时按 level_upper 选层；仅 deviceType === 'lift' 时有意义。 */
   outgoingLayerBindings?: Record<string, string[]>;
-  /** 小车提升机专用：绑定巷道编号——MQTT 目标层靠它匹配同巷道多穿库的换层站台；空串不参与巷道匹配；仅 deviceType === 'hclift' 时有意义。 */
+  /** 小车提升机/堆垛机专用：绑定巷道编号——hclift 靠它匹配同巷道多穿库的换层站台；stacker 找不到本设备绑定的货格时按相同巷道编号回退匹配；空串不参与巷道匹配。 */
   aisleCode?: string;
   /** 输送线专用：模型局部正向校准，同时供货物行走、编辑轨迹和表面箭头使用。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
