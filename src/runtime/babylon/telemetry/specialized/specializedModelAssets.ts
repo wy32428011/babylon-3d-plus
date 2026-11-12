@@ -480,6 +480,7 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     platformInboundCargo: false,
     platformInboundDirection: 1,
     platformPlacedCargo: false,
+    platformOutboundTaskPending: false,
   };
 }
 
@@ -509,6 +510,7 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.platformInboundCargo = false;
   model.conveyorTelemetry.platformInboundDirection = 1;
   model.conveyorTelemetry.platformPlacedCargo = false;
+  model.conveyorTelemetry.platformOutboundTaskPending = false;
 }
 
 /** 创建 stacker 遥测运行态，所有偏移都只保存在内存中。 */

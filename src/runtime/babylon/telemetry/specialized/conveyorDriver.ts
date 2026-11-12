@@ -367,6 +367,7 @@ export class ConveyorTelemetryDriver {
         state.handoffEntryOffset = null;
         state.entryHandoffPending = false;
         state.platformPlacedCargo = false;
+        state.platformOutboundTaskPending = false;
         if (heldTask) {
           this.notifyTaken(model, heldTask, null, movementDirection !== 0 ? movementDirection : this.resolveFlowDirection(model));
         }
@@ -398,7 +399,8 @@ export class ConveyorTelemetryDriver {
         // 复用宽限只针对「本机自己上报过该 task、且下游还有 conveyor 可接走」的在机货：提升机双货
         // 连续下料时先到的货刚落地、下游 task 边沿还没到，立即改号会把前一件货改姓丢失，接收方被占用
         // 还会把后一件货卡在提升机上。外部放入（lastTask 未上报）或末端无下游的滞留箱仍按即时复用处理；
-        // 上游已持新 task 货时也立即销毁让位。
+        // 上游已持新 task 货时也立即销毁让位。线首站台的首次出库任务始终复用外部放入的同一货物，
+        // 不走上述宽限或销毁分支，但旧 task 已有下游订阅时仍先交付旧货。
         const exitNeighbor = this.resolveProbeNeighbor(model, -flowDirection);
         // 提升机来料口的“下游”是 lift：同样要把在机货留到提升机取走，否则会丢掉前一件 task。
         const liftExit = exitNeighbor !== null && isLiftRuntimeModel(exitNeighbor);
@@ -412,10 +414,11 @@ export class ConveyorTelemetryDriver {
             ? CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS
             : CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
         const deferReuse = (
-          state.platformPlacedCargo
+          (state.platformPlacedCargo || state.platformOutboundTaskPending)
           && this.hasDownstreamSubscriberForTask(state, heldCargo.task)
         ) || (
-          !upstreamHoldsNewTask
+          !state.platformOutboundTaskPending
+          && !upstreamHoldsNewTask
           && canHandDownstream
           && heldCargo.task === state.pendingPreviousTask
           && heldCargo.task !== state.pendingTask
@@ -424,7 +427,7 @@ export class ConveyorTelemetryDriver {
         if (deferReuse) {
           // 宽限期或出口门控期间先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
           this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);
-        } else if (upstreamHoldsNewTask) {
+        } else if (upstreamHoldsNewTask && !state.platformOutboundTaskPending) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
           const oldTask = heldCargo.task;
           this.trace(`${model.assetCode} 上游已有新 task=${state.pendingTask} 货，销毁在机货 task=${oldTask} 并订阅`);
@@ -433,6 +436,7 @@ export class ConveyorTelemetryDriver {
           state.handoffEntryOffset = null;
           state.entryHandoffPending = false;
           state.platformPlacedCargo = false;
+          state.platformOutboundTaskPending = false;
           this.notifyTaken(model, oldTask, null, flowDirection);
           state.waitingTask = state.pendingTask;
           this.sendSubscribe(model, state.pendingTask, probeDirection);
@@ -441,6 +445,7 @@ export class ConveyorTelemetryDriver {
           const oldTask = heldCargo.task;
           this.trace(`${model.assetCode} 滞留箱复用 task ${oldTask || '-'} -> ${state.pendingTask}`);
           heldCargo.task = state.pendingTask;
+          state.platformOutboundTaskPending = false;
           // 复用后货物可驶离（含从站台出发），不再按上游来货钳制终点
           state.platformInboundCargo = false;
           const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
@@ -476,6 +481,7 @@ export class ConveyorTelemetryDriver {
           state.entryHandoffPending = false;
           state.platformInboundCargo = false;
           state.platformPlacedCargo = false;
+          state.platformOutboundTaskPending = false;
           state.cargoDriveEngaged = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
@@ -989,6 +995,7 @@ export class ConveyorTelemetryDriver {
     subscriberState.platformInboundCargo = this.resolvePlatformLocator(subscriber) !== null;
     subscriberState.platformInboundDirection = direction;
     subscriberState.platformPlacedCargo = false;
+    subscriberState.platformOutboundTaskPending = false;
     this.state.conveyorCargoMeshes.set(this.getConveyorCargoKey(subscriber.assetCode, CONVEYOR_CARGO_IDENTITY), cargo);
 
     this.sendUnsubscribe(subscriber, task, direction);
@@ -1298,6 +1305,7 @@ export class ConveyorTelemetryDriver {
         model.conveyorTelemetry.entryHandoffPending = false;
         model.conveyorTelemetry.platformInboundCargo = false;
         model.conveyorTelemetry.platformPlacedCargo = false;
+        model.conveyorTelemetry.platformOutboundTaskPending = false;
       }
     }
     this.state.conveyorCargoMeshes.delete(key);
@@ -1335,9 +1343,9 @@ export class ConveyorTelemetryDriver {
 
   /**
    * stacker 向本机站台放货完成：货物落座站台成为本机滞留货物（不销毁、不自动驶离），由本机继续维护；
-   * 本机正等待的 task 由匿名货或 task 一致的货物立即兑现；放入货物自带不同 task 时保留货物身份不盖号
-   * （启动晚错过旧 task 源事件的滞留等待不得劫走新货补位），退订清除等待且不预写 currentTask/lastTask，
-   * 本机上报该 task 时形成新 task 边沿走滞留箱复用驶离。
+   * 本机正等待的 task 由匿名货或 task 一致的货物立即兑现。线首站台已先收到下一出库 task、当前报文仍持有
+   * 该 task 且放入货物属于上一 task 时，也由该等待 task 兑现；其它异 task 货物保留身份，避免启动晚的
+   * 残留等待劫走新货。未兑现时退订清除等待且不预写 currentTask/lastTask，本机后续上报形成新 task 边沿。
    * 本机已有货或站台偏移不可解析时返回 false（调用方走原销毁路径）。
    */
   acceptPlatformPlacedCargo(
@@ -1360,17 +1368,23 @@ export class ConveyorTelemetryDriver {
     state.entryHandoffPending = false;
     state.platformInboundCargo = false;
     // 线首站台货须先完成本机走行，不能被已登记的下游订阅从站台直接接走。
-    state.platformPlacedCargo = this.resolveProbeNeighbor(model, this.resolveFlowDirection(model)) === null
-      && state.upstreamLinks.size === 0;
+    // 入口侧的 stacker/RGV 是本次外部放货设备，不属于输送线上游，不得因此取消线首站台门控。
+    const upstreamNeighbor = this.resolveProbeNeighbor(model, this.resolveFlowDirection(model));
+    const hasConveyorUpstream = upstreamNeighbor !== null && isConveyorRuntimeModel(upstreamNeighbor);
+    state.platformPlacedCargo = !hasConveyorUpstream && state.upstreamLinks.size === 0;
+    state.platformOutboundTaskPending = state.platformPlacedCargo;
     // 站台落座为滞留停泊：未驱动前不允许字段静默续行，等待 task 复用才驶离。
     state.cargoDriveEngaged = false;
-    // 等待中的 task 由放入货物兑现：仅限匿名货或 task 本就一致（线首站台未发订阅，退订为无害空操作）。
-    // 放入货物自带不同 task：启动晚错过旧 task 源事件的滞留等待不得劫走新货盖号补位（货物会被旧 task
-    // 订阅链直接接走，孪生永远慢一拍）；站台已被实物占用，退订清除等待，且不预写 currentTask/lastTask——
-    // 本机上报该 task 时仍形成新 task 边沿，走滞留箱复用驶离。
     if (state.waitingTask !== null) {
-      const claimedByWaitingTask = !cargo.task || cargo.task === state.waitingTask;
-      if (claimedByWaitingTask) cargo.task = state.waitingTask;
+      const claimedByWaitingTask = !cargo.task || cargo.task === state.waitingTask || (
+        state.platformOutboundTaskPending
+        && cargo.task === state.pendingPreviousTask
+        && state.snapshotTask === state.waitingTask
+      );
+      if (claimedByWaitingTask) {
+        cargo.task = state.waitingTask;
+        state.platformOutboundTaskPending = false;
+      }
       this.sendUnsubscribe(model, state.waitingTask, this.resolveFlowDirection(model));
       state.waitingTask = null;
       if (!claimedByWaitingTask) {

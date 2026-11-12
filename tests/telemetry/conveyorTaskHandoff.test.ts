@@ -1539,6 +1539,7 @@ test('线首站台：货物被取走或销货后清理出口门控', () => {
       h.apply('B', { task: 9, movement_x: 1 });
       const cargo = h.placePlatformCargo('A');
       assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, true);
+      assert.equal(h.models.A.conveyorTelemetry.platformOutboundTaskPending, false, '等待 task 已被放入货物兑现');
       if (action === 'pickup') {
         assert.equal(h.driver.adoptPlatformCargoForStacker(h.models.A, 'SH1'), cargo);
       } else {
@@ -1546,6 +1547,7 @@ test('线首站台：货物被取走或销货后清理出口门控', () => {
       }
       assert.equal(h.models.A.conveyorTelemetry.cargoCode, null);
       assert.equal(h.models.A.conveyorTelemetry.platformPlacedCargo, false);
+      assert.equal(h.models.A.conveyorTelemetry.platformOutboundTaskPending, false);
       assert.equal(h.state.conveyorCargoMeshes.size, 0);
     } finally {
       h.dispose();
@@ -1632,6 +1634,78 @@ test('线首站台：放入货物自带 task 与等待 task 不同时不盖号�
     const offset = h.models.A.conveyorTelemetry.cargoTravelOffset;
     assert.ok(Math.abs(offset - HALF_RANGE) < 1e-6,
       `本机 task 边沿后货物必须走向出口端（${HALF_RANGE}），实际 ${offset}`);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：外部旧 task 货收到首次出库 task 立即换号，无持续心跳仍交付同一货物', () => {
+  const h = makeHarness({
+    ST1: { centerX: -0.8, halfSpanX: 0.4, stacker: true },
+    A: { centerX: 0, halfSpanX: 0.4, platformOffset: 0 },
+    B: { centerX: 0.8, halfSpanX: 0.4 },
+  });
+  try {
+    const cargo = h.placePlatformCargo('A', '253447');
+    const cargoRoot = cargo.root;
+    const a = h.models.A.conveyorTelemetry;
+    assert.equal(a.probeNeighbors?.forward, 'ST1', '前置：入口探测到执行放货的 stacker');
+    assert.equal(a.platformPlacedCargo, true, 'stacker 是外部交接设备，不得取消线首站台出口门控');
+    assert.equal(a.platformOutboundTaskPending, true, '外部放入线首站台后必须等待首次出库 task');
+
+    // 诺力 4001 顺序：DDJ10 先放入 253447，4001 随后生成 253457；只收到一次新报文。
+    // 同时登记上游新 task 持货，验证站台实物不会走普通“销毁旧货等传递”分支。
+    a.upstreamLinks.set('UP', { task: '253457', holderAssetCode: 'UP', hops: 1, direction: 1 });
+    h.apply('A', { task: 253457, movement_x: 1 }, 0.1, 1, 1000);
+    assert.strictEqual(cargo.root, cargoRoot, '换号必须复用同一货物实例');
+    assert.equal(cargo.task, '253457', '首次出库 task 不得等待普通 3 秒复用宽限');
+    assert.equal(a.pendingTask, null);
+    assert.equal(a.platformOutboundTaskPending, false);
+    assert.equal(cargo.assetCode, 'A', '换号后仍须先完成本机走行');
+    assert.equal(a.platformPlacedCargo, true, '未到出口不得解除交付门控');
+
+    // 4002 在 4001 到出口前先订阅：当帧不得交付，但订阅必须保留。
+    h.apply('B', { task: 253457, movement_x: 1 }, 0.1, 1, 1100);
+    assert.equal(cargo.assetCode, 'A');
+    assert.ok(a.downstreamLinks.has('B'));
+
+    // 相同 receivedAt 表示没有新 MQTT 心跳；短线体在既有断流窗口内到达出口。
+    h.apply('A', { task: 253457, movement_x: 1 }, 0.1, 1, 1000);
+    assert.equal(a.platformPlacedCargo, false, '到出口后必须解除交付门控');
+    h.apply('A', { task: 253457, movement_x: 1 }, 0.1, 1, 1000);
+    assert.strictEqual(onlyCargo(h.state), cargo, '交接不得复制或替换货物');
+    assert.equal(cargo.assetCode, 'B', '下游必须接管已换号的同一货物');
+    assert.equal(a.cargoCode, null);
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('线首站台：下一出库 task 先到时，随后放入的上一 task 货物立即兑现且仍走到出口', () => {
+  const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 }, B: { centerX: 4 } });
+  try {
+    h.apply('A', { task: 253447, movement_x: 1 }, 0.1, 1, 1000);
+    h.apply('B', { task: 253457, movement_x: 1 }, 0.1, 1, 1100);
+    h.apply('A', { task: 253457, movement_x: 1 }, 0.1, 1, 1200);
+    const a = h.models.A.conveyorTelemetry;
+    assert.equal(a.waitingTask, '253457');
+    assert.equal(a.pendingPreviousTask, '253447');
+
+    const cargo = h.placePlatformCargo('A', '253447');
+    const cargoRoot = cargo.root;
+    assert.equal(cargo.task, '253457', '当前报文仍持有出库 task 时，上一 task 落货必须兑现新 task');
+    assert.equal(a.lastTask, '253457');
+    assert.equal(a.waitingTask, null);
+    assert.equal(a.pendingTask, null);
+    assert.equal(a.platformOutboundTaskPending, false);
+    assert.equal(cargo.assetCode, 'A');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, null, '下游预订阅不得在站台直接接走货物');
+
+    h.apply('A', { task: 253457, movement_x: 1 }, 0.1, 200, 1200);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.strictEqual(cargo.root, cargoRoot);
+    assert.equal(cargo.assetCode, 'B', '完成本机走行后才交付下游');
   } finally {
     h.dispose();
   }

@@ -398,6 +398,8 @@ export type ConveyorModelTelemetryState = {
   platformInboundDirection: number;
   /** 外部设备放入线首站台的货：到达本机流向出口前禁止下游订阅交付。 */
   platformPlacedCargo: boolean;
+  /** 线首站台货等待首次有效出库任务：到达后复用同一货物换号，不走普通在机货复用宽限。 */
+  platformOutboundTaskPending: boolean;
 };
 
 export type ConveyorCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
