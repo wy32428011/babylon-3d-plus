@@ -1682,6 +1682,44 @@ test('线首站台：外部旧 task 货收到首次出库 task 立即换号，�
   }
 });
 
+test('线首站台：本机 task=0 时由下游首次订阅换号，自驱到出口后交付同一货物', () => {
+  const h = makeHarness({
+    ST1: { centerX: -0.8, halfSpanX: 0.4, stacker: true },
+    A: { centerX: 0, halfSpanX: 0.4, platformOffset: 0 },
+    B: { centerX: 0.8, halfSpanX: 0.4 },
+  });
+  try {
+    const cargo = h.placePlatformCargo('A', '253454');
+    const cargoRoot = cargo.root;
+    const a = h.models.A.conveyorTelemetry;
+    h.apply('A', { task: 0, movement_x: 0, mode: 2 }, 0.1, 1, 1000);
+    assert.equal(a.snapshotTask, '', '前置：4001 当前报文 task=0');
+    assert.equal(a.platformOutboundTaskPending, true);
+
+    // 诺力第二次放货：4001 不再上报新 task，4002 直接请求 253465。
+    h.apply('B', { task: 253465, movement_x: 1 }, 0.1, 1, 1100);
+    assert.strictEqual(cargo.root, cargoRoot);
+    assert.equal(cargo.task, '253465', '下游首次订阅必须复用站台实物并换号');
+    assert.equal(cargo.assetCode, 'A', '换号当帧不得从站台隔空交付');
+    assert.equal(a.platformPlacedCargo, true);
+    assert.equal(a.platformOutboundTaskPending, false);
+    assert.equal(a.lastTask, '253465');
+    assert.equal(a.selfDriveDirection, 1, '本机 movement=0 时必须按订阅方向自驱到出口');
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, null);
+
+    // 4001 没有新的 MQTT 心跳，沿用 task=0 缓存快照自驱并交付。
+    h.apply('A', { task: 0, movement_x: 0, mode: 2 }, 0.1, 200, 1000);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.strictEqual(cargo.root, cargoRoot);
+    assert.equal(cargo.assetCode, 'B');
+    assert.equal(cargo.task, '253465');
+    assert.equal(a.cargoCode, null);
+    assert.equal(h.models.B.conveyorTelemetry.cargoCode, 'cargo');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('线首站台：下一出库 task 先到时，随后放入的上一 task 货物立即兑现且仍走到出口', () => {
   const h = makeHarness({ A: { centerX: 0, platformOffset: -1.5 }, B: { centerX: 4 } });
   try {

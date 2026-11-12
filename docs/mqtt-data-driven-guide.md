@@ -140,6 +140,14 @@ export const dataDriven = {
 };
 ```
 
+### 输送线货物任务交接
+
+- 非零 `task` 变化形成任务边沿；`task=0` 表示本机当前没有有效任务，本身不会创建新任务。
+- 外部设备向线首站台放货后，货物保留原任务并等待首次有效出库任务。本机收到新任务时立即复用同一货物换号，不走普通在机货的 3/10/30 秒复用宽限；入口探测到 stacker/RGV 等放货设备不算存在上游输送线。
+- 若本机最新报文为 `task=0`，本机仍持有上述站台货物且尚未取得首次出库任务，则下游 conveyor 的首次非零任务订阅可以作为出库任务：本机把同一运行时货物改为该任务，更新内存中的 `currentTask/lastTask`，并按订阅方向登记自驱。旧任务已有下游订阅时不得换号。
+- 两种首次出库路径都不解除 `platformPlacedCargo` 出口门控：货物必须完成本机走行并到达出口，才能交付下游；换号不创建第二份货物，也不从站台直接隔空交付。
+- 这些规则只处理 MQTT 数据在 Babylon 运行时中的只读可视化，不写入场景，不向 WCS/PLC 回写任务。若现场任务号来源异常，仍需单独检查 WCS 数据；运行时不能验证业务任务号本身是否正确。
+
 stacker 的 `dataDriven` 则声明 `motion.travel/lift/fork` 的节点、速度、行程与限位，详见 `Assets/Models/Stacker/stacker.model.ts`；rgv 另以顶层 `cargo.frontNodes/backNodes` 声明载货台面节点、`fixedNodes` 声明固定轨道。
 
 导入模型时，编辑器根据 `dataDriven.device.devType` 创建默认 `telemetryBinding`，并把 motion/cargo 原文透传到 `modelAsset.dataDrivenConfig.specializedMotion`/`cargo`，Inspector“数据驱动”区域以只读摘要分组展示。未声明专用 devType 的模型不显示“数据驱动”与“货箱生成器”区域。`deviceType` 真源是模型包 `dataDriven`，Inspector 只读展示；实体级可编辑字段仅有：

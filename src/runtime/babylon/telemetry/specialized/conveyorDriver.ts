@@ -714,6 +714,24 @@ export class ConveyorTelemetryDriver {
     const heldCargo = state.cargoCode !== null
       ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
       : null;
+    // 线首站台本机 task=0、尚未取得首次出库 task 时，下游首次订阅即作为该实物的出库任务。
+    // 仅复用同一货物并登记自驱，platformPlacedCargo 仍要求货物抵达本机出口后才可交付。
+    if (heldCargo && heldCargo.task !== msg.task
+      && state.platformOutboundTaskPending && state.snapshotTask === ''
+      && !this.hasDownstreamSubscriberForTask(state, heldCargo.task)) {
+      const oldTask = heldCargo.task;
+      this.trace(`${model.assetCode} <-subscribe ${msg.originAssetCode} task=${msg.task} 驱动站台货 ${oldTask || '-'} 换号并自驱`);
+      heldCargo.task = msg.task;
+      state.currentTask = msg.task;
+      state.lastTask = msg.task;
+      state.pendingTask = null;
+      state.waitingTask = null;
+      state.platformInboundCargo = false;
+      state.platformOutboundTaskPending = false;
+      state.selfDriveDirection = msg.direction;
+      if (oldTask) this.notifyTaken(model, oldTask, null, msg.direction);
+      this.notifyAvailable(model, msg.task, msg.direction);
+    }
     if (heldCargo && heldCargo.task === msg.task) {
       this.trace(`${model.assetCode} <-subscribe ${msg.originAssetCode} task=${msg.task} 持货命中立即交付 hops=${msg.hops}`);
       this.tryDeliverHeldCargo(model);
