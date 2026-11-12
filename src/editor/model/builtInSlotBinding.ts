@@ -23,6 +23,8 @@ export type BuiltInSlotBindingConfig = {
   columnSplitParam?: string;
   /** 排数的模型参数 key（可选）：一个宿主生成 N 个绑定货格，缺省为 1 排 */
   rowCountParam?: string;
+  /** 单侧货架参数 key（可选）：为 true 时把按双侧声明的 4/2 排折算为本侧 2/1 排 */
+  singleSideParam?: string;
 };
 
 /** 货格实体上的绑定标记；hostEntityId 指向声明了绑定的模型实体时视为内置绑定（parentId 不参与绑定身份，仍只用于文件夹分组）。 */
@@ -71,6 +73,7 @@ export function normalizeBuiltInSlotBindingConfig(source: unknown): BuiltInSlotB
 
   const columnSplitParam = typeof record.columnSplitParam === 'string' ? record.columnSplitParam.trim() : '';
   const rowCountParam = typeof record.rowCountParam === 'string' ? record.rowCountParam.trim() : '';
+  const singleSideParam = typeof record.singleSideParam === 'string' ? record.singleSideParam.trim() : '';
 
   return {
     enabledParam,
@@ -78,6 +81,7 @@ export function normalizeBuiltInSlotBindingConfig(source: unknown): BuiltInSlotB
     columnDirection: record.columnDirection === '-x' ? '-x' : '+x',
     ...(columnSplitParam ? { columnSplitParam } : {}),
     ...(rowCountParam ? { rowCountParam } : {}),
+    ...(singleSideParam ? { singleSideParam } : {}),
   };
 }
 
@@ -147,9 +151,21 @@ export function deriveColumnSplitFromBinding(
   return Math.max(MIN_COLUMN_SPLIT, Math.min(MAX_COLUMN_SPLIT, Math.round(value)));
 }
 
+/** 列拆分后的首格居中只使用货格净长度，不把立柱等架体厚度计入退让量。 */
+export function resolveBuiltInSlotFirstCellCenterX(
+  physicalFirstCellCenterX: number,
+  logicalCellLength: number,
+  columnSplit: number,
+  columnDirection: BuiltInSlotColumnDirection = '+x',
+): number {
+  const columnSign = columnDirection === '-x' ? -1 : 1;
+  return physicalFirstCellCenterX - columnSign * logicalCellLength * (columnSplit - 1) / 2;
+}
+
 /**
  * 读取声明的排数参数；未声明 rowCountParam 时返回 1（单个货格，现状不变）。
  * 声明后只认 4 排，其余取值（含空/非数）按 2 排兜底——排数参数只承载 2 / 4 两种语义。
+ * singleSideParam 为 true 时只保留本侧，双侧 4/2 排分别折算为 2/1 排。
  */
 export function deriveBuiltInSlotRowCountFromBinding(
   config: BuiltInSlotBindingConfig,
@@ -159,7 +175,8 @@ export function deriveBuiltInSlotRowCountFromBinding(
   if (!paramKey) return 1;
   const raw = parameterValues?.[paramKey];
   const value = typeof raw === 'number' ? raw : Number(raw);
-  return Number.isFinite(value) && Math.round(value) === 4 ? 4 : 2;
+  const rowCount = Number.isFinite(value) && Math.round(value) === 4 ? 4 : 2;
+  return config.singleSideParam && parameterValues?.[config.singleSideParam] === true ? rowCount / 2 : rowCount;
 }
 
 /** 按声明的维度映射从宿主模型参数值派生货格维度。 */

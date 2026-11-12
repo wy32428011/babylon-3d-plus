@@ -164,7 +164,7 @@ export function createBuiltInSlotEntityInScene(
  * 把宿主的内置货格对齐到声明的排数：未启用（或声明未启用）时删除全部货格，启用时多删少补（幂等）。
  * 已有排保留其实体身份与用户改动，只按 rowIndex 增删；末尾统一派生维度。
  */
-function reconcileBuiltInSlotEntitiesInScene(
+export function reconcileBuiltInSlotEntitiesInScene(
   scene: SceneDocument,
   hostEntityId: string,
   config: BuiltInSlotBindingConfig,

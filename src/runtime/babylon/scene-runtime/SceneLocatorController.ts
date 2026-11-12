@@ -10,7 +10,7 @@ import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { Entity } from '../../../editor/model/Entity';
 import type { LocatorComponent, LocatorStorageDepth } from '../../../editor/model/components';
-import { deriveColumnSplitFromBinding } from '../../../editor/model/builtInSlotBinding';
+import { deriveColumnSplitFromBinding, resolveBuiltInSlotFirstCellCenterX } from '../../../editor/model/builtInSlotBinding';
 import { type SceneDocument } from '../../../editor/model/SceneDocument';
 import { LocatorFetchRuntime } from '../LocatorFetchRuntime';
 import { resolveLocatorBoxIndex, resolveLocatorCellLocalBounds, resolveLocatorCellLocalIndex, resolveLocatorCellSupportWorldPosition } from '../telemetry/stackerStorageLocation';
@@ -490,9 +490,13 @@ export class SceneLocatorController {
             : { x: offset.x, y: offset.y, z: offset.z })
         : layout
         ? {
-            // 逻辑首格中心 = 物理首格中心沿列向退让 (物理格宽−逻辑格宽)/2；
-            // 退让方向由 columnDirection 决定（'-x' 时改向 +x 退），故符号只作用在退让量上。
-            x: layout.firstCellCenterX - columnSign * layout.columnSpacing * (columnSplit - 1) / (2 * columnSplit) + offset.x,
+            // 首格居中只按货格净长度退让；列步距可能包含架体厚度，不能当作物理格宽。
+            x: resolveBuiltInSlotFirstCellCenterX(
+              layout.firstCellCenterX,
+              locator.length,
+              columnSplit,
+              hostBindingConfig?.columnDirection,
+            ) + offset.x,
             y: layout.firstLayerSurfaceY + offset.y,
             z: (rowLayout?.depthCenterZ ?? layout.depthCenterZ) + offset.z,
           }

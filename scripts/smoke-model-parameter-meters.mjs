@@ -137,6 +137,21 @@ const MODEL_SPECS = [
     customValues: { carLength: 3, carWidth: 1.3, trackLength: 10, trackHeight: 0.2 },
   },
   {
+    name: 'MultiwearingWarehouse',
+    assetName: 'Model-2080113070531387394-多穿货架',
+    script: 'multiwearing-warehouse.model.ts',
+    lengthUnit: 'meter',
+    linearKeys: ['slotLength', 'slotWidth', 'slotHeight'],
+    customValues: {
+      slotCountLength: 3,
+      slotCountHeight: 2,
+      slotLength: 2.4,
+      slotWidth: 1.2,
+      slotHeight: 1.4,
+      hideOppositeShelf: true,
+    },
+  },
+  {
     name: 'Shelf',
     script: 'shelf.model.ts',
     lengthUnit: 'millimeter',
@@ -553,6 +568,38 @@ function assertMetadataContract(spec, metadata) {
   }
 }
 
+/** 多穿货架的虚拟列步距必须与计入竖向架体厚度的实物副本步距一致。 */
+function assertMultiwearingColumnLayout(spec, contentRoot, values) {
+  if (spec.name !== 'MultiwearingWarehouse') return;
+  const layout = contentRoot.metadata?.builtInSlotLayout;
+  assert.ok(layout, '多穿货架必须输出内置货格布局');
+  assert.ok(
+    layout.columnSpacing > values.slotLength + 1e-6,
+    '多穿货架列步距必须包含竖向架体厚度',
+  );
+
+  const marker = contentRoot.getChildMeshes(false)
+    .find((mesh) => mesh.name === '多穿库货架_框架_标记001');
+  assert.ok(marker, '多穿货架缺少长度方向标记001');
+  const matrixData = marker._thinInstanceDataStorage?.matrixData;
+  assert.ok(matrixData, '多穿货架标记001 缺少实物副本矩阵');
+  const columnXs = [];
+  for (let index = 0; index < marker.thinInstanceCount; index += 1) {
+    const x = matrixData[index * 16 + 12];
+    if (!columnXs.some((item) => Math.abs(item - x) < 1e-5)) columnXs.push(x);
+  }
+  columnXs.sort((a, b) => a - b);
+  assert.equal(columnXs.length, values.slotCountLength, '标记001 的实物列数必须与参数一致');
+  for (let index = 1; index < columnXs.length; index += 1) {
+    assertClose(
+      columnXs[index] - columnXs[index - 1],
+      layout.columnSpacing,
+      `多穿货架第 ${index + 1} 列实物步距必须与虚拟货格一致`,
+      1e-5,
+    );
+  }
+}
+
 /** 创建并运行一个模型参数化场景，返回默认、自定义及重复自定义尺寸。 */
 async function runModelScenario({
   spec,
@@ -622,6 +669,7 @@ async function runModelScenario({
     const defaultMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
 
     updateRuntimeValues(runtime, contentRoot, metadata, customValues, assetCode);
+    assertMultiwearingColumnLayout(spec, contentRoot, customValues);
     const customSizeFirst = measureModelSizeMeters(root, contentRoot);
     const customWorldBounds = verifyFocusRegression ? measureModelWorldBounds(contentRoot) : null;
     const customMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
@@ -856,11 +904,12 @@ async function assertAssetIndexContract() {
       .map((asset) => [path.basename(asset.packagePath), asset]),
   );
   for (const spec of ACTIVE_MODEL_SPECS) {
-    const asset = modelEntries.get(spec.name);
-    assert.ok(asset, `资产索引缺少 ${spec.name}`);
-    assert.equal(asset.lengthUnit, spec.lengthUnit, `资产索引 ${spec.name}.lengthUnit 未刷新`);
-    assert.equal(asset.unitScaleToMeters, getUnitScaleToMeters(spec.lengthUnit), `资产索引 ${spec.name}.unitScaleToMeters 未刷新`);
-    assert.ok(typeof asset.assetRevision === 'string' && asset.assetRevision.length > 0, `资产索引 ${spec.name} 缺少 assetRevision`);
+    const assetName = spec.assetName ?? spec.name;
+    const asset = modelEntries.get(assetName);
+    assert.ok(asset, `资产索引缺少 ${assetName}`);
+    assert.equal(asset.lengthUnit, spec.lengthUnit, `资产索引 ${assetName}.lengthUnit 未刷新`);
+    assert.equal(asset.unitScaleToMeters, getUnitScaleToMeters(spec.lengthUnit), `资产索引 ${assetName}.unitScaleToMeters 未刷新`);
+    assert.ok(typeof asset.assetRevision === 'string' && asset.assetRevision.length > 0, `资产索引 ${assetName} 缺少 assetRevision`);
   }
 }
 
@@ -884,7 +933,7 @@ try {
   const summaries = [];
   for (const spec of ACTIVE_MODEL_SPECS) {
     const sourcePackage = path.join(MODEL_ROOT, spec.name);
-    const copiedPackage = path.join(ASSET_MODEL_ROOT, spec.name);
+    const copiedPackage = path.join(ASSET_MODEL_ROOT, spec.assetName ?? spec.name);
     const metadataPath = path.join(sourcePackage, 'meta.json');
     const copiedMetadataPath = path.join(copiedPackage, 'meta.json');
     const scriptPath = path.join(sourcePackage, spec.script);

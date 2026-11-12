@@ -196,24 +196,33 @@ test('deriveBuiltInSlotRowCountFromBinding：未声明为 1 排，声明后只�
   assert.equal(deriveBuiltInSlotRowCountFromBinding(withRows, { builtInSlotRows: 'oops' }), 2);
   assert.equal(deriveBuiltInSlotRowCountFromBinding(withRows, { builtInSlotRows: 3 }), 2);
   assert.equal(deriveBuiltInSlotRowCountFromBinding(withRows, undefined), 2);
+
+  const singleSide: BuiltInSlotBindingConfig = { ...withRows, singleSideParam: 'hideOppositeShelf' };
+  assert.equal(deriveBuiltInSlotRowCountFromBinding(singleSide, { builtInSlotRows: '4', hideOppositeShelf: true }), 2);
+  assert.equal(deriveBuiltInSlotRowCountFromBinding(singleSide, { builtInSlotRows: '2', hideOppositeShelf: true }), 1);
+  assert.equal(deriveBuiltInSlotRowCountFromBinding(singleSide, { builtInSlotRows: '4', hideOppositeShelf: false }), 4);
+  assert.equal(deriveBuiltInSlotRowCountFromBinding(singleSide, { builtInSlotRows: '4' }), 4);
 });
 
-test('normalizeBuiltInSlotBindingConfig 解析 rowCountParam，缺省不写入字段', () => {
+test('normalizeBuiltInSlotBindingConfig 解析 rowCountParam 与 singleSideParam，缺省不写入字段', () => {
   const declared = normalizeBuiltInSlotBindingConfig({
     enabledParam: 'enableBuiltInSlots',
     dimensionMapping: { columns: 'columnCount' },
     columnDirection: '-x',
     rowCountParam: ' builtInSlotRows ',
+    singleSideParam: ' hideOppositeShelf ',
   });
   assert.deepEqual(declared, {
     enabledParam: 'enableBuiltInSlots',
     dimensionMapping: { columns: 'columnCount' },
     columnDirection: '-x',
     rowCountParam: 'builtInSlotRows',
+    singleSideParam: 'hideOppositeShelf',
   });
 
   const bare = normalizeBuiltInSlotBindingConfig({ enabledParam: 'enableBuiltInSlots' });
   assert.equal(bare && 'rowCountParam' in bare, false);
+  assert.equal(bare && 'singleSideParam' in bare, false);
   assert.equal(normalizeBuiltInSlotBindingConfig({ enabledParam: '  ' }), undefined);
 });
 

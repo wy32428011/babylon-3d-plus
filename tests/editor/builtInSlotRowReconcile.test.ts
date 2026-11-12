@@ -9,7 +9,12 @@ import { pathToFileURL } from 'node:url';
 // 预编译同一模块图，避免 Vite SSR 按需传输在大型 Store 依赖图中超时。
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'builtin-slot-rows-ssr-'));
 after(() => rm(temporary, { recursive: true, force: true }));
-const entries = ['src/editor/store/editorStore.ts', 'src/editor/model/SceneDocument.ts'];
+const entries = [
+  'src/editor/store/editorStore.ts',
+  'src/editor/model/SceneDocument.ts',
+  'src/editor/store/slices/sceneHierarchyOperations.ts',
+  'src/editor/model/builtInSlotBinding.ts',
+];
 const entryFile = path.join(temporary, 'input.ts');
 await writeFile(entryFile, entries.map((entry, index) =>
   `export * as module${index} from ${JSON.stringify(path.resolve(entry).replace(/\\/g, '/'))};`).join('\n'));
@@ -21,12 +26,14 @@ await build({ configFile: false, logLevel: 'error', ssr: { noExternal: true },
 });
 (globalThis as any).window ??= {};
 const loaded = await import(pathToFileURL(path.join(temporary, 'out/entry.mjs')).href);
-const { reconcileBuiltInSlotEntitiesInScene } = loaded.module0 as typeof import('../../src/editor/store/editorStore');
+const { reconcileBuiltInSlotEntitiesInScene } = loaded.module2 as typeof import('../../src/editor/store/slices/sceneHierarchyOperations');
+const { resolveBuiltInSlotFirstCellCenterX } = loaded.module3 as typeof import('../../src/editor/model/builtInSlotBinding');
 const { createEmptySceneDocument, createFolderEntity, createModelEntity } = loaded.module1 as typeof import('../../src/editor/model/SceneDocument');
 
 const CONFIG = {
   enabledParam: 'enableBuiltInSlots',
   rowCountParam: 'builtInSlotRows',
+  singleSideParam: 'hideOppositeShelf',
   dimensionMapping: { columns: 'columnCount', layers: 'layerCount' },
   columnDirection: '-x' as const,
 };
@@ -137,6 +144,39 @@ test('关闭开关删除全部货格，重复对账幂等', () => {
   assert.equal(run(disabled, host.id), disabled);
 });
 
+test('隐藏对侧货架与启用内置货格按最终参数对账，操作顺序不影响单侧结果', () => {
+  const { scene, host } = fixture();
+  const hiddenFirst = run(setParameters(scene, host.id, {
+    enableBuiltInSlots: false, builtInSlotRows: '4', hideOppositeShelf: true,
+  }), host.id);
+  assert.deepEqual(slotsOf(hiddenFirst, host.id), [], '先隐藏但未启用时不得创建货格');
+
+  const singleSideFour = run(setParameters(hiddenFirst, host.id, {
+    enableBuiltInSlots: true, builtInSlotRows: '4', hideOppositeShelf: true,
+  }), host.id);
+  const singleSideFourSlots = slotsOf(singleSideFour, host.id);
+  assert.deepEqual(singleSideFourSlots.map((slot) => slot.components.locator?.builtInBinding?.rowIndex), [0, 1]);
+  assert.deepEqual(singleSideFourSlots.map((slot) => slot.components.locator?.rowNumber), [1, 2]);
+
+  const visibleFour = run(setParameters(singleSideFour, host.id, {
+    enableBuiltInSlots: true, builtInSlotRows: '4', hideOppositeShelf: false,
+  }), host.id);
+  const visibleFourSlots = slotsOf(visibleFour, host.id);
+  assert.deepEqual(visibleFourSlots.map((slot) => slot.components.locator?.builtInBinding?.rowIndex), [0, 1, 2, 3]);
+  assert.deepEqual(visibleFourSlots.slice(0, 2).map((slot) => slot.id), singleSideFourSlots.map((slot) => slot.id),
+    '恢复双侧时保留本侧实体身份，只补对侧排');
+
+  const singleSideTwo = run(setParameters(visibleFour, host.id, {
+    enableBuiltInSlots: true, builtInSlotRows: '2', hideOppositeShelf: true,
+  }), host.id);
+  assert.deepEqual(slotsOf(singleSideTwo, host.id).map((slot) => slot.components.locator?.builtInBinding?.rowIndex), [0]);
+
+  const visibleTwo = run(setParameters(singleSideTwo, host.id, {
+    enableBuiltInSlots: true, builtInSlotRows: '2', hideOppositeShelf: false,
+  }), host.id);
+  assert.deepEqual(slotsOf(visibleTwo, host.id).map((slot) => slot.components.locator?.builtInBinding?.rowIndex), [0, 1]);
+});
+
 test('未声明排数参数时保持单排行为', () => {
   const { scene, host } = fixture();
   const singleRowConfig = { enabledParam: 'enableBuiltInSlots', dimensionMapping: { columns: 'columnCount' } };
@@ -150,4 +190,10 @@ test('未声明排数参数时保持单排行为', () => {
   assert.equal(slots.length, 1);
   assert.equal(slots[0].components.locator?.builtInBinding?.rowIndex, 0);
   assert.equal(slots[0].components.locator?.rowNumber, 1);
+});
+
+test('列拆分首格居中按净货格长度退让，不包含架体厚度', () => {
+  assert.equal(resolveBuiltInSlotFirstCellCenterX(10, 2, 1), 10);
+  assert.ok(Math.abs(resolveBuiltInSlotFirstCellCenterX(10, 0.6, 4) - 9.1) < 1e-12);
+  assert.ok(Math.abs(resolveBuiltInSlotFirstCellCenterX(10, 0.6, 4, '-x') - 10.9) < 1e-12);
 });

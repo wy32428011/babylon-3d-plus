@@ -52,10 +52,14 @@ export const builtInSlotBinding = {
   columnDirection: '+x',
   /** 列向分裂比例参数 key（可选）：1 个实物货格分裂为 N 个逻辑列，逻辑列数 = columns × N、逻辑格宽 = length / N；to_x 按连续逻辑列号 */
   columnSplitParam: 'slotColumnRatio',
+  /** 单侧货架参数 key（可选）：为 true 时双侧 4/2 排只创建本侧 2/1 排 */
+  singleSideParam: 'hideOppositeShelf',
 };
 ```
 
-`columnSplitParam` 为后加的可选字段（缺省 = 1，行为不变）：派生层 `deriveLocatorDimensionsFromBinding` 对 columns 乘 N、length 除 N；运行时 `syncLocatorEntity` 把 `columnSpacing / N` 作为列步距、首格中心左移 `(N-1)/(2N) × columnSpacing`。`builtInSlotLayout` metadata 仍写**物理**布局，比例换算全部在绑定层。
+`columnSplitParam` 为后加的可选字段（缺省 = 1，行为不变）：派生层 `deriveLocatorDimensionsFromBinding` 对 columns 乘 N、length 除 N；运行时 `syncLocatorEntity` 把 `columnSpacing / N` 作为列步距，首格中心按 `(N-1)/2 × 逻辑货格长度` 退让。列步距可能包含架体厚度，不能代替货格净长度参与首格居中。`builtInSlotLayout` metadata 仍写**物理**布局，比例换算全部在绑定层。
+
+`singleSideParam` 为可选字段，缺省不改变既有货架。启用开关仍是总开关；每次参数提交都先写入完整参数快照，再按启用状态与单侧参数对账货格，因此先隐藏再启用、先启用再隐藏得到相同结果。恢复双侧时保留本侧实体身份，只补建对侧排。多穿货架脚本输出的 `builtInSlotLayout.rows` 也按同一参数省略对侧布局，实体数量与运行时排索引保持一致。
 
 ### 运行时布局输出约定
 
@@ -73,6 +77,8 @@ this.node.metadata = { ...(this.node.metadata ?? {}), builtInSlotLayout: {
 ```
 
 列/层步距必须用货架实测值（spacing、layerStepY），不能用货格 length+columnGap——否则远端列/层累积错位。绑定期间 Locator 的 columnGap/layerGap 失效。
+
+多穿货架的物理列步距为 `slotLength + 标记001 X 向厚度`，与层步距 `slotHeight + 008 Y 向高度` 一样包含架体厚度。实物长度副本与 `builtInSlotLayout.columnSpacing` 共用该值；列步距必须在长度副本落盘前测量，避免把标记件的整列包围盒误当成单根竖向架体厚度。货格自身长度仍为 `slotLength`，首列中心不变。
 
 ## 关键代码事实（已核实）
 
