@@ -1079,7 +1079,7 @@ function updateTelemetryBinding(
   telemetryBinding: TelemetryBindingComponent | null,
 ): SceneDocument {
   const entity = scene.entities[entityId];
-  if (!entity?.components.modelAsset) return scene;
+  if (!entity?.components.modelAsset && !entity.components.devicePartBinding) return scene;
   const components = { ...entity.components };
   if (telemetryBinding) components.telemetryBinding = telemetryBinding;
   else delete components.telemetryBinding;

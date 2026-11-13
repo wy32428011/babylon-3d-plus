@@ -9,6 +9,7 @@ const [
   { deserializeScene, serializeScene },
   { deleteEntitiesInScene },
   { applySceneModelUpdates },
+  { updateTelemetryBindingCommand },
 ] = (await importIsolatedTypeScriptModules([
   'src/editor/model/SceneDocument.ts',
   'src/editor/model/telemetryBinding.ts',
@@ -16,6 +17,7 @@ const [
   'src/editor/project/SceneSerializer.ts',
   'src/editor/store/slices/sceneHierarchyOperations.ts',
   'src/editor/assets/applySceneModelUpdates.ts',
+  'src/editor/commands/entityCommands.ts',
 ])) as [
   typeof import('../../src/editor/model/SceneDocument'),
   typeof import('../../src/editor/model/telemetryBinding'),
@@ -23,6 +25,7 @@ const [
   typeof import('../../src/editor/project/SceneSerializer'),
   typeof import('../../src/editor/store/slices/sceneHierarchyOperations'),
   typeof import('../../src/editor/assets/applySceneModelUpdates'),
+  typeof import('../../src/editor/commands/entityCommands'),
 ];
 
 const subDevices = [
@@ -111,15 +114,20 @@ test('历史场景幂等升级：保留宿主，第二设备号留空且原输�
   assert.equal(again.scene, upgraded.scene);
 });
 
-test('手填第二设备号后保存重开保留绑定，反序列化不重复创建', () => {
+test('逻辑子设备可通过数据驱动命令填写第二设备号，支持撤销并保存重开', () => {
   const { scene } = createCompositeScene();
   const upgraded = reconcileCompositeDevices(scene).scene;
   const part = Object.values(upgraded.entities).find(
     (entity) => entity.components.devicePartBinding,
   )!;
-  part.components.telemetryBinding!.assetCode = '4018';
+  const before = part.components.telemetryBinding!;
+  const command = updateTelemetryBindingCommand(part.id, before, { ...before, assetCode: '4018' });
+  const updated = command.execute(upgraded);
 
-  const reopened = deserializeScene(serializeScene(upgraded));
+  assert.equal(updated.entities[part.id].components.telemetryBinding?.assetCode, '4018');
+  assert.equal(command.undo(updated).entities[part.id].components.telemetryBinding?.assetCode, undefined);
+
+  const reopened = deserializeScene(serializeScene(updated));
   const parts = Object.values(reopened.entities).filter(
     (entity) => entity.components.devicePartBinding,
   );

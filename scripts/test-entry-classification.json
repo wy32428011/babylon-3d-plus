@@ -7634,7 +7634,7 @@
     },
     {
       "file": "tests/editor/compositeDeviceBinding.test.ts",
-      "sha256": "fb7900a1e9f891388553879853503a48ae7a4bc9d5fd0333c49768af91fab9e1",
+      "sha256": "ff2726d1d3786ca368d98cdee1b138c2fe6aa22c01411e31cf1a4e40c42e6d27",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-strip-types --test tests/editor/compositeDeviceBinding.test.ts",
