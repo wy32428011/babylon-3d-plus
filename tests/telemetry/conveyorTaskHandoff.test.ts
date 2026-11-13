@@ -2067,3 +2067,54 @@ test('逻辑移栽单轴：home 禁止交付，raised 按 task 定向，lowering
     h.dispose();
   }
 });
+
+
+test('复合设备任务互换：主设备旧任务货先交给移栽新任务，再由主设备同任务接回', () => {
+  const h = makeHarness({
+    '4004': { centerX: 0, centerZ: -3 },
+    '4005': { centerX: 0, cross: true, composite: true },
+    '4020': { centerX: 0, partOf: '4005' },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4005', '255492');
+    h.syncTopology();
+    h.apply('4005', { task: 255492, movement_x: 0 });
+
+    h.apply('4020', { task: 255497, movement_x: 0, movement_y: 1 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4020', '移栽报新任务时应接管主设备的上一任务货物');
+    assert.equal(cargo.task, '255497');
+    assert.equal(h.models['4005'].conveyorTelemetry.lastTask, '255492', '内部改号不得提前消费主设备的新任务边沿');
+
+    h.apply('4020', { task: 255497, movement_x: 0, movement_y: 0 });
+    h.apply('4005', { task: 255497, movement_x: 0, signalBits: 1 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4005', '主设备随后报同一新任务时应从低位移栽接回');
+    assert.equal(cargo.task, '255497');
+    assert.equal(h.models['4020'].conveyorTelemetry.cargoCode, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合设备任务反向互换：主设备新任务等待移栽旧任务货下降后交回', () => {
+  const h = makeHarness({
+    MAIN: { centerX: 0, cross: true, composite: true },
+    TRANSFER: { centerX: 0, partOf: 'MAIN' },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('TRANSFER', '80');
+    h.apply('TRANSFER', { task: 80, movement_x: 0, movement_y: 1 });
+    h.apply('MAIN', { task: 81, movement_x: 0 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, 'TRANSFER', '移栽尚未下降时继续保持货物');
+    assert.equal(cargo.task, '81', '内部主转次同样允许按新任务改号');
+
+    h.apply('TRANSFER', { task: 81, movement_x: 0, movement_y: 0 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, 'MAIN', '移栽回到低位后应交回主设备');
+    assert.equal(cargo.task, '81');
+  } finally {
+    h.dispose();
+  }
+});

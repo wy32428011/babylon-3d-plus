@@ -792,6 +792,9 @@ export class ConveyorTelemetryDriver {
     const heldCargo = state.cargoCode !== null
       ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
       : null;
+    const internalTaskHandoff = heldCargo !== null && heldCargo.task !== msg.task
+      && this.resolveInternalDeviceParts(model).some((part) => part.assetCode === msg.originAssetCode)
+      && !this.hasDownstreamSubscriberForTask(state, heldCargo.task);
     // 线首站台本机 task=0、尚未取得首次出库 task 时，下游首次订阅即作为该实物的出库任务。
     // 仅复用同一货物并登记自驱，platformPlacedCargo 仍要求货物抵达本机出口后才可交付。
     if (heldCargo && heldCargo.task !== msg.task
@@ -809,6 +812,12 @@ export class ConveyorTelemetryDriver {
       state.selfDriveDirection = msg.direction;
       if (oldTask) this.notifyTaken(model, oldTask, null, msg.direction);
       this.notifyAvailable(model, msg.task, msg.direction);
+    } else if (heldCargo && internalTaskHandoff) {
+      // 复合设备内部允许主次任务互换：只改货物任务，不提前改持货方 lastTask，
+      // 持货方随后上报该新任务时仍需形成边沿并等待实物交回。
+      const oldTask = heldCargo.task;
+      heldCargo.task = msg.task;
+      if (oldTask) this.notifyTaken(model, oldTask, null, msg.direction);
     }
     if (heldCargo && heldCargo.task === msg.task) {
       this.trace(`${model.assetCode} <-subscribe ${msg.originAssetCode} task=${msg.task} 持货命中立即交付 hops=${msg.hops}`);
@@ -946,11 +955,18 @@ export class ConveyorTelemetryDriver {
   }
 
   /** task 定向移栽必须先升起并到达目标端口；下降保持路线，到点后仍允许交付。 */
-  private isCargoReadyForDelivery(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry): boolean {
+  private isCargoReadyForDelivery(
+    model: ModelRuntimeEntry,
+    cargo: GeneratedCargoRuntimeEntry,
+    subscriber: ModelRuntimeEntry,
+  ): boolean {
     const config = readConveyorCargoTravelConfig(model);
+    const state = model.conveyorTelemetry;
+    const internalDelivery = this.resolveInternalDeviceParts(model).some((part) => part === subscriber);
+    // 移栽交回本机主输送是下降落货，不要求外部端口；主输送交给内部移栽保持原直接交接。
+    if (internalDelivery) return !config.lift || state.liftPhase === 'home';
     if (config.directionSource !== 'task') return true;
     if (!cargo.task) return false;
-    const state = model.conveyorTelemetry;
     const route = this.resolveTaskRoute(model, cargo.task);
     if (!route || config.lift && state.liftPhase === 'home') return false;
     const plan = this.resolveConveyorTravelPlan(model);
@@ -964,11 +980,12 @@ export class ConveyorTelemetryDriver {
     const state = model.conveyorTelemetry;
     if (state.cargoCode === null) return;
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
-    if (!cargo || !cargo.task || state.platformPlacedCargo || !this.isCargoReadyForDelivery(model, cargo)) return;
+    if (!cargo || !cargo.task || state.platformPlacedCargo) return;
     const target = this.findDeliveryTarget(model, cargo);
-    if (!target) return;
+    if (!target || !this.isCargoReadyForDelivery(model, cargo, target.subscriber)) return;
     const detached = this.context.detachClaimedCargoByReference(cargo);
     if (!detached) return;
+    if (state.pendingTask === cargo.task) state.pendingTask = null;
     this.runCargoDeliveryRelay(model, model.assetCode, detached, model, target);
   }
 
@@ -1026,8 +1043,9 @@ export class ConveyorTelemetryDriver {
       const task = target.link.task;
       const direction = target.link.direction;
       this.settleCargoTransfer(cargo, target.subscriber, task, target.link.hops, direction, false, holder);
-      const next = this.isCargoReadyForDelivery(target.subscriber, cargo)
-        ? this.findDeliveryTarget(target.subscriber, cargo)
+      const nextTarget = this.findDeliveryTarget(target.subscriber, cargo);
+      const next = nextTarget && this.isCargoReadyForDelivery(target.subscriber, cargo, nextTarget.subscriber)
+        ? nextTarget
         : null;
       if (!next) {
         // 接力终点：唯一一次 taken + available
