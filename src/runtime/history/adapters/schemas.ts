@@ -4,6 +4,10 @@ import { DEVICE_TYPES } from '../state/types';
 
 const ref = (key: string): JsonSchema => ({ $ref: '#/$defs/' + key });
 const obj = (properties: Record<string, JsonSchema>): JsonSchema => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
+const withOptional = (schema: JsonSchema, keys: string[]): JsonSchema => ({
+  ...schema,
+  required: (schema.required as string[]).filter(key => !keys.includes(key)),
+});
 const arr = (items: JsonSchema): JsonSchema => ({ type: 'array', items });
 const maybe = (schema: JsonSchema): JsonSchema => ({ oneOf: [{ type: 'null' }, schema] });
 const text: JsonSchema = { type: 'string' }, id: JsonSchema = { type: 'string', minLength: 1, maxLength: 2048 };
@@ -28,16 +32,20 @@ const rgvStation = obj({ cargoId: maybe(id), onBoard: bool, holdPosition: nullab
 const liftStation = obj({ cargoId: maybe(id), onBoard: bool, holdPosition: nullableVec, holdRotation: maybe(quat), transferProgress: number,
   transferDirection: { type: 'number', enum: [1, -1] }, transferActive: bool, anchorPosition: nullableVec,
   taskAnnotationSeen: bool, reachedOutgoing: bool, outgoingDeviceId: maybe(id) });
-const downstream: Record<string, JsonSchema> = { subscriberId: id, task: id, hops: { type: 'integer', minimum: 0 }, direction: number };
+const downstream: Record<string, JsonSchema> = { subscriberId: id, task: id, hops: { type: 'integer', minimum: 0 }, direction: number, nextHopDeviceId: id };
+const downstreamSchema = withOptional(obj(downstream), ['nextHopDeviceId']);
 const states = [
   obj({ ...common, kind: literal('stacker'), rootPosition: nullableVec, liftOffset: number, forkCatchUp: bool,
     lastFrontCellKey: nullableText, lastFrontCellChangedAt: maybe(time), frontCellChangeIntervalMs: maybe(time), front: stackerFork, back: stackerFork }),
-  obj({ ...common, kind: literal('conveyor'), cargoId: maybe(id), currentTask: nullableText, pendingTask: nullableText, lastTask: nullableText,
+  withOptional(obj({ ...common, kind: literal('conveyor'), cargoId: maybe(id), currentTask: nullableText, pendingTask: nullableText, lastTask: nullableText,
     waitingTask: nullableText, snapshotTask: nullableText, pendingTaskAgeSeconds: number, pendingPreviousTask: nullableText,
     taskPulseQueue: arr(id), upstreamLinks: arr(obj({ deviceId: id, task: id, holderDeviceId: id, hops: { type: 'integer', minimum: 0 }, direction: number })),
-    downstreamLinks: arr(obj(downstream)), externalPulls: arr(obj({ ...downstream, holderDeviceId: id })), transitedTasks: arr(id),
+    downstreamLinks: arr(downstreamSchema), externalPulls: arr(withOptional(obj({ ...downstream, holderDeviceId: id }), ['nextHopDeviceId'])), transitedTasks: arr(id),
     lastMovementDirection: number, selfDriveDirection: number, cargoDriveEngaged: bool, lastSnapshotReceivedAt: maybe(time), cargoTravelOffset: number,
-    handoffEntryOffset: maybe(number), entryHandoffPending: bool, platformInboundCargo: bool, platformInboundDirection: number, platformPlacedCargo: bool }),
+    handoffEntryOffset: maybe(number), entryHandoffPending: bool, platformInboundCargo: bool, platformInboundDirection: number, platformPlacedCargo: bool,
+    liftPhase: choice('home', 'raised', 'lowering'),
+    taskRoute: maybe(obj({ task: id, nextHopDeviceId: id, direction: { type: 'number', enum: [1, -1] } })) }),
+    ['liftPhase', 'taskRoute']),
   obj({ ...common, kind: literal('hclift'), liftOffset: number, liftTargetOffset: maybe(number), targetLevel: maybe(number), hasInitialLevel: bool, workState: maybe(number),
     surface: maybe(obj({ supportY: number, deckCenter: vec, targetLevel: maybe(number), arrived: bool, workState: maybe(number), updatedAt: time })),
     occupancy: maybe(obj({ shuttleId: id, phase: choice('entering', 'loaded'), shuttleStatus: maybe(number), shuttleFaulted: bool, updatedAt: time })) }),
@@ -78,10 +86,12 @@ const layer = obj({ layer: number, targets: arr(targetSpec) });
 const deviceSpecs = [
   obj({ ...base, kind: literal('stacker'), targetReference: vec, travelLimits: maybe(range), liftLimits: range,
     travelSpeed: number, liftSpeed: number, forkSpeed: number, cargoGapY: number, rpmToMetersPerSecond: number, forks: obj({ front: forkSpec, back: forkSpec }) }),
-  obj({ ...base, kind: literal('conveyor'), center: vec, span: number, surfaceLift: number, forwardSign: { type: 'number', enum: [1, -1] },
+  withOptional(obj({ ...base, kind: literal('conveyor'), center: vec, span: number, surfaceLift: number, forwardSign: { type: 'number', enum: [1, -1] },
     movementFields: arr(id), actionMap: { type: 'object', additionalProperties: number }, cargoSpeed: number,
     frontHasGoodsField: id, backHasGoodsField: id, cargoAutoDispose: bool, cargoOriginDevice: bool,
-    probeNeighbors: obj({ forward: maybe(id), reverse: maybe(id) }), perpendicularEnds: obj({ positive: maybe(number), negative: maybe(number) }), platformLocatorId: maybe(id) }),
+    probeNeighbors: obj({ forward: maybe(id), reverse: maybe(id) }), perpendicularEnds: obj({ positive: maybe(number), negative: maybe(number) }), platformLocatorId: maybe(id),
+    directionSource: choice('task'), lift: obj({ field: id, homeValue: number, raisedValue: number, loweringValue: number }) }),
+    ['directionSource', 'lift']),
   obj({ ...base, kind: literal('hclift'), aisleCode: text, liftSpeed: number, liftLimits: range, deckCenterBase: vec, deckTopBase: number, platformLocatorId: id }),
   obj({ ...base, kind: literal('shuttle'), aisleCode: text, targetReference: vec, travelLimits: maybe(range), travelSpeed: number, forkSpeed: number,
     deckTravelSpeed: number, forkStroke: number, forkCenterHome: vec, forkAnchor: vec, cargoBaseHomeY: number, travelBodyHome: obj({ center: vec, axisMin: number, axisMax: number }) }),

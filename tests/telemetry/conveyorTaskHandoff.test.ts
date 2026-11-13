@@ -71,6 +71,12 @@ type HarnessDeviceConfig = {
   proxyOf?: string;
   /** 内置站台货格：沿行走轴相对行程中心的偏移（米），正值 = 行走轴正端。 */
   platformOffset?: number;
+  /** 十字移载：GD_4 主 Z 轴 + EQ_YZJ 横 X 轴，方向由 task 端口决定。 */
+  cross?: boolean;
+  /** 复合设备宿主：主输送与 transfer 逻辑子设备分别保存独立运动和遥测状态。 */
+  composite?: boolean;
+  /** 逻辑子设备：共享宿主几何与位姿，但使用独立 assetCode 和 MQTT 状态。 */
+  partOf?: string;
 };
 
 /** 多设备 harness：共享货物表与 collectModels 视图，帧函数镜像 facade（applyToModel 后执行帧尾外部拉取扫描）。 */
@@ -111,6 +117,20 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       entitySnapshot: { id: `e_${assetCode}` },
     } as unknown as ModelRuntimeEntry;
     models.set(assetCode, model);
+    if (config.cross) {
+      root.position.x = config.centerX;
+      const primaryNode = MeshBuilder.CreateBox('GD_4', { width: 1, height: 0.2, depth: 4 }, scene);
+      const crossNode = MeshBuilder.CreateBox('EQ_YZJ', { width: 2, height: 0.2, depth: 1 }, scene);
+      primaryNode.parent = root;
+      crossNode.parent = root;
+      model.meshes = [primaryNode, crossNode];
+      model.externalScriptRuntime = {
+        getDataDrivenConfigs: () => [{
+          device: { devType: 'conveyor' },
+          cargo: { travel: { axis: 'z', nodes: ['GD_4'], fields: ['movement_x'] } },
+        }],
+      } as unknown as ModelRuntimeEntry['externalScriptRuntime'];
+    }
     if (config.platformOffset !== undefined) {
       // 镜像真实运行时：货格根节点挂在宿主模型根下，位置即站台支撑位
       const locatorRoot = new TransformNode(`e_${assetCode}_platformRoot`, scene);
@@ -132,6 +152,42 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     const proxyHost = models.get(config.proxyOf);
     assert.ok(proxyHost, `代理 ${assetCode} 的宿主 ${config.proxyOf} 必须存在`);
     (models.get(assetCode) as { telemetryProxySource?: ModelRuntimeEntry }).telemetryProxySource = proxyHost;
+  }
+  for (const [assetCode, config] of Object.entries(layout)) {
+    if (!config.composite) continue;
+    const hostModel = models.get(assetCode)!;
+    const declaration = hostModel.externalScriptRuntime!.getDataDrivenConfigs()[0] as { cargo: unknown };
+    hostModel.externalScriptRuntime = {
+      getDataDrivenConfigs: () => [{
+        device: { devType: 'conveyor' },
+        cargo: declaration.cargo,
+        subDevices: [{
+          role: 'transfer',
+          displayName: '移栽机构',
+          device: { devType: 'conveyor' },
+          cargo: {
+            travel: {
+              axis: 'x', nodes: ['EQ_YZJ'], fields: ['movement_x'], directionSource: 'task', forwardSign: 1,
+            },
+            lift: { field: 'movement_y', homeValue: 0, raisedValue: 1, loweringValue: 2 },
+          },
+          fixedNodes: [],
+        }],
+      }],
+    } as unknown as ModelRuntimeEntry['externalScriptRuntime'];
+    hostModel.entitySnapshot = { id: `e_${assetCode}`, components: {} } as unknown as ModelRuntimeEntry['entitySnapshot'];
+  }
+  for (const [assetCode, config] of Object.entries(layout)) {
+    if (!config.partOf) continue;
+    const hostModel = models.get(config.partOf);
+    const partModel = models.get(assetCode)!;
+    assert.ok(hostModel, `逻辑设备 ${assetCode} 的宿主 ${config.partOf} 必须存在`);
+    partModel.telemetryProxySource = hostModel;
+    partModel.entitySnapshot = {
+      id: `e_${assetCode}`,
+      components: { devicePartBinding: { hostEntityId: `e_${config.partOf}`, role: 'transfer' } },
+    } as unknown as ModelRuntimeEntry['entitySnapshot'];
+    partModel.root.position.copyFrom(hostModel.root.position);
   }
 
   const host = {
@@ -1937,6 +1993,76 @@ test('下游 conveyor 仍持货（排队进提升机）：上游在机货不得�
     assert.equal(held.task, '100', '下游排队期间在机货不得改号');
     assert.equal(h.models.CV1.conveyorTelemetry.pendingTask, '101', '新 task 必须保持挂起等队列排空');
     assert.equal(h.models.CV1.conveyorTelemetry.cargoCode, 'cargo');
+  } finally {
+    h.dispose();
+  }
+});
+
+
+
+
+
+
+
+test('复合辊筒移载：4014 → 4018 → 4019 → 4015 按独立 MQTT task 链路交接同一货物', () => {
+  const h = makeHarness({
+    '4014': { centerX: 0, cross: true, composite: true },
+    '4018': { centerX: 0, partOf: '4014' },
+    '4008': { centerX: 3, cross: true, composite: true },
+    '4019': { centerX: 3, partOf: '4008' },
+    '4015': { centerX: 6 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4014', '253448');
+    h.syncTopology();
+    assert.equal(h.models['4014'].conveyorTelemetry.travelPlan?.travelContext.travelAxisName, 'z');
+    assert.equal(h.models['4018'].conveyorTelemetry.travelPlan?.travelContext.travelAxisName, 'x');
+
+    h.apply('4018', { task: 253448, movement_x: 1, movement_y: 0 });
+    h.apply('4019', { task: 253448, movement_x: 1, movement_y: 1 });
+    assert.equal(cargo.assetCode, '4018', '主设备应先经内部订阅交给同模型的移栽逻辑设备');
+
+    h.apply('4018', { task: 253448, movement_x: 2, movement_y: 1 }, 0.1, 120);
+    assert.equal(cargo.assetCode, '4019', '4018 上升后应按 task 横向交给下一模型的 4019');
+    h.apply('4015', { task: 253448, movement_x: 1 });
+    h.apply('4019', { task: 253448, movement_x: 2, movement_y: 1 }, 0.1, 120);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4015');
+    assert.equal(cargo.task, '253448');
+  } finally {
+    h.dispose();
+  }
+});
+
+
+test('逻辑移栽单轴：home 禁止交付，raised 按 task 定向，lowering 保持路线', () => {
+  const h = makeHarness({
+    MAIN: { centerX: 0, cross: true, composite: true },
+    TRANSFER: { centerX: 0, partOf: 'MAIN' },
+    RIGHT: { centerX: 3 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('MAIN', '8');
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 0 });
+    const state = h.models.TRANSFER.conveyorTelemetry;
+    assert.equal(cargo.assetCode, 'TRANSFER');
+    assert.equal(state.liftPhase, 'home');
+    const homeOffset = state.cargoTravelOffset;
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 0 }, 0.1, 10);
+    assert.equal(state.cargoTravelOffset, homeOffset, 'home 状态不得离开交付落点');
+
+    h.apply('RIGHT', { task: 8, movement_x: 1 });
+    state.cargoTravelOffset = 0;
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 1 }, 0.1, 12);
+    assert.ok(state.cargoTravelOffset > 0, 'movement_x=2 不得覆盖 task 端口方向');
+    assert.equal(cargo.assetCode, 'TRANSFER', '未到目标端口不得交付');
+    const beforeLowering = state.cargoTravelOffset;
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 2 }, 0.1, 2);
+    assert.equal(state.liftPhase, 'lowering');
+    assert.ok(state.cargoTravelOffset > beforeLowering);
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 2 }, 0.1, 100);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, 'RIGHT');
   } finally {
     h.dispose();
   }

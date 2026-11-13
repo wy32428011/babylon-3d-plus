@@ -183,7 +183,7 @@ export class ConveyorTelemetryDriver {
     return this.context.host;
   }
 
-  /** 预热链路缓存：模型 ready 即解析行程规划与双向探测邻居，避免首个货物事件的级联把全场景几何扫描挤在一帧。 */
+  /** 预热当前逻辑设备的双向缓存，避免首个货物事件的级联把全场景几何扫描挤在一帧。 */
   primeLinkCaches(model: ModelRuntimeEntry): void {
     if (!isConveyorRuntimeModel(model)) return;
     this.resolveConveyorTravelPlan(model);
@@ -220,6 +220,7 @@ export class ConveyorTelemetryDriver {
       if (!this.isLinkTopologyReady(model) || !isConveyorRuntimeModel(model)) continue;
       model.conveyorTelemetry.probeNeighbors = null;
       model.conveyorTelemetry.travelPlan = null;
+      model.conveyorTelemetry.taskRoute = null;
       this.primeLinkCaches(model);
     }
     if (previous === null) return;
@@ -299,6 +300,74 @@ export class ConveyorTelemetryDriver {
    * 取**模型本地坐标**（x/-x/z/-z，缺省 x），模型旋转后仍跟随本地轴：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
+  /** 逻辑移栽设备的 movement_y=0/1 更新升降阶段；2 下降保持当前路线继续运动。 */
+  private updateConveyorLiftPhase(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+  ): ConveyorCargoTravelConfig {
+    const config = readConveyorCargoTravelConfig(model);
+    const state = model.conveyorTelemetry;
+    if (!config.lift) {
+      state.liftPhase = 'home';
+      return config;
+    }
+    const value = readIntegerField(snapshot.fields, config.lift.field);
+    if (value === config.lift.raisedValue) state.liftPhase = 'raised';
+    else if (value === config.lift.loweringValue) state.liftPhase = 'lowering';
+    else state.liftPhase = 'home';
+    return config;
+  }
+
+  /** 按货物 task 和订阅的直下一跳匹配左右端口；接收方占用不妨碍提前规划路线。 */
+  private resolveTaskRoute(
+    model: ModelRuntimeEntry,
+    cargoTask: string,
+  ): ConveyorModelTelemetryState['taskRoute'] {
+    const state = model.conveyorTelemetry;
+    const config = readConveyorCargoTravelConfig(model);
+    if (config.directionSource !== 'task' || !cargoTask) return null;
+    this.resolveProbeNeighbor(model, 1);
+    this.resolveProbeNeighbor(model, -1);
+    const neighbors = state.probeNeighbors;
+    if (!neighbors) return null;
+
+    const locked = state.taskRoute;
+    const resolveLink = (link: ConveyorDownstreamLink, subscriberCode: string): ConveyorModelTelemetryState['taskRoute'] => {
+      if (link.task !== cargoTask) return null;
+      const subscriber = this.findModelByAssetCode(subscriberCode);
+      const subscriberState = subscriber?.conveyorTelemetry;
+      if (!subscriber || !subscriberState
+        || (subscriberState.pendingTask !== link.task && subscriberState.waitingTask !== link.task)) return null;
+      const nextHopAssetCode = link.nextHopAssetCode ?? subscriberCode;
+      const direction = neighbors.reverse === nextHopAssetCode ? 1 : neighbors.forward === nextHopAssetCode ? -1 : null;
+      return direction === null ? null : { task: cargoTask, nextHopAssetCode, direction };
+    };
+
+    if (locked?.task === cargoTask) {
+      for (const [subscriberCode, link] of state.downstreamLinks) {
+        const route = resolveLink(link, subscriberCode);
+        if (route?.nextHopAssetCode === locked.nextHopAssetCode) return locked;
+      }
+    }
+    for (const [subscriberCode, link] of state.downstreamLinks) {
+      const route = resolveLink(link, subscriberCode);
+      if (!route) continue;
+      state.taskRoute = route;
+      return route;
+    }
+    state.taskRoute = null;
+    return null;
+  }
+
+  private resolveActiveTaskRouteDirection(model: ModelRuntimeEntry): 1 | -1 | null {
+    const state = model.conveyorTelemetry;
+    const cargo = state.cargoCode !== null
+      ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
+      : null;
+    const route = this.resolveTaskRoute(model, cargo?.task ?? state.currentTask ?? '');
+    return route?.direction ?? null;
+  }
+
   private applyConveyorCargoMotion(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
@@ -310,9 +379,13 @@ export class ConveyorTelemetryDriver {
     const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods) ?? false;
     const mode = readIntegerField(snapshot.fields, 'mode');
 
-    // 货物走行的方向与速度取自 dataDriven.cargo.travel（fields+actionMap+speed），脚本未声明时回退 movement_x 默认映射。
-    const travelConfig = readConveyorCargoTravelConfig(model);
-    const movementDirection = this.readConveyorMotionDirection(snapshot, travelConfig);
+    // 移栽逻辑设备独立消费 movement_y；task 定向时 movement_x 的 1/2 不代表左右。
+    const travelConfig = this.updateConveyorLiftPhase(model, snapshot);
+    const reportedMovementDirection = this.readConveyorMotionDirection(snapshot, travelConfig);
+    const taskDrivenTravel = travelConfig.directionSource === 'task';
+    const movementDirection = taskDrivenTravel
+      ? this.resolveActiveTaskRouteDirection(model) ?? 0
+      : reportedMovementDirection;
 
     // 自驱只被字段显式接管打断（movement 非 0 的新消息）：movement=0 的新消息保持自驱，连贯驶到目标位。
     // 字段接管结束后（movement 归 0）持货未达流向终点时，走行前检查会重新登记自驱续行。
@@ -332,10 +405,10 @@ export class ConveyorTelemetryDriver {
     this.consumeTaskPulseQueues(model, snapshot, movementDirection, mode);
     if (taskMode) this.registerTaskEdge(model, task, movementDirection, mode);
 
-    // 流向翻转：链路全部失效清空（探测缓存保留），等待中的订阅先退订再以新方向重订。
+    // 普通输送线保留流向翻转语义；task 定向的移栽 1/2 不代表左右，不得据此清链。
     const previousDirection = state.lastMovementDirection;
     if (movementDirection !== 0) state.lastMovementDirection = movementDirection;
-    if (movementDirection !== 0 && previousDirection !== 0 && movementDirection !== previousDirection) {
+    if (!taskDrivenTravel && movementDirection !== 0 && previousDirection !== 0 && movementDirection !== previousDirection) {
       if (state.waitingTask !== null) this.sendUnsubscribe(model, state.waitingTask, previousDirection);
       state.upstreamLinks.clear();
       state.downstreamLinks.clear();
@@ -570,7 +643,7 @@ export class ConveyorTelemetryDriver {
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
     // 直角交接插值期间冻结走行：目标点固定在拐角，货物沿上游轴滑到拐角后再沿本机轴驱动。
     const awaitingEntryHandoff = state.entryHandoffPending && cargo.handoff !== null;
-    const cargoDirection = awaitingEntryHandoff
+    const cargoDirection = travelConfig.lift && state.liftPhase === 'home' || awaitingEntryHandoff
       ? 0
       : movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
     if (!snapshot.faulted && cargoDirection !== 0) {
@@ -710,7 +783,12 @@ export class ConveyorTelemetryDriver {
   private handleSubscribeMessage(model: ModelRuntimeEntry, msg: ConveyorLinkMessage): void {
     const state = model.conveyorTelemetry;
     const linkHops = msg.hops + 1;
-    state.downstreamLinks.set(msg.originAssetCode, { task: msg.task, hops: linkHops, direction: msg.direction });
+    state.downstreamLinks.set(msg.originAssetCode, {
+      task: msg.task,
+      hops: linkHops,
+      direction: msg.direction,
+      nextHopAssetCode: msg.visited[msg.visited.length - 1],
+    });
     const heldCargo = state.cargoCode !== null
       ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
       : null;
@@ -759,6 +837,7 @@ export class ConveyorTelemetryDriver {
     if (exitNeighbor && exitNeighbor.assetCode !== model.assetCode && isConveyorRuntimeModel(exitNeighbor)) {
       this.dispatchLinkMessage(exitNeighbor, msg);
     }
+    for (const part of this.resolveInternalDeviceParts(model)) this.dispatchLinkMessage(part, msg);
   }
 
   /**
@@ -781,6 +860,7 @@ export class ConveyorTelemetryDriver {
         });
       }
     }
+    for (const part of this.resolveInternalDeviceParts(model)) targets.set(part.assetCode, part);
     for (const key of state.upstreamLinks.keys()) {
       if (targets.has(key)) continue;
       const target = this.findModelByAssetCode(key);
@@ -830,33 +910,53 @@ export class ConveyorTelemetryDriver {
     });
   }
 
-  /** 传递式订阅：向入口探测邻居 + 注册上游发送 subscribe（origin 为本机，hops 从 0 计）。 */
+  /** task 定向设备向左右两个端口传递订阅，路由锁定后由下一跳决定实际出口。 */
   private sendSubscribe(model: ModelRuntimeEntry, task: string, direction: number): void {
     if (!task) return;
-    this.propagateUpstream(model, {
-      kind: 'subscribe',
-      task,
-      originAssetCode: model.assetCode,
-      recipientAssetCode: null,
-      hops: 0,
-      direction,
-      visited: [model.assetCode],
-    }, 0);
+    const directions = readConveyorCargoTravelConfig(model).directionSource === 'task' ? [1, -1] : [direction];
+    for (const routeDirection of directions) {
+      this.propagateUpstream(model, {
+        kind: 'subscribe',
+        task,
+        originAssetCode: model.assetCode,
+        recipientAssetCode: null,
+        hops: 0,
+        direction: routeDirection,
+        visited: [model.assetCode],
+      }, 0);
+    }
   }
 
-  /** 退订：收到货/变更 task/mode=0/流向翻转时发出，沿链清除 downstreamLinks/externalPulls 登记。 */
+  /** 退订沿原端口及 task 定向双端口传播，确保两侧登记都能清除。 */
   private sendUnsubscribe(model: ModelRuntimeEntry, task: string, direction: number): void {
     if (!task) return;
-    this.trace(`${model.assetCode} 退订 task=${task} dir=${direction}`);
-    this.propagateUpstream(model, {
-      kind: 'unsubscribe',
-      task,
-      originAssetCode: model.assetCode,
-      recipientAssetCode: null,
-      hops: 0,
-      direction,
-      visited: [model.assetCode],
-    }, 0);
+    const directions = readConveyorCargoTravelConfig(model).directionSource === 'task' ? [1, -1] : [direction];
+    for (const routeDirection of directions) {
+      this.trace(`${model.assetCode} 退订 task=${task} dir=${routeDirection}`);
+      this.propagateUpstream(model, {
+        kind: 'unsubscribe',
+        task,
+        originAssetCode: model.assetCode,
+        recipientAssetCode: null,
+        hops: 0,
+        direction: routeDirection,
+        visited: [model.assetCode],
+      }, 0);
+    }
+  }
+
+  /** task 定向移栽必须先升起并到达目标端口；下降保持路线，到点后仍允许交付。 */
+  private isCargoReadyForDelivery(model: ModelRuntimeEntry, cargo: GeneratedCargoRuntimeEntry): boolean {
+    const config = readConveyorCargoTravelConfig(model);
+    if (config.directionSource !== 'task') return true;
+    if (!cargo.task) return false;
+    const state = model.conveyorTelemetry;
+    const route = this.resolveTaskRoute(model, cargo.task);
+    if (!route || config.lift && state.liftPhase === 'home') return false;
+    const plan = this.resolveConveyorTravelPlan(model);
+    const halfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
+    const exitOffset = route.direction * plan.forwardSign * halfRange;
+    return Math.abs(state.cargoTravelOffset - exitOffset) <= CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
   }
 
   /** 持货交付检查：本机持有货物且 downstreamLinks 中有该 task 的订阅者 → 开启交付接力。 */
@@ -864,7 +964,7 @@ export class ConveyorTelemetryDriver {
     const state = model.conveyorTelemetry;
     if (state.cargoCode === null) return;
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
-    if (!cargo || !cargo.task || state.platformPlacedCargo) return;
+    if (!cargo || !cargo.task || state.platformPlacedCargo || !this.isCargoReadyForDelivery(model, cargo)) return;
     const target = this.findDeliveryTarget(model, cargo);
     if (!target) return;
     const detached = this.context.detachClaimedCargoByReference(cargo);
@@ -926,7 +1026,9 @@ export class ConveyorTelemetryDriver {
       const task = target.link.task;
       const direction = target.link.direction;
       this.settleCargoTransfer(cargo, target.subscriber, task, target.link.hops, direction, false, holder);
-      const next = this.findDeliveryTarget(target.subscriber, cargo);
+      const next = this.isCargoReadyForDelivery(target.subscriber, cargo)
+        ? this.findDeliveryTarget(target.subscriber, cargo)
+        : null;
       if (!next) {
         // 接力终点：唯一一次 taken + available
         this.trace(`接力终点 task=${task} 持货方=${originHolderAssetCode} -> ${target.subscriber.assetCode}`);
@@ -962,6 +1064,7 @@ export class ConveyorTelemetryDriver {
 
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
+    subscriberState.taskRoute = null;
     // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点计算行程。
     const cargoAxialLength = this.resolveCargoAxialLengthMeters(cargo, plan.travelContext);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
@@ -1130,8 +1233,10 @@ export class ConveyorTelemetryDriver {
     return false;
   }
 
-  /** 本机有效流向：最近非 0 运行方向，缺省回退（正转）。 */
+  /** task 定向设备优先使用路由方向；其它设备沿用最近非 0 运行方向。 */
   private resolveFlowDirection(model: ModelRuntimeEntry, fallback = 1): number {
+    const taskDirection = this.resolveActiveTaskRouteDirection(model);
+    if (taskDirection !== null) return taskDirection;
     const direction = model.conveyorTelemetry?.lastMovementDirection ?? 0;
     return direction !== 0 ? direction : fallback;
   }
@@ -1163,7 +1268,23 @@ export class ConveyorTelemetryDriver {
     return this.modelIndex.get(assetCode) ?? null;
   }
 
-  /** 探测点邻居解析（带缓存）：正/反转各解析一次，预览期间模型不动，缓存安全。 */
+  /** 同一物理模型的主设备与逻辑子设备显式互连，不使用重叠包围盒推断内部拓扑。 */
+  private resolveInternalDeviceParts(model: ModelRuntimeEntry): ModelRuntimeEntry[] {
+    const part = model.entitySnapshot?.components?.devicePartBinding;
+    if (part) return model.telemetryProxySource ? [model.telemetryProxySource] : [];
+    const hostEntityId = model.entitySnapshot?.id;
+    if (!hostEntityId) return [];
+    const result: ModelRuntimeEntry[] = [];
+    for (const { model: candidate } of this.host.collectModels()) {
+      const binding = candidate.entitySnapshot?.components?.devicePartBinding;
+      if (candidate.telemetryProxySource === model && binding?.hostEntityId === hostEntityId && candidate.assetCode) {
+        result.push(candidate);
+      }
+    }
+    return result;
+  }
+
+  /** 按当前逻辑设备的根节点轴缓存正、负两个探测端口。 */
   private resolveProbeNeighbor(model: ModelRuntimeEntry, direction: number): ModelRuntimeEntry | null {
     const state = model.conveyorTelemetry;
     if (!state.probeNeighbors) {
@@ -1176,7 +1297,7 @@ export class ConveyorTelemetryDriver {
     return assetCode ? this.findModelByAssetCode(assetCode) : null;
   }
 
-  /** 探测点世界坐标：轨迹端点沿走行方向向外延伸一个货箱长度（复用刷出端偏移公式）。邻居拓扑探测与货箱实测长度无关，且探测解析时货箱可能尚未渲染，这里固定用内置长度。 */
+  /** 探测点使用行程节点几何，运动轴始终取自整个模型根节点，不继承子节点轴向。 */
   private resolveProbePoint(model: ModelRuntimeEntry, direction: number): Vector3 {
     const plan = this.resolveConveyorTravelPlan(model);
     const cargoAxialLength = CONVEYOR_CARGO_SIZE[plan.travelContext.travelAxisName];
@@ -1191,12 +1312,24 @@ export class ConveyorTelemetryDriver {
   /** 探测点落在哪个专用设备（conveyor/stacker/rgv/lift）的世界包围盒内；多个命中取盒中心最近者。 */
   private findProbeNeighborAssetCode(model: ModelRuntimeEntry, direction: number): string | null {
     const probePoint = this.resolveProbePoint(model, direction);
+    const axis = readConveyorCargoTravelConfig(model).axis;
     const epsilon = 0.05;
     let nearestAssetCode: string | null = null;
     let nearestDistance = Infinity;
     for (const { model: candidate } of this.host.collectModels()) {
       if (candidate === model || candidate.assetCode === model.assetCode) continue;
+      const partHost = model.entitySnapshot?.components?.devicePartBinding ? model.telemetryProxySource : null;
+      const candidatePartHost = candidate.entitySnapshot?.components?.devicePartBinding ? candidate.telemetryProxySource : null;
+      if (partHost && (candidate === partHost || candidatePartHost === partHost)) continue;
+      if (candidatePartHost && candidatePartHost === model) continue;
       if (!this.isLinkTopologyCandidate(candidate) || !this.isLinkTopologyReady(candidate)) continue;
+      const compositeHost = !candidate.entitySnapshot?.components?.devicePartBinding
+        && (candidate.externalScriptRuntime?.getDataDrivenConfigs() ?? []).some(declaration => {
+          const subDevices = declaration && typeof declaration === 'object'
+            ? (declaration as { subDevices?: unknown }).subDevices : null;
+          return Array.isArray(subDevices) && subDevices.length > 0;
+        });
+      if (compositeHost && axis !== readConveyorCargoTravelConfig(candidate).axis) continue;
       const bounds = this.host.getModelWorldBounds(candidate);
       if (!bounds) continue;
       const { minimum, maximum } = bounds;
@@ -1484,10 +1617,12 @@ export class ConveyorTelemetryDriver {
   private resolveConveyorTravelPlan(model: ModelRuntimeEntry): ConveyorCargoTravelPlan {
     const state = model.conveyorTelemetry;
     if (state.travelPlan) return state.travelPlan;
+    const config = readConveyorCargoTravelConfig(model);
     const travelContext = this.resolveConveyorCargoTravelContext(model);
     const plan: ConveyorCargoTravelPlan = {
       travelContext,
-      forwardSign: this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxisName),
+      forwardSign: config.forwardSign
+        ?? this.readConveyorTrajectoryForwardSign(model, travelContext.travelAxisName),
     };
     state.travelPlan = plan;
     return plan;

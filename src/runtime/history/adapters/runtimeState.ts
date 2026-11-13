@@ -19,7 +19,8 @@ export type StackerState = DriverCommon & {
   front: StackerForkState; back: StackerForkState;
 };
 export type UpstreamLink = { deviceId: string; task: string; holderDeviceId: string; hops: number; direction: number };
-export type DownstreamLink = { subscriberId: string; task: string; hops: number; direction: number };
+export type DownstreamLink = { subscriberId: string; task: string; hops: number; direction: number; nextHopDeviceId?: string };
+export type ConveyorTaskRoute = { task: string; nextHopDeviceId: string; direction: 1 | -1 };
 export type ExternalPull = DownstreamLink & { holderDeviceId: string };
 export type ConveyorState = DriverCommon & {
   kind: 'conveyor'; cargoId: string | null; currentTask: string | null; pendingTask: string | null; lastTask: string | null;
@@ -28,6 +29,7 @@ export type ConveyorState = DriverCommon & {
   lastMovementDirection: number; selfDriveDirection: number; cargoDriveEngaged: boolean; lastSnapshotReceivedAt: number | null;
   cargoTravelOffset: number; handoffEntryOffset: number | null; entryHandoffPending: boolean;
   platformInboundCargo: boolean; platformInboundDirection: number; platformPlacedCargo: boolean;
+  liftPhase?: 'home' | 'raised' | 'lowering'; taskRoute?: ConveyorTaskRoute | null;
 };
 export type HcliftSurface = { supportY: number; deckCenter: Vec3; targetLevel: number | null; arrived: boolean; workState: number | null; updatedAt: number };
 export type DeckOccupancy = { shuttleId: string; phase: 'entering' | 'loaded'; shuttleStatus: number | null; shuttleFaulted: boolean; updatedAt: number };
@@ -116,7 +118,8 @@ export function createFreshLogisticsDriverState(spec: LogisticsDeviceSpec | Pass
       lastTask: null, waitingTask: null, snapshotTask: null, pendingTaskAgeSeconds: 0, pendingPreviousTask: null, taskPulseQueue: [],
       upstreamLinks: [], downstreamLinks: [], externalPulls: [], transitedTasks: [], lastMovementDirection: 0, selfDriveDirection: 0,
       cargoDriveEngaged: false, lastSnapshotReceivedAt: null, cargoTravelOffset: 0, handoffEntryOffset: null, entryHandoffPending: false,
-      platformInboundCargo: false, platformInboundDirection: 0, platformPlacedCargo: false });
+      platformInboundCargo: false, platformInboundDirection: 0, platformPlacedCargo: false,
+      liftPhase: 'home', taskRoute: null });
     case 'hclift': return wrapLogisticsState({ ...common, kind: 'hclift', liftOffset: 0, liftTargetOffset: null,
       targetLevel: null, hasInitialLevel: false, workState: null, surface: null, occupancy: null });
     case 'shuttle': return wrapLogisticsState({ ...common, ...emptyForkCargo(), kind: 'shuttle', rootPosition: null,

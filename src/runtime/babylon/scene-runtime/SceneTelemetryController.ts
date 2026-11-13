@@ -37,7 +37,7 @@ import { type ModelRuntimeEntry } from './sceneRuntimeTypes';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
-  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayTelemetryProxies' | 'refreshModelArrayRuntimeRepresentation' | 'prepareModelArrayRuntimeMutation'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayTelemetryProxies' | 'devicePartTelemetryProxies' | 'refreshModelArrayRuntimeRepresentation' | 'prepareModelArrayRuntimeMutation'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'spawnedDeviceModels' | 'getGeneratedCargoFallbackSpec' | 'ensureGeneratedCargoFallback' | 'ensureGeneratedCargoOutputOwner' | 'syncGeneratedCargoVisual' | 'setGeneratedCargoRootPose' | 'disposeGeneratedCargo' | 'clearModelGeneratorLoadFailureCache' | 'syncAllModelGeneratorPresentations' | 'syncDeviceSpawnerMarkerVisibility' | 'configureDeviceSpawnersFromDocument' | 'deviceSpawnerRuntime' | 'stopDeviceSpawning' | 'generatedOutputOwners' | 'revealDrivenSpawnedDevices'>;
@@ -192,6 +192,7 @@ export class SceneTelemetryController {
     this.dependencies.assets.models.forEach(append);
     this.dependencies.variants.modelArrayParameterVariants.forEach(variant => append(variant.model, variant.representativeEntityId));
     this.dependencies.arrays.modelArrayTelemetryProxies.forEach(append);
+    this.dependencies.arrays.devicePartTelemetryProxies.forEach(append);
     this.dependencies.outputs.spawnedDeviceModels.forEach((model, key) => append(model, `spawned:${key}`));
     this.collectedModels = next ?? (previous && count === previous.length ? previous : previous?.slice(0, count) ?? []);
     return this.collectedModels;
@@ -327,6 +328,9 @@ export class SceneTelemetryController {
     for (const proxy of this.dependencies.arrays.modelArrayTelemetryProxies.values()) {
       resetConveyorTelemetryState(proxy);
     }
+    for (const proxy of this.dependencies.arrays.devicePartTelemetryProxies.values()) {
+      resetConveyorTelemetryState(proxy);
+    }
     this.clearTelemetryPreviewRuntimeState();
     // 最终销毁不重新进入编辑态脚本、不重试加载；共享资源由后续销毁阶段释放。
     if (this.updatesStopped || this.dependencies.document.disposed) return;
@@ -452,6 +456,12 @@ export class SceneTelemetryController {
         this.specializedTelemetryRuntime.primeConveyorLinkCaches(proxy);
       }
     }
+    for (const proxy of this.dependencies.arrays.devicePartTelemetryProxies.values()) {
+      if (!proxy.assetHandle || !proxy.stackerTelemetryReady) continue;
+      if (this.specializedTelemetryRuntime.resolveDeviceType(proxy) === 'conveyor') {
+        this.specializedTelemetryRuntime.primeConveyorLinkCaches(proxy);
+      }
+    }
   }
 
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
@@ -464,6 +474,9 @@ export class SceneTelemetryController {
       this.specializedTelemetryRuntime.clearDiagnosticsForModel(variant.model);
     }
     for (const proxy of this.dependencies.arrays.modelArrayTelemetryProxies.values()) {
+      this.specializedTelemetryRuntime.clearDiagnosticsForModel(proxy);
+    }
+    for (const proxy of this.dependencies.arrays.devicePartTelemetryProxies.values()) {
       this.specializedTelemetryRuntime.clearDiagnosticsForModel(proxy);
     }
     for (const owner of this.dependencies.outputs.generatedOutputOwners.values()) {

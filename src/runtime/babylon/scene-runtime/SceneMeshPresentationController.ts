@@ -110,8 +110,8 @@ export class SceneMeshPresentationController {
   setModelEntranceHidden(hidden: boolean): void {
     if (this.trajectoriesDisposed || this.disposed || this.modelEntranceHidden === hidden) return;
     this.modelEntranceHidden = hidden;
-    for (const [entityId, entry] of this.conveyorTrajectories) {
-      entry.root.setEnabled(!hidden && this._trajectoryVisible && this.dependencies.document.isEntityVisible(entityId));
+    for (const entry of this.conveyorTrajectories.values()) {
+      entry.root.setEnabled(!hidden && this._trajectoryVisible && this.dependencies.document.isEntityVisible(entry.entityId));
     }
   }
 
@@ -119,8 +119,8 @@ export class SceneMeshPresentationController {
   setTrajectoryVisible(visible: boolean): void {
     if (this.trajectoriesDisposed || this.disposed) return;
     this._trajectoryVisible = visible;
-    for (const [entityId, entry] of this.conveyorTrajectories) {
-      entry.root.setEnabled(!this.modelEntranceHidden && visible && this.dependencies.document.isEntityVisible(entityId));
+    for (const entry of this.conveyorTrajectories.values()) {
+      entry.root.setEnabled(!this.modelEntranceHidden && visible && this.dependencies.document.isEntityVisible(entry.entityId));
     }
   }
 
@@ -306,7 +306,7 @@ export class SceneMeshPresentationController {
 
   // ===== 输送线轨迹可视化 =====
 
-  /** 同步输送线轨迹：conveyor 且模型就绪时创建（trajectoryDirection 缺省按 'x'），反之释放。 */
+  /** 同步逻辑设备轨迹；轴向使用模型根节点坐标，不继承子节点方向。 */
   public syncConveyorTrajectory(entity: Entity, model: ModelRuntimeEntry | null): void {
     if (this.trajectoriesDisposed || this.disposed) return;
     const binding = entity.components.telemetryBinding;
@@ -322,16 +322,15 @@ export class SceneMeshPresentationController {
       return;
     }
 
-    const context = this.resolveConveyorTrajectoryContext(entity, model);
+    const context = this.resolveConveyorTrajectoryContext(entity, model, readConveyorCargoTravelConfig(model));
     const signature = this.createConveyorTrajectorySignature(entity, context);
     const existing = this.conveyorTrajectories.get(entity.id);
-    if (existing && existing.signature === signature) {
-      // 轨迹挂独立根节点（阵列源模型 root 会被合批挂起禁用），实体移动/显隐变化只刷新根节点。
+    if (existing?.signature === signature) {
       this.refreshConveyorTrajectoryRoot(entity, existing.root);
       return;
     }
     if (existing) this.disposeConveyorTrajectory(entity.id, existing);
-    this.createConveyorTrajectory(entity, context, signature);
+    this.createConveyorTrajectory(entity, context, signature, entity.id);
   }
 
   /** 轨迹根的变换与显隐：跟随实体 Transform、实体可见性与全局开关。 */
@@ -363,8 +362,12 @@ export class SceneMeshPresentationController {
   }
 
   /** 与 conveyorDriver 同源的行程计算：cargo.travel 配置行走轴 + 包围盒投影，转模型局部空间。 */
-  public resolveConveyorTrajectoryContext(entity: Entity, model: ModelRuntimeEntry): ConveyorTrajectoryContext {
-    const travelConfig = readConveyorCargoTravelConfig(model);
+  public resolveConveyorTrajectoryContext(
+    entity: Entity,
+    model: ModelRuntimeEntry,
+    configuredTravel?: ConveyorCargoTravelConfig,
+  ): ConveyorTrajectoryContext {
+    const travelConfig = configuredTravel ?? readConveyorCargoTravelConfig(model);
     const travelAxisName = travelConfig.axis;
     const configuredNodes = this.findEditorConveyorMotionNodes(model, travelConfig);
     const conveyorNodes = configuredNodes.length > 0
@@ -406,7 +409,12 @@ export class SceneMeshPresentationController {
   }
 
   /** 创建轨迹虚线 + 方向箭头；全部网格非拾取，挂独立根节点（阵列源模型 root 会被合批挂起禁用）。 */
-  public createConveyorTrajectory(entity: Entity, context: ConveyorTrajectoryContext, signature: string): void {
+  public createConveyorTrajectory(
+    entity: Entity,
+    context: ConveyorTrajectoryContext,
+    signature: string,
+    trajectoryKey = entity.id,
+  ): void {
     if (this.trajectoriesDisposed || this.disposed || context.spanMeters <= 0.001) return;
 
     const half = context.spanMeters / 2;
@@ -416,7 +424,7 @@ export class SceneMeshPresentationController {
     const start = new Vector3(startBase.x, baseY, startBase.z);
     const end = new Vector3(endBase.x, baseY, endBase.z);
 
-    const root = new TransformNode(`${entity.id}_conveyorTrajectoryRoot`, this.context.scene);
+    const root = new TransformNode(`${trajectoryKey}_conveyorTrajectoryRoot`, this.context.scene);
     this.refreshConveyorTrajectoryRoot(entity, root);
 
     // 流光渐变：颜色表沿虚线均匀分布（COLOR_DISTRIBUTION_TYPE_LINE），每帧滚动相位形成
@@ -524,13 +532,14 @@ export class SceneMeshPresentationController {
 
     let flowTime = 0;
     const flowObserver = this.context.scene.onBeforeRenderObservable.add(() => {
-      if (this.trajectoriesDisposed || root.isDisposed() || this.conveyorTrajectories.get(entity.id)?.root !== root || !root.isEnabled()) return;
+      if (this.trajectoriesDisposed || root.isDisposed() || this.conveyorTrajectories.get(trajectoryKey)?.root !== root || !root.isEnabled()) return;
       const dtSeconds = this.context.scene.getEngine().getDeltaTime() / 1000;
       flowTime = (flowTime + (dtSeconds * flowSpeed) / context.spanMeters) % 1;
       updateFlow(flowTime);
     });
 
-    this.conveyorTrajectories.set(entity.id, {
+    this.conveyorTrajectories.set(trajectoryKey, {
+      entityId: entity.id,
       signature,
       root,
       lineMeshes: [line],

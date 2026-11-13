@@ -56,6 +56,7 @@ import {
 } from '../model/modelGenerator';
 import { sanitizeClickEventBindingComponent } from '../model/clickEventBinding';
 import { sanitizeDeviceSpawnerComponent } from '../model/deviceSpawner';
+import { normalizeCompositeDeviceFolder, normalizeDevicePartBinding, reconcileCompositeDevices } from '../model/devicePartBinding';
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
 import { LIGHT_WALL_MAX_POINTS, validateLightWallPoints } from '../model/lightWallFence';
@@ -280,15 +281,11 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     migratedSkybox.entityIds,
     migratedSkybox.entities,
   );
-  validateSingleManualRoamSpawn(migratedSkybox.entityIds, normalizedPatrolEntities);
-  validateEntityHierarchy(migratedSkybox.entityIds, normalizedPatrolEntities);
-  validateModelArrayInstanceReferences(migratedSkybox.entityIds, migratedSkybox.entities);
-
   if ('selectedEntityId' in scene && scene.selectedEntityId !== null && typeof scene.selectedEntityId !== 'string') {
     throwUnsupportedSceneFileError();
   }
 
-  return {
+  const document: SceneDocument = {
     ...scene,
     id,
     name,
@@ -299,6 +296,12 @@ function normalizeSceneDocument(value: unknown): SceneDocument {
     fetchConfig: sanitizeFetchConfig(scene.fetchConfig),
     sceneSettings: migratedSkybox.sceneSettings,
   };
+  const reconciled = reconcileCompositeDevices(document);
+  for (const warning of reconciled.warnings) console.warn(`[场景迁移] ${warning}`);
+  validateSingleManualRoamSpawn(reconciled.scene.entityIds, reconciled.scene.entities);
+  validateEntityHierarchy(reconciled.scene.entityIds, reconciled.scene.entities);
+  validateModelArrayInstanceReferences(reconciled.scene.entityIds, reconciled.scene.entities);
+  return reconciled.scene;
 }
 
 /** 旧扁平天空配置迁移为隐藏的场景唯一配置实体，不再改变相机距离。 */
@@ -657,6 +660,18 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     const deviceSpawner = sanitizeDeviceSpawnerComponent(components.deviceSpawner);
     if (!deviceSpawner) throwUnsupportedSceneFileError();
     normalized.deviceSpawner = deviceSpawner;
+  }
+
+  if (components.compositeDevice !== undefined) {
+    const compositeDevice = normalizeCompositeDeviceFolder(components.compositeDevice);
+    if (!compositeDevice) throwUnsupportedSceneFileError();
+    normalized.compositeDevice = compositeDevice;
+  }
+
+  if (components.devicePartBinding !== undefined) {
+    const devicePartBinding = normalizeDevicePartBinding(components.devicePartBinding);
+    if (!devicePartBinding) throwUnsupportedSceneFileError();
+    normalized.devicePartBinding = devicePartBinding;
   }
 
   if ('telemetryBinding' in components && components.telemetryBinding !== undefined) {
@@ -1473,6 +1488,7 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.cadReference ||
     components.modelAsset ||
     components.modelGenerator ||
+    components.devicePartBinding ||
     components.poiEffect ||
     components.autoPatrol ||
     components.manualRoamSpawn ||

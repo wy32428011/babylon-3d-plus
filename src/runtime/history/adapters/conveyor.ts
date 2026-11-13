@@ -1,7 +1,7 @@
 import { readBooleanField, readIntegerField, readStringField } from '../../mqtt/deviceTelemetry';
 import { readConveyorMotionSignal } from '../../babylon/telemetry/conveyorMotionSignal';
 import type { ActorOf, DriverFrame, LogisticsContext } from './context';
-import type { DownstreamLink, ExternalPull } from './runtimeState';
+import type { ConveyorTaskRoute, DownstreamLink, ExternalPull } from './runtimeState';
 import type { FrozenLocator } from './manifest';
 import { clamp, conveyorHalfRange, perpendicularOffset, V } from './math';
 
@@ -13,6 +13,33 @@ export const conveyorFlow = (actor: Conveyor, fallback = 1): number => actor.sta
 function neighbor(ctx: LogisticsContext, actor: Conveyor, direction: number): string | null {
   const id = direction < 0 ? actor.spec.probeNeighbors.reverse : actor.spec.probeNeighbors.forward;
   return id && ctx.tx.get('devices', id) && !ctx.removed.has(id) ? id : null;
+}
+function resolveTaskRoute(ctx: LogisticsContext, actor: Conveyor, cargoTask: string): ConveyorTaskRoute | null {
+  if (actor.spec.directionSource !== 'task' || !cargoTask) return null;
+  const neighbors = actor.spec.probeNeighbors;
+  const resolveLink = (link: DownstreamLink): ConveyorTaskRoute | null => {
+    if (link.task !== cargoTask) return null;
+    const target = ctx.conveyor(link.subscriberId);
+    if (!target || (target.state.pendingTask !== link.task && target.state.waitingTask !== link.task)) return null;
+    const nextHopDeviceId = link.nextHopDeviceId ?? link.subscriberId;
+    const direction = neighbors.reverse === nextHopDeviceId ? 1 : neighbors.forward === nextHopDeviceId ? -1 : null;
+    return direction === null ? null : { task: cargoTask, nextHopDeviceId, direction };
+  };
+  const locked = actor.state.taskRoute;
+  if (locked?.task === cargoTask) {
+    for (const link of actor.state.downstreamLinks) {
+      if (resolveLink(link)?.nextHopDeviceId === locked.nextHopDeviceId) return locked;
+    }
+  }
+  for (const link of actor.state.downstreamLinks) {
+    const route = resolveLink(link);
+    if (route) {
+      actor.state.taskRoute = route;
+      return route;
+    }
+  }
+  actor.state.taskRoute = null;
+  return null;
 }
 function platformOffset(actor: Conveyor, locator: FrozenLocator): number | null {
   const first = locator.cells[0]; return first ? V.dot(V.sub(first.pose.position, actor.spec.center), actor.spec.travelAxis) : null;
@@ -58,7 +85,8 @@ function dispatch(ctx: LogisticsContext, targetId: string, message: LinkMessage)
     flood(ctx, actor, { ...message, hops: message.hops + 1, visited: [...message.visited, targetId] });
   } else if (message.kind === 'subscribe') {
     const hops = message.hops + 1;
-    upsert(state.downstreamLinks, { subscriberId: message.originId, task: message.task, hops, direction: message.direction }, link => link.subscriberId);
+    upsert(state.downstreamLinks, { subscriberId: message.originId, task: message.task, hops, direction: message.direction,
+      nextHopDeviceId: message.visited[message.visited.length - 1] }, link => link.subscriberId);
     if (state.cargoId !== null && ctx.cargo.task(state.cargoId) === message.task) { tryDeliverHeldCargo(ctx, actor); return; }
     propagate(ctx, actor, { ...message, hops, visited: [...message.visited, targetId] }, hops);
   } else {
@@ -92,10 +120,18 @@ export function notifyTaken(ctx: LogisticsContext, actor: Conveyor, task: string
   takenWave(ctx, actor, actor.device.id, task, recipientId, direction);
 }
 function subscribe(ctx: LogisticsContext, actor: Conveyor, task: string, direction: number): void {
-  if (task) propagate(ctx, actor, { kind: 'subscribe', task, originId: actor.device.id, recipientId: null, hops: 0, direction, visited: [actor.device.id] }, 0);
+  const directions = actor.spec.directionSource === 'task' ? [1, -1] : [direction];
+  if (task) for (const routeDirection of directions) {
+    propagate(ctx, actor, { kind: 'subscribe', task, originId: actor.device.id, recipientId: null, hops: 0,
+      direction: routeDirection, visited: [actor.device.id] }, 0);
+  }
 }
 function unsubscribe(ctx: LogisticsContext, actor: Conveyor, task: string, direction: number): void {
-  if (task) propagate(ctx, actor, { kind: 'unsubscribe', task, originId: actor.device.id, recipientId: null, hops: 0, direction, visited: [actor.device.id] }, 0);
+  const directions = actor.spec.directionSource === 'task' ? [1, -1] : [direction];
+  if (task) for (const routeDirection of directions) {
+    propagate(ctx, actor, { kind: 'unsubscribe', task, originId: actor.device.id, recipientId: null, hops: 0,
+      direction: routeDirection, visited: [actor.device.id] }, 0);
+  }
 }
 function registerTask(ctx: LogisticsContext, actor: Conveyor, task: string): void {
   const state = actor.state; if (!task || task === state.lastTask) return;
@@ -122,13 +158,20 @@ function settle(ctx: LogisticsContext, cargoId: string, actor: Conveyor, task: s
   const state = actor.state, spec = actor.spec, pose = ctx.cargo.world(cargoId);
   const length = ctx.cargo.axialLength(cargoId, spec.travelAxis, ctx.cargo.templateFor(actor)), half = conveyorHalfRange(spec.span, length);
   let corner: number | null = null;
-  if (!preserve && upstream && upstream.device.id !== actor.device.id) corner = perpendicularOffset(
-    { center: upstream.spec.center, axis: upstream.spec.travelAxis, span: upstream.spec.span }, { center: spec.center, axis: spec.travelAxis }, half, Math.max(0, spec.span / 2 - half) + length);
+  if (!preserve && upstream && upstream.device.id !== actor.device.id) {
+    const upstreamSpec = upstream.spec;
+    corner = perpendicularOffset(
+      { center: upstreamSpec.center, axis: upstreamSpec.travelAxis, span: upstreamSpec.span },
+      { center: spec.center, axis: spec.travelAxis }, half, Math.max(0, spec.span / 2 - half) + length,
+    );
+  }
   ctx.cargo.detach(cargoId); ctx.cargo.own(cargoId, actor, 'single'); ctx.cargo.annotate(cargoId, task); ctx.cargo.startHandoff(cargoId, 1 / Math.max(hops, 1));
   state.cargoId = cargoId; state.handoffEntryOffset = corner; state.entryHandoffPending = corner !== null;
+  state.taskRoute = null;
   state.cargoTravelOffset = preserve ? clamp(V.dot(V.sub(pose.position, spec.center), spec.travelAxis), -half, half) : corner ?? -direction * spec.forwardSign * half;
   state.pendingTask = null; state.waitingTask = null; state.selfDriveDirection = direction; state.cargoDriveEngaged = false;
-  state.platformInboundCargo = spec.platformLocatorId !== null; state.platformInboundDirection = direction; state.platformPlacedCargo = false;
+  state.platformInboundCargo = 'platformLocatorId' in spec && spec.platformLocatorId !== null;
+  state.platformInboundDirection = direction; state.platformPlacedCargo = false;
   unsubscribe(ctx, actor, task, direction);
 }
 function relay(ctx: LogisticsContext, waveOrigin: Conveyor, originId: string, cargoId: string, holder: Conveyor | null, first: { actor: Conveyor; link: DownstreamLink }): void {
@@ -138,14 +181,23 @@ function relay(ctx: LogisticsContext, waveOrigin: Conveyor, originId: string, ca
     if (previous) previous.state.downstreamLinks = previous.state.downstreamLinks.filter(link => link.subscriberId !== target.actor.device.id);
     const { task, direction, hops } = target.link;
     settle(ctx, cargoId, target.actor, task, hops, direction, false, previous);
-    const next = deliveryTarget(ctx, target.actor, cargoId);
+    const next = cargoReadyForDelivery(ctx, target.actor, cargoId) ? deliveryTarget(ctx, target.actor, cargoId) : null;
     if (!next) { takenWave(ctx, waveOrigin, originId, task, target.actor.device.id, direction); notifyAvailable(ctx, target.actor, task, direction); return; }
     previous = target.actor; target = next;
   }
 }
+function cargoReadyForDelivery(ctx: LogisticsContext, actor: Conveyor, cargoId: string): boolean {
+  if (actor.spec.directionSource !== 'task') return true;
+  const task = ctx.cargo.task(cargoId), route = resolveTaskRoute(ctx, actor, task);
+  if (!route || actor.spec.lift && actor.state.liftPhase === 'home') return false;
+  const spec = actor.spec;
+  const half = conveyorHalfRange(spec.span, ctx.cargo.axialLength(cargoId, spec.travelAxis, ctx.cargo.templateFor(actor)));
+  const exitOffset = route.direction * spec.forwardSign * half;
+  return Math.abs(actor.state.cargoTravelOffset - exitOffset) <= 1e-3;
+}
 export function tryDeliverHeldCargo(ctx: LogisticsContext, actor: Conveyor): void {
   const state = actor.state, id = state.cargoId;
-  if (!id || !ctx.cargo.task(id) || state.platformPlacedCargo) return;
+  if (!id || !ctx.cargo.task(id) || state.platformPlacedCargo || !cargoReadyForDelivery(ctx, actor, id)) return;
   const target = deliveryTarget(ctx, actor, id); if (target) relay(ctx, actor, actor.device.id, id, actor, target);
 }
 export function takePlatformCargo(ctx: LogisticsContext, actor: Conveyor, recipientId: string): string | null {
@@ -182,14 +234,25 @@ export function acceptColumnCargo(ctx: LogisticsContext, actor: Conveyor, cargoI
 
 /** 原 applyConveyorCargoMotion：任务边沿、在机货复用/订阅、自驱、站台出口门控均保留。 */
 export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: DriverFrame): void {
-  const state = actor.state, spec = actor.spec, fields = frame.fields, mode = readIntegerField(fields, 'mode');
-  const movement = readConveyorMotionSignal(fields, { fields: spec.movementFields, actionMap: spec.actionMap }).direction;
+  const state = actor.state, fields = frame.fields, mode = readIntegerField(fields, 'mode');
+  const spec = actor.spec;
+  state.liftPhase ??= 'home';
+  if (spec.lift) {
+    const lift = readIntegerField(fields, spec.lift.field);
+    if (lift === spec.lift.raisedValue) state.liftPhase = 'raised';
+    else if (lift === spec.lift.loweringValue) state.liftPhase = 'lowering';
+    else state.liftPhase = 'home';
+  }
+  const reportedMovement = readConveyorMotionSignal(fields, { fields: spec.movementFields, actionMap: spec.actionMap }).direction;
+  const taskDrivenTravel = spec.directionSource === 'task';
+  const route = taskDrivenTravel ? resolveTaskRoute(ctx, actor, state.cargoId ? ctx.cargo.task(state.cargoId) : state.currentTask ?? '') : null;
+  const movement = taskDrivenTravel ? route?.direction ?? 0 : reportedMovement;
   if (frame.receivedAt !== state.lastSnapshotReceivedAt) { state.lastSnapshotReceivedAt = frame.receivedAt; if (movement !== 0) state.selfDriveDirection = 0; }
   const taskValue = readIntegerField(fields, 'task'), task = taskOf(taskValue); state.snapshotTask = taskValue !== null ? task : null;
   const pulses = state.taskPulseQueue; state.taskPulseQueue = []; for (const pulse of pulses) registerTask(ctx, actor, pulse);
   if (taskValue !== null) registerTask(ctx, actor, task);
   const priorDirection = state.lastMovementDirection; if (movement !== 0) state.lastMovementDirection = movement;
-  if (movement !== 0 && priorDirection !== 0 && movement !== priorDirection) {
+  if (!taskDrivenTravel && movement !== 0 && priorDirection !== 0 && movement !== priorDirection) {
     if (state.waitingTask !== null) unsubscribe(ctx, actor, state.waitingTask, priorDirection);
     state.upstreamLinks = []; state.downstreamLinks = []; state.externalPulls = [];
     if (state.waitingTask !== null) subscribe(ctx, actor, state.waitingTask, movement);
@@ -198,7 +261,8 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
     if (state.waitingTask !== null) { unsubscribe(ctx, actor, state.waitingTask, movement !== 0 ? movement : conveyorFlow(actor)); state.pendingTask = null; }
     state.waitingTask = null;
   }
-  if (mode === 2 && !(readBooleanField(fields, spec.frontHasGoodsField) ?? false) && !(readBooleanField(fields, spec.backHasGoodsField) ?? false) && spec.cargoAutoDispose) {
+  if (mode === 2 && !(readBooleanField(fields, actor.spec.frontHasGoodsField) ?? false)
+    && !(readBooleanField(fields, actor.spec.backHasGoodsField) ?? false) && actor.spec.cargoAutoDispose) {
     const id = state.cargoId, heldTask = ctx.cargo.task(id); if (id) ctx.cargo.dispose(id, 'conveyor-auto-dispose');
     state.cargoId = null; state.handoffEntryOffset = null; state.entryHandoffPending = false; state.platformPlacedCargo = false;
     notifyTaken(ctx, actor, heldTask, null, movement !== 0 ? movement : conveyorFlow(actor)); return;
@@ -228,8 +292,8 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
       }
     } else if (state.waitingTask === null) {
       const hasUpstream = neighbor(ctx, actor, probeDirection) !== null || state.upstreamLinks.length > 0;
-      if (!hasUpstream && spec.platformLocatorId !== null) state.waitingTask = state.pendingTask;
-      else if (!hasUpstream && spec.cargoOriginDevice && !externalHoldsTask(ctx, state.pendingTask)) {
+      if (!hasUpstream && actor.spec.platformLocatorId !== null) state.waitingTask = state.pendingTask;
+      else if (!hasUpstream && actor.spec.cargoOriginDevice && !externalHoldsTask(ctx, state.pendingTask)) {
         const newTask = state.currentTask ?? '', templateId = ctx.cargo.templateFor(actor);
         state.pendingTask = null; state.waitingTask = null;
         state.cargoTravelOffset = -probeDirection * spec.forwardSign * conveyorHalfRange(spec.span, ctx.cargo.axialLength(null, spec.travelAxis, templateId));
@@ -245,8 +309,8 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
   const cargoId = state.cargoId, meta = ctx.cargo.meta(cargoId), half = conveyorHalfRange(spec.span, ctx.cargo.axialLength(cargoId, spec.travelAxis, ctx.cargo.templateFor(actor)));
   let min = -half, max = half;
   if (state.handoffEntryOffset !== null) { min = Math.min(min, state.handoffEntryOffset); max = Math.max(max, state.handoffEntryOffset); }
-  if (state.platformInboundCargo && spec.platformLocatorId !== null) {
-    const platform = ctx.locator(spec.platformLocatorId), offset = platform ? platformOffset(actor, platform) : null;
+  if (state.platformInboundCargo && actor.spec.platformLocatorId !== null) {
+    const platform = ctx.locator(actor.spec.platformLocatorId), offset = platform ? platformOffset(actor, platform) : null;
     if (offset !== null) { if (state.platformInboundDirection * spec.forwardSign >= 0) max = Math.min(offset, half); else min = Math.max(offset, -half); }
   }
   const exitFlow = movement !== 0 ? movement : state.selfDriveDirection !== 0 ? state.selfDriveDirection : conveyorFlow(actor);
@@ -255,7 +319,9 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
   const flow = state.platformInboundCargo && state.platformInboundDirection !== 0 ? state.platformInboundDirection : conveyorFlow(actor);
   const atEnd = (): boolean => flow * spec.forwardSign >= 0 ? state.cargoTravelOffset >= max - 1e-3 : state.cargoTravelOffset <= min + 1e-3;
   if (movement === 0 && state.selfDriveDirection === 0 && state.cargoDriveEngaged && !atEnd()) state.selfDriveDirection = flow;
-  const direction = state.entryHandoffPending && meta.handoff !== null ? 0 : movement !== 0 ? movement : state.selfDriveDirection;
+  const direction = spec.lift && state.liftPhase === 'home' || state.entryHandoffPending && meta.handoff !== null
+    ? 0
+    : movement !== 0 ? movement : state.selfDriveDirection;
   if (!frame.faulted && direction !== 0) { state.cargoTravelOffset += direction * spec.forwardSign * spec.cargoSpeed * ctx.dt; state.cargoDriveEngaged = true; }
   state.cargoTravelOffset = clamp(state.cargoTravelOffset, min, max);
   if (state.platformPlacedCargo && atEnd()) state.platformPlacedCargo = false;

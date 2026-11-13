@@ -311,6 +311,17 @@ export type ConveyorDownstreamLink = {
   hops: number;
   /** 链路建立时的流向；流向翻转后链路失效清空。 */
   direction: number;
+  /** 订阅到达本机前的直接下一跳；task 定向设备据此选择实际出口端口。 */
+  nextHopAssetCode?: string;
+};
+
+export type ConveyorTravelAxis = 'x' | 'z';
+export type ConveyorLiftPhase = 'home' | 'raised' | 'lowering';
+export type ConveyorProbeNeighbors = { forward: string | null; reverse: string | null };
+export type ConveyorTaskRoute = {
+  task: string;
+  nextHopAssetCode: string;
+  direction: 1 | -1;
 };
 
 /** 外部持货拉取登记：订阅传播到 stacker/RGV 邻居时由相邻 conveyor 登记，帧尾扫描拉取。key=最终订阅者 assetCode。 */
@@ -357,10 +368,14 @@ export type ConveyorModelTelemetryState = {
   pendingTaskAgeSeconds: number;
   /** 建立当前 pendingTask 之前本机最近的 task：判断在机货是否是本机刚上报过的那一件。 */
   pendingPreviousTask: string | null;
-  /** 探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
-  probeNeighbors: { forward: string | null; reverse: string | null } | null;
-  /** 行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */
+  /** 当前设备探测点邻居缓存（按正/反转各存邻居 assetCode），reset 时清空重算。 */
+  probeNeighbors: ConveyorProbeNeighbors | null;
+  /** 当前设备行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */
   travelPlan: ConveyorCargoTravelPlan | null;
+  /** 独立移栽机构的升降阶段；lowering 保持当前 task 路线继续运动。 */
+  liftPhase: ConveyorLiftPhase;
+  /** task 路由：下一跳命中的端口决定左右，不读取 movement_x 的正负。 */
+  taskRoute: ConveyorTaskRoute | null;
   /** 上位链路表：key=上一跳 assetCode；available 通知建立、taken 通知清除，含通知注册进来的非探测上游。 */
   upstreamLinks: Map<string, ConveyorUpstreamLink>;
   /** 下位链路表：key=最终订阅者 assetCode；subscribe 建立、unsubscribe/交付完成清除。 */
@@ -635,6 +650,13 @@ export type ShuttleModelTelemetryState = {
 
 export type ShuttleCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
+export type ConveyorLiftConfig = {
+  field: string;
+  homeValue: number;
+  raisedValue: number;
+  loweringValue: number;
+};
+
 /** conveyor 货物走行配置：由模型脚本 dataDriven.cargo.travel 归一化而来，本体无自主动画。 */
 export type ConveyorCargoTravelConfig = {
   axis: 'x' | 'z';
@@ -643,6 +665,11 @@ export type ConveyorCargoTravelConfig = {
   fallbackPattern: string | null;
   fields: string[];
   actionMap: Record<string, number>;
+  /** task 表示 movement_x 不决定左右，由匹配任务的下一跳端口决定；缺省读取遥测方向。 */
+  directionSource?: 'task';
+  forwardSign?: 1 | -1;
+  /** 独立移栽机构的升降字段映射，定义在 dataDriven.cargo.lift。 */
+  lift?: ConveyorLiftConfig;
 };
 
 export type SpecializedTelemetryRuntimeEntry = {

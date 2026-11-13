@@ -282,10 +282,12 @@ export function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[])
   const deletingIds = new Set(entityIds.filter((entityId) => Boolean(scene.entities[entityId])));
   if (deletingIds.size === 0) return scene;
 
-  // 内置货格是宿主模型的附属物，随宿主一并删除而非提升为孤儿实体。
+  // 内置货格和逻辑子设备是宿主模型的附属物，随宿主一并删除而非提升为孤儿实体。
   for (const entity of Object.values(scene.entities)) {
     if (deletingIds.has(entity.id)) continue;
-    const hostEntityId = entity.components.locator?.builtInBinding?.hostEntityId;
+    const hostEntityId = entity.components.locator?.builtInBinding?.hostEntityId
+      ?? entity.components.devicePartBinding?.hostEntityId
+      ?? entity.components.compositeDevice?.hostEntityId;
     if (hostEntityId && deletingIds.has(hostEntityId)) deletingIds.add(entity.id);
   }
 

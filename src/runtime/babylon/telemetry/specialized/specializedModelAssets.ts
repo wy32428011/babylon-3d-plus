@@ -352,12 +352,23 @@ export function resetRgvTelemetryState(model: ModelRuntimeEntry): void {
   model.rgvTelemetry.nodeBaselines.clear();
 }
 
-/** 遍历模型脚本声明的 conveyor dataDriven 配置块，运行时只接受 devType=conveyor。 */
+/** 遍历模型脚本声明的 conveyor dataDriven 配置块；逻辑子设备按 role 读取自己的声明。 */
 function* iterateConveyorDataDrivenConfigs(model: ModelRuntimeEntry): Generator<Record<string, unknown>> {
-  // 合批遥测代理自身不持有脚本运行时，配置读取委托给承载几何的宿主模型。
+  // 遥测代理自身不持有脚本运行时，配置读取委托给承载几何的宿主模型。
   const scriptRuntime = model.externalScriptRuntime ?? model.telemetryProxySource?.externalScriptRuntime ?? null;
+  const role = model.entitySnapshot?.components?.devicePartBinding?.role ?? null;
   for (const dataDriven of scriptRuntime?.getDataDrivenConfigs() ?? []) {
     if (!isPlainRecord(dataDriven)) continue;
+    if (role) {
+      const subDevices = Array.isArray(dataDriven.subDevices) ? dataDriven.subDevices : [];
+      for (const subDevice of subDevices) {
+        if (!isPlainRecord(subDevice) || subDevice.role !== role) continue;
+        const deviceConfig = isPlainRecord(subDevice.device) ? subDevice.device : {};
+        const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+        if (devType === 'conveyor') yield subDevice;
+      }
+      continue;
+    }
     const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
     const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
     if (devType === 'conveyor') yield dataDriven;
@@ -378,6 +389,11 @@ export function readConveyorCargoTravelConfig(model: ModelRuntimeEntry): Conveyo
     const nodes = readStringArrayPath(travel, ['nodes']);
     const fields = readStringArrayPath(travel, ['fields']);
     const rawFallbackPattern = typeof travel.fallbackPattern === 'string' ? travel.fallbackPattern.trim() : '';
+    const lift = cargo && isPlainRecord(cargo.lift) ? cargo.lift : null;
+    const readLiftValue = (key: 'homeValue' | 'raisedValue' | 'loweringValue', fallback: number) => {
+      const value = Number(lift?.[key]);
+      return Number.isFinite(value) ? value : fallback;
+    };
 
     return {
       axis,
@@ -386,6 +402,14 @@ export function readConveyorCargoTravelConfig(model: ModelRuntimeEntry): Conveyo
       fallbackPattern: rawFallbackPattern || null,
       fields: fields.length > 0 ? fields : ['movement_x'],
       actionMap: readConveyorActionMap(travel.actionMap),
+      ...(travel.directionSource === 'task' ? { directionSource: 'task' as const } : {}),
+      ...(travel.forwardSign !== undefined ? { forwardSign: Number(travel.forwardSign) === -1 ? -1 as const : 1 as const } : {}),
+      ...(lift ? { lift: {
+        field: typeof lift.field === 'string' && lift.field.trim() ? lift.field.trim() : 'movement_y',
+        homeValue: readLiftValue('homeValue', 0),
+        raisedValue: readLiftValue('raisedValue', 1),
+        loweringValue: readLiftValue('loweringValue', 2),
+      } } : {}),
     };
   }
 
@@ -466,6 +490,8 @@ export function createConveyorTelemetryState(): ConveyorModelTelemetryState {
     pendingPreviousTask: null,
     probeNeighbors: null,
     travelPlan: null,
+    liftPhase: 'home',
+    taskRoute: null,
     upstreamLinks: new Map(),
     downstreamLinks: new Map(),
     externalPulls: new Map(),
@@ -496,6 +522,8 @@ export function resetConveyorTelemetryState(model: ModelRuntimeEntry): void {
   model.conveyorTelemetry.pendingPreviousTask = null;
   model.conveyorTelemetry.probeNeighbors = null;
   model.conveyorTelemetry.travelPlan = null;
+  model.conveyorTelemetry.liftPhase = 'home';
+  model.conveyorTelemetry.taskRoute = null;
   model.conveyorTelemetry.upstreamLinks.clear();
   model.conveyorTelemetry.downstreamLinks.clear();
   model.conveyorTelemetry.externalPulls.clear();

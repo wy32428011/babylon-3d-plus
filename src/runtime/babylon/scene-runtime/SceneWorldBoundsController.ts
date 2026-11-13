@@ -15,6 +15,7 @@ import type { Vector3Data } from '../../../editor/model/math';
 import { isMeasurableModelMesh, measureModelSizeMeters, type ModelMeasurementResult } from '../modelMeasurement';
 import { resolveLocatorCellWorldBounds } from '../telemetry/stackerStorageLocation';
 import { computeRootRelativeWorldMatrix, createPointWorldBounds, getMeshWorldBounds, getThinInstanceMeshWorldBounds, isFiniteVector3, mergeWorldBounds, transformWorldBounds, type RuntimeWorldBounds } from '../runtimeNodeGeometry';
+import { readStringArrayPath } from '../runtimeValueUtils';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
@@ -345,6 +346,30 @@ export class SceneWorldBoundsController {
     // 遥测代理没有自身网格：把宿主模型的世界包围盒按两台设备的相对位姿换算到代理位姿。
     const proxySource = model.telemetryProxySource;
     if (proxySource) {
+      const role = model.entitySnapshot?.components?.devicePartBinding?.role;
+      if (role) {
+        const names = new Set<string>();
+        for (const declaration of proxySource.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+          if (!declaration || typeof declaration !== 'object') continue;
+          const subDevices = (declaration as { subDevices?: unknown }).subDevices;
+          if (!Array.isArray(subDevices)) continue;
+          for (const subDevice of subDevices) {
+            if (!subDevice || typeof subDevice !== 'object' || (subDevice as { role?: unknown }).role !== role) continue;
+            for (const name of readStringArrayPath(subDevice, ['cargo', 'travel', 'nodes'])) names.add(name);
+          }
+        }
+        let partBounds: RuntimeWorldBounds | null = null;
+        for (const mesh of proxySource.meshes) {
+          const sourceName = mesh.metadata?.generatedByParametricRuntime === true
+            ? mesh.metadata.motionSourceNodeName ?? mesh.metadata.sourceNodeName ?? mesh.name
+            : mesh.name;
+          if (!names.has(mesh.name) && !names.has(sourceName)) continue;
+          if (!this.isModelBoundsMesh(proxySource, mesh)) continue;
+          const bounds = getMeshWorldBounds(mesh);
+          if (bounds) partBounds = partBounds ? mergeWorldBounds(partBounds, bounds) : bounds;
+        }
+        if (partBounds) return partBounds;
+      }
       const sourceBounds = this.getModelWorldBounds(proxySource);
       if (!sourceBounds) return null;
       const relativeMatrix = computeRootRelativeWorldMatrix(proxySource.root, model.root);

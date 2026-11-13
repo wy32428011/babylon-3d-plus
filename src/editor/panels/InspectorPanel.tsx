@@ -22,6 +22,7 @@ import {
 import { containsManualRoamSpawnEntity } from '../model/manualRoamSpawn';
 import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
 import { findBuiltInSlotEntities, findLayerChangePlatformEntity } from '../model/builtInSlotBinding';
+import { getDevicePartDeclaration } from '../model/devicePartBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { DeviceSpawnerInspector } from './DeviceSpawnerInspector';
@@ -359,15 +360,22 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const poiEffect = selectedEntity.components.poiEffect;
   const autoPatrol = selectedEntity.components.autoPatrol;
   const manualRoamSpawn = selectedEntity.components.manualRoamSpawn;
+  const devicePart = selectedEntity.components.devicePartBinding;
+  const devicePartDeclaration = getDevicePartDeclaration(scene, selectedEntity);
+  const devicePartDataDrivenConfig = devicePartDeclaration ? {
+    device: devicePartDeclaration.device,
+    ...(devicePartDeclaration.cargo ? { cargo: devicePartDeclaration.cargo } : {}),
+    fixedNodes: devicePartDeclaration.fixedNodes,
+  } : null;
   const isCompactModelInspector = Boolean(
-    modelAsset || meshRenderer || skybox || modelGenerator || deviceSpawner || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
+    modelAsset || devicePart || meshRenderer || skybox || modelGenerator || deviceSpawner || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
   );
   const isGeneratorEntity = Boolean(modelGenerator || deviceSpawner);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
   const builtInSlotEntities = modelAsset ? findBuiltInSlotEntities(scene, selectedEntity.id) : [];
   const layerChangePlatformEntity = modelAsset ? findLayerChangePlatformEntity(scene, selectedEntity.id) : null;
   const transformDisabled = isLocked || isBuiltInBound;
-  const transformFields: readonly TransformField[] = skybox ? [] : light
+  const transformFields: readonly TransformField[] = skybox || devicePart ? [] : light
     ? getLightEditorCapabilities(light.lightKind).transformFields
     : autoPatrol || manualRoamSpawn
       ? fields.filter((field) => field !== 'scale')
@@ -682,6 +690,37 @@ export function InspectorPanel(props: InspectorPanelProps) {
             </select>
           </label>
         </fieldset>
+      ) : null}
+      {devicePart ? (
+        <>
+          <fieldset className="transform-fieldset">
+            <legend>逻辑设备</legend>
+            <p className="muted">与宿主模型共享几何和整体位姿，独立接收本部件的 MQTT 消息。</p>
+            <label className="inspector-row">
+              <span>宿主模型</span>
+              <button type="button" onClick={() => requestRevealHierarchyEntity(devicePart.hostEntityId)}>
+                {scene.entities[devicePart.hostEntityId]?.name ?? '宿主已删除'}
+              </button>
+            </label>
+            <p className="muted">角色：{devicePart.role}{devicePartDeclaration ? ` · ${devicePartDeclaration.displayName}` : '（模型包声明缺失）'}</p>
+          </fieldset>
+          <TelemetryBindingInspector
+            entityId={selectedEntity.id}
+            binding={selectedEntity.components.telemetryBinding}
+            dataDrivenConfig={devicePartDataDrivenConfig}
+            disabled={isLocked}
+            modelAssetCode=""
+            secondAssetCodeRequired
+            onChange={updateSelectedTelemetryBinding}
+            onRestoreDefault={restoreSelectedTelemetryBindingDefault}
+          />
+          <CargoGeneratorInspector
+            binding={selectedEntity.components.telemetryBinding}
+            modelDevType={devicePartDeclaration?.device.devType}
+            disabled={isLocked}
+            onChange={updateSelectedTelemetryBinding}
+          />
+        </>
       ) : null}
       {modelAsset ? (
         <>

@@ -11,6 +11,7 @@ import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from './mergeMode
 import { normalizeModelParameterConfig } from '../model/modelParameters';
 import { normalizeModelDataDrivenConfig } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from '../model/builtInSlotBinding';
+import { reconcileCompositeDevices } from '../model/devicePartBinding';
 
 export type SceneModelReplacement = { sourceUrls: string[]; asset: ProjectModelAssetEntry };
 export type SceneModelUpdateIssue = { resourceKind: 'model' | 'combo' | 'environment'; resourceId?: string; message: string };
@@ -124,7 +125,11 @@ export function applySceneModelUpdates(
       delete entity.components.modelArrayInstance;
     }
   }
-  if (environment !== undefined) next.sceneSettings.environment = structuredClone(environment);
-  if (JSON.stringify(next) === JSON.stringify(scene)) return { scene, updatedCount: 0, warnings: [...warnings] };
-  return { scene: next, updatedCount, warnings: [...warnings] };
+  const reconciled = reconcileCompositeDevices(next);
+  updatedCount += reconciled.createdCount;
+  for (const warning of reconciled.warnings) warnings.add(warning);
+  const result = reconciled.scene;
+  if (environment !== undefined) result.sceneSettings.environment = structuredClone(environment);
+  if (JSON.stringify(result) === JSON.stringify(scene)) return { scene, updatedCount: 0, warnings: [...warnings] };
+  return { scene: result, updatedCount, warnings: [...warnings] };
 }

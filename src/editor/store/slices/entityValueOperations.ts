@@ -29,7 +29,7 @@ export function cloneTransform(transform: TransformComponent): TransformComponen
 /** 对实体 Transform 应用组件级不变量；特殊编辑标记不允许产生无效缩放或倾斜。 */
 export function normalizeTransformForEntity(entity: Entity, transform: TransformComponent): TransformComponent {
   // 天空不参与通用/群组位姿编辑；水平朝向由天空配置命令单独更新，旧位姿数据原样保留。
-  if (entity.components.skybox) return cloneTransform(entity.components.transform);
+  if (entity.components.skybox || entity.components.devicePartBinding) return cloneTransform(entity.components.transform);
   const normalized = cloneTransform(transform);
   if (entity.components.autoPatrol) normalized.scale = { x: 1, y: 1, z: 1 };
   if (entity.components.manualRoamSpawn) {

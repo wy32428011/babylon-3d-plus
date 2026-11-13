@@ -4,8 +4,8 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：983；测试/runner/smoke 候选：865；fixture/helper/治理工具：118。
-- npm 测试/smoke 入口：147；有静态入口的候选：699；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：984；测试/runner/smoke 候选：866；fixture/helper/治理工具：118。
+- npm 测试/smoke 入口：147；有静态入口的候选：700；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
 - CI 静态可达候选：162。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
@@ -435,6 +435,7 @@
 | tests/editor/chartMarkerVideo.test.mjs | NullEngine；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；P4 SSR helper一次预构建本文件全部真实入口模块图，共享Store/依赖单例；Babylon维持本项目外置原生Node单例，无watcher/transport/HMR，保留t.after/after/finally清理与原断言/阈值；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/chartMarkerVisibility.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/clickEventBinding.test.mjs | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | P4 SSR helper一次预构建本文件全部真实入口模块图，共享Store/依赖单例；Babylon维持本项目外置原生Node单例，无watcher/transport/HMR，保留t.after/after/finally清理与原断言/阈值；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/editor/compositeDeviceBinding.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 使用隔离 TypeScript 模块加载器；不读取或修改真实工程场景；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/composition.test.ts | Node 测试候选；node-contract/resources | test:contracts、test:contracts:resources | 未证明跨平台 | 前置 npm run build:electron；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/compositionPackage.test.ts | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources | 未证明跨平台 | 先执行 npm run build:electron，产物必须对应当前源码；前置 npm run build:electron；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | tests/editor/compositionRemote.test.mjs | 包含文件/源码断言候选；node-contract/resources | test:contracts、test:contracts:resources | 未证明跨平台 | 先执行 npm run build:electron，产物必须对应当前源码；前置 npm run build:electron；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-electron；核对 build:electron 前置；本地临时端口可用；结束后关闭本次 server | 否 / 未确认 |

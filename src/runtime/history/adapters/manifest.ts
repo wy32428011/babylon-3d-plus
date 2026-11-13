@@ -60,6 +60,8 @@ export type ConveyorSpec = FrozenDeviceBase & {
   probeNeighbors: { forward: string | null; reverse: string | null };
   perpendicularEnds: { positive: number | null; negative: number | null };
   platformLocatorId: string | null;
+  directionSource?: 'task';
+  lift?: { field: string; homeValue: number; raisedValue: number; loweringValue: number };
 };
 export type HcliftSpec = FrozenDeviceBase & {
   kind: 'hclift'; aisleCode: string; liftSpeed: number; liftLimits: FrozenRange;

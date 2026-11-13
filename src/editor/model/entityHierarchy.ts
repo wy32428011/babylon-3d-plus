@@ -217,7 +217,7 @@ function createHierarchyGroupId(selectionIds: readonly string[], primaryEntityId
 
 /** 内置绑定定位线框的位置由宿主模型驱动，不单独参与组合 Transform。 */
 function isHierarchyGroupTransformEntity(entity: Entity): boolean {
-  return !entity.isFolder && !entity.components.locator?.builtInBinding;
+  return !entity.isFolder && !entity.components.locator?.builtInBinding && !entity.components.devicePartBinding;
 }
 
 /**

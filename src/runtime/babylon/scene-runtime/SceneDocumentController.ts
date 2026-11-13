@@ -34,7 +34,7 @@ import { type ModelRuntimeEntry, type EntityRuntimeState, type SceneRuntimeSyncO
 type Dependencies = {
   readonly telemetry: Pick<SceneTelemetryController, 'telemetryPreviewActive' | 'hasConveyorSurfaceArrows' | 'conveyorSurfaceArrowSystem' | 'hasStackerMotionArrows' | 'stackerMotionArrowSystem' | 'hasRgvMotionArrows' | 'rgvMotionArrowSystem' | 'hasLiftMotionArrows' | 'liftMotionArrowSystem'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'getGizmoTargetByEntityId' | 'cancelFolderGroupTransforms' | 'disposeStaleModelArrayGizmoProxy' | 'compositionArrayPreview' | 'clearEntityArrayPreview' | 'entityArrayPreview' | 'clearEntityArrayPreviewIfSource' | 'modelArrayGizmoProxy'>;
-  readonly arrays: Pick<ModelArrayRuntimeController, 'resolveModelArrayBatchForEntityId' | 'modelArrayIdentityMode' | 'syncAllModelArrayBatches' | 'syncModelArrayTelemetryProxies' | 'modelArrayInstanceEntities'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'resolveModelArrayBatchForEntityId' | 'modelArrayIdentityMode' | 'syncAllModelArrayBatches' | 'syncModelArrayTelemetryProxies' | 'syncDevicePartTelemetryProxies' | 'modelArrayInstanceEntities'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'selectedEntityIds' | 'setHierarchySelectionIds' | 'isEntityHighlighted' | 'rebuildModelSelectionOutline' | 'resolveSelectedEntityIds' | 'localHighlightedEntityIds' | 'externalHighlightedEntityIds' | 'selectionSyncCount' | 'lastSelectionSyncDurationMs' | 'maxSelectionSyncDurationMs' | 'lastSelectionChangedEntityCount' | 'applyModelSelection'>;
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics' | 'modelStatisticsEnvironmentSourceUrl' | 'modelReadinessErrors'>;
   readonly environment: Pick<EnvironmentAndSkyboxController, 'lightingRuntime' | 'syncAppearance' | 'syncLighting' | 'syncSkybox' | 'skyboxRuntime' | 'syncSkyboxEntity' | 'lightRigRuntime' | 'shadowRuntime'>;
@@ -295,6 +295,7 @@ export class SceneDocumentController {
     }
     this.dependencies.arrays.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
     this.dependencies.arrays.syncModelArrayTelemetryProxies();
+    this.dependencies.arrays.syncDevicePartTelemetryProxies(document);
     this.dependencies.transforms.disposeStaleModelArrayGizmoProxy();
     this.dependencies.selection.selectedEntityIds = selectedEntityIds;
     this.dependencies.selection.rebuildModelSelectionOutline();
@@ -340,6 +341,7 @@ export class SceneDocumentController {
     this.syncedEntities.set(entityId, entity);
     this.dependencies.arrays.syncAllModelArrayBatches(document, dirtyModelArraySourceIds, entityId);
     this.dependencies.arrays.syncModelArrayTelemetryProxies();
+    this.dependencies.arrays.syncDevicePartTelemetryProxies(document);
     this.dependencies.transforms.disposeStaleModelArrayGizmoProxy();
     this.dependencies.selection.rebuildModelSelectionOutline();
     this.dependencies.readiness.invalidateModelStatistics();
@@ -629,6 +631,7 @@ export class SceneDocumentController {
     this.dependencies.environment.syncSkybox(document);
     this.dependencies.arrays.syncAllModelArrayBatches(document, dirtyModelArraySourceIds);
     this.dependencies.arrays.syncModelArrayTelemetryProxies();
+    this.dependencies.arrays.syncDevicePartTelemetryProxies(document);
     this.dependencies.transforms.disposeStaleModelArrayGizmoProxy();
     this.dependencies.selection.selectedEntityIds = selectedEntityIds;
     this.dependencies.locators.rebuildLocatorTargetIndex(document);

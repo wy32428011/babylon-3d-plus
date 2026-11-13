@@ -31,6 +31,7 @@ type Props = {
   dataDrivenConfig: ModelDataDrivenConfig | null;
   disabled: boolean;
   modelAssetCode: string;
+  secondAssetCodeRequired?: boolean;
   onChange: (binding: TelemetryBindingComponent | null) => void;
   onRestoreDefault: () => void;
 };
@@ -437,6 +438,7 @@ function LiftLayerBindingsEditor(props: {
       <fieldset className="transform-fieldset">
         <legend>数据驱动</legend>
         <p className="muted">当前模型没有启用遥测绑定。</p>
+        {props.secondAssetCodeRequired ? <p className="telemetry-runtime-error">请恢复默认绑定并手动填写第二设备号 assetCode；未填写前该逻辑设备不参与 MQTT 驱动。</p> : null}
         <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
         <TelemetryRuntimeDiagnosticsView entityId={props.entityId} binding={props.binding} modelAssetCode={props.modelAssetCode} />
       </fieldset>
@@ -471,6 +473,9 @@ function LiftLayerBindingsEditor(props: {
       <label className="number-row"><span>expected(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.expectedIntervalMs} onChange={(event) => commit({ expectedIntervalMs: Number(event.target.value) })} /></label>
       <label className="number-row"><span>stale(ms)</span><input type="number" disabled={props.disabled} min="1" value={binding.staleAfterMs} onChange={(event) => commit({ staleAfterMs: Number(event.target.value) })} /></label>
       <p className="muted">deviceType：{binding.deviceType}（由模型包 dataDriven 声明，只读）</p>
+      {props.secondAssetCodeRequired && !(binding.assetCode ?? props.modelAssetCode).trim() ? (
+        <p className="telemetry-runtime-error">第二设备号未填写。请手动输入 assetCode；未填写前该逻辑设备不参与 MQTT 驱动。</p>
+      ) : null}
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
       {binding.deviceType === 'rgv' ? (
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />

@@ -378,6 +378,7 @@ export type CadReferenceRuntimeEntry = {
 
 /** 输送线编辑器轨迹可视化：虚线 + 方向箭头，仅编辑态、非拾取。 */
 export type ConveyorTrajectoryRuntimeEntry = {
+  entityId: string;
   signature: string;
   root: TransformNode;
   lineMeshes: Mesh[];

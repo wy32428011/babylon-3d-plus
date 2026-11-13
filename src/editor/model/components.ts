@@ -9,6 +9,7 @@ import type { BuiltInSlotBindingConfig, LayerChangePlatformBindingConfig, Locato
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
+import type { CompositeDeviceFolderComponent, DevicePartBindingComponent } from './devicePartBinding';
 import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
 
 export type TransformComponent = {
@@ -558,6 +559,10 @@ export type EntityComponents = {
   modelGenerator?: ModelGeneratorComponent;
   /** 设备产生器：MQTT 消息驱动动态克隆模板实例（AGV/穿梭车等编辑期数量不确定的设备）。 */
   deviceSpawner?: DeviceSpawnerComponent;
+  /** 复合设备文件夹的组织元数据，不创建运行时几何。 */
+  compositeDevice?: CompositeDeviceFolderComponent;
+  /** 共享宿主模型几何的独立逻辑设备。 */
+  devicePartBinding?: DevicePartBindingComponent;
   telemetryBinding?: TelemetryBindingComponent;
   camera?: CameraComponent;
   light?: LightComponent;

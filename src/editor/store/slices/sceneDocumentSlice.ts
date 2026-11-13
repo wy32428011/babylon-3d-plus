@@ -26,6 +26,7 @@ import { cloneModelGeneratorComponent, sanitizeModelGeneratorComponent } from '.
 import { sanitizeDeviceSpawnerComponent } from '../../model/deviceSpawner';
 import { cloneClickEventBindingComponent, sanitizeClickEventBindingComponent } from '../../model/clickEventBinding';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../../model/telemetryBinding';
+import { getDevicePartDeclaration } from '../../model/devicePartBinding';
 import { sanitizePoiEffectComponent } from '../../model/poiEffect';
 import { deserializeScene, hasSceneDocumentChanges, serializeScene } from '../../project/SceneSerializer';
 import { sanitizeCadReferenceDisplayPatch } from '../../cad/cadReferenceCore';
@@ -1360,7 +1361,7 @@ export const createSceneDocumentSlice: EditorSlice<
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改遥测绑定');
       const entity = getSelectedEntity(state);
-      if (!entity?.components.modelAsset) return state;
+      if (!entity?.components.modelAsset && !entity?.components.devicePartBinding) return state;
       const before = entity.components.telemetryBinding ?? null;
       const after = binding ? normalizeTelemetryBindingComponent(binding) : null;
       if (JSON.stringify(before) === JSON.stringify(after)) return state;
@@ -1373,7 +1374,8 @@ export const createSceneDocumentSlice: EditorSlice<
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '恢复遥测绑定');
       const entity = getSelectedEntity(state);
-      const devType = entity?.components.modelAsset?.dataDrivenConfig?.device.devType;
+      const devType = entity?.components.modelAsset?.dataDrivenConfig?.device.devType
+        ?? (entity ? getDevicePartDeclaration(state.scene, entity)?.device.devType : undefined);
       if (!entity || !devType) return state;
       const before = entity.components.telemetryBinding ?? null;
       const after = createDefaultTelemetryBinding(devType);

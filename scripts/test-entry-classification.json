@@ -7633,6 +7633,32 @@
       ]
     },
     {
+      "file": "tests/editor/compositeDeviceBinding.test.ts",
+      "sha256": "fb7900a1e9f891388553879853503a48ae7a4bc9d5fd0333c49768af91fab9e1",
+      "disposition": "node-contract",
+      "domain": "editor",
+      "command": "node --experimental-strip-types --test tests/editor/compositeDeviceBinding.test.ts",
+      "purpose": "复合设备声明归一化、历史场景幂等升级、第二设备号持久化及模型同步事务",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
+        "使用隔离 TypeScript 模块加载器；不读取或修改真实工程场景"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import test from 'node:test';"
+        },
+        {
+          "line": 2,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 3,
+          "text": "import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';"
+        }
+      ]
+    },
+    {
       "file": "tests/editor/conveyorArrowEffect.integration.test.mjs",
       "sha256": "de9d3c635b2aa1ebb6a65427f8eaf29552a739aa2f4b61f70acf47b3ed21182a",
       "disposition": "node-contract",

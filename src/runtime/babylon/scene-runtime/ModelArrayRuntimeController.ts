@@ -46,6 +46,8 @@ export class ModelArrayRuntimeController {
   public readonly modelArrayInstanceEntities = new Map<string, Entity>();
   /** 合批 conveyor 实例的遥测代理（key=实例实体 ID）：无几何，仅承载设备身份与遥测状态。 */
   public readonly modelArrayTelemetryProxies = new Map<string, ModelRuntimeEntry>();
+  /** 复合模型的逻辑子设备代理（key=逻辑实体 ID），与阵列实例一样共享几何但独立接收遥测。 */
+  public readonly devicePartTelemetryProxies = new Map<string, ModelRuntimeEntry>();
   public readonly pendingModelArraySourceResyncs = new Map<string, string | null>();
   public readonly pendingModelArrayVariantRenderSuppressions = new Set<TransformNode>();
   public readonly suppressedModelArrayVariantRootsThisFrame = new Set<TransformNode>();
@@ -98,6 +100,13 @@ export class ModelArrayRuntimeController {
       runSceneRuntimeCleanup(this.context, `阵列遥测代理 ${entityId}`, () => this.disposeModelArrayTelemetryProxy(entityId, proxy));
     }
     this.modelArrayTelemetryProxies.clear();
+    for (const [entityId, proxy] of [...this.devicePartTelemetryProxies]) {
+      runSceneRuntimeCleanup(this.context, `逻辑设备遥测代理 ${entityId}`, () => {
+        if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
+        this.devicePartTelemetryProxies.delete(entityId);
+      });
+    }
+    this.devicePartTelemetryProxies.clear();
     this.modelArrayInstanceEntities.clear();
     this.modelArrayCanonicalSignatureIds.clear();
     this.modelArrayCanonicalSignatureSequence = 0;
@@ -185,19 +194,29 @@ export class ModelArrayRuntimeController {
 
   /** 创建合批 conveyor 实例的遥测代理：加载/就绪门控通过访问器跟随宿主，避免异步时序两处各写一份。 */
   public createModelArrayTelemetryProxy(entity: Entity, host: ModelRuntimeEntry): ModelRuntimeEntry {
-    if (this.updatesStopped) throw new Error('阵列运行时已停止，无法创建遥测代理。');
+    return this.createTelemetryProxy(entity, host, this.modelArrayTelemetryProxies, false);
+  }
+
+  private createTelemetryProxy(
+    entity: Entity,
+    host: ModelRuntimeEntry,
+    registry: Map<string, ModelRuntimeEntry>,
+    useHostPose: boolean,
+  ): ModelRuntimeEntry {
+    if (this.updatesStopped) throw new Error('运行时已停止，无法创建遥测代理。');
     const modelAsset = entity.components.modelAsset;
     const root = new TransformNode(`__telemetryProxy_${sanitizeBabylonName(entity.id)}`, this.context.scene);
     const contentRoot = new TransformNode(`__telemetryProxyContent_${sanitizeBabylonName(entity.id)}`, this.context.scene);
     contentRoot.parent = root;
-    this.dependencies.presentation.applyTransform(root, entity.components.transform);
+    this.dependencies.presentation.applyTransform(root,
+      useHostPose ? host.entitySnapshot!.components.transform : entity.components.transform);
 
     const proxy: ModelRuntimeEntry = {
       sourceUrl: modelAsset?.sourceUrl ?? host.sourceUrl,
-      assetRevision: modelAsset?.assetRevision ?? null,
+      assetRevision: modelAsset?.assetRevision ?? host.assetRevision,
       assetSignature: host.assetSignature,
       entitySnapshot: entity,
-      assetCode: modelAsset?.assetCode ?? '',
+      assetCode: modelAsset?.assetCode ?? entity.components.telemetryBinding?.assetCode ?? '',
       telemetryBinding: entity.components.telemetryBinding ?? null,
       stackerCapable: false,
       conveyorCapable: true,
@@ -233,7 +252,7 @@ export class ModelArrayRuntimeController {
     };
     Object.defineProperty(proxy, 'assetHandle', { get: () => host.assetHandle });
     Object.defineProperty(proxy, 'stackerTelemetryReady', { get: () => host.stackerTelemetryReady });
-    this.modelArrayTelemetryProxies.set(entity.id, proxy);
+    registry.set(entity.id, proxy);
     return proxy;
   }
 
@@ -244,6 +263,35 @@ export class ModelArrayRuntimeController {
     runSceneRuntimeCleanup(this.context, `阵列遥测代理节点 ${entityId}`, () => {
       if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
     });
+  }
+
+  /** 为共享宿主几何的逻辑子设备维护独立遥测身份；空 assetCode 仅保留配置，不参与驱动。 */
+  public syncDevicePartTelemetryProxies(document: SceneDocument): void {
+    if (this.updatesStopped) return;
+    const desired = new Map<string, { entity: Entity; host: ModelRuntimeEntry }>();
+    for (const entityId of document.entityIds) {
+      const entity = document.entities[entityId];
+      const part = entity?.components.devicePartBinding;
+      if (!entity?.components.telemetryBinding || !part) continue;
+      const host = this.dependencies.assets.models.get(part.hostEntityId);
+      if (host) desired.set(entityId, { entity, host });
+    }
+    for (const [entityId, proxy] of [...this.devicePartTelemetryProxies]) {
+      const target = desired.get(entityId);
+      if (target && proxy.telemetryProxySource === target.host) continue;
+      this.devicePartTelemetryProxies.delete(entityId);
+      runSceneRuntimeCleanup(this.context, `逻辑设备遥测代理节点 ${entityId}`, () => {
+        if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
+      });
+    }
+    for (const [entityId, target] of desired) {
+      const proxy = this.devicePartTelemetryProxies.get(entityId)
+        ?? this.createTelemetryProxy(target.entity, target.host, this.devicePartTelemetryProxies, true);
+      proxy.entitySnapshot = target.entity;
+      proxy.assetCode = target.entity.components.telemetryBinding?.assetCode ?? '';
+      proxy.telemetryBinding = target.entity.components.telemetryBinding ?? null;
+      this.dependencies.presentation.applyTransform(proxy.root, target.host.entitySnapshot!.components.transform);
+    }
   }
 
   /**

@@ -7,6 +7,17 @@ export const DEFAULT_TELEMETRY_EXPECTED_INTERVAL_MS = 500;
 export const TELEMETRY_CONFIG_MAX_DEPTH = 8;
 export const TELEMETRY_COLLECTION_MAX_ITEMS = 128;
 
+export type ModelSubDeviceConfig = {
+  role: string;
+  displayName: string;
+  device: {
+    devType?: string;
+    defaultAssetCode?: string;
+  };
+  cargo?: Record<string, unknown>;
+  fixedNodes: string[];
+};
+
 export type ModelDataDrivenConfig = {
   device: {
     device?: string;
@@ -21,6 +32,8 @@ export type ModelDataDrivenConfig = {
   specializedMotion?: Record<string, unknown>;
   /** specialized 模型的 cargo 原文透传（conveyor 走行参数 / rgv 载货台面节点），仅作 Inspector 只读摘要数据源。 */
   cargo?: Record<string, unknown>;
+  /** 同一几何模型上的独立逻辑设备；实例 assetCode 由场景逻辑节点单独保存。 */
+  subDevices?: ModelSubDeviceConfig[];
   fixedNodes: string[];
 };
 
@@ -181,6 +194,34 @@ function normalizeColumnBindings(value: unknown): Record<string, string[]> | und
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+function normalizeSubDevices(value: unknown): ModelSubDeviceConfig[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const roles = new Set<string>();
+  const result: ModelSubDeviceConfig[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item)) continue;
+    const role = normalizeOptionalString(item.role);
+    const displayName = normalizeOptionalString(item.displayName);
+    const device = isPlainObject(item.device) ? item.device : {};
+    const devType = normalizeTelemetryDeviceType(device.devType);
+    if (!role || !displayName || !isSpecializedTelemetryDeviceType(devType) || roles.has(role)) continue;
+    roles.add(role);
+    result.push({
+      role,
+      displayName,
+      device: {
+        devType,
+        ...(normalizeOptionalString(device.defaultAssetCode)
+          ? { defaultAssetCode: normalizeOptionalString(device.defaultAssetCode) }
+          : {}),
+      },
+      ...(isPlainObject(item.cargo) ? { cargo: JSON.parse(JSON.stringify(item.cargo)) as Record<string, unknown> } : {}),
+      fixedNodes: normalizeStringArray(item.fixedNodes),
+    });
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 /** 归一化模型包 dataDriven 配置，输出纯 JSON 供场景和运行时共享。 */
 export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenConfig | null {
   if (!isSafeTelemetryShape(value) || !isPlainObject(value)) return null;
@@ -200,8 +241,9 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
   const cargo = isSpecializedTelemetryDeviceType(devType) && isPlainObject(value.cargo)
     ? JSON.parse(JSON.stringify(value.cargo)) as Record<string, unknown>
     : undefined;
+  const subDevices = normalizeSubDevices(value.subDevices);
   const fixedNodes = normalizeStringArray(value.fixedNodes);
-  if (!deviceName && !devType && !defaultAssetCode && !hasMotionKey && !specializedMotion && !cargo && fixedNodes.length === 0) return null;
+  if (!deviceName && !devType && !defaultAssetCode && !hasMotionKey && !specializedMotion && !cargo && !subDevices && fixedNodes.length === 0) return null;
   return {
     device: {
       ...(deviceName ? { device: deviceName } : {}),
@@ -213,6 +255,7 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
     ...(hasMotionKey ? { motion: true } : {}),
     ...(specializedMotion ? { specializedMotion } : {}),
     ...(cargo ? { cargo } : {}),
+    ...(subDevices ? { subDevices } : {}),
     fixedNodes,
   };
 }

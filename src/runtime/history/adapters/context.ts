@@ -96,7 +96,9 @@ export class LogisticsContext {
     if (!id || this.removed.has(id)) return null;
     const record = this.tx.get('devices', id); return record?.driverState.value.kind === 'conveyor' ? this.of(id, 'conveyor') : null;
   }
-  conveyorSurface(spec: ConveyorSpec): Vec3 { return V.add(spec.center, V.scale(spec.upAxis, spec.surfaceLift)); }
+  conveyorSurface(spec: Pick<ConveyorSpec, 'center' | 'upAxis' | 'surfaceLift'>): Vec3 {
+    return V.add(spec.center, V.scale(spec.upAxis, spec.surfaceLift));
+  }
   cargoPort(actor: Actor, role: 'front' | 'back' | 'single' | 'step1' | 'step2'): string {
     const port = actor.spec.cargoPorts[role === 'step1' ? 'front' : role === 'step2' ? 'back' : role];
     requireState(port, 'LOGISTICS_MANIFEST', `设备 ${actor.device.id} 没有 ${role} 的逻辑货物端口。`); return port;
