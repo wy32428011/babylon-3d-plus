@@ -115,22 +115,42 @@ function makeHarness() {
     aisleCode: '',
   } as unknown as LocatorRuntimeEntry;
 
+  const sourceRoot = new TransformNode('slot_fetch_source_root', scene);
+  sourceRoot.position.set(-4, 4, 0);
+  sourceRoot.computeWorldMatrix(true);
+  const sourceLocator = {
+    entityId: 'slot_fetch_source',
+    root: sourceRoot,
+    columns: 1,
+    layers: 1,
+    startColumn: 42,
+    startLayer: 4,
+    columnReversed: false,
+    cellSteps: { columnStepX: 1.3, layerStepY: 0.34 },
+    rowNumber: 12,
+    deviceAssetCode: 'DDJ2',
+    aisleCode: '',
+  } as unknown as LocatorRuntimeEntry;
+
   const host = {
     pushLog: (message: string) => { logs.push(message); },
     collectModels: () => [
       { entityId: 'e_DDJ2', model: stacker },
       { entityId: 'e_1005', model: conveyor },
     ],
-    findLocatorByDevice: (assetCode: string, x: number, y: number, z: number) =>
-      assetCode === 'DDJ2' && z === 2 && x === 43 && y === 1 ? platformLocator : null,
-    findLocatorsByDevice: (assetCode: string) => (assetCode === 'DDJ2' ? [platformLocator] : []),
+    findLocatorByDevice: (assetCode: string, x: number, y: number, z: number) => {
+      if (assetCode !== 'DDJ2' || z !== 2) return null;
+      if (x === 42 && y === 4) return sourceLocator;
+      return x === 43 && y === 1 ? platformLocator : null;
+    },
+    findLocatorsByDevice: (assetCode: string) => (assetCode === 'DDJ2' ? [sourceLocator, platformLocator] : []),
     findBuiltInSlotLocatorForHostModel: (hostEntityId: string) => (hostEntityId === 'e_1005' ? platformLocator : null),
     resolveBuiltInSlotHost: (locatorEntityId: string) =>
       locatorEntityId === 'slot_1005' ? { model: conveyor, locator: platformLocator } : null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
-    resolveFetchDriveRowForLocator: () => null,
-    suppressFetchCellForLocator: () => null,
+    resolveFetchDriveRowForLocator: (locator: LocatorRuntimeEntry) => locator === sourceLocator ? 12 : null,
+    suppressFetchCellForLocator: (locator: LocatorRuntimeEntry) => locator === sourceLocator ? 12 : null,
     handleFetchRowSync: () => undefined,
     keepCargoForFetchRowSync: () => false,
     updateExternalScriptContext: () => true,
@@ -334,6 +354,42 @@ test('mode==4 放货到 conveyor 站台：收叉中途停止（上帧收叉本�
     assert.equal(st.frontSignalAction, null, '收叉回零后锁存必须清除');
     assert.equal(h.state.conveyorCargoMeshes.size, 1, '相位退出不得销毁已交接货物');
     assert.equal(h.state.stackerCargoMeshes.size, 0, 'stacker 侧不得残留货物');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('放货途中从 Fetch 货架转移到非 Fetch 站台：重算排号并正常交接', () => {
+  const h = makeHarness();
+  try {
+    const st = h.stacker.stackerTelemetry;
+    h.apply({ ...STACKER_ARRIVED, front_x: 0, front_y: 0, front_z: 0, front_signalBits: 0, front_task: 0 }, CONVEYOR_IDLE, 0.1, 5);
+
+    const placingFromSource = {
+      ...STACKER_ARRIVED,
+      mode: 3,
+      front_command: 3,
+      front_x: 42,
+      front_y: 4,
+      front_z: 2,
+      to_x: 43,
+      to_y: 1,
+      to_z: 2,
+    };
+    h.apply(placingFromSource, CONVEYOR_IDLE);
+    assert.equal(st.frontCargoFetchRow, 12, '放货开始时应读取起始货架的 Fetch 排号');
+    assert.equal(st.frontCargoBoundToFork, true);
+
+    const placingAtPlatform = { ...placingFromSource, front_x: 43, front_y: 1 };
+    h.apply(placingAtPlatform, CONVEYOR_IDLE);
+    assert.equal(st.frontCargoFetchRow, null, '到非 Fetch 站台后必须清除起始货架排号');
+    assert.equal(st.frontCargoPlaceTarget?.locator.entityId, 'slot_1005');
+
+    h.apply({ ...placingAtPlatform, front_movement_z: 3 }, CONVEYOR_IDLE, 0.1, 200);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '落货后 stacker 不得再持有货物');
+    const conveyorCargo = h.state.conveyorCargoMeshes.get(JSON.stringify(['1005', 'cargo']));
+    assert.ok(conveyorCargo, '非 Fetch 站台必须接管货物');
+    assert.equal(conveyorCargo.task, '12279');
   } finally {
     h.dispose();
   }

@@ -847,7 +847,7 @@ export class StackerTelemetryDriver {
       // 补建仅限本相位尚未伸叉（伸出标记为空）：伸叉后落货交接会摘除 cargoKey，
       // 此时再补建会在叉上刷出第二个货物，与站台上的交接货物重叠；
       // 同时接管目标格口渲染使其保持为空，货物全程由 stacker 渲染；
-      // 锁定目标排号：放货完成时当前位字段可能已变化，排号必须提前留存
+      // 放货途中随当前货格重算排号，落货解绑后固定供完成阶段同步
       if ((command === 3 || command === 4) && targetLocator) {
         const placeExtendSeen = side === 'front' ? state.frontLastMovementZ !== null : state.backLastMovementZ !== null;
         if (!this.getStackerForkCargoKey(model, side) && !placeExtendSeen) {
@@ -855,7 +855,8 @@ export class StackerTelemetryDriver {
         }
         const frontX = readIntegerField(snapshot.fields, 'front_x');
         const frontY = readIntegerField(snapshot.fields, 'front_y');
-        // 入场即锁定目标格：放货完成或相位退出时当前位字段可能已变化，留存归属必须用这里的格口。
+        const previousPlaceTarget = side === 'front' ? state.frontCargoPlaceTarget : state.backCargoPlaceTarget;
+        // 放货期间跟踪当前目标格，解绑后由状态保留供完成阶段使用。
         const placeTarget: SlotPlaceTarget | null = frontX !== null && frontY !== null
           ? {
               locator: targetLocator,
@@ -871,6 +872,11 @@ export class StackerTelemetryDriver {
         // 跳变保护：取货携带转场的中转帧（货叉部分伸出且本帧无伸出指令）不得覆盖取货滑移参数，
         // 否则货物会被拉回中转格口；放货伸出指令生效（targetOffset 非零）时持续更新目标格与行程。
         const boundForSlide = side === 'front' ? state.frontCargoBoundToFork : state.backCargoBoundToFork;
+        const placeLocatorChanged = previousPlaceTarget?.locator.entityId !== placeTarget?.locator.entityId;
+        if (boundForSlide && placeLocatorChanged) {
+          if (side === 'front') state.frontCargoFetchRow = null;
+          else state.backCargoFetchRow = null;
+        }
         const slideExists = side === 'front' ? state.frontCargoClampSlide !== null : state.backCargoClampSlide !== null;
         const offsetNow = side === 'front' ? state.frontForkOffset : state.backForkOffset;
         const targetOffsetNow = side === 'front' ? state.frontForkTargetOffset : state.backForkTargetOffset;
