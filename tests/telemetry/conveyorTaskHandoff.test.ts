@@ -2035,7 +2035,7 @@ test('复合辊筒移载：4014 → 4018 → 4019 → 4015 按独立 MQTT task �
 });
 
 
-test('逻辑移栽单轴：home 禁止交付，raised 按 task 定向，lowering 保持路线', () => {
+test('逻辑移栽单轴：按 task 定向并到端口交付，movement_y 不参与门控', () => {
   const h = makeHarness({
     MAIN: { centerX: 0, cross: true, composite: true },
     TRANSFER: { centerX: 0, partOf: 'MAIN' },
@@ -2047,20 +2047,12 @@ test('逻辑移栽单轴：home 禁止交付，raised 按 task 定向，lowering
     const state = h.models.TRANSFER.conveyorTelemetry;
     assert.equal(cargo.assetCode, 'TRANSFER');
     assert.equal(state.liftPhase, 'home');
-    const homeOffset = state.cargoTravelOffset;
-    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 0 }, 0.1, 10);
-    assert.equal(state.cargoTravelOffset, homeOffset, 'home 状态不得离开交付落点');
-
     h.apply('RIGHT', { task: 8, movement_x: 1 });
     state.cargoTravelOffset = 0;
-    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 1 }, 0.1, 12);
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 0 }, 0.1, 12);
     assert.ok(state.cargoTravelOffset > 0, 'movement_x=2 不得覆盖 task 端口方向');
     assert.equal(cargo.assetCode, 'TRANSFER', '未到目标端口不得交付');
-    const beforeLowering = state.cargoTravelOffset;
-    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 2 }, 0.1, 2);
-    assert.equal(state.liftPhase, 'lowering');
-    assert.ok(state.cargoTravelOffset > beforeLowering);
-    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 2 }, 0.1, 100);
+    h.apply('TRANSFER', { task: 8, movement_x: 2, movement_y: 0 }, 0.1, 100);
     assert.strictEqual(onlyCargo(h.state), cargo);
     assert.equal(cargo.assetCode, 'RIGHT');
   } finally {
@@ -2097,7 +2089,7 @@ test('复合设备任务互换：主设备旧任务货先交给移栽新任务�
   }
 });
 
-test('复合设备任务反向互换：主设备新任务等待移栽旧任务货下降后交回', () => {
+test('复合设备任务反向互换：主设备新任务直接接回移栽旧任务货，不看升降阶段', () => {
   const h = makeHarness({
     MAIN: { centerX: 0, cross: true, composite: true },
     TRANSFER: { centerX: 0, partOf: 'MAIN' },
@@ -2107,13 +2099,70 @@ test('复合设备任务反向互换：主设备新任务等待移栽旧任务�
     h.apply('TRANSFER', { task: 80, movement_x: 0, movement_y: 1 });
     h.apply('MAIN', { task: 81, movement_x: 0 });
     assert.strictEqual(onlyCargo(h.state), cargo);
-    assert.equal(cargo.assetCode, 'TRANSFER', '移栽尚未下降时继续保持货物');
+    assert.equal(cargo.assetCode, 'MAIN', '内部交接不受 movement_y 门控');
     assert.equal(cargo.task, '81', '内部主转次同样允许按新任务改号');
+  } finally {
+    h.dispose();
+  }
+});
 
-    h.apply('TRANSFER', { task: 81, movement_x: 0, movement_y: 0 });
+
+test('复合辊筒移载现场低位时序：4014 → 4018 → 4019 → 4015 不受 movement_y 阻断', () => {
+  const h = makeHarness({
+    '4014': { centerX: 0, cross: true, composite: true },
+    '4018': { centerX: 0, partOf: '4014' },
+    '4008': { centerX: 3, cross: true, composite: true },
+    '4019': { centerX: 3, partOf: '4008' },
+    '4015': { centerX: 6 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4014', '255972');
+    h.syncTopology();
+    h.apply('4014', { task: 255972, movement_x: 1, movement_y: 0 });
+    h.apply('4018', { task: 255972, movement_x: 0, movement_y: 0 });
+    assert.equal(cargo.assetCode, '4018');
+
+    h.apply('4019', { task: 255972, movement_x: 1, movement_y: 0 });
+    h.apply('4018', { task: 255972, movement_x: 1, movement_y: 0 }, 0.1, 120);
+    assert.equal(cargo.assetCode, '4019', '4018 低位到端口后也应交给 4019');
+
+    h.apply('4015', { task: 255972, movement_x: 1, movement_y: 0 });
+    h.apply('4019', { task: 255972, movement_x: 1, movement_y: 0 }, 0.1, 120);
     assert.strictEqual(onlyCargo(h.state), cargo);
-    assert.equal(cargo.assetCode, 'MAIN', '移栽回到低位后应交回主设备');
-    assert.equal(cargo.task, '81');
+    assert.equal(cargo.assetCode, '4015');
+    assert.equal(cargo.task, '255972');
+  } finally {
+    h.dispose();
+  }
+});
+
+
+test('4019 → 4015 直角接驳：到达中心线交叉点即交付，不再等待普通端口', () => {
+  const h = makeHarness({
+    '4008': { centerX: 0, cross: true, composite: true },
+    '4019': { centerX: 0, partOf: '4008' },
+    '4015': { centerX: 3 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4019', '255972');
+    h.models['4019'].conveyorTelemetry.cargoTravelOffset = 0;
+    h.syncTopology();
+    h.apply('4015', { task: 255972, movement_x: 1 });
+
+    const state = h.models['4019'].conveyorTelemetry;
+    const route = state.taskRoute;
+    assert.ok(route, '4015 的订阅必须形成 4019 的任务路线');
+    assert.equal(cargo.assetCode, '4019', '普通端口之外时不得提前交付');
+    const plan = state.travelPlan;
+    assert.ok(plan);
+    plan.perpendicularEndOffsets = route.direction > 0
+      ? { positive: 0, negative: null }
+      : { positive: null, negative: 0 };
+
+    h.apply('4019', { task: 255972, movement_x: 1, movement_y: 0 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4015', '交叉点与走行终点一致时必须交付');
+    assert.equal(cargo.task, '255972');
   } finally {
     h.dispose();
   }

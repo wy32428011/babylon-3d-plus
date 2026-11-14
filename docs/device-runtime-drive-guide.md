@@ -83,7 +83,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 | `dataDriven.cargo.travel.actionMap` | specializedModelAssets.ts:360-371 | 字段值→方向（默认 {0:0,1:1,2:-1}） |
 | `dataDriven.cargo.travel.nodes` / `fallbackPattern` | 同上 | 行程节点名 / 兜底正则 |
 | `dataDriven.cargo.travel.directionSource` / `forwardSign` | specializedModelAssets.ts `readConveyorCargoTravelConfig` | 可选 task 端口定向及方向符号；逻辑移栽的 movement_x=1/2 不再映射左右 |
-| `dataDriven.cargo.lift` | 同上 | 逻辑移栽的 movement_y 0/1/2 映射；home 停止水平走行，raised 放行，lowering 保持路线 |
+| `dataDriven.cargo.lift` | 同上 | 逻辑移栽的 movement_y 0/1/2 映射及阶段记录；不参与货物走行或交付门控 |
 | `dataDriven.subDevices` | devicePartBinding.ts；specializedModelAssets.ts 按 role 读取 | 同一几何模型的独立逻辑设备声明；场景保存 devicePartBinding 与独立 telemetryBinding，第二设备号手动填写 |
 | `dataDriven.cargo.surfaceOffset` | specializedModelAssets.ts:331-341 | 支撑面微调 |
 | `dataDriven.cargo.front/backHasGoodsField` | specializedModelAssets.ts:343-357 | 光电字段名（默认 front/back_has_goods） |
@@ -115,7 +115,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 交接
 - **conveyor→conveyor**：探测邻居(:951-1010) + `available/taken` 下行泛洪、`subscribe/unsubscribe` 上行传递（`dispatchLinkMessage` :459）；越级直达 `runCargoDeliveryRelay`(:687-722)，K 跳仅终点发一次 taken+available，`visited` 防环。接收方**暂时有货不等于订阅失效**：保留 `downstreamLinks` / `externalPulls` 并逐帧重试，不 detach、不覆盖接收方货物；只有订阅者消失或 pending/waiting task 均不匹配才摘除登记。占用等待不设超时。
-- **复合辊筒移载**：`subDevices` 将同一 GLB 的主输送与移栽机构注册为独立逻辑设备，各自接收 MQTT 并持有独立 task/货物状态。宿主只走主输送轴，移栽子设备只走自己的单轴；`travel.directionSource='task'` 按下一跳端口定向，`cargo.lift` 消费 movement_y 的 home/raised/lowering。内部链路显式传递订阅，外部探针落到逻辑移栽节点，级联接力逐跳检查升降交接条件。历史场景幂等补建逻辑节点，第二设备号留空提示手填，未填写不驱动，保存后才持久化。详见 `docs/conveyor-mqtt-drive-logic.md` 第 12 节。
+- **复合辊筒移载**：`subDevices` 将同一 GLB 的主输送与移栽机构注册为独立逻辑设备，各自接收 MQTT 并持有独立 task/货物状态。宿主只走主输送轴，移栽子设备只走自己的单轴；`travel.directionSource='task'` 按下一跳端口定向，`cargo.lift` 仅记录 movement_y 的 home/raised/lowering，不参与走行或交付门控。内部链路显式传递订阅，外部探针落到逻辑移栽节点，级联接力逐跳检查任务路线和目标端口，直角接驳以中心线交叉点作为走行与交付的共同终点。历史场景幂等补建逻辑节点，第二设备号留空提示手填，未填写不驱动，保存后才持久化。详见 `docs/conveyor-mqtt-drive-logic.md` 第 12 节。
 - **异步加载拓扑自愈**：正式 Viewer 不等待全场景模型脚本完成即启动预览。帧首仅比较专用候选的模型引用与 ready 状态；模型增删或 ready 变化时，未 ready 候选不参与探测，已就绪 conveyor 的 `travelPlan`（含直角终点）与 `probeNeighbors` 一并重建，但货物、task、订阅登记和交接插值不清空。重建后按当前状态补发一次现有 available/subscribe，接通加载期间已存在的持货与等待；稳定帧不做全场景几何重扫，也不逐帧补发，设备动画不被加载栅栏阻塞。
 - **直角相邻交接落点**：`settleCargoTransfer` 通过 `resolvePerpendicularHandoffOffset`（conveyorCargoTravel.ts）求上游/下游两条中心轨迹的 XZ 交叉点；近似直角（|dot|≤0.3）、层高差≤0.5m、交叉点不远离上游中心时，交付落点取交叉点沿下游轴的偏移，而不是下游进入端——货箱先沿线走到拐角交叉点，再沿下游中心轴继续，横向平移瞬间不再脱离下游中心轨迹。
 - **走行终点取交叉点**：行程计划首次持货时扫描其它 conveyor 中心线，求落在本机跨度内、对方跨度附近（+0.5m 容差）的直角交叉，缓存为 `perpendicularEndOffsets`（正/负两侧）。走行到该侧时终点钳制到交叉点，货箱停在拐角（而非设备边沿），再由下游沿其中心轴继续；没有直角邻居的一侧保持原行程半径。

@@ -300,7 +300,7 @@ export class ConveyorTelemetryDriver {
    * 取**模型本地坐标**（x/-x/z/-z，缺省 x），模型旋转后仍跟随本地轴：
    * 正转（=1）刷在轨迹起点向终点移动；反转（=2）刷在轨迹终点向起点移动。
    */
-  /** 逻辑移栽设备的 movement_y=0/1 更新升降阶段；2 下降保持当前路线继续运动。 */
+  /** 逻辑移栽记录 movement_y 对应的升降阶段；货物走行与交付只使用任务路线和端口位置。 */
   private updateConveyorLiftPhase(
     model: ModelRuntimeEntry,
     snapshot: DeviceTelemetrySnapshot,
@@ -643,7 +643,7 @@ export class ConveyorTelemetryDriver {
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
     // 直角交接插值期间冻结走行：目标点固定在拐角，货物沿上游轴滑到拐角后再沿本机轴驱动。
     const awaitingEntryHandoff = state.entryHandoffPending && cargo.handoff !== null;
-    const cargoDirection = travelConfig.lift && state.liftPhase === 'home' || awaitingEntryHandoff
+    const cargoDirection = awaitingEntryHandoff
       ? 0
       : movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
     if (!snapshot.faulted && cargoDirection !== 0) {
@@ -954,24 +954,27 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** task 定向移栽必须先升起并到达目标端口；下降保持路线，到点后仍允许交付。 */
+  /** task 定向移栽按订阅路线到达目标端口后交付；内部主次设备直接交接，不使用 movement_y 门控。 */
   private isCargoReadyForDelivery(
     model: ModelRuntimeEntry,
     cargo: GeneratedCargoRuntimeEntry,
     subscriber: ModelRuntimeEntry,
   ): boolean {
     const config = readConveyorCargoTravelConfig(model);
-    const state = model.conveyorTelemetry;
     const internalDelivery = this.resolveInternalDeviceParts(model).some((part) => part === subscriber);
-    // 移栽交回本机主输送是下降落货，不要求外部端口；主输送交给内部移栽保持原直接交接。
-    if (internalDelivery) return !config.lift || state.liftPhase === 'home';
+    if (internalDelivery) return true;
     if (config.directionSource !== 'task') return true;
     if (!cargo.task) return false;
     const route = this.resolveTaskRoute(model, cargo.task);
-    if (!route || config.lift && state.liftPhase === 'home') return false;
+    if (!route) return false;
+    const state = model.conveyorTelemetry;
     const plan = this.resolveConveyorTravelPlan(model);
     const halfRange = this.resolveTravelHalfRangeMeters(cargo, plan);
-    const exitOffset = route.direction * plan.forwardSign * halfRange;
+    const exitSign = route.direction * plan.forwardSign;
+    const perpendicularOffset = exitSign > 0
+      ? plan.perpendicularEndOffsets?.positive
+      : plan.perpendicularEndOffsets?.negative;
+    const exitOffset = perpendicularOffset ?? exitSign * halfRange;
     return Math.abs(state.cargoTravelOffset - exitOffset) <= CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
   }
 
@@ -982,7 +985,8 @@ export class ConveyorTelemetryDriver {
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
     if (!cargo || !cargo.task || state.platformPlacedCargo) return;
     const target = this.findDeliveryTarget(model, cargo);
-    if (!target || !this.isCargoReadyForDelivery(model, cargo, target.subscriber)) return;
+    const ready = target ? this.isCargoReadyForDelivery(model, cargo, target.subscriber) : false;
+    if (!target || !ready) return;
     const detached = this.context.detachClaimedCargoByReference(cargo);
     if (!detached) return;
     if (state.pendingTask === cargo.task) state.pendingTask = null;

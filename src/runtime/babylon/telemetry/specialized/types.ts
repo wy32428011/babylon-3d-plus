@@ -372,7 +372,7 @@ export type ConveyorModelTelemetryState = {
   probeNeighbors: ConveyorProbeNeighbors | null;
   /** 当前设备行程规划缓存：首次需要时计算（避免等待设备每帧全场景几何扫描），reset 时清空。 */
   travelPlan: ConveyorCargoTravelPlan | null;
-  /** 独立移栽机构的升降阶段；lowering 保持当前 task 路线继续运动。 */
+  /** 独立移栽机构按 movement_y 记录的升降阶段；不参与货物走行或交付门控。 */
   liftPhase: ConveyorLiftPhase;
   /** task 路由：下一跳命中的端口决定左右，不读取 movement_x 的正负。 */
   taskRoute: ConveyorTaskRoute | null;

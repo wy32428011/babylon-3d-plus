@@ -23,7 +23,7 @@
 | 字段 | 类型 | 语义 |
 |---|---|---|
 | `movement_x` | int | 0 静止，1 正转，2 反转（正负数兜底兼容）。实际读取走 `cargo.travel` 的 `fields`+`actionMap`，缺省即 movement_x。**不再门控刷出**：新 task 刷出/复用时若为 0 按正转（1）处理并登记自驱（见 §5.7/§8）。逻辑移栽声明 `travel.directionSource='task'` 时 1/2 不代表左右，方向由 task 下一跳端口决定 |
-| `movement_y` | int | 逻辑移栽可选：由 `cargo.lift` 声明 0/1/2 映射；home 停在接货位置，raised 允许走行，lowering 保持 task 路线继续运动；普通输送线忽略 |
+| `movement_y` | int | 逻辑移栽可选：由 `cargo.lift` 声明 0/1/2 映射并记录 home/raised/lowering；不参与货物走行或交付门控，普通输送线忽略 |
 | `mode` | int | 2=销毁条件（配合双光电无货+勾选自动销毁）；0=空闲（等待方退出等待并退订）；缺省（null）视为运行中 |
 | `task` | int | 任务号；缺失/0=无任务（归一化为空串，不触发任何边沿，状态不变）。**匿名模式已移除**：无 task 不再刷出货箱 |
 | `front_has_goods` / `back_has_goods` | bool | 前后光电，仅用于 mode==2 的销毁判定（字段名可由脚本顶层 `cargo.frontHasGoodsField/backHasGoodsField` 覆盖） |
@@ -283,8 +283,8 @@ task 在 `transitedTasks` 中（越级流转货已过机，§7.5）时**不触�
 
 - **独立遥测**：逻辑子设备经无几何代理进入 `collectModels`，拥有独立 MQTT 快照、持货状态、单轴行程和 task 订阅，不与宿主共用 `conveyorTelemetry`。
 - **内部拓扑**：宿主与逻辑子设备显式双向传递 available/taken/subscribe/unsubscribe，不用重叠包围盒猜测内部连接。外部嗅探落到逻辑移栽节点，排除同一物理模型及复合宿主的遮挡。
-- **单轴与升降**：宿主只声明 `GD_4` 的 Z 轴；移栽子设备只声明 `EQ_YZJ` 的 X 轴，并设置 `travel.directionSource='task'` 与 `forwardSign`。movement_x 的 1/2 不代表左右，匹配货物 task 的 `nextHopAssetCode` 命中哪个端口就向哪侧移动。`cargo.lift` 声明 movement_y 的 0/1/2：home 停在接货位置，raised 允许向目标端口走行，lowering 保持路线继续运动。
-- **接力门控**：级联交付逐跳检查升降和目标端口，不在同帧穿过尚未到点的移栽设备。内部主次任务可双向互换：一方订阅新任务时可接管另一方尚无旧任务订阅者的货物并改号，但不提前消费持货方后续的新任务边沿；移栽交回本机主输送时在低位交付，不套用外部端口门控。普通输送线异任务仍不得交付。实时与历史回放使用同一逻辑设备配置。
+- **单轴与升降**：宿主只声明 `GD_4` 的 Z 轴；移栽子设备只声明 `EQ_YZJ` 的 X 轴，并设置 `travel.directionSource='task'` 与 `forwardSign`。movement_x 的 1/2 不代表左右，匹配货物 task 的 `nextHopAssetCode` 命中哪个端口就向哪侧移动。`cargo.lift` 仅记录 movement_y 对应的 home/raised/lowering 状态，不再门控货物走行或交付。
+- **接力门控**：级联交付按任务订阅逐跳检查目标端口，不在同帧穿过尚未到点的移栽设备；直角接驳的走行和交付共用中心线交叉点终点，无交叉点才使用普通行程端口。内部主次任务可双向互换：一方订阅新任务时可接管另一方尚无旧任务订阅者的货物并改号，但不提前消费持货方后续的新任务边沿；内部主次设备直接交接，不套用外部端口门控。普通输送线异任务仍不得交付。实时与历史回放使用同一逻辑设备配置。
 - **历史场景升级**：模型同步或反序列化遇到新版声明时，按 `hostEntityId + role` 幂等补建复合文件夹和逻辑实体，保留宿主实体 ID、Transform、参数及原有业务引用，不自动写盘；显式保存后才持久化。
 - **第二设备号**：自动创建的子设备 assetCode 留空并显示提示，由用户手动填写；未填写前没有完整遥测主键，不参与真实 MQTT 驱动。保存重开保留手填值，重复同步不重复建节点。
 - **编辑约束**：逻辑节点不创建第二份网格、不参与独立 Transform 或群组移动；删除宿主时一并删除其子设备和复合分组。
