@@ -462,10 +462,12 @@ export class StackerTelemetryDriver {
         state.rootBasePosition.add(travelAxis.scale(targetTravelOffset)),
         travelAxis,
       );
-      const defaultSpeed = this.readStackerInspectorSpeed(model, 'travelSpeed')
+      const inspectorSpeed = this.readStackerInspectorSpeed(model, 'travelSpeed');
+      const defaultSpeed = inspectorSpeed
         ?? this.readStackerDataDrivenNumber(model, ['motion', 'travel', 'speed'])
         ?? STACKER_DEFAULT_TRAVEL_SPEED_METERS_PER_SECOND;
-      const targetSpeed = this.resolveStackerCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
+      const targetSpeed = inspectorSpeed
+        ?? this.resolveStackerCatchUpSpeed(model, Vector3.Distance(state.rootPosition, rootTargetPosition), defaultSpeed);
       const previous = state.rootPosition;
       state.rootPosition = moveVectorTowards(
         state.rootPosition,
@@ -490,11 +492,11 @@ export class StackerTelemetryDriver {
 
     let moving = false;
     if (!snapshot.faulted && targetLiftOffset !== null) {
-      const targetSpeed = this.resolveStackerCatchUpSpeed(
+      const inspectorSpeed = this.readStackerInspectorSpeed(model, 'liftSpeed');
+      const targetSpeed = inspectorSpeed ?? this.resolveStackerCatchUpSpeed(
         model,
         Math.abs(targetLiftOffset - state.liftOffset),
-        this.readStackerInspectorSpeed(model, 'liftSpeed')
-          ?? this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'speed'])
+        this.readStackerDataDrivenNumber(model, ['motion', 'lift', 'speed'])
           ?? STACKER_DEFAULT_LIFT_SPEED_METERS_PER_SECOND,
       );
       const previous = state.liftOffset;
@@ -1994,7 +1996,7 @@ export class StackerTelemetryDriver {
     return this.host.findLocatorByAisle(aisleCode, x, y, z);
   }
 
-  /** 使用 rpm 字段换算速度；rpm 符号只表示旋转方向（负 rpm 同样在运动，如 11 排 mv3 伸叉 rpm_z=-6），取绝对值；无 rpm 字段时回退 Inspector 速度参数、dataDriven.motion.<motionKey>.speed 或模型默认速度。 */
+  /** Inspector 显式速度优先；未设置时使用 rpm 绝对值换算，rpm 缺失再回退 dataDriven.motion.<motionKey>.speed 或模型默认速度。 */
   private readSpeed(
     model: ModelRuntimeEntry,
     snapshot: StackerTelemetrySnapshot,
@@ -2002,8 +2004,9 @@ export class StackerTelemetryDriver {
     motionKey: 'travel' | 'lift' | 'fork',
     fallbackSpeed: number,
   ): number {
-    const defaultSpeed = this.readStackerInspectorSpeed(model, `${motionKey}Speed`)
-      ?? this.readStackerDataDrivenNumber(model, ['motion', motionKey, 'speed'])
+    const inspectorSpeed = this.readStackerInspectorSpeed(model, `${motionKey}Speed`);
+    if (inspectorSpeed !== null) return inspectorSpeed;
+    const defaultSpeed = this.readStackerDataDrivenNumber(model, ['motion', motionKey, 'speed'])
       ?? fallbackSpeed;
     const rpm = readNumberField(snapshot.fields, rpmKey);
     if (rpm === null) return defaultSpeed;

@@ -180,10 +180,10 @@ go_column/列号边沿锁行走目标(:135-146) → 滑向目标列 → movement
 ### 参数化配置
 | 配置 | 位置 | 语义 |
 |---|---|---|
-| Inspector `travelSpeed/liftSpeed/forkSpeed` | stackerDriver.ts:1620 `readStackerInspectorSpeed` | 读 modelAsset.parameterValues，优先级最高 |
-| `dataDriven.motion.{travel,lift,fork}.speed` | :1633 | 回退链第二级 |
+| Inspector `travelSpeed/liftSpeed/forkSpeed` | stackerDriver.ts `readStackerInspectorSpeed` | 读 modelAsset.parameterValues；显式设置后优先级最高，不被 RPM 覆盖，行走/升降也不再叠加自适应追赶 |
+| `dataDriven.motion.{travel,lift,fork}.speed` | 同上 `readSpeed` | 未设置 Inspector 且 RPM 缺失时回退 |
 | 常量默认 0.8 / 0.3 / 0.25 m/s | types.ts:15-17 | 最终回退 |
-| MQTT `rpm_*` × `rpmToMetersPerSecond` | :1638 | 实际速度优先（默认 0.01） |
+| MQTT `rpm_*` × `rpmToMetersPerSecond` | 同上 `readSpeed` | 仅在未设置对应 Inspector 速度时参与，取 RPM 绝对值换算（默认系数 0.01） |
 | Locator `rowNumber/startColumn/startLayer/columns/layers/columnReversed/cellSteps/cellSize` | SceneRuntime.ts:555-584 | 巷道/列/层网格不在 stacker 配置，在绑定货格 |
 | `travelConstraint` / `liftConstraint` + `dataDriven.motion.lift.limits` | :1386-1401,:1418-1420 | 行走/升降行程钳制 |
 | `dataDriven.motion.*.nodes` / `fixedNodes` / `fallbackPattern` | :1561,:1549,:1504 | 轴节点映射；兜底硬编码 huocha2.10(一段叉)/huocha.9(二段叉)(:1489-1491) |

@@ -284,6 +284,18 @@ test('front_ 变化间隔已知时按窗口剩余时间自适应提速，上限 
     h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
     const z2 = h.model.stackerTelemetry.rootPosition!.z;
     assert.ok(Math.abs(z2 - (20 - 0.8 * 0.1)) < 1e-6, `无间隔信息时必须退回默认速度 0.8 m/s，实际 z=${z2}`);
+
+    // 显式面板速度不参与自适应追赶：travel=0.2/lift=0.1 时单帧分别只走 0.02/0.01m
+    (h.model as { entitySnapshot: unknown }).entitySnapshot = {
+      components: { modelAsset: { parameterValues: { travelSpeed: 0.2, liftSpeed: 0.1 } } },
+    };
+    h.model.stackerTelemetry.frontCellChangeIntervalMs = 300;
+    h.model.stackerTelemetry.lastFrontCellChangedAtMs = performance.now();
+    h.model.stackerTelemetry.rootPosition!.z = 20;
+    h.model.stackerTelemetry.liftOffset = 0;
+    h.apply({ ...POSITION_FRAME, front_x: 5 }, 0.1, 1);
+    assert.ok(Math.abs(h.model.stackerTelemetry.rootPosition!.z - 19.98) < 1e-6, '显式水平速度必须保持 0.2 m/s');
+    assert.ok(Math.abs(h.model.stackerTelemetry.liftOffset - 0.01) < 1e-6, '显式垂直速度必须保持 0.1 m/s');
   } finally {
     h.dispose();
   }
@@ -961,7 +973,7 @@ test('堆垛机关联巷道回退：本设备未绑定的货格按巷道编号�
   }
 });
 
-test('堆垛机模型参数速度覆盖：parameterValues.forkSpeed 覆盖模型默认伸叉速度', () => {
+test('堆垛机模型参数速度覆盖：parameterValues.forkSpeed 不受高 RPM 影响', () => {
   const h = makeHarness();
   try {
     makeStackerGeometry(h);
@@ -971,13 +983,13 @@ test('堆垛机模型参数速度覆盖：parameterValues.forkSpeed 覆盖模型
     const defaultOffset = Math.abs(h.model.stackerTelemetry.frontForkOffset);
     assert.ok(Math.abs(defaultOffset - 0.125) < 1e-6, `默认伸叉速度 0.25m/s 五帧应走 0.125m，实际 ${defaultOffset}`);
 
-    // 模型参数覆盖 1.0 m/s：先收叉归零再伸，0.1s × 5 帧 = 0.5m
+    // 模型参数覆盖 1.0 m/s：即使现场 rpm=255，仍按 0.1s × 5 帧 = 0.5m 伸出
     (h.model as { entitySnapshot: unknown }).entitySnapshot = {
       components: { modelAsset: { parameterValues: { forkSpeed: 1.0 } } },
     };
-    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 2 }, 0.1, 20);
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 2, front_rpm_z: 255 }, 0.1, 20);
     assert.equal(h.model.stackerTelemetry.frontForkOffset, 0, '覆盖前先收叉归零');
-    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1 }, 0.1, 5);
+    h.apply({ ...POSITION_FRAME, front_command: 1, front_movement_z: 1, front_rpm_z: 255 }, 0.1, 5);
     const overrideOffset = Math.abs(h.model.stackerTelemetry.frontForkOffset);
     assert.ok(Math.abs(overrideOffset - 0.5) < 1e-6, `forkSpeed=1.0 五帧应走 0.5m，实际 ${overrideOffset}`);
   } finally {
