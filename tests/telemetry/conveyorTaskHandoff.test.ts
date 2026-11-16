@@ -100,6 +100,8 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     if (config.autoDispose !== undefined) binding.cargoAutoDispose = config.autoDispose;
     if (config.origin !== undefined) binding.cargoOriginDevice = config.origin;
     if (config.trajectoryDirection !== undefined) binding.trajectoryDirection = config.trajectoryDirection;
+    // 这些用例按原有 task 边沿语义编写，显式关闭首载光电同步，避免存量货补建改变时序。
+    binding.cargoInitialSync = false;
     const model = {
       assetCode,
       assetHandle: {},

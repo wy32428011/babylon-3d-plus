@@ -99,7 +99,7 @@ for (const [id, code, x, origin] of [[HOST_A, 'CV1', -4, true], [HOST_B, 'CV2', 
   entity.components.modelAsset = { ...entity.components.modelAsset!, assetCode: code, assetRevision: 'host-v1' };
   entity.components.telemetryBinding = { enabled: true, sourceId: SOURCE_ID, deviceType: 'conveyor',
     expectedIntervalMs: 100, staleAfterMs: 60_000, trajectoryDirection: 'x',
-    cargoOriginDevice: origin, cargoGeneratorId: GENERATOR_ID, cargoTravelSpeed: .3, cargoAutoDispose: true,
+    cargoOriginDevice: origin, cargoInitialSync: false, cargoGeneratorId: GENERATOR_ID, cargoTravelSpeed: .3, cargoAutoDispose: true,
     surfaceArrows: { enabled: false } as never };
   documentModel.entities[id] = entity; documentModel.entityIds.push(id);
 }

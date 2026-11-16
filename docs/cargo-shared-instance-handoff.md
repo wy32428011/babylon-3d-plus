@@ -35,7 +35,7 @@
 
 | 设备 | 刷出时机 | 锁的实现 |
 |---|---|---|
-| conveyor | 新 task 边沿登记 `pendingTask` → movement_x 非 0 即刷出/接管（不依赖光电信号）；刷出位置只由运行方向决定（正转刷轨迹起点、反转刷终点） | `currentTask` 同 task 不重生；mode==2 且双光电无货时清空并复位 `currentTask`（允许 task 复用），pendingTask 保留等待确认 |
+| conveyor | 新 task 边沿登记 `pendingTask` → movement_x 非 0 即刷出/接管（不依赖光电信号）；刷出位置只由运行方向决定（正转刷轨迹起点、反转刷终点）。例外：默认开启的 `cargoInitialSync` 会在首载确认光电有货且带 task 时补建滞留货（显式 `false` 可关闭，见 conveyor 驱动文档 §5.0） | `currentTask` 同 task 不重生；mode==2 且双光电无货时清空并复位 `currentTask`（允许 task 复用），pendingTask 保留等待确认 |
 | stacker | command 边沿（取货初始化/放货补建）不变 | command 边沿不重复触发，天然不反抢 |
 | rgv | movement_z 起转边沿/放货补建不变 | 同上 |
 

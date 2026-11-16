@@ -51,7 +51,7 @@ export async function createLiftFixture(output) {
   const stations = [['lift-input', -5, .575], ['lift-input-high', -5, 4.575], ['lift-output', 0, .575]].map(([id, x, y]) => entity(id, id, {
     transform: transform(x, y), modelAsset: { assetCode: id, sourcePath: conveyorPath, sourceUrl: assetUrl(conveyorPath), lengthUnit: 'meter', unitScaleToMeters: 1,
       dataDrivenConfig: conveyorConfig, scriptAssets: [{ path: conveyorScript, sourceUrl: assetUrl(conveyorScript), name: path.basename(conveyorScript) }] },
-    telemetryBinding: { enabled: true, sourceId: 'default', deviceType: 'conveyor', cargoOriginDevice: id === 'lift-input', surfaceArrows: { enabled: false } },
+    telemetryBinding: { enabled: true, sourceId: 'default', deviceType: 'conveyor', cargoOriginDevice: id === 'lift-input', cargoInitialSync: false, surfaceArrows: { enabled: false } },
   }));
   const locator = entity('lift-arrow-locator', '换层站台', { transform: transform(2.5), locator: {
     assetId: 'HC-ARROW-SLOTS', storageDepth: 'near', length: 1, width: 1, height: 1, columns: 1, layers: 5, startColumn: -1, startLayer: 1,

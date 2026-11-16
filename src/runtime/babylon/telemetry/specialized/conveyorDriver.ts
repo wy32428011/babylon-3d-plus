@@ -79,6 +79,12 @@ const CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS = 30;
  */
 const CONVEYOR_LIFT_INFEED_REUSE_GRACE_SECONDS = 10;
 
+/** 首载光电同步：连续确认的新快照数；按 receivedAt 去重，同一报文多帧不重复计数。 */
+const CONVEYOR_INITIAL_SYNC_SAMPLE_COUNT = 3;
+
+/** 首载光电同步确认窗口（毫秒）：从首条健康快照起算，覆盖 PLC 启动晚于孪生的情况。 */
+const CONVEYOR_INITIAL_SYNC_WINDOW_MS = 15_000;
+
 /** 临时链路诊断开关（排查残留订阅/越级拽货时置 true，输出到浏览器 console；平时关闭）。 */
 const CONVEYOR_LINK_TRACE = false;
 
@@ -252,10 +258,112 @@ export class ConveyorTelemetryDriver {
 
   /** 对单条输送线应用货物占位/走行和状态 metadata；本体滚筒/链条不再驱动，仅维护货物运动。 */
   applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
+    this.tryInitialSensorSync(model, snapshot);
     this.reportConveyorRuntimeState(snapshot);
     writeDeviceTelemetryMetadata(model, snapshot);
 
     this.applyConveyorCargoMotion(model, snapshot, deltaSeconds);
+  }
+
+  /** 帧首全局预扫描入口：在任一 task 边沿处理前先按光电物化存量货，避免起点设备先刷出幻影货。 */
+  applyInitialSensorSync(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+    this.tryInitialSensorSync(model, snapshot);
+  }
+
+  /**
+   * 首载光电同步（默认开启，实例可显式关闭）：首次加载/模型重置后，确认前后光电有货且报文带 task，
+   * 在本机物化一个正常货箱，弥补数字孪生与真实产线非同时启动时中途段存量货缺失。
+   * 只做“存在性”兜底：无 task 不建箱；同一 task 已有任何设备持货时不重复建；
+   * 物化后先滞留（initialSensorHold），线体未走行前禁止下游订阅把箱立即拉走。
+   * 位置按模型局部轴约定：前端=负端、后端=正端、双端都有货=中心；精确测点偏移留待后续配置。
+   */
+  private tryInitialSensorSync(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+    const state = model.conveyorTelemetry;
+    // 默认开启；历史场景没有该字段也参与首载同步，只有显式 false 才关闭。
+    if (model.telemetryBinding?.cargoInitialSync === false) return;
+    if (state.initialSyncDone) return;
+    // 同一报文可能被多帧重复应用；优先用来源时间戳/序号识别新报文，快放回放时 receivedAt 可能相同。
+    const sampleKey = snapshot.sourceTimestamp !== null ? `ts:${snapshot.sourceTimestamp}`
+      : snapshot.sequence !== null ? `seq:${snapshot.sequence}`
+        : `at:${snapshot.receivedAt}`;
+    if (state.initialSyncSampleKey === sampleKey) return;
+    state.initialSyncSampleKey = sampleKey;
+
+    if (snapshot.faulted) {
+      state.initialSyncSamples = 0;
+      state.initialSyncStartedAt = null;
+      return;
+    }
+    // 正常 task 边沿已经建货、或已有货物被交付到本机时，后续完全交给既有状态机。
+    if (state.cargoCode !== null) {
+      state.initialSyncDone = true;
+      return;
+    }
+
+    if (state.initialSyncStartedAt === null) state.initialSyncStartedAt = snapshot.receivedAt;
+    else if (snapshot.receivedAt - state.initialSyncStartedAt > CONVEYOR_INITIAL_SYNC_WINDOW_MS) {
+      state.initialSyncDone = true;
+      return;
+    }
+
+    const signalFields = readConveyorCargoSignalFields(model);
+    const frontHasGoods = readBooleanField(snapshot.fields, signalFields.frontHasGoods);
+    const backHasGoods = readBooleanField(snapshot.fields, signalFields.backHasGoods);
+    if (frontHasGoods !== true && backHasGoods !== true) {
+      state.initialSyncSamples = 0;
+      return;
+    }
+    state.initialSyncSamples += 1;
+    // 停线的存量箱是稳定状态，首条有效快照即可物化；运行中的光电脉冲才需要连续 3 条确认。
+    const reportedDirection = readConveyorMotionSignal(snapshot.fields, readConveyorCargoTravelConfig(model)).direction;
+    const requiredSamples = reportedDirection === 0 ? 1 : CONVEYOR_INITIAL_SYNC_SAMPLE_COUNT;
+    if (state.initialSyncSamples < requiredSamples) return;
+
+    const task = normalizeCargoTask(readIntegerField(snapshot.fields, 'task'));
+    if (!task) return;
+    if (this.hasAnyCargoForTask(task)) {
+      state.initialSyncDone = true;
+      return;
+    }
+
+    const plan = this.resolveConveyorTravelPlan(model);
+    const halfRange = this.resolveTravelHalfRangeMeters(null, plan);
+    const offset = frontHasGoods === true && backHasGoods === true
+      ? 0
+      : backHasGoods === true ? halfRange : -halfRange;
+    state.cargoCode = CONVEYOR_CARGO_IDENTITY;
+    state.currentTask = task;
+    state.lastTask = task;
+    state.pendingTask = null;
+    state.waitingTask = null;
+    state.pendingTaskAgeSeconds = 0;
+    state.pendingPreviousTask = null;
+    state.cargoTravelOffset = offset;
+    state.handoffEntryOffset = null;
+    state.entryHandoffPending = false;
+    state.platformInboundCargo = false;
+    state.platformPlacedCargo = false;
+    state.platformOutboundTaskPending = false;
+    state.cargoDriveEngaged = false;
+    state.selfDriveDirection = 0;
+    state.initialSyncDone = true;
+    this.createConveyorCargoForTask(model, snapshot, CONVEYOR_CARGO_IDENTITY);
+    state.initialSensorHold = true;
+    this.notifyAvailable(model, task, reportedDirection !== 0 ? reportedDirection : this.resolveFlowDirection(model));
+  }
+
+  /** 五张货物表里是否已有该 task 的活货物；首载同步只允许一个设备持有同一 task。 */
+  private hasAnyCargoForTask(task: string): boolean {
+    return this.hasConveyorCargoForTask(task) || this.hasExternalHolderForTask(task);
+  }
+
+  /** 输送线货物表里是否已有该 task 的活货物（含本机与其它线体）。 */
+  private hasConveyorCargoForTask(task: string): boolean {
+    if (!task) return false;
+    for (const cargo of this.state.conveyorCargoMeshes.values()) {
+      if (cargo.task === task) return true;
+    }
+    return false;
   }
 
   /**
@@ -441,6 +549,7 @@ export class ConveyorTelemetryDriver {
         state.entryHandoffPending = false;
         state.platformPlacedCargo = false;
         state.platformOutboundTaskPending = false;
+        state.initialSensorHold = false;
         if (heldTask) {
           this.notifyTaken(model, heldTask, null, movementDirection !== 0 ? movementDirection : this.resolveFlowDirection(model));
         }
@@ -510,6 +619,7 @@ export class ConveyorTelemetryDriver {
           state.entryHandoffPending = false;
           state.platformPlacedCargo = false;
           state.platformOutboundTaskPending = false;
+          state.initialSensorHold = false;
           this.notifyTaken(model, oldTask, null, flowDirection);
           state.waitingTask = state.pendingTask;
           this.sendSubscribe(model, state.pendingTask, probeDirection);
@@ -519,6 +629,7 @@ export class ConveyorTelemetryDriver {
           this.trace(`${model.assetCode} 滞留箱复用 task ${oldTask || '-'} -> ${state.pendingTask}`);
           heldCargo.task = state.pendingTask;
           state.platformOutboundTaskPending = false;
+          state.initialSensorHold = false;
           // 复用后货物可驶离（含从站台出发），不再按上游来货钳制终点
           state.platformInboundCargo = false;
           const containerCode = readStringField(snapshot.fields, 'containerCode')?.trim() ?? '';
@@ -538,10 +649,12 @@ export class ConveyorTelemetryDriver {
           // 不自建货箱也不发订阅；无需勾选起点设备/货物自动销毁。
           this.trace(`${model.assetCode} 线首站台挂起 task=${state.pendingTask}（等 stacker 放入）`);
           state.waitingTask = state.pendingTask;
-        } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true && !this.hasExternalHolderForTask(state.pendingTask)) {
+        } else if (!hasUpstream && model.telemetryBinding?.cargoOriginDevice === true
+          && !this.hasExternalHolderForTask(state.pendingTask) && !this.hasConveyorCargoForTask(state.pendingTask)) {
           // 起点设备：探测点未触及上游且无注册上游时允许自行创建货箱。
-          // 例外：stacker/RGV 已持有同 task 实物在途（静态探测缓存找不到行车中的 RGV）时不得刷幻影货，
-          // 否则本机 cargoCode 被占用，真实货物推送交付时被拒收、停转边沿销毁。
+          // 例外：stacker/RGV/其它 conveyor 已持有同 task 实物（静态探测缓存找不到行车中的 RGV、
+          // 首载光电同步已在下游物化）时不得刷幻影货，否则本机 cargoCode 被占用，
+          // 真实货物推送交付时被拒收、停转边沿销毁。
           // 刷出端由运行方向决定：正转刷在轨迹起点向终点移动，反转刷在轨迹终点向起点移动。
           // 刷出瞬间货箱模板尚未加载，按内置长度计算行程；模板就绪后下一帧 clamp 自动收敛到实测端点。
           const plan = this.resolveConveyorTravelPlan(model);
@@ -555,6 +668,7 @@ export class ConveyorTelemetryDriver {
           state.platformInboundCargo = false;
           state.platformPlacedCargo = false;
           state.platformOutboundTaskPending = false;
+          state.initialSensorHold = false;
           state.cargoDriveEngaged = false;
           this.createConveyorCargoForTask(model, snapshot, state.cargoCode);
           if (movementDirection === 0) state.selfDriveDirection = 1;
@@ -649,6 +763,7 @@ export class ConveyorTelemetryDriver {
     if (!snapshot.faulted && cargoDirection !== 0) {
       state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
       state.cargoDriveEngaged = true;
+      state.initialSensorHold = false;
     }
     state.cargoTravelOffset = clampNumber(state.cargoTravelOffset, minOffset, maxOffset);
     if (state.platformPlacedCargo && isAtFlowEnd()) state.platformPlacedCargo = false;
@@ -983,7 +1098,7 @@ export class ConveyorTelemetryDriver {
     const state = model.conveyorTelemetry;
     if (state.cargoCode === null) return;
     const cargo = this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode));
-    if (!cargo || !cargo.task || state.platformPlacedCargo) return;
+    if (!cargo || !cargo.task || state.platformPlacedCargo || state.initialSensorHold) return;
     const target = this.findDeliveryTarget(model, cargo);
     const ready = target ? this.isCargoReadyForDelivery(model, cargo, target.subscriber) : false;
     if (!target || !ready) return;
@@ -1087,6 +1202,8 @@ export class ConveyorTelemetryDriver {
     const plan = this.resolveConveyorTravelPlan(subscriber);
     subscriberState.cargoCode = CONVEYOR_CARGO_IDENTITY;
     subscriberState.taskRoute = null;
+    subscriberState.initialSensorHold = false;
+    subscriberState.initialSyncDone = true;
     // 交接货箱已在上游渲染完毕，模板长度实测可用，直接按实测端点计算行程。
     const cargoAxialLength = this.resolveCargoAxialLengthMeters(cargo, plan.travelContext);
     const travelHalfRange = resolveConveyorCargoTravelHalfRange(
@@ -1188,6 +1305,8 @@ export class ConveyorTelemetryDriver {
     if (!task) return false;
     const neighbor = this.resolveProbeNeighbor(model, direction);
     if (neighbor === null || isLiftRuntimeModel(neighbor)) return false;
+    // 首载物化货在线体未走行前保持滞留，下游吸附也不得提前摘走。
+    if (neighbor.conveyorTelemetry?.initialSensorHold) return false;
     // 直角相邻不吸附：货物物理上停在两条中心线的交叉拐角而非本机进入端，
     // 交回 subscribe 路径由 settleCargoTransfer 的 perpendicularOffset 拐角交付处理。
     const selfPlan = this.resolveConveyorTravelPlan(model);
@@ -1479,6 +1598,8 @@ export class ConveyorTelemetryDriver {
         model.conveyorTelemetry.platformInboundCargo = false;
         model.conveyorTelemetry.platformPlacedCargo = false;
         model.conveyorTelemetry.platformOutboundTaskPending = false;
+        model.conveyorTelemetry.initialSensorHold = false;
+        model.conveyorTelemetry.initialSyncDone = true;
       }
     }
     this.state.conveyorCargoMeshes.delete(key);
@@ -1540,6 +1661,8 @@ export class ConveyorTelemetryDriver {
     state.handoffEntryOffset = null;
     state.entryHandoffPending = false;
     state.platformInboundCargo = false;
+    state.initialSensorHold = false;
+    state.initialSyncDone = true;
     // 线首站台货须先完成本机走行，不能被已登记的下游订阅从站台直接接走。
     // 入口侧的 stacker/RGV 是本次外部放货设备，不属于输送线上游，不得因此取消线首站台门控。
     const upstreamNeighbor = this.resolveProbeNeighbor(model, this.resolveFlowDirection(model));

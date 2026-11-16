@@ -17,26 +17,31 @@ import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 /** harness bounds 跨度 4m、货箱轴向 0.72 → 行程半径 1.64，刷出端偏移 = -1.64。 */
 const HALF_RANGE = resolveConveyorCargoTravelHalfRange(4, CONVEYOR_CARGO_SIZE.x);
 
-function makeSnapshot(fields: Record<string, unknown>, receivedAt: number = Date.now()): DeviceTelemetrySnapshot {
+function makeSnapshot(
+  fields: Record<string, unknown>,
+  receivedAt: number = Date.now(),
+  faulted = false,
+  sourceTimestamp: number | null = null,
+): DeviceTelemetrySnapshot {
   return {
     sourceId: 'default',
     topic: 'test/topic',
     deviceType: 'conveyor',
     assetCode: 'CV1',
     payloadDeviceCode: null,
-    sourceTimestamp: null,
+    sourceTimestamp,
     sequence: null,
     receivedAt,
     fields,
     currentLocationKey: null,
     targetLocationKey: null,
     hasTargetLocation: false,
-    faulted: false,
+    faulted,
     message: '',
   };
 }
 
-function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: boolean; cargoTravelSpeed?: number } | null) {
+function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: boolean; cargoInitialSync?: boolean; cargoTravelSpeed?: number } | null) {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const state = createSpecializedTelemetrySharedState();
@@ -48,7 +53,7 @@ function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: 
     meshes: [],
     conveyorTelemetry: createConveyorTelemetryState(),
     // 单机无邻居场景：探测点触及不到任何设备，必须勾选起点设备才允许自行创建货箱
-    telemetryBinding: { cargoOriginDevice: true, ...(binding ?? {}) },
+    telemetryBinding: { cargoOriginDevice: true, cargoInitialSync: false, ...(binding ?? {}) },
     externalScriptRuntime: null,
   } as unknown as ModelRuntimeEntry;
 
@@ -88,10 +93,18 @@ function makeHarness(binding: { cargoAutoDispose?: boolean; cargoOriginDevice?: 
     driver,
     state,
     model,
+    scene,
     dispose: () => { scene.dispose(); engine.dispose(); },
-    apply: (fields: Record<string, unknown>, deltaSeconds = 0.1, frames = 1, receivedAt?: number) => {
+    apply: (
+      fields: Record<string, unknown>,
+      deltaSeconds = 0.1,
+      frames = 1,
+      receivedAt?: number,
+      faulted = false,
+      sourceTimestamp: number | null = null,
+    ) => {
       for (let i = 0; i < frames; i += 1) {
-        driver.applyToModel(model, makeSnapshot(fields, receivedAt), deltaSeconds);
+        driver.applyToModel(model, makeSnapshot(fields, receivedAt, faulted, sourceTimestamp), deltaSeconds);
       }
     },
   };
@@ -101,13 +114,15 @@ const RUNNING = { task: 1, front_has_goods: 1, back_has_goods: 0, movement_x: 1 
 const STOPPED_EMPTY = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0 };
 const DISPOSE_FRAME = { task: 1, front_has_goods: 0, back_has_goods: 0, movement_x: 0, mode: 2 };
 
-test('telemetryBinding 归一化保留 cargoAutoDispose/cargoOriginDevice 显式布尔值', () => {
+test('telemetryBinding 归一化保留 cargoAutoDispose/cargoOriginDevice/cargoInitialSync 显式布尔值', () => {
   const base = { enabled: true, sourceId: 'default', deviceType: 'conveyor' };
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoAutoDispose: false })?.cargoAutoDispose, false);
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoAutoDispose: true })?.cargoAutoDispose, true);
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoAutoDispose, undefined);
   assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoOriginDevice: true })?.cargoOriginDevice, true);
   assert.equal(normalizeTelemetryBindingComponent(base)?.cargoOriginDevice, undefined);
+  assert.equal(normalizeTelemetryBindingComponent({ ...base, cargoInitialSync: true })?.cargoInitialSync, true);
+  assert.equal(normalizeTelemetryBindingComponent(base)?.cargoInitialSync, undefined);
 });
 
 test('telemetryBinding 归一化保留正的 cargoTravelSpeed，非法值丢弃并封顶 100', () => {
@@ -361,6 +376,181 @@ test('新 task 边沿即刷出：无旧箱时 movement_x=0 也立即刷在轨迹
       Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (selfDrivenOffset + 0.3 * 0.1)) < 1e-6,
       `自驱必须在新消息 movement_x=0 时继续推进到 ${selfDrivenOffset + 0.03}，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
     );
+  } finally {
+    h.dispose();
+  }
+});
+
+const INITIAL_FRONT = { task: 7, front_has_goods: 1, back_has_goods: 0, movement_x: 0 };
+const INITIAL_BACK = { task: 7, front_has_goods: 0, back_has_goods: 1, movement_x: 0 };
+const INITIAL_BOTH = { task: 7, front_has_goods: 1, back_has_goods: 1, movement_x: 0 };
+
+test('显式取消启动光电同步：光电有货且带 task 的首次加载仍只进入等待', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: false });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '显式取消后不得建箱');
+    assert.equal(h.model.conveyorTelemetry.waitingTask, '7', '原有等待上游语义必须保持');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('历史场景未写 cargoInitialSync 时默认开启：停线首帧补建', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: undefined });
+  try {
+    h.apply(INITIAL_FRONT, 0.1, 1, 1000);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '缺省未写字段必须按默认开启处理');
+    assert.equal(h.model.conveyorTelemetry.cargoCode, 'cargo');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('启动光电同步：前端光电连续有货时在负端物化滞留货，线体未走行不自动拉走', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '连续确认后必须补建一个货箱');
+    const cargo = [...h.state.conveyorCargoMeshes.values()][0];
+    assert.equal(cargo.task, '7');
+    assert.equal(h.model.conveyorTelemetry.cargoCode, 'cargo');
+    assert.equal(h.model.conveyorTelemetry.selfDriveDirection, 0, '首载物化不得登记自驱');
+    assert.equal(h.model.conveyorTelemetry.initialSensorHold, true);
+    assert.equal(h.model.conveyorTelemetry.initialSyncDone, true);
+    assert.ok(
+      Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6,
+      `前端有货应落在负端 ${-HALF_RANGE}，实际 ${h.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+
+    // 同 task 后续帧不得重复建箱，也不得被帧级交付拉走。
+    for (const receivedAt of [4000, 5000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1);
+    assert.ok(Math.abs(h.model.conveyorTelemetry.cargoTravelOffset - (-HALF_RANGE)) < 1e-6);
+
+    // 线体真正走行后才解除滞留门控。
+    h.apply({ ...INITIAL_FRONT, movement_x: 1 }, 0.1, 1, 6000);
+    assert.equal(h.model.conveyorTelemetry.initialSensorHold, false);
+    assert.ok(h.model.conveyorTelemetry.cargoTravelOffset > -HALF_RANGE, '线体走行后货箱必须开始移动');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('启动光电同步：后端光电落在正端，双端都有货落在中心', () => {
+  const back = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) back.apply(INITIAL_BACK, 0.1, 1, receivedAt);
+    assert.equal(back.state.conveyorCargoMeshes.size, 1);
+    assert.ok(
+      Math.abs(back.model.conveyorTelemetry.cargoTravelOffset - HALF_RANGE) < 1e-6,
+      `后端有货应落在正端 ${HALF_RANGE}，实际 ${back.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+  } finally {
+    back.dispose();
+  }
+
+  const both = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) both.apply(INITIAL_BOTH, 0.1, 1, receivedAt);
+    assert.equal(both.state.conveyorCargoMeshes.size, 1);
+    assert.ok(
+      Math.abs(both.model.conveyorTelemetry.cargoTravelOffset) < 1e-6,
+      `双端都有货应落在中心，实际 ${both.model.conveyorTelemetry.cargoTravelOffset}`,
+    );
+  } finally {
+    both.dispose();
+  }
+});
+
+test('启动光电同步：无 task 不建箱，光电抖动后重新计数仍可在窗口内补建', () => {
+  const noTask = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) {
+      noTask.apply({ front_has_goods: 1, back_has_goods: 0, movement_x: 0 }, 0.1, 1, receivedAt);
+    }
+    assert.equal(noTask.state.conveyorCargoMeshes.size, 0, '无 task 不得凭光电建箱');
+    assert.equal(noTask.model.conveyorTelemetry.initialSyncDone, false, '无 task 时仍应保留窗口等待后续报文');
+  } finally {
+    noTask.dispose();
+  }
+
+  const flapping = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) {
+      flapping.apply({ task: 7, front_has_goods: 0, back_has_goods: 0, movement_x: 0 }, 0.1, 1, receivedAt);
+    }
+    assert.equal(flapping.state.conveyorCargoMeshes.size, 0);
+    for (const receivedAt of [4000, 5000, 6000]) flapping.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(flapping.state.conveyorCargoMeshes.size, 1, '窗口内光电恢复后必须补建');
+  } finally {
+    flapping.dispose();
+  }
+});
+
+test('启动光电同步：故障帧不计样本，恢复健康后仍可补建', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const receivedAt of [1000, 2000, 3000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt, true);
+    assert.equal(h.state.conveyorCargoMeshes.size, 0, '故障帧不得建箱');
+    for (const receivedAt of [4000, 5000, 6000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '故障恢复后必须继续首载同步');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('启动光电同步：同 task 已被其他设备持有时不重复建箱', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    const otherRoot = new TransformNode('other_cargo_root', h.scene);
+    h.state.conveyorCargoMeshes.set(JSON.stringify(['OTHER', 'cargo']), {
+      assetCode: 'OTHER',
+      containerCode: '',
+      task: '7',
+      root: otherRoot,
+      outputOwner: null,
+      fallback: null,
+      generatorEntityId: null,
+      handoff: null,
+      axialLengthCache: null,
+      lockedWorldRotation: null,
+    } as never);
+    for (const receivedAt of [1000, 2000, 3000]) h.apply(INITIAL_FRONT, 0.1, 1, receivedAt);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '同 task 只能保留一个货物实例');
+    assert.equal(h.model.conveyorTelemetry.cargoCode, null, '本机不得再建第二个同 task 货箱');
+    assert.equal(h.model.conveyorTelemetry.initialSyncDone, true);
+  } finally {
+    h.dispose();
+  }
+});
+
+test('启动光电同步：停线首条有货快照立即物化，运行中仍需连续确认', () => {
+  const stopped = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    stopped.apply(INITIAL_FRONT, 0.1, 1, 1000);
+    assert.equal(stopped.state.conveyorCargoMeshes.size, 1, '停线存量为稳定状态，首条快照即可建箱');
+  } finally {
+    stopped.dispose();
+  }
+
+  const running = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    running.apply({ ...INITIAL_FRONT, movement_x: 1 }, 0.1, 1, 1000);
+    assert.equal(running.state.conveyorCargoMeshes.size, 0, '运行中的单条光电脉冲不得立即建箱');
+    running.apply({ ...INITIAL_FRONT, movement_x: 1 }, 0.1, 1, 2000);
+    running.apply({ ...INITIAL_FRONT, movement_x: 1 }, 0.1, 1, 3000);
+    assert.equal(running.state.conveyorCargoMeshes.size, 1, '运行中连续 3 条确认后建箱');
+  } finally {
+    running.dispose();
+  }
+});
+
+test('启动光电同步：快放回放 receivedAt 相同但 sourceTimestamp 递增时仍逐条计数', () => {
+  const h = makeHarness({ cargoOriginDevice: false, cargoInitialSync: true });
+  try {
+    for (const sourceTimestamp of [100, 200, 300]) h.apply(INITIAL_FRONT, 0.1, 1, 1000, false, sourceTimestamp);
+    assert.equal(h.state.conveyorCargoMeshes.size, 1, '三条不同来源时间的报文必须能完成首载确认');
   } finally {
     h.dispose();
   }

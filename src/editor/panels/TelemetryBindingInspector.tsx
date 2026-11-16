@@ -570,6 +570,16 @@ function LiftLayerBindingsEditor(props: {
             />
             起点设备（探测点无上游设备时自行创建货箱）
           </label>
+          <label className="mqtt-config-dialog-checkbox">
+            <input
+              type="checkbox"
+              disabled={props.disabled}
+              checked={binding.cargoInitialSync !== false}
+              onChange={(event) => commit({ cargoInitialSync: event.target.checked })}
+            />
+            启动光电同步（默认开启，特殊情况取消勾选）
+          </label>
+          <p className="muted">默认按前后光电补建首载机上货箱；取消勾选后本机不再补建。仅在停线首条或运行中连续确认有货且报文带 task 时生效。</p>
           <label className="number-row">
             <span>货物输送速度(m/s)</span>
             <input

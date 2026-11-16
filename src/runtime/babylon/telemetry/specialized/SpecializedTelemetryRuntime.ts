@@ -173,6 +173,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     }
     const nowMs = Date.now();
     this.conveyorDriver.syncLinkTopology();
+    this.applyConveyorInitialSensorSync(nowMs);
     for (const driver of this.drivers) {
       const candidateStarted = this.performanceTimingEnabled ? performance.now() : null;
       this.prepareFrameCandidates(driver.deviceType);
@@ -596,6 +597,29 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   }
 
   // ===== 帧内私有方法 =====
+
+  /** 首载光电同步预扫描：在任一 task 边沿处理前先按光电物化存量货，避免起点设备先刷出幻影货。 */
+  private applyConveyorInitialSensorSync(nowMs: number): void {
+    let pending = false;
+    for (const { model } of this.host.collectModels()) {
+      if (model.telemetryBinding?.cargoInitialSync !== false && isConveyorRuntimeModel(model)
+        && !model.conveyorTelemetry.initialSyncDone) {
+        pending = true;
+        break;
+      }
+    }
+    if (!pending) return;
+    this.prepareFrameCandidates('conveyor');
+    const { candidates, conflictKeys } = this.candidateGroups.get('conveyor')!;
+    for (const candidate of candidates) {
+      if (candidate.model.telemetryBinding?.cargoInitialSync === false) continue;
+      if (conflictKeys.has(candidate.binding.key)) continue;
+      const snapshot = resolveSpecializedTelemetrySnapshot(deviceTelemetryStore, candidate.binding);
+      if (!snapshot || snapshot.faulted) continue;
+      if (nowMs - snapshot.receivedAt > candidate.binding.staleAfterMs) continue;
+      this.conveyorDriver.applyInitialSensorSync(candidate.model, snapshot);
+    }
+  }
 
   /** 保留每种驱动之前的检查边界，使同步订阅回调的绑定修改当帧生效；稳定帧复用候选与冲突集合。 */
   private prepareFrameCandidates(deviceType: SpecializedTelemetryDeviceType): void {

@@ -394,6 +394,16 @@ export type ConveyorModelTelemetryState = {
    * 货物到达本机的三条路径（settleCargoTransfer / acceptPlatformPlacedCargo / 起点刷出）均复位为 false。
    */
   cargoDriveEngaged: boolean;
+  /** 首载光电同步是否已结束：物化成功、被正常 task 接管或确认窗口到期后置 true，reset 时清零。 */
+  initialSyncDone: boolean;
+  /** 首载光电同步连续命中样本数（按新快照计，同一报文多帧不重复计数）。 */
+  initialSyncSamples: number;
+  /** 首载光电同步窗口起点（首条健康快照 receivedAt）；null 表示尚未开始。 */
+  initialSyncStartedAt: number | null;
+  /** 已计入首载光电同步的最近报文样本键（优先 sourceTimestamp/sequence，缺失时 receivedAt）。 */
+  initialSyncSampleKey: string | null;
+  /** 首载光电物化的滞留货：线体未走行前禁止下游订阅立即拉走；走行/复用/交付/销毁时清除。 */
+  initialSensorHold: boolean;
   /** 最近一次应用的快照 receivedAt：识别新消息到达并结束自驱；断流重放时保持不变。 */
   lastSnapshotReceivedAt: number;
   cargoTravelOffset: number;

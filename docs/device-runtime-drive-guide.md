@@ -89,6 +89,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 | `dataDriven.cargo.front/backHasGoodsField` | specializedModelAssets.ts:343-357 | 光电字段名（默认 front/back_has_goods） |
 | `telemetryBinding.trajectoryDirection` | telemetryBinding.ts:59 | 'x'\|'-x'\|'-z'\|'z'，正转=movement_x 正值时的模型本地方向，换算 `forwardSign`（conveyorDriver.ts:1225-1227） |
 | `telemetryBinding.cargoOriginDevice` | :273 | 起点刷货 |
+| `telemetryBinding.cargoInitialSync` | conveyorDriver.ts `tryInitialSensorSync` | 缺省开启；显式 `false` 关闭。首载确认光电有货且带 task 时补建滞留货，线体走行前不交付；详见 [conveyor 驱动文档](conveyor-mqtt-drive-logic.md) §5.0 |
 | `telemetryBinding.cargoAutoDispose` | :209 | 缺省 false；恒 mode:2 且无 hasGoods 的设备勾选后会每帧销毁滞留货（配置陷阱，勿改代码） |
 | `metadata.conveyorSurfaceY` | conveyorDriver.ts:1194-1207 | 链面顶高 |
 

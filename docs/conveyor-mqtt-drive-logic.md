@@ -26,7 +26,7 @@
 | `movement_y` | int | 逻辑移栽可选：由 `cargo.lift` 声明 0/1/2 映射并记录 home/raised/lowering；不参与货物走行或交付门控，普通输送线忽略 |
 | `mode` | int | 2=销毁条件（配合双光电无货+勾选自动销毁）；0=空闲（等待方退出等待并退订）；缺省（null）视为运行中 |
 | `task` | int | 任务号；缺失/0=无任务（归一化为空串，不触发任何边沿，状态不变）。**匿名模式已移除**：无 task 不再刷出货箱 |
-| `front_has_goods` / `back_has_goods` | bool | 前后光电，仅用于 mode==2 的销毁判定（字段名可由脚本顶层 `cargo.frontHasGoodsField/backHasGoodsField` 覆盖） |
+| `front_has_goods` / `back_has_goods` | bool | 前后光电；用于 `mode==2` 销毁判定，以及勾选 `cargoInitialSync` 后的首载存量货补建（字段名可由脚本顶层 `cargo.frontHasGoodsField/backHasGoodsField` 覆盖） |
 | `containerCode` | string | 货箱条码，仅元数据（命名/metadata），不参与身份唯一性 |
 | `faulted`（快照级） | bool | 故障门控，见 §9 |
 
@@ -37,6 +37,7 @@
 | `trajectoryDirection` | x | movement_x 正转时货物的运动方向（x/-x/z/-z），**模型本地坐标**，见 §3 |
 | `cargoAutoDispose` | 关 | 勾选后 mode==2 且双光电无货时销毁本机货物；缺省不销毁，货物滞留（等被订阅交付取走或新 task 复用） |
 | `cargoOriginDevice` | 关 | 起点设备：新 task 边沿时探测点未触及上游且无注册上游，允许自行创建货箱（见 §5.7） |
+| `cargoInitialSync` | 开 | 首载光电同步：首次加载/模型重置后确认前后光电有货且报文带 `task` 时，在本机补建存量货箱（见 §5.0）；显式 `false` 关闭，无 `task` 不建箱 |
 
 ## 3. 货物几何基础
 
@@ -67,10 +68,24 @@
 | `selfDriveDirection` | 自驱走行方向（±1，0=关闭）：被交付时登记订阅方向；movement_x=0 的新 task 刷出/复用时登记正转 1 |
 | `lastSnapshotReceivedAt` | 最近应用的快照 receivedAt，识别新消息 |
 | `cargoTravelOffset` | 货物行程偏移（世界方向带 forwardSign） |
+| `initialSyncDone` | 首载光电同步是否已结束（成功物化、已有货物或窗口到期）；reset 时清零 |
+| `initialSyncSamples` / `initialSyncStartedAt` | 连续命中样本数与确认窗口起点，按新快照计数 |
+| `initialSensorHold` | 首载物化货的滞留门控：线体未走行前禁止交付，走行/复用/交付/销毁时清除 |
 
-## 5. 主流程逐分支（`applyConveyorCargoMotion`，按代码顺序）
+## 5. 主流程逐分支（`applyToModel` → `applyConveyorCargoMotion`，按代码顺序）
 
 每帧按以下顺序判定，**靠前分支的 return 会截断后续全部逻辑**：
+
+### 5.0 首载光电同步（`cargoInitialSync`，默认开启，显式 `false` 关闭）
+
+用于数字孪生与真实产线非同时启动的补货场景：首次加载或模型重置后，孪生没有任何在机货物，但真实输送线上可能已经停着货箱。
+
+- **触发**：实例未显式设置 `cargoInitialSync: false`；快照新鲜且非故障；`cargoCode` 为空；前端或后端光电有货。停线（movement 方向为 0）时首条有效快照即可确认；运行中需连续 **3 条不同报文**（优先按 `sourceTimestamp`/`sequence` 识别，缺失时用 `receivedAt`）都满足。
+- **窗口**：从首条健康快照起 15 秒内有效，覆盖 PLC 启动晚于孪生的情况；超时后不再尝试。
+- **身份**：只使用报文中的数值 `task`；`task` 缺失/0 时不建箱。若任一其它设备（conveyor/stacker/RGV/shuttle/lift）已持有同 `task` 货物，则本机不重复建。
+- **位置**：按模型局部轴缺省约定，前端有货落负端、后端有货落正端、双端都有货落中心；该约定不保证所有厂商一致，精确测点偏移后续再配置。
+- **滞留门控**：物化后置 `initialSensorHold`，线体未走行前 `tryDeliverHeldCargo` 不交付，避免下游订阅在停线时把箱子直接拉走；首次实际走行、正常 task 复用/接管、交付或销毁时清除。
+- **顺序**：由 `SpecializedTelemetryRuntime.applyFrame` 在驱动循环前统一预扫描，先于任何 task 边沿处理；逐设备 `applyToModel` 以报文样本键去重，同一报文不会重复计数。
 
 ### 5.1 新消息检测（自驱清零）
 `receivedAt !== lastSnapshotReceivedAt` → 更新记录并 `selfDriveDirection = 0`。

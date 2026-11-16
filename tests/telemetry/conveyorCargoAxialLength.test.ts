@@ -49,7 +49,7 @@ function makeHarness() {
     contentRoot: root,
     meshes: [],
     conveyorTelemetry: createConveyorTelemetryState(),
-    telemetryBinding: { cargoOriginDevice: true },
+    telemetryBinding: { cargoOriginDevice: true, cargoInitialSync: false },
     externalScriptRuntime: null,
   } as unknown as ModelRuntimeEntry;
 
