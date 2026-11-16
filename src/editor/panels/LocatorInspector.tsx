@@ -47,6 +47,10 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     : '未绑定（内置立方体）';
   const builtInBinding = component.builtInBinding;
   const isLayerChangePlatform = builtInBinding?.kind === 'layerChangePlatform';
+  // 内置货格宿主是输送线时，该货格即「站台」：站台交接由设备事件驱动，不能按货架 fetch 排号处理。
+  const hostEntity = builtInBinding ? scene.entities[builtInBinding.hostEntityId] : undefined;
+  const isConveyorPlatformSlot = Boolean(builtInBinding)
+    && hostEntity?.components.telemetryBinding?.deviceType === 'conveyor';
 
   function handleDimensionChange(field: LocatorDimensionField, rawValue: string) {
     if (rawValue === '') return;
@@ -240,6 +244,12 @@ export function LocatorInspector({ component, disabled = false }: LocatorInspect
     {!isLayerChangePlatform ? (
     <fieldset className="transform-fieldset">
       <legend>Fetch 数据驱动</legend>
+      {isConveyorPlatformSlot ? (
+        <p className={fetchDrive?.enabled === true ? 'telemetry-runtime-error' : 'muted'}>
+          该货格是输送线内置站台：站台交接由堆垛机/小车事件驱动。勾选 Fetch 后设备会把它当成货架格口做库存同步，
+          从而跳过站台交接（货物不会交给输送线）。站台货格请保持关闭。
+        </p>
+      ) : null}
       <p className="muted">运行预览时按排号从 Fetch 接口拉取库存并渲染到本线框库位；排号、起始列使用上方已有配置。</p>
       <label className="inspector-row">
         <span>启用</span>

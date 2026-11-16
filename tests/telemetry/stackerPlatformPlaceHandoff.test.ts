@@ -149,8 +149,8 @@ function makeHarness() {
       locatorEntityId === 'slot_1005' ? { model: conveyor, locator: platformLocator } : null,
     resolveCargoGeneratorForModel: () => null,
     resolveColumnTargetPose: () => null,
-    resolveFetchDriveRowForLocator: (locator: LocatorRuntimeEntry) => locator === sourceLocator ? 12 : null,
-    suppressFetchCellForLocator: (locator: LocatorRuntimeEntry) => locator === sourceLocator ? 12 : null,
+    resolveFetchDriveRowForLocator: (locator: LocatorRuntimeEntry): number | null => locator === sourceLocator ? 12 : null,
+    suppressFetchCellForLocator: (locator: LocatorRuntimeEntry): number | null => locator === sourceLocator ? 12 : null,
     handleFetchRowSync: () => undefined,
     keepCargoForFetchRowSync: () => false,
     updateExternalScriptContext: () => true,
@@ -234,6 +234,8 @@ function makeHarness() {
     conveyor,
     stackerDriver,
     conveyorDriver,
+    host,
+    context,
     dispose: () => { scene.dispose(); engine.dispose(); },
     /** 镜像 facade 帧调度：两台设备同帧推进。 */
     apply: (
@@ -389,6 +391,46 @@ test('放货途中从 Fetch 货架转移到非 Fetch 站台：重算排号并正
     assert.equal(h.state.stackerCargoMeshes.size, 0, '落货后 stacker 不得再持有货物');
     const conveyorCargo = h.state.conveyorCargoMeshes.get(JSON.stringify(['1005', 'cargo']));
     assert.ok(conveyorCargo, '非 Fetch 站台必须接管货物');
+    assert.equal(conveyorCargo.task, '12279');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('站台货格误配 Fetch 排号：仍只按站台交接，不得跳过 placeCargoIntoConveyorPlatform', () => {
+  const h = makeHarness();
+  try {
+    // 复现现场误配：内置站台货格也勾了 Fetch，该格口会返回排号；运行时能识别它是输送线站台。
+    h.host.suppressFetchCellForLocator = () => 9;
+    h.host.resolveFetchDriveRowForLocator = () => 9;
+    h.context.isConveyorPlatformLocator = (locatorEntityId: string) => locatorEntityId === 'slot_1005';
+
+    h.apply({ ...STACKER_ARRIVED, front_x: 0, front_y: 0, front_z: 0, front_signalBits: 0, front_task: 0 }, CONVEYOR_IDLE, 0.1, 5);
+
+    const cargo = h.stackerDriver.getOrCreateStackerCargo('DDJ2', 'front');
+    cargo.task = '12279';
+    const st = h.stacker.stackerTelemetry;
+    st.frontCargoKey = JSON.stringify(['DDJ2', 'front']);
+    st.frontCargoBoundToFork = true;
+
+    const placingAtPlatform = {
+      ...STACKER_ARRIVED,
+      mode: 3,
+      front_command: 3,
+      front_x: 43,
+      front_y: 1,
+      front_z: 2,
+      to_x: 43,
+      to_y: 1,
+      to_z: 2,
+    };
+    h.apply(placingAtPlatform, CONVEYOR_IDLE);
+    assert.equal(st.frontCargoFetchRow, null, '站台货格不得写入 fetch 排号');
+
+    h.apply({ ...placingAtPlatform, front_movement_z: 3 }, CONVEYOR_IDLE, 0.1, 200);
+    assert.equal(h.state.stackerCargoMeshes.size, 0, '站台交接必须完成，stacker 不得残留货物');
+    const conveyorCargo = h.state.conveyorCargoMeshes.get(JSON.stringify(['1005', 'cargo']));
+    assert.ok(conveyorCargo, '误配 Fetch 的站台货格仍必须由 1005 接手');
     assert.equal(conveyorCargo.task, '12279');
   } finally {
     h.dispose();

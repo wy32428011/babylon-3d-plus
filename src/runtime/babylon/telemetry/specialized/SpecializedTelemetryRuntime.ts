@@ -477,6 +477,12 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return this.conveyorDriver.adoptPlatformCargoForStacker(resolved.model, stackerAssetCode);
   }
 
+  /** 目标货格是否为输送线内置站台（宿主为 conveyor）：站台交接不走货架 fetch 排号。 */
+  isConveyorPlatformLocator(locatorEntityId: string): boolean {
+    const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);
+    return Boolean(resolved && isConveyorRuntimeModel(resolved.model));
+  }
+
   /** stacker 向 conveyor 站台放货完成：取出货物交接给该 conveyor；失败时货物放回原表，由调用方走原销毁路径。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean {
     const resolved = this.host.resolveBuiltInSlotHost(locatorEntityId);

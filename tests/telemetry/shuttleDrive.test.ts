@@ -790,6 +790,35 @@ test('卸货到 conveyor 站台：伸满落座后保持原货物静止，货叉�
   }
 });
 
+test('站台货格误配 Fetch 排号：卸货仍只按站台交接，不写 fetch 排号', () => {
+  const h = makeHarness();
+  try {
+    makeShuttleGeometry(h);
+    h.ref.locator = makeLocator(h.scene, { columns: 10, layers: 1, startColumn: 1, rootPosition: new Vector3(0, 2, 11) });
+    // 复现现场误配：站台货格也勾了 Fetch，抑制/留存方法会返回排号；运行时能识别它是输送线站台。
+    h.ref.fetchRow = 9;
+    (h.context as Record<string, unknown>).isConveyorPlatformLocator =
+      (locatorEntityId: string) => locatorEntityId === h.ref.locator?.entityId;
+    const handoffCalls: string[] = [];
+    h.context.placeShuttleCargoIntoConveyorPlatform = (locatorEntityId: string, cargoKey: string) => {
+      handoffCalls.push(locatorEntityId);
+      h.driver.detachClaimedCargoByKey(cargoKey);
+      return true;
+    };
+    const PLACE = targetFrame(3, 10, 1, 2, 2, { task: 7007 });
+
+    h.apply(PLACE, 0.1, 21);
+    assert.equal(h.model.shuttleTelemetry.cargoFetchRow, null, '站台货格不得写 fetch 排号');
+    assert.equal(h.model.shuttleTelemetry.cargoPendingPlatformLocatorId, h.ref.locator.entityId, '必须登记待交接站台');
+
+    for (let frame = 0; frame < 40 && h.model.shuttleTelemetry.forkOffset !== 0; frame += 1) h.apply(PLACE);
+    assert.deepEqual(handoffCalls, [h.ref.locator.entityId], '货叉归零后必须交接给站台');
+    assert.equal(h.state.shuttleCargoMeshes.size, 0, '交接后 shuttle 不得残留货物');
+  } finally {
+    h.dispose();
+  }
+});
+
 test('卸货到 conveyor 站台：收叉归零时站台占用则保留原货重试，释放后交接同一实例', () => {
   const h = makeHarness();
   try {

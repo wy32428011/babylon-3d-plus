@@ -1209,7 +1209,11 @@ export class ShuttleTelemetryDriver {
       supportPosition: cell.supportPosition,
       retainCargo: cell.locator.retainCargo === true,
     };
-    if (state.cargoFetchRow === null) {
+    // 输送线内置站台是设备交接缓冲，不是货架格口：不得为它解析 fetch 排号，
+    // 否则卸货会走 fetch 单排同步路径而跳过 placeShuttleCargoIntoConveyorPlatform（货物交不到输送线）。
+    if (this.context.isConveyorPlatformLocator?.(cell.locator.entityId) === true) {
+      state.cargoFetchRow = null;
+    } else if (state.cargoFetchRow === null) {
       state.cargoFetchRow = this.host.suppressFetchCellForLocator(cell.locator, cell.toX, cell.toY)
         ?? this.host.resolveFetchDriveRowForLocator(cell.locator);
     }

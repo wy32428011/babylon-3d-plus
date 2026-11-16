@@ -886,13 +886,20 @@ export class StackerTelemetryDriver {
         if (boundForSlide && placeTarget && (!slideExists || slidingOut || Math.abs(offsetNow) < 0.02)) {
           this.setupStackerCargoClampSlide(model, side, placeTarget.supportPosition);
         }
-        const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
-        if (lockedRow === null) {
-          const fetchRow = frontX !== null && frontY !== null
-            ? this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY)
-            : this.host.resolveFetchDriveRowForLocator(targetLocator);
-          if (side === 'front') state.frontCargoFetchRow = fetchRow;
-          else state.backCargoFetchRow = fetchRow;
+        // 输送线内置站台是设备交接缓冲，不是货架格口：不得为它解析 fetch 排号，
+        // 否则落货会走 fetch 单排同步路径而跳过 placeCargoIntoConveyorPlatform（货物交不到输送线）。
+        if (this.context.isConveyorPlatformLocator?.(targetLocator.entityId) === true) {
+          if (side === 'front') state.frontCargoFetchRow = null;
+          else state.backCargoFetchRow = null;
+        } else {
+          const lockedRow = side === 'front' ? state.frontCargoFetchRow : state.backCargoFetchRow;
+          if (lockedRow === null) {
+            const fetchRow = frontX !== null && frontY !== null
+              ? this.host.suppressFetchCellForLocator(targetLocator, frontX, frontY)
+              : this.host.resolveFetchDriveRowForLocator(targetLocator);
+            if (side === 'front') state.frontCargoFetchRow = fetchRow;
+            else state.backCargoFetchRow = fetchRow;
+          }
         }
       }
       // 伸叉动画完结（偏移到达目标行程）：取货阶段绑定货物上叉，放货阶段解绑落入箱位

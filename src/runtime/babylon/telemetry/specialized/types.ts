@@ -877,6 +877,12 @@ export interface SpecializedTelemetryDriverContext {
   adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
   /** stacker 落货到 conveyor 站台时交接货物给该 conveyor；conveyor 已有货或非站台货格返回 false，此时不拆除原持货引用。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
+  /**
+   * 目标货格是否为「输送线内置站台」（宿主是 conveyor）。站台是设备交接缓冲而不是货架格口：
+   * 返回 true 时堆垛机不得把它当作 fetch 库位解析排号，否则会跳过 placeCargoIntoConveyorPlatform，
+   * 货物永远交不到输送线上。未实现时按 false 处理（旧运行时行为不变）。
+   */
+  isConveyorPlatformLocator?(locatorEntityId: string): boolean;
   /** shuttle 落货到 conveyor 站台时交接货物给该 conveyor；语义同 placeCargoIntoConveyorPlatform，货物来源为 shuttleCargoMeshes。 */
   placeShuttleCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */
