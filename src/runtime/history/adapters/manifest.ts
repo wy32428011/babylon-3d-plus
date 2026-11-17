@@ -57,6 +57,7 @@ export type ConveyorSpec = FrozenDeviceBase & {
   kind: 'conveyor'; center: Vec3; span: number; surfaceLift: number; forwardSign: 1 | -1;
   movementFields: string[]; actionMap: { [key: string]: number }; cargoSpeed: number;
   frontHasGoodsField: string; backHasGoodsField: string; cargoAutoDispose: boolean; cargoOriginDevice: boolean;
+  cargoTaskPolicy?: 'preserve' | 'overwrite';
   probeNeighbors: { forward: string | null; reverse: string | null };
   perpendicularEnds: { positive: number | null; negative: number | null };
   platformLocatorId: string | null;

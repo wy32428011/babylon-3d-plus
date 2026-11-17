@@ -271,7 +271,8 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
   if (taskValue !== null && state.pendingTask) {
     const probeDirection = movement !== 0 ? movement : 1;
     let heldId = state.cargoId;
-    if (heldId && state.downstreamLinks.some(link => link.task === ctx.cargo.task(heldId))) { tryDeliverHeldCargo(ctx, actor); heldId = state.cargoId; }
+    const taskOverwrite = actor.spec.cargoTaskPolicy === 'overwrite';
+    if (heldId && !taskOverwrite && state.downstreamLinks.some(link => link.task === ctx.cargo.task(heldId))) { tryDeliverHeldCargo(ctx, actor); heldId = state.cargoId; }
     if (heldId) {
       const flow = movement !== 0 ? movement : conveyorFlow(actor), upstreamId = neighbor(ctx, actor, probeDirection);
       const upstreamHolds = state.upstreamLinks.some(link => link.task === state.pendingTask)
@@ -279,9 +280,9 @@ export function stepConveyor(ctx: LogisticsContext, actor: Conveyor, frame: Driv
       const exitId = neighbor(ctx, actor, -flow), exitType = exitId ? ctx.tx.get('devices', exitId)?.driverState.value.kind : null;
       const queued = exitType === 'conveyor' && ctx.conveyor(exitId)!.state.cargoId !== null;
       const grace = exitType === 'lift' ? 10 : queued ? 30 : 3, oldTask = ctx.cargo.task(heldId);
-      const defer = state.platformPlacedCargo && state.downstreamLinks.some(link => link.task === oldTask)
-        || !upstreamHolds && (exitType === 'conveyor' || exitType === 'lift') && oldTask === state.pendingPreviousTask && oldTask !== state.pendingTask && state.pendingTaskAgeSeconds < grace;
-      if (!defer && upstreamHolds) {
+      const defer = !taskOverwrite && (state.platformPlacedCargo && state.downstreamLinks.some(link => link.task === oldTask)
+        || !upstreamHolds && (exitType === 'conveyor' || exitType === 'lift') && oldTask === state.pendingPreviousTask && oldTask !== state.pendingTask && state.pendingTaskAgeSeconds < grace);
+      if (!taskOverwrite && !defer && upstreamHolds) {
         ctx.cargo.dispose(heldId, 'conveyor-upstream-new-task'); state.cargoId = null; state.handoffEntryOffset = null; state.entryHandoffPending = false; state.platformPlacedCargo = false;
         notifyTaken(ctx, actor, oldTask, null, flow); state.waitingTask = state.pendingTask; subscribe(ctx, actor, state.pendingTask, probeDirection);
       } else if (!defer) {

@@ -374,3 +374,17 @@ test('运行预检按模拟器、浏览器协议与 Electron MQTT 协议校验�
   assert.equal(missingSubscription.ok, false);
   assert.equal(missingSubscription.code, 'missing-subscription');
 });
+
+
+test('输送线在机货任务策略只持久化显式覆盖配置，旧场景保持默认', () => {
+  const base = { enabled: true, sourceId: 'default', deviceType: 'conveyor' };
+  const overwrite = normalizeTelemetryBindingComponent({ ...base, cargoTaskPolicy: 'overwrite' });
+  const preserve = normalizeTelemetryBindingComponent({ ...base, cargoTaskPolicy: 'preserve' });
+  const legacy = normalizeTelemetryBindingComponent(base);
+  const invalid = normalizeTelemetryBindingComponent({ ...base, cargoTaskPolicy: 'invalid' });
+
+  assert.equal(overwrite?.cargoTaskPolicy, 'overwrite');
+  assert.equal(preserve?.cargoTaskPolicy, undefined);
+  assert.equal(legacy?.cargoTaskPolicy, undefined);
+  assert.equal(invalid?.cargoTaskPolicy, undefined);
+});

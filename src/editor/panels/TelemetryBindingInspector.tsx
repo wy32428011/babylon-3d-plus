@@ -580,6 +580,20 @@ function LiftLayerBindingsEditor(props: {
             启动光电同步（默认开启，特殊情况取消勾选）
           </label>
           <p className="muted">默认按前后光电补建首载机上货箱；取消勾选后本机不再补建。仅在停线首条或运行中连续确认有货且报文带 task 时生效。</p>
+          <label className="inspector-row">
+            <span>在机货任务策略</span>
+            <select
+              disabled={props.disabled}
+              value={binding.cargoTaskPolicy ?? 'preserve'}
+              onChange={(event) => commit({
+                cargoTaskPolicy: event.target.value === 'overwrite' ? 'overwrite' : undefined,
+              })}
+            >
+              <option value="preserve">保持原任务（默认）</option>
+              <option value="overwrite">新任务覆盖在机货</option>
+            </select>
+          </label>
+          <p className="muted">任务下发器选择“新任务覆盖在机货”：本机收到新 task 时直接改写当前货物，不等待复用宽限，也不因上游同任务货物销毁本机货物。</p>
           <label className="number-row">
             <span>货物输送速度(m/s)</span>
             <input

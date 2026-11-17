@@ -67,6 +67,8 @@ type HarnessDeviceConfig = {
   rotationY?: number;
   /** telemetryBinding.trajectoryDirection（x/-x/z/-z，模型本地坐标）。 */
   trajectoryDirection?: string;
+  /** 任务下发器：新 task 立即覆盖当前在机货。 */
+  taskPolicy?: 'overwrite';
   /** 合批遥测代理：无自身几何，包围盒/行程经宿主模型按相对位姿换算（值为宿主 assetCode）。 */
   proxyOf?: string;
   /** 内置站台货格：沿行走轴相对行程中心的偏移（米），正值 = 行走轴正端。 */
@@ -100,6 +102,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
     if (config.autoDispose !== undefined) binding.cargoAutoDispose = config.autoDispose;
     if (config.origin !== undefined) binding.cargoOriginDevice = config.origin;
     if (config.trajectoryDirection !== undefined) binding.trajectoryDirection = config.trajectoryDirection;
+    if (config.taskPolicy !== undefined) binding.cargoTaskPolicy = config.taskPolicy;
     // 这些用例按原有 task 边沿语义编写，显式关闭首载光电同步，避免存量货补建改变时序。
     binding.cargoInitialSync = false;
     const model = {
@@ -2165,6 +2168,62 @@ test('4019 → 4015 直角接驳：到达中心线交叉点即交付，不再等
     assert.strictEqual(onlyCargo(h.state), cargo);
     assert.equal(cargo.assetCode, '4015', '交叉点与走行终点一致时必须交付');
     assert.equal(cargo.task, '255972');
+  } finally {
+    h.dispose();
+  }
+});
+
+
+test('任务下发器：4006 在机货立即覆盖新 task，4007 同任务订阅后正常接走', () => {
+  const h = makeHarness({
+    '4005': { centerX: -4 },
+    '4006': { centerX: 0, taskPolicy: 'overwrite' },
+    '4007': { centerX: 4 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4006', '258882');
+    h.apply('4006', { task: 258882, movement_x: 1 });
+    h.apply('4006', { task: 258899, movement_x: 1 });
+
+    assert.strictEqual(onlyCargo(h.state), cargo, '覆盖任务必须复用同一货物实例');
+    assert.equal(cargo.assetCode, '4006');
+    assert.equal(cargo.task, '258899', '新任务不得等待 3 秒复用宽限');
+    assert.equal(h.models['4006'].conveyorTelemetry.pendingTask, null);
+
+    h.apply('4007', { task: 258899, movement_x: 1 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4007', '下游同任务边沿到达后必须交付');
+    assert.equal(h.models['4006'].conveyorTelemetry.cargoCode, null);
+
+    const next = h.insertConveyorCargo('4005', '258889');
+    h.apply('4005', { task: 258889, movement_x: 1 });
+    h.apply('4006', { task: 258889, movement_x: 1 });
+    assert.equal(next.assetCode, '4006', '上一托交付后必须正常接收下一托');
+    assert.equal(next.task, '258889');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('任务下发器：上游持有同 task 新货时仍保留并覆盖本机在机货', () => {
+  const h = makeHarness({
+    '4005': { centerX: -4 },
+    '4006': { centerX: 0, taskPolicy: 'overwrite' },
+  });
+  try {
+    const held = h.insertConveyorCargo('4006', '258882');
+    const upstream = h.insertConveyorCargo('4005', '258889');
+    h.apply('4005', { task: 258889, movement_x: 1 });
+    h.apply('4006', { task: 258889, movement_x: 1 });
+
+    const cargos = [...h.state.conveyorCargoMeshes.values()];
+    assert.equal(cargos.length, 2, '任务覆盖不得销毁本机或上游货物');
+    assert.strictEqual(h.state.conveyorCargoMeshes.get(JSON.stringify(['4006', 'cargo'])), held);
+    assert.strictEqual(h.state.conveyorCargoMeshes.get(JSON.stringify(['4005', 'cargo'])), upstream);
+    assert.equal(held.assetCode, '4006');
+    assert.equal(held.task, '258889');
+    assert.equal(upstream.assetCode, '4005');
+    assert.equal(h.models['4006'].conveyorTelemetry.waitingTask, null);
   } finally {
     h.dispose();
   }

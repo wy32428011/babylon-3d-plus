@@ -87,6 +87,8 @@ export type TelemetryBindingComponent = {
   cargoOriginDevice?: boolean;
   /** 输送线专用：首次加载时按前后光电补建机上货箱；缺省开启，显式 false 关闭，只对带 task 的快照生效。 */
   cargoInitialSync?: boolean;
+  /** 输送线专用：overwrite 表示任务下发器，新 task 立即覆盖当前在机货；缺省保留原任务并应用复用宽限。 */
+  cargoTaskPolicy?: 'preserve' | 'overwrite';
   /** 输送线专用：货物走行速度覆盖（米/秒）；缺省沿用模型脚本 dataDriven.cargo.travel.speed。 */
   cargoTravelSpeed?: number;
   /** 堆垛机专用：货叉瞄准基点相对货格支撑位的竖直偏移（米）——只计入升降目标，叉顶面定位到支撑位 + 间隙（插入货物底部货槽）；货物在货格内落位保持支撑位不变；允许负值；缺省 0。 */
@@ -318,6 +320,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
     ...(typeof value.cargoInitialSync === 'boolean' ? { cargoInitialSync: value.cargoInitialSync } : {}),
+    ...(value.cargoTaskPolicy === 'overwrite' ? { cargoTaskPolicy: 'overwrite' as const } : {}),
     ...(typeof value.cargoTravelSpeed === 'number' && Number.isFinite(value.cargoTravelSpeed) && value.cargoTravelSpeed > 0
       ? { cargoTravelSpeed: Math.min(value.cargoTravelSpeed, 100) }
       : {}),

@@ -393,7 +393,8 @@ export class ConveyorTelemetryDriver {
    *   接走——提升机双货连续下料时，前一件货还没被下游接走、同机就报出下一件 task，立即复用会把前一件
    *   改号丢失，接收方被占用还会把后一件货卡在提升机上。空 conveyor 下游宽限 3s；下游 conveyor 仍持货
    *   （排队）时宽限 30s，必须等队列排空；提升机来料口宽限 10s（往返多层下料再回收常需 4–6s）。
-   *   到期仍未被接走才复用。
+   *   到期仍未被接走才复用。实例 cargoTaskPolicy='overwrite' 表示任务下发器：新 task 直接覆盖同一在机货，
+   *   跳过旧任务优先交付、复用宽限和上游新货销毁规则；下游匹配、占用与出口门控不变。
    * - 外部持货（stacker/RGV）：无链路能力，订阅传播触达时由相邻 conveyor 登记 externalPulls，
    *   facade 帧尾扫描其持货，命中即代交付（同样直达最终订阅者）。
    * - 站台（模型脚本声明的内置 1×1 货格）：conveyor↔stacker 双向交接缓冲，locator 事件驱动、不经链路。
@@ -566,7 +567,8 @@ export class ConveyorTelemetryDriver {
       let heldCargo = state.cargoCode !== null
         ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
         : null;
-      if (heldCargo && this.hasDownstreamSubscriberForTask(state, heldCargo.task)) {
+      const taskOverwrite = model.telemetryBinding?.cargoTaskPolicy === 'overwrite';
+      if (heldCargo && !taskOverwrite && this.hasDownstreamSubscriberForTask(state, heldCargo.task)) {
         // 旧货已有下游订阅：先正常交付，本机按无货流程处理新 task
         this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 已有下游订阅，先交付再处理新 task=${state.pendingTask}`);
         this.tryDeliverHeldCargo(model);
@@ -595,7 +597,7 @@ export class ConveyorTelemetryDriver {
           : downstreamQueued
             ? CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS
             : CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
-        const deferReuse = (
+        const deferReuse = !taskOverwrite && ((
           (state.platformPlacedCargo || state.platformOutboundTaskPending)
           && this.hasDownstreamSubscriberForTask(state, heldCargo.task)
         ) || (
@@ -605,11 +607,11 @@ export class ConveyorTelemetryDriver {
           && heldCargo.task === state.pendingPreviousTask
           && heldCargo.task !== state.pendingTask
           && state.pendingTaskAgeSeconds < reuseGraceSeconds
-        );
+        ));
         if (deferReuse) {
           // 宽限期或出口门控期间先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
           this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);
-        } else if (upstreamHoldsNewTask && !state.platformOutboundTaskPending) {
+        } else if (!taskOverwrite && upstreamHoldsNewTask && !state.platformOutboundTaskPending) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
           const oldTask = heldCargo.task;
           this.trace(`${model.assetCode} 上游已有新 task=${state.pendingTask} 货，销毁在机货 task=${oldTask} 并订阅`);
