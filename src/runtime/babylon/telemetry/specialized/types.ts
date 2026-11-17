@@ -350,6 +350,8 @@ export type ConveyorCargoTravelPlan = {
    * 走行到该侧的终点钳制到交叉点：货箱停在拐角而不是设备边沿，交给下游沿其中心轴继续。
    */
   perpendicularEndOffsets?: { positive: number | null; negative: number | null };
+  /** 复合设备内部交接点：key=内部设备 assetCode，value=交叉点沿本机轴偏移；null=无有效直角交叉。 */
+  internalHandoffOffsets?: Record<string, number | null>;
 };
 
 export type ConveyorModelTelemetryState = {

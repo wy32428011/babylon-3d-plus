@@ -2094,7 +2094,7 @@ test('复合设备任务互换：主设备旧任务货先交给移栽新任务�
   }
 });
 
-test('复合设备任务反向互换：主设备新任务直接接回移栽旧任务货，不看升降阶段', () => {
+test('复合设备任务反向互换：主设备新任务在交叉点接回移栽货，不看升降阶段', () => {
   const h = makeHarness({
     MAIN: { centerX: 0, cross: true, composite: true },
     TRANSFER: { centerX: 0, partOf: 'MAIN' },
@@ -2104,7 +2104,9 @@ test('复合设备任务反向互换：主设备新任务直接接回移栽旧�
     h.apply('TRANSFER', { task: 80, movement_x: 0, movement_y: 1 });
     h.apply('MAIN', { task: 81, movement_x: 0 });
     assert.strictEqual(onlyCargo(h.state), cargo);
-    assert.equal(cargo.assetCode, 'MAIN', '内部交接不受 movement_y 门控');
+    assert.equal(cargo.assetCode, 'TRANSFER', '尚未回到内部交叉点时不得提前交接');
+    h.apply('TRANSFER', { task: 81, movement_x: 0, movement_y: 1 }, 0.1, 2);
+    assert.equal(cargo.assetCode, 'MAIN', '回到交叉点后内部交接不受 movement_y 门控');
     assert.equal(cargo.task, '81', '内部主转次同样允许按新任务改号');
   } finally {
     h.dispose();
@@ -2224,6 +2226,71 @@ test('任务下发器：上游持有同 task 新货时仍保留并覆盖本机�
     assert.equal(held.task, '258889');
     assert.equal(upstream.assetCode, '4005');
     assert.equal(h.models['4006'].conveyorTelemetry.waitingTask, null);
+  } finally {
+    h.dispose();
+  }
+});
+
+
+test('复合交叉点路由未知：4008 停在 4019 交叉点，后续内部交付不再倒退', () => {
+  const h = makeHarness({
+    '4008': { centerX: 0, cross: true, composite: true },
+    '4019': { centerX: 0, partOf: '4008' },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4008', '258899');
+    h.apply('4008', { task: 258899, movement_x: 1 }, 0.1, 100);
+
+    assert.equal(cargo.assetCode, '4008', '路由未知时不得交给内部设备');
+    assert.equal(h.models['4008'].conveyorTelemetry.cargoTravelOffset, 0,
+      '路由未知时必须停在内部交叉点，而不是主输送末端');
+
+    h.apply('4019', { task: 258899, movement_x: 1, movement_y: 0 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4019');
+    assert.ok(Math.abs(h.models['4019'].conveyorTelemetry.cargoTravelOffset) < 1e-6,
+      '内部交付落点必须与 4008 等待点一致');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合交叉点直行路由：外部下游订阅后从等待点正常交付', () => {
+  const h = makeHarness({
+    '4008': { centerX: 0, cross: true, composite: true },
+    '4019': { centerX: 0, partOf: '4008' },
+    '4009': { centerX: 4 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4008', '258899');
+    h.apply('4008', { task: 258899, movement_x: 1 }, 0.1, 100);
+    assert.equal(h.models['4008'].conveyorTelemetry.cargoTravelOffset, 0);
+
+    h.apply('4009', { task: 258899, movement_x: 1 });
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4009', '直行下游已明确时不得继续等待内部设备');
+    assert.equal(cargo.task, '258899');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合内部提前订阅：4019 已到任务仍须等 4008 货物到达交叉点', () => {
+  const h = makeHarness({
+    '4008': { centerX: 0, cross: true, composite: true },
+    '4019': { centerX: 0, partOf: '4008' },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4008', '258899');
+    h.models['4008'].conveyorTelemetry.cargoTravelOffset = -1;
+    h.apply('4019', { task: 258899, movement_x: 1, movement_y: 0 });
+
+    assert.equal(cargo.assetCode, '4008', '未到内部交叉点不得提前交接');
+
+    h.apply('4008', { task: 258899, movement_x: 1 }, 0.1, 100);
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4019', '到达交叉点后应完成内部交接');
+    assert.ok(Math.abs(h.models['4019'].conveyorTelemetry.cargoTravelOffset) < 1e-6);
   } finally {
     h.dispose();
   }

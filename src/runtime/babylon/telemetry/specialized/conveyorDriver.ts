@@ -747,6 +747,21 @@ export class ConveyorTelemetryDriver {
     const flowDirection = state.platformInboundCargo && state.platformInboundDirection !== 0
       ? state.platformInboundDirection
       : this.resolveFlowDirection(model);
+    // 宿主路由未知时在内部交叉点等待；直行路由不钳制，内部路由到点后交付。
+    const internalParts = this.resolveInternalDeviceParts(model);
+    if (internalParts.length > 0) {
+      const route = [...state.downstreamLinks].find(([, link]) => link.task === cargo.task);
+      const routePart = route
+        ? internalParts.find(part => part.assetCode === route[0])
+        : undefined;
+      const decisionPart = routePart
+        ?? (!model.entitySnapshot?.components?.devicePartBinding && !route ? internalParts[0] : undefined);
+      const decisionOffset = decisionPart ? this.resolveInternalHandoffOffset(model, decisionPart) : null;
+      if (decisionOffset !== null) {
+        if (flowDirection * plan.forwardSign > 0) maxOffset = Math.min(maxOffset, decisionOffset);
+        else if (flowDirection * plan.forwardSign < 0) minOffset = Math.max(minOffset, decisionOffset);
+      }
+    }
     const isAtFlowEnd = () => flowDirection * plan.forwardSign >= 0
       ? state.cargoTravelOffset >= maxOffset - CONVEYOR_TRAVEL_ENDPOINT_EPSILON
       : state.cargoTravelOffset <= minOffset + CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
@@ -1071,7 +1086,7 @@ export class ConveyorTelemetryDriver {
     }
   }
 
-  /** task 定向移栽按订阅路线到达目标端口后交付；内部主次设备直接交接，不使用 movement_y 门控。 */
+  /** task 定向移栽按订阅路线到达目标端口后交付；内部主次设备到交叉点交接，不使用 movement_y 门控。 */
   private isCargoReadyForDelivery(
     model: ModelRuntimeEntry,
     cargo: GeneratedCargoRuntimeEntry,
@@ -1079,7 +1094,11 @@ export class ConveyorTelemetryDriver {
   ): boolean {
     const config = readConveyorCargoTravelConfig(model);
     const internalDelivery = this.resolveInternalDeviceParts(model).some((part) => part === subscriber);
-    if (internalDelivery) return true;
+    if (internalDelivery) {
+      const offset = this.resolveInternalHandoffOffset(model, subscriber);
+      return offset === null
+        || Math.abs(model.conveyorTelemetry.cargoTravelOffset - offset) <= CONVEYOR_TRAVEL_ENDPOINT_EPSILON;
+    }
     if (config.directionSource !== 'task') return true;
     if (!cargo.task) return false;
     const route = this.resolveTaskRoute(model, cargo.task);
@@ -1425,6 +1444,25 @@ export class ConveyorTelemetryDriver {
       }
     }
     return result;
+  }
+
+  private resolveInternalHandoffOffset(model: ModelRuntimeEntry, part: ModelRuntimeEntry): number | null {
+    const plan = this.resolveConveyorTravelPlan(model);
+    const cached = plan.internalHandoffOffsets?.[part.assetCode];
+    if (cached !== undefined) return cached;
+    const self = plan.travelContext;
+    const other = this.resolveConveyorCargoTravelContext(part);
+    const offset = resolvePerpendicularHandoffOffset(
+      {
+        center: other.center,
+        axis: other.travelAxis,
+        halfSpanMeters: other.spanMeters === null ? null : other.spanMeters / 2,
+      },
+      { center: self.center, axis: self.travelAxis, halfSpanMeters: null },
+      (self.spanMeters ?? 0) / 2,
+    );
+    (plan.internalHandoffOffsets ??= {})[part.assetCode] = offset;
+    return offset;
   }
 
   /** 按当前逻辑设备的根节点轴缓存正、负两个探测端口。 */
@@ -1790,6 +1828,10 @@ export class ConveyorTelemetryDriver {
     // 交叉点必须落在本机跨度内（中心线交点在设备长度范围内），才作为走行终点
     for (const { model: candidate } of this.host.collectModels()) {
       if (candidate === model || !isConveyorRuntimeModel(candidate)) continue;
+      const partHost = model.entitySnapshot?.components?.devicePartBinding ? model.telemetryProxySource : null;
+      const candidatePartHost = candidate.entitySnapshot?.components?.devicePartBinding ? candidate.telemetryProxySource : null;
+      if (partHost && (candidate === partHost || candidatePartHost === partHost)) continue;
+      if (candidatePartHost && candidatePartHost === model) continue;
       // 不使用 resolveConveyorTravelPlan 缓存，避免两台设备互相解析时递归
       const other = this.resolveConveyorCargoTravelContext(candidate);
       const offset = resolvePerpendicularHandoffOffset(
