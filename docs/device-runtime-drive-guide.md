@@ -524,7 +524,7 @@ hclift 每帧向共享状态发布载货台状态（`hcliftPlatformSurfaces`，k
   - **动态设备**（设备产生器产物）：自带编号 → 上报 `spawnedAssetCode`，高亮/聚焦目标是合成实体 id `spawned:{key}`；`generatedUnit.kind = 'spawned-device'`，无 host。
 - `ClickEventBindingClickResolution.trigger.reportAssetCode` 是产物的上报编号覆盖位：产物没有 `modelAsset`，`buildClickEventAssetClickedPayload` 优先取它，取不到才回落命中实体的 `modelAsset.assetCode`。产物命中时载荷附加 `unit`（kind + containerCode/assetCode）与 `host`（货箱的承运设备），`assetCode` 字段保持原语义不动。
 - 宿主随交接变化：`syncGeneratedCargoVisual` 每帧写入 `cargo.hostEntityId`（取自宿主模型 `entitySnapshot.id`）；owner 元数据变化时经 `applyGeneratedOutputMetadata` 重新下发到已加载网格，避免接管后上报旧宿主。
-- 产物没有文档实体，高亮/聚焦走运行时的合成 id 通道：动态实例经 `resolveSpawnedDeviceModel`、货物输出宿主经 `generatedOutputOwners` 分别接入 `getEntityWorldBounds` 与 `rebuildModelSelectionOutline`（不经 `applyModelSelection`，按合成 id 直接命中）。编辑器预览侧对非场景实体的目标改用 `setLocalHighlightEntityIds` + `getEntitiesFocusBounds`，不写编辑器选区，且产物高亮与编辑器选区互斥（命中产物时清空旧选中设备，避免双高亮）；生成器绑定不参与全场接管，点空白或未接管模型转入常规选择路径时，产物本地高亮随之清除（SceneViewPanel 用 `clickProductHighlightIdRef` 记录目标）。
+- 产物没有文档实体，高亮/聚焦走运行时的合成 id 通道：动态实例经 `resolveSpawnedDeviceModel`、货物输出宿主经 `generatedOutputOwners` 分别接入 `getEntityWorldBounds` 与 `rebuildModelSelectionOutline`（不经 `applyModelSelection`，按合成 id 直接命中）。聚焦包围盒只合并真实可见且有顶点的产物网格，GLB 零顶点 `__root__` 包装节点和隐藏几何不得拉偏中心。编辑器预览侧对非场景实体的目标改用 `setLocalHighlightEntityIds` + `getEntitiesFocusBounds`，不写编辑器选区，且产物高亮与编辑器选区互斥（命中产物时清空旧选中设备，避免双高亮）；生成器绑定不参与全场接管，点空白或未接管模型转入常规选择路径时，产物本地高亮随之清除（SceneViewPanel 用 `clickProductHighlightIdRef` 记录目标）。
 
 ### 回归
 

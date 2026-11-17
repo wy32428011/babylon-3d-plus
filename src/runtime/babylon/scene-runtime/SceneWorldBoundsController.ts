@@ -270,7 +270,7 @@ export class SceneWorldBoundsController {
     if (generatedOwner) {
       let mergedBounds: RuntimeWorldBounds | null = null;
       for (const mesh of collectGeneratedOutputMeshes(generatedOwner.output)) {
-        if (mesh.isDisposed()) continue;
+        if (!isMeasurableModelMesh(mesh)) continue;
         const bounds = getGeneratedOutputMeshWorldBounds(mesh);
         if (!bounds) continue;
         mergedBounds = mergedBounds ? mergeWorldBounds(mergedBounds, bounds) : bounds;

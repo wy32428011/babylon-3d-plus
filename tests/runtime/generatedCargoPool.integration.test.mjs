@@ -477,3 +477,32 @@ test('首次checkout不比disabled原生路径额外观察source getLODLevels', 
   }
   assert.deepEqual(traces[1], traces[0], '资格判定应先识别own方法并退回原路径，不能为审计额外调用');
 });
+
+
+test('生成货物聚焦忽略零顶点包装节点和隐藏网格', async t => {
+  const f = setup(t);
+  const entity = generator(target('focus-visible-geometry'));
+  await sync(f, entity);
+  const cargo = f.spawn(entity);
+  cargo.root.position.set(10, 2, 3);
+  const model = await loaded(f, cargo);
+  f.scene.render();
+
+  const wrapper = new Mesh('__root__', f.scene);
+  wrapper.parent = model.contentRoot;
+  wrapper.position.set(-30, 0, 20);
+  const hidden = MeshBuilder.CreateBox('hidden-far-geometry', {}, f.scene);
+  hidden.parent = model.contentRoot;
+  hidden.position.set(-30, 0, 20);
+  hidden.isVisible = false;
+  model.meshes.push(wrapper, hidden);
+  f.scene.render();
+
+  const mesh = physical(model);
+  const expected = mesh.getBoundingInfo().boundingBox.centerWorld;
+  const focus = f.runtime.getEntitiesFocusBounds([cargo.outputOwner.entityId]);
+  assert.ok(focus, '生成货物必须能解析聚焦包围盒');
+  assert.ok(Vector3.Distance(expected, new Vector3(focus.center.x, focus.center.y, focus.center.z)) < 1e-6,
+    JSON.stringify({ expected: expected.asArray(), actual: focus.center }));
+  f.retire(cargo);
+});
