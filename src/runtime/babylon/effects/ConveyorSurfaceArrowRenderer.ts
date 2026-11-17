@@ -15,6 +15,8 @@ import { readConveyorCargoTravelConfig } from '../telemetry/specialized/speciali
 import { CONVEYOR_ARROW_GLSL } from './ConveyorArrowShaders';
 
 const EPSILON = 1e-8;
+/** 箭头覆盖尺寸上限（米），与实例配置长度/宽度的归一化上限一致，防止脚本输出异常值撑爆几何。 */
+const MAX_SURFACE_SIZE = 10000;
 const DEFAULT_SURFACE_PATTERN = /conveyor|roller|chain|rail|GT|输送|滚筒|链条|轨道/i;
 const ARROW_STYLE_UNIFORMS = {
   'conveyor-direction': 0,
@@ -335,11 +337,17 @@ export class ConveyorSurfaceArrowRenderer {
     if (!validMatrix(frame)) return '输送线实例变换退化，无法生成箭头。';
     const alongAxis = surface.axis;
     const acrossAxis = alongAxis === 'x' ? 'z' : 'x';
+    const metadata = host.contentRoot.metadata as { conveyorSurfaceY?: unknown; conveyorSurfaceWidth?: unknown } | null;
+    // 载货面节点常常只是窄导轨（如辊筒链条机的 G）：模型脚本会输出实测输送面宽度，
+    // 自动宽度优先用它，避免条带与箭头被节点横向跨度压窄；实例显式 width 仍然优先。
+    // 与 conveyorSurfaceY 一致只在未指定表面节点时生效；单位是米，与自动包围盒同一空间。
+    const scriptedWidth = !surface.explicit && typeof metadata?.conveyorSurfaceWidth === 'number'
+      && Number.isFinite(metadata.conveyorSurfaceWidth) && metadata.conveyorSurfaceWidth > EPSILON
+      ? Math.min(metadata.conveyorSurfaceWidth, MAX_SURFACE_SIZE) : 0;
     const length = (config.length || bounds.maximum[alongAxis] - bounds.minimum[alongAxis]) - config.endMargin * 2;
-    const width = config.width || bounds.maximum[acrossAxis] - bounds.minimum[acrossAxis];
+    const width = config.width || scriptedWidth || bounds.maximum[acrossAxis] - bounds.minimum[acrossAxis];
     if (length <= EPSILON || width <= EPSILON) return '箭头可用长度或宽度为零，请减小端部留边或增大尺寸。';
     const center = bounds.minimum.add(bounds.maximum).scale(.5);
-    const metadata = host.contentRoot.metadata as { conveyorSurfaceY?: unknown } | null;
     center.y = !surface.explicit && typeof metadata?.conveyorSurfaceY === 'number' && Number.isFinite(metadata.conveyorSurfaceY)
       ? metadata.conveyorSurfaceY : bounds.maximum.y;
     center.y += config.surfaceOffset;

@@ -10346,11 +10346,11 @@
     },
     {
       "file": "tests/runtime/conveyorSurfaceArrowRenderer.test.mjs",
-      "sha256": "99b81c97d88e0fc834435e7c5290168acb11b293cdac2c3e6f248a356124e196",
+      "sha256": "32cc6d8e925d03c20c0aacd752df2947aba5d352057c06f12ac6a138e1f563c2",
       "disposition": "node-contract",
       "domain": "motion",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/conveyorSurfaceArrowRenderer.test.mjs",
-      "purpose": "自动表面优先脚本链面高度，独立网格不污染模型测量且保留深度遮挡",
+      "purpose": "自动表面优先脚本链面高度、窄载货面宽度由脚本输出接管，独立网格不污染模型测量且保留深度遮挡",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
         "NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS",

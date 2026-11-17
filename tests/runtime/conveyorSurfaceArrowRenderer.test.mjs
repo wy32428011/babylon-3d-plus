@@ -201,6 +201,32 @@ test('自动尺寸包含参数化源节点别名并排除已有箭头装饰', t 
   assert.deepEqual(arrow(scene).metadata, { conveyorSurfaceArrow: true, entityId: 'one' });
 });
 
+test('窄载货面下模型脚本输出的输送面宽度接管自动宽度，箭头不被压细', t => {
+  const { scene, model, renderer, config, surface, contentRoot } = setup(t);
+  // 模拟辊筒链条机的 G 这类窄导轨：横向只有 0.072m。
+  surface.scaling.z = 0.06;
+  renderer.update('one', model, config, 1, 0, true);
+  const mesh = arrow(scene);
+  near(mesh.material._floats.stripWidth, .072);
+  near(mesh.material._floats.arrowWidth, .072);
+  near(Vector3.Distance(point(mesh, 0, -.5), point(mesh, 0, .5)), .072);
+  // 脚本输出的输送面宽度只接管自动宽度，箭头宽度恢复配置值。
+  contentRoot.metadata = { conveyorSurfaceWidth: 1.02 };
+  renderer.update('one', model, config, 1, 0, true);
+  near(mesh.material._floats.stripWidth, 1.02);
+  near(mesh.material._floats.arrowWidth, .38);
+  near(Vector3.Distance(point(mesh, 0, -.5), point(mesh, 0, .5)), 1.02);
+  // 实例显式宽度优先于脚本输出。
+  config.width = .5;
+  renderer.update('one', model, config, 1, 0, true);
+  near(mesh.material._floats.stripWidth, .5);
+  // 指定表面节点时不使用脚本宽度，严格按该节点几何。
+  config.width = 0;
+  config.surfaceNode = 'belt';
+  renderer.update('one', model, config, 1, 0, true);
+  near(mesh.material._floats.stripWidth, 1.2);
+});
+
 test('z 行走轴和 thinInstance 几何使用单机范围，不含整批矩阵包围盒', t => {
   const { scene, model, surface, renderer, config } = setup(t);
   model.entitySnapshot.components.modelAsset.dataDrivenConfig.cargo.travel.axis = 'z';
