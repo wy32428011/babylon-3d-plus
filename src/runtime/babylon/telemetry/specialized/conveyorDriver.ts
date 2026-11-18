@@ -387,8 +387,9 @@ export class ConveyorTelemetryDriver {
    *   （最终持有方），中间跳不发波——避免接力放大为链路消息风暴。
    * - 过境标记 transitedTasks：taken 波经过时 pendingTask 匹配且交付对象非本机 → 货已越过，
    *   此后收到同 task 仅更新 lastTask，不再挂单（替代旧 bypassedTasks 语义）。
-   * - 新 task 到达且本机持货：旧货有下游订阅 → 先交付再按无货流程处理；无订阅且上游链路有新 task 持货
-   *   → 销毁当前货物等传递；否则复用滞留箱盖新 task。**复用宽限**：在机货的 task 正是本机上一条上报
+   * - 新 task 到达且本机持货：旧货有下游订阅 → 先交付再按无货流程处理；尚未到交接点时保留旧货并暂停
+   *   新 task 接管，不适用复用宽限或上游新货销毁；无订阅且上游链路有新 task 持货 → 销毁当前货物等传递；
+   *   否则复用滞留箱盖新 task。**复用宽限**：在机货的 task 正是本机上一条上报
    *   的 task（pendingPreviousTask）且下游探测邻居是可接货 conveyor / 提升机来料口时，先等下游把在机货
    *   接走——提升机双货连续下料时，前一件货还没被下游接走、同机就报出下一件 task，立即复用会把前一件
    *   改号丢失，接收方被占用还会把后一件货卡在提升机上。空 conveyor 下游宽限 3s；下游 conveyor 仍持货
@@ -568,7 +569,9 @@ export class ConveyorTelemetryDriver {
         ? this.state.conveyorCargoMeshes.get(this.getConveyorCargoKey(model.assetCode, state.cargoCode)) ?? null
         : null;
       const taskOverwrite = model.telemetryBinding?.cargoTaskPolicy === 'overwrite';
-      if (heldCargo && !taskOverwrite && this.hasDownstreamSubscriberForTask(state, heldCargo.task)) {
+      const heldCargoAwaitingDelivery = heldCargo !== null && !taskOverwrite
+        && this.hasDownstreamSubscriberForTask(state, heldCargo.task);
+      if (heldCargo && heldCargoAwaitingDelivery) {
         // 旧货已有下游订阅：先正常交付，本机按无货流程处理新 task
         this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 已有下游订阅，先交付再处理新 task=${state.pendingTask}`);
         this.tryDeliverHeldCargo(model);
@@ -583,8 +586,8 @@ export class ConveyorTelemetryDriver {
         // 复用宽限只针对「本机自己上报过该 task、且下游还有 conveyor 可接走」的在机货：提升机双货
         // 连续下料时先到的货刚落地、下游 task 边沿还没到，立即改号会把前一件货改姓丢失，接收方被占用
         // 还会把后一件货卡在提升机上。外部放入（lastTask 未上报）或末端无下游的滞留箱仍按即时复用处理；
-        // 上游已持新 task 货时也立即销毁让位。线首站台的首次出库任务始终复用外部放入的同一货物，
-        // 不走上述宽限或销毁分支，但旧 task 已有下游订阅时仍先交付旧货。
+        // 上游已持新 task 货时也立即销毁让位，但旧货已有接货订阅时必须等到实际交付，不能销毁或改号。
+        // 线首站台的首次出库任务始终复用外部放入的同一货物，不走上述宽限或销毁分支。
         const exitNeighbor = this.resolveProbeNeighbor(model, -flowDirection);
         // 提升机来料口的“下游”是 lift：同样要把在机货留到提升机取走，否则会丢掉前一件 task。
         const liftExit = exitNeighbor !== null && isLiftRuntimeModel(exitNeighbor);
@@ -597,19 +600,23 @@ export class ConveyorTelemetryDriver {
           : downstreamQueued
             ? CONVEYOR_HELD_CARGO_QUEUE_GRACE_SECONDS
             : CONVEYOR_HELD_CARGO_REUSE_GRACE_SECONDS;
-        const deferReuse = !taskOverwrite && ((
-          (state.platformPlacedCargo || state.platformOutboundTaskPending)
-          && this.hasDownstreamSubscriberForTask(state, heldCargo.task)
-        ) || (
-          !state.platformOutboundTaskPending
-          && !upstreamHoldsNewTask
-          && canHandDownstream
-          && heldCargo.task === state.pendingPreviousTask
-          && heldCargo.task !== state.pendingTask
-          && state.pendingTaskAgeSeconds < reuseGraceSeconds
-        ));
+        const deferReuse = !taskOverwrite && (
+          heldCargoAwaitingDelivery
+          || (
+            (state.platformPlacedCargo || state.platformOutboundTaskPending)
+            && this.hasDownstreamSubscriberForTask(state, heldCargo.task)
+          )
+          || (
+            !state.platformOutboundTaskPending
+            && !upstreamHoldsNewTask
+            && canHandDownstream
+            && heldCargo.task === state.pendingPreviousTask
+            && heldCargo.task !== state.pendingTask
+            && state.pendingTaskAgeSeconds < reuseGraceSeconds
+          )
+        );
         if (deferReuse) {
-          // 宽限期或出口门控期间先不改号，等下游订阅把在机货接走；本帧后续的帧级交付/走行照常执行。
+          // 已有订阅的旧货等到点交付；其余仅在宽限期或出口门控期间暂缓改号。
           this.trace(`${model.assetCode} 在机货 task=${heldCargo.task} 等下游接走，新 task=${state.pendingTask} 暂缓复用（${state.pendingTaskAgeSeconds.toFixed(1)}s）`);
         } else if (!taskOverwrite && upstreamHoldsNewTask && !state.platformOutboundTaskPending) {
           // 上游链路已有新 task 的货：销毁当前货物，订阅等传递
@@ -749,6 +756,7 @@ export class ConveyorTelemetryDriver {
       : this.resolveFlowDirection(model);
     // 宿主路由未知时在内部交叉点等待；直行路由不钳制，内部路由到点后交付。
     const internalParts = this.resolveInternalDeviceParts(model);
+    let internalDriveDirection: 1 | -1 | null = null;
     if (internalParts.length > 0) {
       const route = [...state.downstreamLinks].find(([, link]) => link.task === cargo.task);
       const routePart = route
@@ -758,8 +766,19 @@ export class ConveyorTelemetryDriver {
         ?? (!model.entitySnapshot?.components?.devicePartBinding && !route ? internalParts[0] : undefined);
       const decisionOffset = decisionPart ? this.resolveInternalHandoffOffset(model, decisionPart) : null;
       if (decisionOffset !== null) {
-        if (flowDirection * plan.forwardSign > 0) maxOffset = Math.min(maxOffset, decisionOffset);
-        else if (flowDirection * plan.forwardSign < 0) minOffset = Math.max(minOffset, decisionOffset);
+        const distanceToInternalHandoff = decisionOffset - state.cargoTravelOffset;
+        if (routePart && Math.abs(distanceToInternalHandoff) > CONVEYOR_TRAVEL_ENDPOINT_EPSILON) {
+          internalDriveDirection = distanceToInternalHandoff > 0
+            ? plan.forwardSign > 0 ? 1 : -1
+            : plan.forwardSign > 0 ? -1 : 1;
+          // 内部交接点与相邻设备交点可能相差数毫米；已明确内部路由时以内部交点为唯一终点。
+          if (distanceToInternalHandoff > 0) maxOffset = decisionOffset;
+          else minOffset = decisionOffset;
+        } else if (flowDirection * plan.forwardSign > 0) {
+          maxOffset = Math.min(maxOffset, decisionOffset);
+        } else if (flowDirection * plan.forwardSign < 0) {
+          minOffset = Math.max(minOffset, decisionOffset);
+        }
       }
     }
     const isAtFlowEnd = () => flowDirection * plan.forwardSign >= 0
@@ -768,7 +787,9 @@ export class ConveyorTelemetryDriver {
     // 字段接管是暂时的：movement 归 0 后持货已被驱动过且未达流向终点则按流向重新登记自驱续行，
     // 否则接管期间 movement 非 0 消息已清零自驱（见帧首），字段静默后货物会滞留行程中段。
     // 从未被驱动过的持货（stacker 站台放货落座）不续行，保持滞留停泊等待 task 复用。
-    if (movementDirection === 0 && state.selfDriveDirection === 0 && state.cargoDriveEngaged) {
+    if (internalDriveDirection !== null) {
+      state.selfDriveDirection = internalDriveDirection;
+    } else if (movementDirection === 0 && state.selfDriveDirection === 0 && state.cargoDriveEngaged) {
       if (!isAtFlowEnd()) state.selfDriveDirection = flowDirection;
     }
     // 快照 movement 为 0 时回退到接管自驱方向：承接货物控制权后立即走行，不等下一条 MQTT 消息。
@@ -776,7 +797,7 @@ export class ConveyorTelemetryDriver {
     const awaitingEntryHandoff = state.entryHandoffPending && cargo.handoff !== null;
     const cargoDirection = awaitingEntryHandoff
       ? 0
-      : movementDirection !== 0 ? movementDirection : state.selfDriveDirection;
+      : internalDriveDirection ?? (movementDirection !== 0 ? movementDirection : state.selfDriveDirection);
     if (!snapshot.faulted && cargoDirection !== 0) {
       state.cargoTravelOffset += cargoDirection * plan.forwardSign * cargoSpeed * deltaSeconds;
       state.cargoDriveEngaged = true;
@@ -926,7 +947,8 @@ export class ConveyorTelemetryDriver {
       : null;
     const internalTaskHandoff = heldCargo !== null && heldCargo.task !== msg.task
       && this.resolveInternalDeviceParts(model).some((part) => part.assetCode === msg.originAssetCode)
-      && !this.hasDownstreamSubscriberForTask(state, heldCargo.task);
+      && !this.hasDownstreamSubscriberForTask(state, heldCargo.task)
+      && !this.hasAnyCargoForTask(msg.task);
     // 线首站台本机 task=0、尚未取得首次出库 task 时，下游首次订阅即作为该实物的出库任务。
     // 仅复用同一货物并登记自驱，platformPlacedCargo 仍要求货物抵达本机出口后才可交付。
     if (heldCargo && heldCargo.task !== msg.task
@@ -947,6 +969,7 @@ export class ConveyorTelemetryDriver {
     } else if (heldCargo && internalTaskHandoff) {
       // 复合设备内部允许主次任务互换：只改货物任务，不提前改持货方 lastTask，
       // 持货方随后上报该新任务时仍需形成边沿并等待实物交回。
+      // 请求任务已有实物时必须由实际持货方交付，不能把另一方旧货改号后制造同 task 双货。
       const oldTask = heldCargo.task;
       heldCargo.task = msg.task;
       if (oldTask) this.notifyTaken(model, oldTask, null, msg.direction);

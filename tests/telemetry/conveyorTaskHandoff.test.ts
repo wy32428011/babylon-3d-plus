@@ -77,6 +77,8 @@ type HarnessDeviceConfig = {
   cross?: boolean;
   /** 复合设备宿主：主输送与 transfer 逻辑子设备分别保存独立运动和遥测状态。 */
   composite?: boolean;
+  /** 移栽行程中心相对主输送中心的本地 X 偏移（米）。 */
+  transferCenterX?: number;
   /** 逻辑子设备：共享宿主几何与位姿，但使用独立 assetCode 和 MQTT 状态。 */
   partOf?: string;
 };
@@ -126,6 +128,7 @@ function makeHarness(layout: Record<string, HarnessDeviceConfig>) {
       root.position.x = config.centerX;
       const primaryNode = MeshBuilder.CreateBox('GD_4', { width: 1, height: 0.2, depth: 4 }, scene);
       const crossNode = MeshBuilder.CreateBox('EQ_YZJ', { width: 2, height: 0.2, depth: 1 }, scene);
+      crossNode.position.x = config.transferCenterX ?? 0;
       primaryNode.parent = root;
       crossNode.parent = root;
       model.meshes = [primaryNode, crossNode];
@@ -2291,6 +2294,177 @@ test('复合内部提前订阅：4019 已到任务仍须等 4008 货物到达交
     assert.strictEqual(onlyCargo(h.state), cargo);
     assert.equal(cargo.assetCode, '4019', '到达交叉点后应完成内部交接');
     assert.ok(Math.abs(h.models['4019'].conveyorTelemetry.cargoTravelOffset) < 1e-6);
+  } finally {
+    h.dispose();
+  }
+});
+
+
+
+test('复合父转子：实际上游已持新 task 时不得改号父设备旧货', () => {
+  const h = makeHarness({
+    '4003': { centerX: -4 },
+    '4005': { centerX: 0, cross: true, composite: true },
+    '4020': { centerX: 0, partOf: '4005' },
+  });
+  try {
+    const upstream = h.insertConveyorCargo('4003', '258897');
+    const parent = h.insertConveyorCargo('4005', '258889');
+    Object.assign(h.models['4003'].conveyorTelemetry, {
+      lastTask: '258897', currentTask: '258897', pendingTask: '258897', initialSensorHold: true,
+    });
+    Object.assign(h.models['4005'].conveyorTelemetry, { lastTask: '258889', currentTask: '258889' });
+    h.apply('4003', { task: 258897, mode: 3, movement_x: 0, signalBits: 9 });
+    h.models['4003'].conveyorTelemetry.initialSensorHold = true;
+    h.apply('4005', { task: 258889, mode: 3, movement_x: 0, signalBits: 9 });
+
+    h.apply('4020', { task: 258897, mode: 3, movement_x: 1, movement_y: 0, signalBits: 32 });
+
+    assert.equal(parent.assetCode, '4005', '父设备旧货不得冒充上游的新任务货物');
+    assert.equal(parent.task, '258889');
+    assert.equal(upstream.assetCode, '4003');
+    assert.equal(upstream.task, '258897');
+    assert.equal(h.state.conveyorCargoMeshes.size, 2, '不得制造同 task 双货');
+
+    h.models['4003'].conveyorTelemetry.initialSensorHold = false;
+    h.apply('4003', { task: 258897, mode: 3, movement_x: 1, signalBits: 9 });
+    assert.equal(upstream.assetCode, '4020', '移栽应接收实际上游的新任务货物');
+    assert.equal(upstream.task, '258897');
+    assert.equal(parent.assetCode, '4005');
+    assert.equal(parent.task, '258889');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合子转父：实际上游已持新 task 时不得改号移栽旧货', () => {
+  const h = makeHarness({
+    '4004': { centerX: 0, centerZ: -4, rotationY: Math.PI / 2 },
+    '4005': { centerX: 0, cross: true, composite: true },
+    '4020': { centerX: 0, partOf: '4005' },
+  });
+  try {
+    const upstream = h.insertConveyorCargo('4004', '258897');
+    const child = h.insertConveyorCargo('4020', '258889');
+    Object.assign(h.models['4004'].conveyorTelemetry, {
+      lastTask: '258897', currentTask: '258897', initialSensorHold: true,
+    });
+    Object.assign(h.models['4020'].conveyorTelemetry, { lastTask: '258889', currentTask: '258889' });
+    h.apply('4004', { task: 258897, mode: 3, movement_x: 0, signalBits: 9 });
+    h.apply('4020', { task: 258889, mode: 3, movement_x: 0, movement_y: 1, signalBits: 33 });
+
+    h.apply('4005', { task: 258897, mode: 3, movement_x: 0, signalBits: 1 });
+
+    assert.equal(child.assetCode, '4020', '移栽旧货不得冒充上游的新任务货物');
+    assert.equal(child.task, '258889');
+    assert.equal(upstream.assetCode, '4004');
+    assert.equal(upstream.task, '258897');
+    assert.equal(h.state.conveyorCargoMeshes.size, 2, '不得制造同 task 双货');
+
+    h.models['4004'].conveyorTelemetry.initialSensorHold = false;
+    h.apply('4004', { task: 258897, mode: 3, movement_x: 1, signalBits: 9 });
+    assert.equal(upstream.assetCode, '4005', '父设备应接收实际上游的新任务货物');
+    assert.equal(upstream.task, '258897');
+    assert.equal(child.assetCode, '4020');
+    assert.equal(child.task, '258889');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合内部任务互换：无外部新货时连续两轮仍保持双向交接同一货物', () => {
+  const h = makeHarness({
+    '4005': { centerX: 0, cross: true, composite: true },
+    '4020': { centerX: 0, partOf: '4005' },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4005', '258889');
+    Object.assign(h.models['4005'].conveyorTelemetry, { lastTask: '258889', currentTask: '258889' });
+    h.apply('4005', { task: 258889, mode: 3, movement_x: 0, signalBits: 9 });
+
+    for (const task of [258897, 258905]) {
+      h.apply('4020', { task, mode: 3, movement_x: 0, movement_y: 1, signalBits: 16 });
+      assert.strictEqual(onlyCargo(h.state), cargo);
+      assert.equal(cargo.assetCode, '4020');
+      assert.equal(cargo.task, String(task));
+
+      h.apply('4005', { task, mode: 3, movement_x: 0, signalBits: 1 });
+      assert.strictEqual(onlyCargo(h.state), cargo);
+      assert.equal(cargo.assetCode, '4005');
+      assert.equal(cargo.task, String(task));
+    }
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合子转父：旧货未到交接点时新 task 不得销货，旧货交付后再接上游新货', () => {
+  const h = makeHarness({
+    '4003': { centerX: -2.2 },
+    '4005': { centerX: 0, cross: true, composite: true },
+    '4020': { centerX: 0, partOf: '4005' },
+  });
+  try {
+    const upstream = h.insertConveyorCargo('4003', '258897');
+    const oldCargo = h.insertConveyorCargo('4020', '258889');
+    Object.assign(h.models['4003'].conveyorTelemetry, {
+      lastTask: '258897', currentTask: '258897', initialSensorHold: true,
+    });
+    Object.assign(h.models['4020'].conveyorTelemetry, {
+      lastTask: '258889', currentTask: '258889', cargoTravelOffset: -1,
+      selfDriveDirection: 1, cargoDriveEngaged: true,
+    });
+    h.apply('4003', { task: 258897, mode: 3, movement_x: 0, signalBits: 9 });
+    h.apply('4005', { task: 258889, mode: 3, movement_x: 0, signalBits: 1 });
+    assert.equal(oldCargo.assetCode, '4020', '前置：旧货尚未到内部交接点');
+
+    h.apply('4020', { task: 258897, mode: 3, movement_x: 1, movement_y: 0, signalBits: 32 });
+
+    assert.strictEqual(h.state.conveyorCargoMeshes.get(JSON.stringify(['4020', 'cargo'])), oldCargo,
+      '旧货已有接货订阅但尚未到点时不得销毁');
+    assert.equal(oldCargo.task, '258889');
+    assert.equal(upstream.assetCode, '4003', '上一托离开前不得接入下一托');
+
+    h.apply('4020', { task: 258897, mode: 3, movement_x: 1, movement_y: 0, signalBits: 32 }, 0.1, 100);
+    assert.equal(oldCargo.assetCode, '4005', '旧货到交叉点后必须先完成子转父');
+    assert.equal(oldCargo.task, '258889');
+    assert.equal(h.models['4020'].conveyorTelemetry.waitingTask, '258897', '随后必须恢复等待下一托');
+    assert.ok(h.models['4003'].conveyorTelemetry.downstreamLinks.has('4020'),
+      `下一托订阅必须注册到实际上游，4003=${JSON.stringify([...h.models['4003'].conveyorTelemetry.downstreamLinks])} 4005=${JSON.stringify([...h.models['4005'].conveyorTelemetry.downstreamLinks])} 4020up=${JSON.stringify([...h.models['4020'].conveyorTelemetry.upstreamLinks])}`);
+
+    h.models['4003'].conveyorTelemetry.initialSensorHold = false;
+    h.apply('4003', { task: 258897, mode: 3, movement_x: 1, signalBits: 9 });
+    assert.equal(upstream.assetCode, '4020', '旧货离开后必须接入实际上游的下一托');
+    assert.equal(upstream.task, '258897');
+  } finally {
+    h.dispose();
+  }
+});
+
+test('复合内部交接点优先于相邻设备直角终点，厘米级中心线偏差不得卡住子转父', () => {
+  const h = makeHarness({
+    '4005': { centerX: 0, centerZ: 0, cross: true, composite: true, transferCenterX: 0.014 },
+    '4020': { centerX: 0, partOf: '4005' },
+    '4006': { centerX: 0.009, centerZ: 0.8, halfSpanX: 0.4, rotationY: -Math.PI / 2 },
+  });
+  try {
+    const cargo = h.insertConveyorCargo('4020', '258889');
+    Object.assign(h.models['4020'].conveyorTelemetry, {
+      lastTask: '258889', currentTask: '258889', cargoTravelOffset: -0.01,
+      lastMovementDirection: -1, selfDriveDirection: -1, cargoDriveEngaged: true,
+    });
+    h.apply('4020', { task: 258889, mode: 3, movement_x: 0, movement_y: 0, signalBits: 32 });
+    const plan = h.models['4020'].conveyorTelemetry.travelPlan;
+    assert.ok(plan);
+    assert.ok(Math.abs((plan.perpendicularEndOffsets?.negative ?? 0) + 0.005) < 1e-6,
+      `前置：相邻 4006 的交点必须比内部交点提前 5mm，实际 ${JSON.stringify(plan.perpendicularEndOffsets)}`);
+
+    h.apply('4005', { task: 258889, mode: 3, movement_x: 0, signalBits: 1 });
+    h.apply('4020', { task: 258889, mode: 3, movement_x: 0, movement_y: 0, signalBits: 32 }, 0.1, 10);
+
+    assert.strictEqual(onlyCargo(h.state), cargo);
+    assert.equal(cargo.assetCode, '4005', '必须到 4005/4020 的内部交点完成交接，不能被 4006 交点提前钳停');
+    assert.equal(cargo.task, '258889');
   } finally {
     h.dispose();
   }
