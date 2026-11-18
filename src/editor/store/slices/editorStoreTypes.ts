@@ -5,6 +5,7 @@ import { type FailedSceneResources } from '../../assets/restoreFailedSceneResour
 import { type AlarmManagerComponent } from '../../model/alarmManager';
 import { type EntityLightingSettings, type LightingNodeOverride, type LightingClassificationEntry, type SceneLightingBakeSettings, type SceneLightingBakeSnapshot } from '../../../../electron/shared/sceneLightingBakeContract';
 import type { ManualRoamAvatar } from '../../model/components';
+import type { InspectionBinding } from '../../model/inspectionBinding';
 import { type LightingManagerTab, type LightingManagerFocus, type LightingManagementDraft, type LightingManagementResult } from '../lightingManagementState';
 import { type SceneRegionCamera } from '../../model/sceneRegionViews';
 import { type CommandHistory } from '../../commands/CommandHistory';
@@ -449,6 +450,7 @@ export type EditorState = {
   updateSelectedCadReference: (patch: Partial<Pick<CadReferenceComponent, 'lineColor' | 'opacity'>>) => void;
   updateSelectedLight: (patch: Partial<LightComponent>) => void;
   updateSelectedModelAssetCode: (assetCode: string) => void;
+  updateSelectedInspectionBinding: (binding: InspectionBinding | null) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
   updateSelectedDeviceSpawner: (component: DeviceSpawnerComponent, label?: string) => void;
   updateSelectedClickEventBinding: (component: ClickEventBindingComponent, label?: string) => void;

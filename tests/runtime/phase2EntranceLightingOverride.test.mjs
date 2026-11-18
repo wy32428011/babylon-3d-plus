@@ -23,10 +23,15 @@ const hooks = registerHooks({
     return next(url, context);
   },
 });
-let ModelEntranceRuntime, SceneLightingRuntime, LightingProbeSampler, lightingMaterialFingerprint, getLightingGeometrySignature,
+let AlarmColorOverrides, ModelEntranceRuntime, SceneLightingRuntime, LightingProbeSampler, lightingMaterialFingerprint, getLightingGeometrySignature,
   normalizeSceneLightingConfig, getSceneLightingBakeSignature, SceneModelEntrancePlayback, ScenePoiAndEffectsController,
-  registerLightingMaterialOverride, resolveLightingMaterialOverride, isLightingMaterialOverrideOf;
+  registerLightingMaterialOverride, resolveLightingMaterialOverride, isLightingMaterialOverrideOf, TargetModelEffects, createDefaultPoiEffectComponent,
+  exportLightingMesh;
 try {
+  ({ AlarmColorOverrides } = await import('../../src/runtime/babylon/AlarmManagerRuntime.ts'));
+  ({ TargetModelEffects } = await import('../../src/runtime/babylon/effects/TargetModelEffects.ts'));
+  ({ createDefaultPoiEffectComponent } = await import('../../src/editor/model/poiEffect.ts'));
+  ({ exportLightingMesh } = await import('../../src/runtime/babylon/lightingGeometry.ts'));
   ({ ModelEntranceRuntime } = await import('../../src/runtime/babylon/ModelEntranceRuntime.ts'));
   ({ SceneLightingRuntime } = await import('../../src/runtime/babylon/SceneLightingRuntime.ts'));
   ({ LightingProbeSampler } = await import('../../src/runtime/babylon/lightingProbes.ts'));
@@ -127,6 +132,117 @@ for (const pbr of [false, true]) {
     } finally { f.dispose(); }
   });
 }
+
+test('开启烘焙光照的设备解除报警后恢复原有 PBR 外观', async () => {
+  const f = fixture({ dynamic: true, pbr: true });
+  const tint = new AlarmColorOverrides();
+  try {
+    const physical = f.moving.material;
+    physical.albedoColor.copyFromFloats(0.25, 0.45, 0.65);
+    await f.bake();
+    const desired = new Map([[f.moving, '#ff0000']]);
+    const active = new Set([f.moving]);
+    tint.apply(desired, active, 0.8);
+    f.tick();
+    tint.apply(desired, active, 0.4);
+    f.tick();
+    tint.clear();
+    f.tick();
+    assert.equal(f.lighting.getError(), null);
+    assert.ok(f.moving.material instanceof PBRMaterial, '消警后仍应显示带有探针光照的原 PBR 材质');
+    assert.deepEqual(f.moving.material.albedoColor.asArray(), [0.25, 0.45, 0.65]);
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.lighting.sync(f.document);
+    sameIdentity(f.moving.material, physical, '关闭烘焙光照应还原原始模型材质引用');
+  } finally { tint.clear(); f.dispose(); }
+});
+
+test('开启烘焙光照的设备解除全息报警后恢复实体表面', async () => {
+  const f = fixture({ dynamic: true, pbr: true });
+  const effects = new TargetModelEffects(f.scene, () => f.moving, true);
+  try {
+    const physical = f.moving.material;
+    await f.bake();
+    const effect = createDefaultPoiEffectComponent('hologram');
+    effect.visual.targetEntityId = 'moving-entity';
+    effects.sync('alarm', effect, true);
+    assert.equal(f.moving.material.wireframe, true);
+    f.tick();
+    effects.disposeMissing(new Set());
+    f.tick();
+    assert.equal(f.moving.material.wireframe, false, '消警后应移除全息线框');
+    assert.equal(f.moving.material.alpha, physical.alpha);
+    assert.equal(f.lighting.getError(), null);
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.lighting.sync(f.document);
+    sameIdentity(f.moving.material, physical);
+  } finally { effects.dispose(); f.dispose(); }
+});
+
+test('持续报警期间启用、重建或关闭烘焙光照，消警使用当前有效材质', async () => {
+  const f = fixture({ dynamic: true, pbr: true });
+  const tint = new AlarmColorOverrides();
+  const physical = f.moving.material;
+  const alarm = () => tint.apply(new Map([[f.moving, '#ff0000']]), new Set([f.moving]), 0.7);
+  try {
+    alarm();
+    const firstAlarm = f.moving.material;
+    await f.bake();
+    sameIdentity(f.moving.material, firstAlarm, '启用光照时应继续显示正在报警的外观');
+    f.lighting.notifyChange('structure', 'test-rebuild');
+    f.tick();
+    sameIdentity(f.moving.material, firstAlarm, '重建光照时应继续显示正在报警的外观');
+    tint.clear();
+    const working = f.moving.material;
+    differentIdentity(working, physical);
+    assert.ok(working instanceof PBRMaterial && f.scene.materials.includes(working));
+    alarm();
+    const secondAlarm = f.moving.material;
+    f.document.sceneSettings.lighting.bake.enabled = false;
+    f.lighting.sync(f.document);
+    sameIdentity(f.moving.material, secondAlarm, '关闭光照时报警仍活动');
+    tint.clear();
+    sameIdentity(f.moving.material, physical, '不能恢复已经释放的上一代光照工作材质');
+    assert.equal(f.scene.materials.includes(working), false);
+    assert.equal(f.lighting.getError(), null);
+  } finally { tint.clear(); f.dispose(); }
+});
+
+test('静态设备和可见光照代理上的报警不改变烘焙输入，消警恢复贴图代理', async () => {
+  const f = fixture({ pbr: true, multi: true });
+  const tint = new AlarmColorOverrides();
+  const effects = new TargetModelEffects(f.scene, () => f.mesh, true, id => f.lighting.getRenderMeshOverrides(id));
+  try {
+    const sourceMaterial = f.original.subMaterials[0];
+    sourceMaterial.albedoColor.copyFromFloats(0.3, 0.4, 0.5);
+    sourceMaterial.metallic = 0.7;
+    const baseline = f.fingerprint();
+    await f.bake();
+    const [proxy] = f.lighting.getSelectionMeshes(f.source.entry.entityId, [f.mesh]);
+    differentIdentity(proxy, f.mesh);
+    const working = proxy.material;
+    const colors = new Map([[f.mesh, '#ff0000'], [proxy, '#ff0000']]);
+    tint.apply(colors, new Set(colors.keys()), 0.9);
+    f.tick();
+    assert.equal(f.lighting.getError(), null);
+    assert.equal(f.fingerprint(), baseline);
+    const [primitive] = await exportLightingMesh(f.mesh, { ...f.source.entry, receiver: true });
+    assert.deepEqual(primitive.material.baseColor, [0.3, 0.4, 0.5]);
+    assert.equal(primitive.material.metallic, 0.7);
+    tint.clear();
+    sameIdentity(proxy.material, working, '光照代理回到包含原有光照贴图的材质');
+    sameIdentity(f.mesh.material, f.original);
+    const hologram = createDefaultPoiEffectComponent('hologram');
+    hologram.visual.targetEntityId = f.source.entry.entityId;
+    effects.sync('alarm', hologram, true);
+    assert.equal(proxy.material.wireframe, true);
+    f.tick();
+    assert.equal(f.lighting.getError(), null);
+    effects.disposeMissing(new Set());
+    sameIdentity(proxy.material, working);
+    sameIdentity(f.mesh.material, f.original);
+  } finally { effects.dispose(); tint.clear(); f.dispose(); }
+});
 
 test('GI已激活再准备入口，以及入口中建立GI基线再完成，两种真实时序均保持有效', async () => {
   for (const entranceFirst of [false, true]) {
@@ -235,12 +351,16 @@ test('真实EffectsController入口作用到可见GI代理并保留GI插件，�
     const working = proxy.material, baseline = f.fingerprint();
     assert.ok(working.pluginManager?.getPlugin('BakedIndirectLighting'));
     const id = f.source.entry.entityId;
+    const setModelEntranceHidden = () => {};
     const effects = new ScenePoiAndEffectsController({ scene: f.scene, pushLog: () => {}, callbackReceiver: null }, {
-      telemetry: { telemetryPreviewActive: false }, outputs: { generatedOutputOwners: new Map() }, fetch: { locatorFetchRuntimes: new Map() },
+      telemetry: { telemetryPreviewActive: false, setModelEntranceHidden },
+      outputs: { generatedOutputOwners: new Map(), setModelEntranceOutputsHidden: setModelEntranceHidden },
+      fetch: { locatorFetchRuntimes: new Map(), setModelEntranceHidden },
       environment: { environmentRuntime: { getBuildingEffectTarget: () => null, getSnapshot: () => ({ phase: 'idle' }) }, lightingRuntime: f.lighting },
       document: { syncedEntities: new Map([[id, { id, components: { modelAsset: {} } }]]), isEntityVisible: () => true },
       assets: { models: new Map([[id, { root: f.mesh, contentRoot: f.mesh, meshes: [f.mesh] }]]) },
-      presentation: { meshes: new Map() }, variants: { modelArrayParameterVariants: new Map() },
+      presentation: { meshes: new Map(), setModelEntranceHidden }, locators: { setModelEntranceHidden }, cad: { setModelEntranceHidden },
+      variants: { modelArrayParameterVariants: new Map() },
       readiness: { loadDiagnostics: { measureAsync: (_name, job) => job() } }, bounds: { getEntityWorldBounds: () => null },
     });
     effects.modelEntranceRuntime = f.entrance;

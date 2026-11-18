@@ -66,7 +66,6 @@ export function HistoryReplaySettingsDialog({ onClose }: { onClose: () => void }
   const [remoteReady, setRemoteReady] = useState(false);
   const [inputSourceId, setInputSourceId] = useState('');
   const controllers = useRef(new Set<AbortController>());
-  const lifecycle = useRef(0);
   const pending = useRef(false);
   const retry = useRef<{ signature: string; requestId: string } | null>(null);
   const canManage = Boolean(context?.platformOrigin && access?.configured && remoteReady && window.editorApi?.invokeHistoryService);
@@ -98,28 +97,33 @@ export function HistoryReplaySettingsDialog({ onClose }: { onClose: () => void }
   }, [context, access?.configured, refresh]);
 
   useEffect(() => {
-    const generation = ++lifecycle.current;
+    const activeControllers = controllers.current;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     dialog?.showModal();
-    const controller = new AbortController(); controllers.current.add(controller);
+    const controller = new AbortController(); activeControllers.add(controller);
     void (async () => {
       if (!window.editorApi?.getHistoryProjectContext || !window.editorApi.getHistoryAccessStatus) {
         setNotice('当前为浏览器或离线编辑：可以应用无密钥场景草稿，服务器来源管理不可用。'); return;
       }
       const project = await window.editorApi.getHistoryProjectContext();
-      if (controller.signal.aborted || lifecycle.current !== generation) return;
+      if (controller.signal.aborted) return;
       setContext(project);
       if (!project) { setNotice('当前工程未绑定数据中台。可编辑场景草稿；绑定项目后再注册来源和预检。'); return; }
       if (!project.platformOrigin) { setNotice('项目已绑定，但历史管理需要 HTTPS；本机隔离环境可使用 HTTP。'); return; }
       const status = await window.editorApi.getHistoryAccessStatus(project.projectId);
-      if (controller.signal.aborted || lifecycle.current !== generation) return;
+      if (controller.signal.aborted) return;
       setAccess(status);
       if (status.configured) await refresh(project, controller.signal);
     })().catch(reason => {
       if (!controller.signal.aborted) setError(reason instanceof HistoryServiceError ? reason.message : '未能读取当前项目的历史管理状态，请检查本机凭据和项目绑定。');
-    }).finally(() => controllers.current.delete(controller));
-    return () => { ++lifecycle.current; for (const item of controllers.current) item.abort(); controllers.current.clear(); controller.abort(); dialog?.close(); if (previousFocus?.isConnected) previousFocus.focus(); };
+    }).finally(() => activeControllers.delete(controller));
+    return () => {
+      for (const item of activeControllers) item.abort();
+      activeControllers.clear();
+      dialog?.close();
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
   }, [refresh]);
 
   useEffect(() => { if (operation?.status === 'succeeded') refreshCurrent(); }, [operation?.operationId, operation?.status, refreshCurrent]);
@@ -140,19 +144,18 @@ export function HistoryReplaySettingsDialog({ onClose }: { onClose: () => void }
   }
   async function updateAccess(operation: 'replace' | 'clear'): Promise<void> {
     if (!context || !window.editorApi?.updateHistoryAccess || accessBusy) return;
-    const generation = lifecycle.current;
     setAccessBusy(true); setError(null); setRemoteReady(false);
     const secret = accessSecret; setAccessSecret('');
     for (const item of controllers.current) item.abort();
     const controller = new AbortController(); controllers.current.add(controller);
     try {
       const result = await window.editorApi.updateHistoryAccess({ projectId: context.projectId, operation, ...(operation === 'replace' ? { secret } : {}) });
-      if (generation !== lifecycle.current || controller.signal.aborted) return;
+      if (controller.signal.aborted) return;
       setAccess(result); setValidation(null);
       if (result.configured) await refresh(context, controller.signal);
       else { setSources([]); setTotalSources(0); setEffective(null); setNotice('已清除本机管理访问键；未暂停采集，也未撤销服务端授权。'); }
-    } catch (reason) { if (generation === lifecycle.current && !controller.signal.aborted) setError(reason instanceof HistoryServiceError ? reason.message : '未能保存或使用本机访问键。请检查系统安全存储、项目绑定和密钥格式。'); }
-    finally { controllers.current.delete(controller); if (generation === lifecycle.current) setAccessBusy(false); }
+    } catch (reason) { if (!controller.signal.aborted) setError(reason instanceof HistoryServiceError ? reason.message : '未能保存或使用本机访问键。请检查系统安全存储、项目绑定和密钥格式。'); }
+    finally { controllers.current.delete(controller); if (!controller.signal.aborted) setAccessBusy(false); }
   }
 
   async function runControl(action: 'validateConfig' | 'activateProvider' | 'applyCapturePolicy' | 'pauseCapture' | 'resumeCapture'): Promise<void> {

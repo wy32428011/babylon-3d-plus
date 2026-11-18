@@ -210,3 +210,18 @@ test('模型同步索引可往返读取，损坏或越界路径会明确失败',
   await fs.writeFile(indexPath, JSON.stringify(createIndex([createEntry({ packageRelativePath: '../outside' })])));
   await assert.rejects(readDataPlatformModelIndex(root), /packageRelativePath/);
 });
+
+
+test('仅设备类型编码变化更新索引元数据而不下载模型包，撤销类型不保留旧值', () => {
+  const entry = createEntry({ deviceType: 'conveyor' });
+  for (const deviceType of ['stacker', undefined, '输送机']) {
+    const plan = buildDataPlatformModelPlan({ sourceKey: SOURCE_KEY,
+      remote: [createDescriptor({ deviceType })], current: createIndex([entry]),
+      existingPackagePaths: new Set([entry.packageRelativePath]), existingAssetKeys: new Set(['model:1']), syncedAt: SYNCED_AT });
+    assert.deepEqual(plan.downloads, []);
+    assert.deepEqual(plan.runtimeChangedResourceKeys, []);
+    assert.deepEqual(plan.metadataChangedResourceKeys, ['model:1']);
+    assert.equal(plan.reused[0].nextEntry.deviceType, deviceType === 'stacker' ? 'stacker' : undefined);
+    assert.equal(plan.reused[0].nextEntry.runtimeRevision, RUNTIME_REVISION);
+  }
+});

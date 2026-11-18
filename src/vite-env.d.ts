@@ -355,6 +355,8 @@ type BuiltInSlotBindingConfig = import('./editor/model/builtInSlotBinding').Buil
 type LayerChangePlatformBindingConfig = import('./editor/model/builtInSlotBinding').LayerChangePlatformBindingConfig;
 
 type AssetEntry = {
+  /** 中台设备类型编码，不是显示标签或模型分类。 */
+  deviceType?: string;
   id: string;
   name: string;
   path: string;
@@ -665,6 +667,9 @@ interface Window {
     closeDataPlatformProject: () => Promise<void>;
     cancelDataPlatformProjectLoading?: () => Promise<boolean>;
     getDataPlatformProject: (request: OpenDataPlatformProjectRequest) => Promise<DataPlatformProjectEntry>;
+    listInspectionModels: () => Promise<import('../electron/types').InspectionModelListItem[]>;
+    listInspectionModelVersions: (request: import('../electron/types').InspectionModelVersionsRequest) => Promise<import('../electron/types').InspectionModelVersionListItem[]>;
+    prepareInspectionModelVersion: (request: import('../electron/types').InspectionModelVersionRequest) => Promise<import('../electron/types').InspectionModelVersionPreparationResult>;
     syncDataPlatformModels: () => Promise<boolean>;
     retryDataPlatformModelSync: () => Promise<boolean>;
     onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void) => () => void;

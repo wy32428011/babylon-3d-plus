@@ -1,5 +1,6 @@
 import type { ClickEventBindingComponent, ClickEventBindingDeviceSlot, ClickEventBindingDeviceType, ClickEventBindingEffect, ClickEventBindingEvent, ClickEventBindingEventType } from './components';
 import { normalizeDataPlatformScreenUrl } from './dataPlatformScreen';
+import { buildDeviceContext, type ModelDeviceContext } from './deviceContext';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
 import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
@@ -43,7 +44,7 @@ const CLICK_EVENT_BINDING_ID_MAX_LENGTH = 128;
 const DATA_PLATFORM_SCREEN_CHART_ID_PREFIX = 'data-platform-screen:';
 
 const CLICK_EVENT_BINDING_EVENT_TYPES: readonly ClickEventBindingEventType[] = ['click', 'click-cell'];
-const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'show-chart'];
+const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'show-chart', 'open-inspection-detail'];
 
 /** 判断值是否为普通 JSON 对象，避免带原型对象进入场景状态。 */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -428,7 +429,7 @@ export function resolveGeneratedUnitClick(
  * 命中生成器产物时 unit 说明被点击产物身份（货箱箱号/动态设备编号），host 为点击瞬间的承运设备；
  * assetCode 保持原语义（货箱场景为承运设备编号），host 是其结构化补充。
  */
-export type ClickEventAssetClickedPayload = {
+export type ClickEventAssetClickedPayload = Partial<ModelDeviceContext> & {
   assetCode?: string;
   slot?: { row: number; column: number; layer: number };
   chartId?: string;
@@ -450,7 +451,14 @@ export function buildClickEventAssetClickedPayload(
   const assetCode = resolution.reportAssetCode?.trim()
     || scene.entities[resolution.entityId]?.components.modelAsset?.assetCode?.trim();
   const generatedUnit = resolution.kind === 'trigger' ? resolution.generatedUnit : undefined;
+  const context = buildDeviceContext(scene, resolution.entityId, generatedUnit ? {
+    unitKind: generatedUnit.kind,
+    assetCode: assetCode ?? '',
+    highlightEntityId: resolution.entityId,
+    hostEntityId: generatedUnit.host?.entityId,
+  } : undefined);
   return {
+    ...(context ?? {}),
     ...(assetCode ? { assetCode } : {}),
     ...(resolution.kind === 'trigger-cell' ? { slot: { ...resolution.cell } } : {}),
     ...(resolution.chartId ? { chartId: resolution.chartId } : {}),

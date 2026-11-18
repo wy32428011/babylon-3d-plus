@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-const [{ executeDataPlatformModelSync, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
+const [{ executeDataPlatformModelSync, syncSceneDataPlatformModelAssets, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformModelIncrementalSync'),
 ]>(['electron/ipc/dataPlatformModelIncrementalSync.ts']);
 
@@ -57,6 +57,8 @@ function createGlb(marker = 0): Buffer {
 }
 
 type RemoteModel = {
+  deviceType?: string;
+  modelPurpose?: 'SCENE' | 'INSPECTION';
   id: string;
   name: string;
   url: string;
@@ -78,6 +80,8 @@ function createRequestJson(models: readonly RemoteModel[]) {
           ? models.map((model) => ({
               id: model.id,
               modelName: model.name,
+              deviceType: model.deviceType,
+              modelPurpose: model.modelPurpose,
               fileName: `model-${model.id}.glb`,
               fileUrl: model.url,
               ...(model.revision ? { revision: model.revision } : {}),
@@ -122,7 +126,7 @@ async function withEditorRoot(run: (editorRoot: string) => Promise<void>): Promi
 
 async function readAssetIndex(editorRoot: string) {
   return JSON.parse(await fs.readFile(path.join(editorRoot, '.babylon-editor', 'asset-index.json'), 'utf8')) as {
-    assets: Array<{ assetRevision?: string; displayName?: string; path: string }>;
+    assets: Array<{ assetRevision?: string; displayName?: string; deviceType?: string; path: string }>;
   };
 }
 
@@ -938,5 +942,79 @@ test('发布恢复已启动时取消会等待任务清理完成再返回', async
     await checked;
     assert.equal(returnedBeforeCleanup, false);
     assert.deepEqual((await readProjectAssetIndexForTest(editorRoot)).assets, []);
+  });
+});
+
+
+test('中台类型从接口贯通索引，仅类型变化零下载但通知场景更新', async () => {
+  await withEditorRoot(async editorRoot => {
+    const model: RemoteModel = { id: '2051942646011785218', name: '设备', url: '/files/device.glb', revision: '1', deviceType: 'conveyor' };
+    const calls: string[] = [];
+    const run = () => executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: createRequestJson([model]), downloadFile: createDownload(new Map([[model.url, createGlb()]]), calls), readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    await run();
+    const first = (await readAssetIndex(editorRoot)).assets[0];
+    assert.equal(first.deviceType, 'conveyor');
+    model.deviceType = 'stacker';
+    const next = await run();
+    const updated = (await readAssetIndex(editorRoot)).assets[0];
+    assert.equal(calls.length, 1);
+    assert.equal(updated.deviceType, 'stacker');
+    assert.equal(updated.assetRevision, first.assetRevision);
+    assert.equal(next.libraryChanged, true);
+    assert.deepEqual(next.runtimeChangedResourceKeys, ['model:2051942646011785218']);
+    model.deviceType = undefined;
+    await run();
+    assert.equal((await readAssetIndex(editorRoot)).assets[0].deviceType, undefined);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('普通共享模型请求 SCENE，忽略明确高模并兼容旧无用途记录', async () => {
+  await withEditorRoot(async editorRoot => {
+    const models: RemoteModel[] = [
+      { id: '1', name: '场景', url: '/files/scene.glb', revision: '1', modelPurpose: 'SCENE' },
+      { id: '2', name: '详情高模', url: '/files/detail.glb', revision: '1', modelPurpose: 'INSPECTION' },
+      { id: '3', name: '旧模型', url: '/files/legacy.glb', revision: '1' },
+    ];
+    const requests: unknown[] = [];
+    const request = createRequestJson(models);
+    const downloads: string[] = [];
+    await executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: async options => { if (!options.endpointPath.includes('combo-models')) requests.push(options.body); return request(options); },
+      downloadFile: createDownload(new Map(models.map(m => [m.url, createGlb()])), downloads), readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    assert.equal((requests[0] as { modelPurpose: string }).modelPurpose, 'SCENE');
+    assert.deepEqual(downloads.sort(), ['/files/legacy.glb', '/files/scene.glb']);
+    assert.equal((await readAssetIndex(editorRoot)).assets.length, 2);
+  });
+});
+
+
+test('场景复用共享固定版本仍采用本次接口的设备类型，显式旧高模引用可恢复', async () => {
+  await withEditorRoot(async editorRoot => {
+    const downloads: string[] = [];
+    const model = { id: '1', name: '场景设备', url: '/files/model-1.glb', revision: '1', deviceType: 'conveyor' };
+    const downloadFile = createDownload(new Map([[model.url, createGlb()]]), downloads);
+    await executeDataPlatformModelSync({ baseUrl: SOURCE_URL, editorRoot, dependencies: {
+      requestJson: createRequestJson([model]), downloadFile, readAssetIndex: readProjectAssetIndexForTest,
+    } });
+    const record = { id: model.id, modelName: model.name, fileName: 'model-1.glb', fileUrl: model.url,
+      revision: model.revision, deviceType: 'stacker', modelPurpose: 'INSPECTION' };
+    const assets = await syncSceneDataPlatformModelAssets({ baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model', resourceId: '1' }], dependencies: {
+        requestJson: createDetailRequest({ 'model:1': record }), downloadFile, readAssetIndex: readProjectAssetIndexForTest,
+      } });
+    assert.equal(assets[0].deviceType, 'stacker');
+    assert.equal(downloads.length, 1, '相同模型文件版本无需再下载');
+    assert.equal((await readAssetIndex(editorRoot)).assets[0].deviceType, 'conveyor', '复用结果不能偷偷改写共享索引');
+    record.deviceType = 'lift';
+    const restored = await recoverDataPlatformModelAssets({ baseUrl: SOURCE_URL, sharedResourcesRoot: editorRoot,
+      resources: [{ kind: 'model', resourceId: '1' }], dependencies: {
+        requestJson: createDetailRequest({ 'model:1': record }), downloadFile, readAssetIndex: readProjectAssetIndexForTest,
+      } });
+    assert.equal(restored[0].deviceType, 'lift');
+    assert.equal(downloads.length, 2, '显式恢复不被共享库的 SCENE 筛选挡住');
   });
 });

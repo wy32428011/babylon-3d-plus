@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { registerHooks, stripTypeScriptTypes } from 'node:module';
 import '../../src/runtime/babylon/babylonSideEffects.ts';
+import { InternalTexture, InternalTextureSource } from '@babylonjs/core/Materials/Textures/internalTexture.js';
 import { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture.js';
 import { CascadedShadowGenerator } from '@babylonjs/core/Lights/Shadows/cascadedShadowGenerator.js';
 import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
@@ -55,6 +56,7 @@ function createRuntimeFixture(withDirectional = false): { engine: NullEngine; sc
   const engine = new NullEngine({ renderWidth: 640, renderHeight: 360 });
   const scene = new Scene(engine);
   const camera = new FreeCamera('ShadowTestCamera', new Vector3(0, 8, -12), scene);
+  camera.setTarget(Vector3.Zero());
   scene.activeCamera = camera;
   const runtime = new SceneShadowRuntime(scene);
   runtime.applySettings(DEFAULT_SHADOW_SETTINGS);
@@ -73,6 +75,12 @@ function disposeRuntimeFixture(fixture: ReturnType<typeof createRuntimeFixture>)
 
 function flushScene(scene: Scene): void {
   scene.onBeforeRenderObservable.notifyObservers(scene);
+}
+
+async function renderReadyShadowMap(scene: Scene): Promise<void> {
+  scene.render();
+  await scene.whenReadyAsync();
+  scene.render();
 }
 
 function getActiveShadowGenerator(scene: Scene) {
@@ -156,24 +164,27 @@ test('统一光照显式创建主光，模型投射并接收而阴影管理器�
   } finally { fixture.runtime.dispose(); rig.dispose(); disposeRuntimeFixture(fixture); }
 });
 
-test('显式 realtime 均衡档缓存阴影贴图，稳定帧不重复提交投射物', { timeout: 15_000 }, () => {
-  const fixture = createRuntimeFixture(true);
-  try {
-    MeshBuilder.CreateBox('BalancedShadowCaster', { size: 1 }, fixture.scene);
-    flushScene(fixture.scene);
-
-    const generator = getActiveShadowGenerator(fixture.scene);
-    assertAnyShadowGenerator(generator, '默认状态必须存在阴影生成器');
-    const shadowMap = generator.getShadowMap();
-    assert.ok(shadowMap);
-
-    assert.equal(shadowMap.refreshRate, 0, '默认均衡档必须使用只渲染一次模式');
-    shadowMap.resetRefreshCounter();
-    assert.equal(shadowMap._shouldRender(), true);
-    assert.equal(shadowMap._shouldRender(), false, '静态场景的下一帧不得重绘阴影贴图');
-    assert.equal(shadowMap._shouldRender(), false, '后续稳定帧也不得重绘阴影贴图');
-  } finally {
-    disposeRuntimeFixture(fixture);
+test('realtime 和 hybrid 均衡档的未分类投射物在静止与移动帧都提交', { timeout: 15_000 }, async () => {
+  for (const mode of ['realtime', 'hybrid'] as const) {
+    const fixture = createRuntimeFixture(true);
+    const { scene, runtime } = fixture;
+    try {
+      const cube = MeshBuilder.CreateBox('UnclassifiedCaster', {}, scene);
+      runtime.applySettings({ ...DEFAULT_SHADOW_SETTINGS, mode, catcherEnabled: false });
+      await renderReadyShadowMap(scene);
+      const map = getActiveShadowGenerator(scene)?.getShadowMap();
+      assert.ok(map?.renderList?.includes(cube));
+      assert.equal(map.refreshRate, 1);
+      for (const x of [0, 2, 4]) {
+        const before = runtime.getHybridMetrics();
+        cube.position.x = x;
+        scene.render();
+        const after = runtime.getHybridMetrics();
+        assert.equal(after.nativeMapRenders, before.nativeMapRenders + 1);
+        assert.ok(after.dynamicRenders > before.dynamicRenders, mode + ' 必须提交当前投射物');
+        assert.equal(after.cacheHits, before.cacheHits);
+      }
+    } finally { disposeRuntimeFixture(fixture); }
   }
 });
 
@@ -508,60 +519,49 @@ test('切换高质量档时重建 2048 阴影贴图', { timeout: 15_000 }, () =>
   }
 });
 
-test('缓存阴影在投射物变换后只额外刷新一帧', { timeout: 15_000 }, () => {
-  const fixture = createRuntimeFixture(true);
-  try {
-    fixture.runtime.applySettings({
-      ...DEFAULT_SHADOW_SETTINGS,
-      quality: 'performance',
-    });
-    const cube = MeshBuilder.CreateBox('MovingCachedCaster', { size: 1 }, fixture.scene);
-    flushScene(fixture.scene);
+for (const [quality, change] of [['performance', '投射物'], ['balanced', '主方向光']] as const) {
+  test(quality + ' 档静态整图在' + change + '变换后只额外刷新一帧', { timeout: 15_000 }, async () => {
+    const fixture = createRuntimeFixture();
+    const { scene, runtime } = fixture;
+    try {
+      const cube = MeshBuilder.CreateBox('StaticCaster', {}, scene);
+      const light = new DirectionalLight('Primary', new Vector3(-1, -2, 1), scene);
+      runtime.setHybridMeshRoles(new Map([[cube, { mobility: 'static', castShadows: true, receiveShadows: true }]]));
+      runtime.applySettings({
+        ...DEFAULT_SHADOW_SETTINGS, mode: 'hybrid', quality, catcherEnabled: false,
+        distanceMeters: change === '主方向光' ? 260 : 0,
+      });
+      runtime.setManagedLight(light);
+      await renderReadyShadowMap(scene);
+      const generator = light.getShadowGenerator();
+      assertAnyShadowGenerator(generator, '主方向光必须持有原生生成器');
+      assert.equal(generator.getShadowMap()?.refreshRate, 0);
+      const initial = runtime.getHybridMetrics();
+      assert.ok(initial.staticRenders > 0, '首张图必须实际提交投射物');
+      const initialProjection = generator.getTransformMatrix().clone();
+      scene.render();
+      const stable = runtime.getHybridMetrics();
+      assert.equal(stable.nativeMapRenders, initial.nativeMapRenders);
+      assert.equal(stable.staticRenders, initial.staticRenders);
+      assert.equal(stable.cacheHits, initial.cacheHits + 1);
 
-    const generator = getActiveShadowGenerator(fixture.scene);
-    assertAnyShadowGenerator(generator, '性能档必须存在阴影生成器');
-    const shadowMap = generator.getShadowMap();
-    assert.ok(shadowMap);
-
-    shadowMap.resetRefreshCounter();
-    assert.equal(shadowMap._shouldRender(), true);
-    assert.equal(shadowMap._shouldRender(), false);
-
-    cube.position.x = 2;
-    cube.computeWorldMatrix(true);
-
-    assert.equal(shadowMap._shouldRender(), true, '变换后必须允许刷新阴影贴图');
-    assert.equal(shadowMap._shouldRender(), false, '变换后只允许新增一次阴影贴图渲染');
-  } finally {
-    disposeRuntimeFixture(fixture);
-  }
-});
-
-test('缓存阴影在主方向光变化后只额外刷新一帧', { timeout: 15_000 }, () => {
-  const fixture = createRuntimeFixture();
-  try {
-    fixture.runtime.applySettings({
-      ...DEFAULT_SHADOW_SETTINGS,
-      quality: 'performance',
-    });
-    const light = new DirectionalLight('CachedDirectional', new Vector3(0, -1, 0), fixture.scene);
-    fixture.runtime.syncLight('cached-light', light);
-    const shadowMap = light.getShadowGenerator()?.getShadowMap();
-    assert.ok(shadowMap);
-
-    shadowMap.resetRefreshCounter();
-    assert.equal(shadowMap._shouldRender(), true);
-    assert.equal(shadowMap._shouldRender(), false);
-
-    light.direction.copyFromFloats(0.4, -1, 0.2).normalize();
-    fixture.runtime.syncLight('cached-light', light);
-
-    assert.equal(shadowMap._shouldRender(), true, '主光变化后必须允许刷新阴影贴图');
-    assert.equal(shadowMap._shouldRender(), false, '主光变化后只允许新增一次阴影贴图渲染');
-  } finally {
-    disposeRuntimeFixture(fixture);
-  }
-});
+      if (change === '投射物') cube.position.x = 3;
+      else light.direction.copyFromFloats(0.4, -1, 0.2).normalize();
+      scene.render();
+      const moved = runtime.getHybridMetrics();
+      assert.ok(!generator.getTransformMatrix().equals(initialProjection), '原生投影必须反映当前姿态');
+      assert.equal(moved.nativeMapRenders, stable.nativeMapRenders + 1);
+      assert.equal(moved.staticRenders, stable.staticRenders + 1);
+      assert.equal(moved.cacheHits, stable.cacheHits);
+      scene.render();
+      scene.render();
+      const settled = runtime.getHybridMetrics();
+      assert.equal(settled.nativeMapRenders, moved.nativeMapRenders);
+      assert.equal(settled.staticRenders, moved.staticRenders);
+      assert.equal(settled.cacheHits, moved.cacheHits + 2);
+    } finally { disposeRuntimeFixture(fixture); }
+  });
+}
 
 test('统一主光方位变化由真实 rig 立即更新方向和强度', { timeout: 15_000 }, () => {
   const fixture = createRuntimeFixture(); const rig = new SceneLightRigRuntime(fixture.scene);
@@ -575,26 +575,136 @@ test('统一主光方位变化由真实 rig 立即更新方向和强度', { time
   } finally { fixture.runtime.dispose(); rig.dispose(); disposeRuntimeFixture(fixture); }
 });
 
-test('手动阴影距离会写入生成器 shadowMaxZ', { timeout: 15_000 }, () => {
-  const fixture = createRuntimeFixture(true);
-  try {
-    fixture.runtime.applySettings({
-      ...DEFAULT_SHADOW_SETTINGS,
-      distanceMeters: 260,
-    });
+test('普通方向光在各档使用手动光空间远面，切回自动后跟随投射物', () => {
+  for (const [mode, quality] of [
+    ['realtime', 'balanced'], ['hybrid', 'performance'], ['hybrid', 'balanced'], ['hybrid', 'quality'],
+  ] as const) {
+    const fixture = createRuntimeFixture();
+    const { scene, runtime } = fixture;
+    try {
+      const settings = { ...DEFAULT_SHADOW_SETTINGS, mode, quality, catcherEnabled: false };
+      const cube = MeshBuilder.CreateBox('DistanceCaster', {}, scene);
+      cube.position.z = 320;
+      const light = new DirectionalLight('DistanceLight', Vector3.Forward(), scene);
+      light.position.setAll(0);
+      runtime.applySettings(settings);
+      runtime.setManagedLight(light);
+      const generator = light.getShadowGenerator();
+      assertAnyShadowGenerator(generator, 'NullEngine 应使用单张方向光阴影图');
+      scene.render();
+      generator.getTransformMatrix();
+      assert.equal(light.shadowMinZ, 319.5);
 
-    const generator = getActiveShadowGenerator(fixture.scene);
-    assertAnyShadowGenerator(generator, '设置距离后必须保留阴影生成器');
-    if (generator instanceof CascadedShadowGenerator) {
-      assert.equal(generator.shadowMaxZ, 260);
-    } else {
-      const light = generator.getLight();
-      assert.ok(light instanceof DirectionalLight);
-      assert.equal(light.shadowMaxZ, 260);
-    }
-  } finally {
-    disposeRuntimeFixture(fixture);
+      runtime.applySettings({ ...settings, distanceMeters: 260 });
+      assert.equal(light.shadowMaxZ, 260, '设置应立即生效');
+      cube.position.z = -5;
+      scene.activeCamera!.maxZ = 120;
+      scene.render();
+      const projection = generator.getTransformMatrix();
+      assert.equal(light.shadowMaxZ, 260, '光空间的远面独立于相机远面和投射物深度');
+      assert.ok(Math.abs(Vector3.TransformCoordinates(new Vector3(0, 0, 260), projection).z - 1) < 1e-5);
+      const depth = Vector3.TransformCoordinates(cube.position, projection).z;
+      assert.ok(depth > -1 && depth < 1, '投射物应位于当前光空间裁剪区间内');
+      assert.equal(light.getShadowGenerator(), generator);
+
+      runtime.applySettings(settings);
+      for (const z of [-5, 10]) {
+        cube.position.z = z;
+        scene.render();
+        generator.getTransformMatrix();
+        assert.equal(light.shadowMinZ, z - 0.5);
+        assert.equal(light.shadowMaxZ, z + 0.5);
+      }
+    } finally { disposeRuntimeFixture(fixture); }
   }
+});
+
+function enableCascadeFixture(engine: NullEngine): void {
+  // 只提供深度纹理占位，使用实际 CSM 的设置、分级与矩阵计算路径。
+  engine._features.supportCSM = true;
+  engine._features.supportShadowSamplers = true;
+  engine.createDepthStencilTexture = () => new InternalTexture(engine, InternalTextureSource.DepthStencil);
+}
+
+test('单图和级联切换时接收面释放旧着色器，调距和非接收面保留原绘制缓存', { timeout: 15_000 }, async () => {
+  const fixture = createRuntimeFixture();
+  const { engine, scene, runtime } = fixture;
+  try {
+    enableCascadeFixture(engine);
+    const receiver = MeshBuilder.CreateBox('Receiver', {}, scene);
+    const other = MeshBuilder.CreateBox('NonReceiver', {}, scene);
+    const material = new StandardMaterial('Surface', scene);
+    receiver.material = other.material = material;
+    const role = { mobility: 'static' as const, castShadows: true, receiveShadows: true };
+    runtime.setHybridMeshRoles(new Map([[receiver, role], [other, { ...role, receiveShadows: false }]]));
+    const settings = { ...DEFAULT_SHADOW_SETTINGS, mode: 'hybrid' as const, catcherEnabled: false };
+    runtime.applySettings(settings);
+    runtime.setManagedLight(new DirectionalLight('Sun', new Vector3(-1, -2, 1), scene));
+    await renderReadyShadowMap(scene);
+    const surface = receiver.subMeshes[0];
+    const singleEffect = surface.effect;
+    const unaffectedEffect = other.subMeshes[0].effect;
+    assert.ok(singleEffect && unaffectedEffect);
+    material.freeze();
+    runtime.applySettings({ ...settings, distanceMeters: 25 });
+    assert.equal(surface.effect, singleEffect);
+
+    // 模型库的实例可引用 AssetContainer 中的离场源，旧 effect 属于源网格。
+    receiver.createInstance('SharedReceiverA');
+    receiver.createInstance('SharedReceiverB');
+    scene.removeMesh(receiver);
+    try {
+      runtime.applySettings({ ...settings, quality: 'quality' });
+      assert.equal(surface.effect, null, '下一次绘制不得把级联矩阵数组写入离场源的单图着色器');
+    } finally { scene.addMesh(receiver); }
+    assert.equal(other.subMeshes[0].effect, unaffectedEffect);
+    assert.equal(material.isFrozen, true);
+    await renderReadyShadowMap(scene);
+    assert.ok(surface.effect);
+    assert.notEqual(surface.effect, singleEffect);
+    runtime.applySettings(settings);
+    assert.equal(surface.effect, null, '切回单图也要释放级联着色器');
+    await renderReadyShadowMap(scene);
+    assert.ok(surface.effect);
+  } finally { disposeRuntimeFixture(fixture); }
+});
+
+test('高质量级联按相机裁剪距离并在近远面变化后重分级', () => {
+  const fixture = createRuntimeFixture();
+  const { engine, scene, runtime } = fixture;
+  try {
+    enableCascadeFixture(engine);
+    const camera = scene.activeCamera!;
+    camera.minZ = 0.1;
+    camera.maxZ = 120;
+    MeshBuilder.CreateBox('CascadeCaster', {}, scene);
+    const light = new DirectionalLight('CascadeLight', new Vector3(-1, -2, 1), scene);
+    const settings = { ...DEFAULT_SHADOW_SETTINGS, mode: 'hybrid' as const, quality: 'quality' as const, catcherEnabled: false };
+    runtime.applySettings({ ...settings, distanceMeters: 35 });
+    runtime.setManagedLight(light);
+    const generator = light.getShadowGenerator(camera);
+    assert.ok(generator instanceof CascadedShadowGenerator);
+    assert.equal(generator.shadowMaxZ, 35);
+    runtime.applySettings({ ...settings, distanceMeters: 260 });
+    assert.equal(generator.shadowMaxZ, 120, '请求超出相机远面时应扩展到可见边界');
+    camera.maxZ = 800;
+    scene.render();
+    assert.equal(generator.shadowMaxZ, 260, '放宽相机远面后恢复请求距离');
+    camera.minZ = 2;
+    camera.maxZ = 0; // Babylon 的无限远相机。
+    scene.render();
+    assert.equal(generator.shadowMaxZ, 260);
+    const split = generator.getCascadeTransformMatrix(0)!.clone();
+    assert.ok(Array.from(split.asArray()).every(Number.isFinite));
+    generator.splitFrustum();
+    scene.render();
+    assert.ok(generator.getCascadeTransformMatrix(0)!.equals(split), '改变裁剪面后应已使用新分级');
+    runtime.applySettings({ ...settings, distanceMeters: 1 });
+    scene.render();
+    assert.ok(generator.shadowMaxZ > camera.minZ && generator.shadowMaxZ < 3, '距离短于近面时仍需要有效分级');
+    assert.ok(Array.from(generator.getCascadeTransformMatrix(0)!.asArray()).every(Number.isFinite));
+    assert.equal(generator.getShadowMap()?.refreshRate, 1);
+  } finally { disposeRuntimeFixture(fixture); }
 });
 
 test('只修改阴影偏移时复用现有生成器并热更新 bias', { timeout: 15_000 }, () => {

@@ -26,7 +26,7 @@ Object.assign(window, { editorApi: {
   listSyncedImages: async () => [],
 } });
 const doc = createEmptySceneDocument('报警外观特效验证');
-doc.sceneSettings.shadows.enabled = false;
+doc.sceneSettings.lighting.shadows.enabled = false;
 doc.mqttConfig.enabled = true;
 doc.mqttConfig.simulatorEnabled = true;
 const manager = createAlarmManagerEntity({ x: 0, y: 0, z: 5 });

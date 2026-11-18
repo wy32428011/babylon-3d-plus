@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设备详情隔离测试</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #111a26; }
+      body { display: flex; flex-direction: column; }
+      header { padding: 8px 14px; color: #b7c6d9; font: 13px system-ui, sans-serif; }
+      iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: #111a26; }
+    </style>
+  </head>
+  <body>
+    <header>隔离测试：正式设备详情页、测试模型和模拟宿主</header>
+    <iframe id="detail" title="设备详情" src="/inspection.html"></iframe>
+    <script type="module" src="./host.mjs"></script>
+  </body>
+</html>

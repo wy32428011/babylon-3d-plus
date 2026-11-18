@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { build } from 'vite';
 import unzipper from 'unzipper';
+import { skyboxEnvironmentFixture } from '../helpers/skyboxEnvironmentFixture.mjs';
 
 const root = process.env.MODEL_RECOVERY_TEST_ROOT;
 if (!root || path.dirname(root) !== path.resolve(tmpdir()) || !path.basename(root).startsWith('zending-model-recovery-')) throw new Error('请通过 run-publish-model-recovery-integration.mjs 启动测试');
@@ -26,6 +28,8 @@ async function run() {
   const { setCurrentProjectRoot } = await import('../../dist-electron/ipc/projectAssetStore.js');
   const { buildDigitalTwinSourcePackage } = await import('../../dist-electron/ipc/digitalTwinSourcePackage.js');
   const { buildDigitalTwinDistPackage } = await import('../../dist-electron/ipc/digitalTwinDistPackage.js');
+  const { prepareDeploymentExport } = await import('../../dist-electron/ipc/deploymentExportScene.js');
+  const { createSourceResourcePlan } = await import('../../dist-electron/ipc/digitalTwinSourceResourcePlan.js');
   const { encodeAssetUrl, authorizeAssetFile } = await import('../../dist-electron/ipc/assetRegistry.js');
   await build({ configFile: false, publicDir: false, logLevel: 'warn', build: {
     ssr: true, outDir: moduleRoot, rollupOptions: {
@@ -46,10 +50,26 @@ async function run() {
     { key: 'layers', label: '层数', type: 'number', defaultValue: 3 },
     { key: 'width', label: '新版宽度', type: 'number', defaultValue: 20, max: 10 },
   ], bindings: [] };
+  const inspectionPart = { partKey: 'root', name: '主体', nodePath: '.', axis: { x: 0, y: 1, z: 0 }, distanceMeters: 1, fixed: false };
   const modelMetadata = { lengthUnit: 'meter', modelParameters: modelParameterConfig,
-    builtInSlotBinding: { enabledParam: 'enabled', dimensionMapping: { columns: 'columns', layers: 'layers' } } };
+    builtInSlotBinding: { enabledParam: 'enabled', dimensionMapping: { columns: 'columns', layers: 'layers' } },
+    inspection: { schemaVersion: 1, parts: [inspectionPart], configuration: { id: 'configuration-1', parameters: { width: 20 } } } };
+  const hashBytes = bytes => createHash('sha256').update(bytes).digest('hex');
+  const metadataBytes = Buffer.from(JSON.stringify(modelMetadata));
+  const snapshotFiles = [
+    { role: 'model', fileName: 'model.glb', fileUrl: '/model.glb', fileId: '1', sha256: hashBytes(modelBytes), size: String(modelBytes.length) },
+    { role: 'metadata', fileName: 'meta.json', fileUrl: '/meta.json', fileId: '2', sha256: hashBytes(metadataBytes), size: String(metadataBytes.length) },
+  ];
+  const versionId = '2051942646011785219';
+  let snapshotSupported = true;
+  const snapshotRequests = [];
   const requests = [];
   server = createServer(async (request, response) => {
+    if (request.url === '/test-editor') {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end('<html><head><link rel="icon" href="data:,"></head><body>preload recovery integration</body></html>');
+      return;
+    }
     requests.push(request.url);
     if (request.url === '/model.glb') {
       response.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Content-Length': modelBytes.length });
@@ -62,6 +82,22 @@ async function run() {
       assert.equal(JSON.parse(raw).id, '12');
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ success: true, data: { id: '12', modelName: '双立柱堆垛机', fileName: 'model.glb', fileUrl: '/model.glb', metaFileUrl: '/meta.json', revision: '1' } }));
+    } else if (request.url === '/api/v1/models/query') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, data: { pageNum: 1, pageSize: 100, total: 1, records: [{ id: '12', modelName: '双立柱堆垛机' }] } }));
+    } else if (request.url === '/api/v1/models/12/versions/query') {
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, data: [
+        ...Array.from({ length: 6 }, (_, index) => ({ versionId: String(index + 1), versionNumber: index + 1 })),
+        { versionId, versionNumber: 7, fileName: 'model.glb', fileUrl: '/model.glb', metaFileUrl: '/meta.json' },
+      ] }));
+    } else if (request.url?.startsWith('/api/v1/digital-twin/resource-snapshots/')) {
+      let raw = ''; for await (const chunk of request) raw += chunk;
+      snapshotRequests.push({ endpoint: request.url, body: JSON.parse(raw) });
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ success: true, data: { resourceSnapshotToken: 'snapshot-1', resourceRevision: '1',
+        modelVersionsSupported: snapshotSupported, resources: [{ kind: 'modelVersion', resourceId: '12', versionId,
+          revision: 'version-fingerprint', files: snapshotFiles }] } }));
     } else { response.writeHead(404); response.end(); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -71,6 +107,8 @@ async function run() {
   await mkdir(sharedResourcesRoot);
   setCurrentProjectRoot(projectRoot);
   const scene = document.createEmptySceneDocument('缺失模型恢复');
+  // 此用例检查资源恢复与发布路径，隔离场景明确关闭光照烘焙。
+  scene.sceneSettings.lighting.bake.enabled = false;
   const externalSkybox = path.join(root, 'previous-project', 'sky.hdr');
   await mkdir(path.dirname(externalSkybox), { recursive: true });
   const hdr = Buffer.concat([Buffer.from('#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 8\n'),
@@ -99,10 +137,12 @@ async function run() {
     request.sceneContent, { baseUrl, projectRoot, sharedResourcesRoot }, signal,
     detail => event.sender.send('digital-twin-publish:progress', { requestId: request.requestId, phase: 'saving', detail }),
   ));
+  const editorUrl = `${baseUrl}/test-editor`;
   bridgeWindow = new BrowserWindow({ show: false, webPreferences: {
     preload: path.resolve('dist-electron/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false,
+    additionalArguments: ['--editor-entry-url=' + encodeURIComponent(editorUrl)],
   } });
-  await bridgeWindow.loadURL('data:text/html,<html><body>preload recovery integration</body></html>');
+  await bridgeWindow.loadURL(editorUrl);
   assert.deepEqual(await bridgeWindow.webContents.executeJavaScript(
     `['recoverDigitalTwinModels','publishDigitalTwin','cancelDigitalTwinPublish','onDigitalTwinPublishProgress'].map(key => typeof window.editorApi?.[key])`,
   ), ['function', 'function', 'function', 'function']);
@@ -169,6 +209,17 @@ async function run() {
   assert.deepEqual(synchronized.parameterConfig.bindings, [], '参数绑定全量采用新版');
   assert.equal(synchronized.scriptAssets?.some(item => item.name === 'obsolete.ts') ?? false, false, '旧脚本清单不能覆盖新版模板');
   assert.ok(mixedResult.warnings.length, '参数配置差异只记录warning而不阻断恢复');
+  // 使用仓库现有的合法 ENV 夹具，模拟发布前 renderer 已完成的天空预过滤。
+  const { SKYBOX_ENVIRONMENT_RECIPE } = await import('../../dist-electron/shared/sceneSkyboxContract.js');
+  const environmentBytes = skyboxEnvironmentFixture(512);
+  const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+  const environmentPath = path.join(projectRoot, '.babylon-editor', 'skybox-derived', 'recovery.env');
+  await mkdir(path.dirname(environmentPath), { recursive: true });
+  await writeFile(environmentPath, environmentBytes); authorizeAssetFile(environmentPath);
+  const skybox = mixedResult.scene.sceneSettings.skybox;
+  skybox.environment = { version: 1, format: 'env', sourceSha256: sha256(hdr), sourceRevision: skybox.assetRevision?.trim() ?? '',
+    recipeKey: SKYBOX_ENVIRONMENT_RECIPE, sha256: sha256(environmentBytes), byteLength: environmentBytes.length,
+    faceSize: 512, sourcePath: environmentPath, sourceUrl: encodeAssetUrl(environmentPath), packagePath: path.dirname(environmentPath) };
   const entrySceneFilePath = path.join(projectRoot, 'Scenes', 'recovery.scene.json');
   await writeFile(entrySceneFilePath, serializer.serializeScene(mixedResult.scene));
   const source = await buildDigitalTwinSourcePackage({ projectRoot, sharedResourcesRoot, entrySceneFilePath,
@@ -193,11 +244,73 @@ async function run() {
   assert.equal('removed' in published.entities[model.id].components.modelAsset.parameterValues, false);
   const publishedSkybox = published.sceneSettings.skybox ?? Object.values(published.entities).find(entity => entity.components.skybox)?.components.skybox;
   assert.equal(publishedSkybox?.intensity, 0.75);
-  assert.ok(distZip.files.some(file => file.path.endsWith('.hdr')), 'Viewer 包必须包含恢复后的天空盒');
+  assert.ok(distZip.files.some(file => file.path.endsWith('.env')), 'Viewer 包必须包含恢复天空盒的预过滤 ENV');
+  // 实际主进程根据可信快照首次固定版本，同时读取经过校验的元数据清单。
+  const { createDataPlatformBinding, setCurrentDataPlatformBinding } = await import('../../dist-electron/ipc/dataPlatformBindingStore.js');
+  const { listInspectionModels, listInspectionModelVersions, prepareInspectionModelVersion } = await import('../../dist-electron/ipc/inspectionModelService.js');
+  setCurrentDataPlatformBinding(projectRoot, createDataPlatformBinding({ baseUrl, workspaceRoot: root, projectId: '1',
+    projectName: '恢复回归', editorProjectId: null, latestVersionId: null, latestVersionNumber: null,
+    resourceRevision: '1', entryScenePath: 'Scenes/recovery.scene.json', syncedAt: new Date().toISOString() }));
+  assert.deepEqual(await listInspectionModels(), [{ resourceId: '12', displayName: '双立柱堆垛机' }]);
+  const versions = await listInspectionModelVersions({ resourceId: '12' });
+  assert.equal(versions.length, 7); assert.equal(versions[6].versionId, versionId);
+  snapshotSupported = false;
+  await assert.rejects(prepareInspectionModelVersion({ resourceId: '12', versionId }), /不支持巡检高模固定版本快照/);
+  snapshotSupported = true;
+  const prepared = await prepareInspectionModelVersion({ resourceId: '12', versionId });
+  assert.deepEqual(prepared.parts, [inspectionPart]);
+  assert.deepEqual(prepared.configuration, { id: 'configuration-1', parameters: { width: 20 } });
+  assert.equal(prepared.model.versionId, versionId);
+  assert.equal(prepared.model.unitScaleToMeters, 1);
+  assert.ok(snapshotRequests.some(item => item.endpoint.endsWith('/capture')
+    && JSON.stringify(item.body.modelVersions) === JSON.stringify([{ modelId: '12', versionId }])));
+  assert.ok(snapshotRequests.some(item => item.endpoint.endsWith('/validate') && item.body.resourceSnapshotToken === 'snapshot-1'));
+  const highPath = prepared.model.sourcePath, metaPath = prepared.model.metaPath, highRoot = path.dirname(highPath);
+  const highPlan = await createSourceResourcePlan([{ sourcePath: highRoot, destinationRelativePath: 'Assets/Models/Model-12-inspection' }], projectRoot, signal);
+  assert.equal(prepared.model.contentSha256, highPlan.bundles[0].contentSha256);
+  const inspection = { schemaVersion: 1, model: prepared.model, configuration: prepared.configuration,
+    device: { namespace: 'factory', deviceType: 'stacker', deviceNo: 'DDJ2' }, parts: prepared.parts };
+  const inspectionDocument = JSON.parse(source.entrySceneContent);
+  inspectionDocument.scene.entities[model.id].components.modelAsset.inspection = inspection;
+  const inspectOptions = { sourceAssetContext: { projectRoot, sharedResourcesRoot } };
+  const exported = await prepareDeploymentExport(JSON.stringify(inspectionDocument), '巡检高模', [], signal, () => {}, inspectOptions);
+  const exportedAsset = JSON.parse(exported.sceneContent).scene.entities[model.id].components.modelAsset;
+  assert.notEqual(exportedAsset.sourceUrl, exportedAsset.inspection.model.sourceUrl);
+  assert.equal(exportedAsset.inspection.model.metaPath, exportedAsset.inspection.model.metaUrl);
+  assert.ok(exported.assetFiles.some(file => file.sourcePath === metaPath && file.expectedSha256));
+  assert.ok(exported.assetFiles.some(file => file.sourcePath === highPath && file.expectedSha256));
+  // 以真实场景生成两个 ZIP，验证高模和元数据实际入包，而非只检查复制计划。
+  const highScene = JSON.parse(serializer.serializeScene(mixedResult.scene));
+  highScene.scene.entities[model.id].components.modelAsset.inspection = inspection;
+  await writeFile(entrySceneFilePath, JSON.stringify(highScene));
+  const highSource = await buildDigitalTwinSourcePackage({ projectRoot, sharedResourcesRoot, entrySceneFilePath,
+    outputRoot: path.join(root, 'high-source-output'), signal,
+    manifest: { projectId: '1', projectName: '固定高模', editorProjectId: null, baseVersionId: null, resourceRevision: '1' },
+    isPlatformImageReference: () => false, findSyncedImageForReference: async () => null });
+  const highSourceZip = await unzipper.Open.file(highSource.filePath);
+  const highSourceScene = JSON.parse((await highSourceZip.files.find(file => file.path === highSource.entryScenePath).buffer()).toString());
+  const sourceFixed = highSourceScene.scene.entities[model.id].components.modelAsset.inspection.model;
+  assert.notEqual(highSourceScene.scene.entities[model.id].components.modelAsset.sourcePath, sourceFixed.sourcePath);
+  assert.deepEqual(await highSourceZip.files.find(file => file.path === sourceFixed.sourcePath).buffer(), modelBytes);
+  assert.deepEqual(await highSourceZip.files.find(file => file.path === sourceFixed.metaPath).buffer(), await readFile(metaPath));
+  assert.equal(sourceFixed.contentSha256, prepared.model.contentSha256);
+  const highDist = await buildDigitalTwinDistPackage({ projectId: '1', publishName: '固定高模', sceneContent: highSource.entrySceneContent,
+    sourceResourceFiles: highSource.resourceFiles, outputRoot: path.join(root, 'high-dist-output'), signal });
+  const highDistZip = await unzipper.Open.file(highDist.filePath);
+  const highDistScene = JSON.parse((await highDistZip.files.find(file => file.path === 'project/scene.json').buffer()).toString());
+  const distFixed = highDistScene.scene.entities[model.id].components.modelAsset.inspection.model;
+  const virtualPath = url => decodeURIComponent(new URL(url).pathname.slice(1));
+  assert.notEqual(highDistScene.scene.entities[model.id].components.modelAsset.sourceUrl, distFixed.sourceUrl);
+  assert.deepEqual(await highDistZip.files.find(file => file.path === virtualPath(distFixed.sourceUrl)).buffer(), modelBytes);
+  assert.deepEqual(await highDistZip.files.find(file => file.path === virtualPath(distFixed.metaUrl)).buffer(), await readFile(metaPath));
+  assert.equal(distFixed.contentSha256, prepared.model.contentSha256);
+  await writeFile(metaPath, '{"lengthUnit":"cm"}');
+  await assert.rejects(prepareDeploymentExport(JSON.stringify(inspectionDocument), '巡检高模', [], signal, () => {}, inspectOptions), /完整资源包内容摘要不一致/);
   const emitted = [], screens = [], focused = [], selected = [];
   const handler = createViewerModelClickHandler(published, {
     updateSelection: ids => selected.push(ids), setSlotHighlight: () => {}, focusTarget: id => focused.push(id),
-    triggerManualEvents: () => {}, emitAssetClicked: payload => emitted.push(payload), showScreen: screen => screens.push(screen),
+    setHighlightExcludeTrack: () => {}, triggerManualEvents: () => {},
+    emitAssetClicked: payload => emitted.push(payload), showScreen: screen => screens.push(screen),
   });
   handler(model.id);
   const cell = { row: 1, column: 2, layer: 3 };

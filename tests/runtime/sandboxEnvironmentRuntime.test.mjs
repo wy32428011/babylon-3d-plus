@@ -21,7 +21,9 @@ const hooks = registerHooks({
   },
 });
 const { SandboxEnvironmentRuntime } = await import('../../src/runtime/babylon/SandboxEnvironmentRuntime.ts');
-const { SceneSkyboxRuntime } = await import('../../src/runtime/babylon/SceneSkyboxRuntime.ts');
+const { SceneSkyboxRuntime, createSceneSkyboxSignature } = await import('../../src/runtime/babylon/SceneSkyboxRuntime.ts');
+const { SKYBOX_ENVIRONMENT_RECIPE } = await import('../../electron/shared/sceneSkyboxContract.ts');
+const { skyboxRuntimeStatus } = await import('../../src/editor/loading/skyboxRuntimeStatus.ts');
 const { SceneLightRigRuntime } = await import('../../src/runtime/babylon/SceneLightRigRuntime.ts');
 const { SceneAppearanceRuntime } = await import('../../src/runtime/babylon/SceneAppearanceRuntime.ts');
 const { normalizeSceneLightingConfig, normalizeSceneAppearanceConfig } = await import('../../electron/shared/sceneLightingConfig.ts');
@@ -40,6 +42,29 @@ function harness(t, integrated = false) {
   return { scene, runtime, loads, states, texture };
 }
 const sandbox = (visible = true, intensity = 1) => ({ visible, intensity, source: 'sandbox', rotationDegrees: rotation });
+
+function backgroundTarget() {
+  const sourceSha256 = 'a'.repeat(64);
+  return {
+    entityId: 'skybox', visible: true,
+    transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+    skybox: {
+      packagePath: 'skybox', sourcePath: 'skybox/background.hdr', sourceUrl: 'editor-asset://local/skybox%2Fbackground.hdr',
+      format: 'hdr', assetRevision: sourceSha256, resolution: 256, rotationDegrees: 0, intensity: 1,
+      environment: { version: 1, format: 'env', sourceSha256, sourceRevision: '', recipeKey: SKYBOX_ENVIRONMENT_RECIPE,
+        sha256: 'b'.repeat(64), byteLength: 64, faceSize: 256, sourceUrl: 'https://skybox.test/background.env' },
+    },
+  };
+}
+
+function captureBackgroundReads(t) {
+  const reads = [];
+  // 在传输边界挂起真实 ENV 读取，允许测试在取消后送达旧请求的结果。
+  t.mock.method(globalThis, 'fetch', (url, { signal }) => new Promise((resolve, reject) => {
+    reads.push({ url, signal, resolve, reject });
+  }));
+  return reads;
+}
 
 test('内置环境独立加载并应用旋转，缺省场景不加载环境资产', async t => {
   const h = harness(t);
@@ -86,15 +111,19 @@ test('无天空背景也有内置IBL，显隐和异步完成不重置昼夜有�
 test('内置环境与隐藏天空实体解耦，切回场景恢复原有天空IBL', async t => {
   const h = harness(t, true), background = h.texture(), mesh = MeshBuilder.CreateSphere('background', {}, h.scene), material = new PBRMaterial('background', h.scene);
   mesh.material = material;
-  h.runtime.active = { entityKey: 'skybox', signature: 'test', mesh, material, texture: background };
-  h.runtime.desired = { entityId: 'skybox', visible: false, pickable: false, selected: false,
-    transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
-    skybox: { rotationDegrees: 0, intensity: 1, sourceUrl: 'fixture.hdr' } };
-  h.runtime.setLightingOverrides(sandbox()); const environment = h.texture(); h.loads[0].resolve(environment); await settle();
+  const target = backgroundTarget();
+  // 从已加载的场景 ENV 起步，后续显隐与切源经过公开入口。
+  h.runtime.active = { entityKey: target.entityId, signature: createSceneSkyboxSignature(target.skybox),
+    environment: target.skybox.environment, mesh, material, texture: background };
+  h.runtime.setLightingOverrides(sandbox());
+  h.runtime.sync({ ...target, visible: false });
+  const environment = h.texture(); h.loads[0].resolve(environment); await settle();
   assert.equal(mesh.isEnabled(), false); assert.equal(h.scene.environmentTexture, environment);
-  h.runtime.desired.visible = true; h.runtime.setLightingOverrides({ visible: false, intensity: .8, source: 'scene', rotationDegrees: 0 });
+  h.runtime.sync(target);
+  assert.equal(mesh.isEnabled(), true); assert.equal(h.scene.environmentTexture, environment);
+  h.runtime.setLightingOverrides({ visible: false, intensity: .8, source: 'scene', rotationDegrees: 0 });
   assert.equal(mesh.isEnabled(), false); assert.equal(h.scene.environmentTexture, background); assert.equal(h.scene.environmentIntensity, .8);
-  h.runtime.desired.visible = false; h.runtime.setLightingOverrides({ visible: false, intensity: .7 });
+  h.runtime.sync({ ...target, visible: false });
   assert.equal(h.scene.environmentTexture, null);
 });
 
@@ -108,38 +137,96 @@ test('内置环境失败通过统一readiness报告并可在原重试入口恢�
 });
 
 
-test('内置IBL就绪时隐藏的失败背景不阻塞，重新显示恢复背景错误', async t => {
-  const h = harness(t, true);
-  h.runtime.desired = { visible: true, skybox: { sourceUrl: 'broken-background.hdr' } };
-  h.runtime.loadError = '背景文件损坏';
-  h.runtime.setLightingOverrides(sandbox(false));
-  assert.equal(h.runtime.getReadiness().phase, 'loading', '内置IBL尚未完成时仍等待');
-  h.loads[0].resolve(h.texture()); await settle();
-  assert.equal(h.runtime.getReadiness().phase, 'ready');
-  assert.equal(h.runtime.loadError, '背景文件损坏', '隐藏不会删除背景诊断');
+test('隐藏的失败背景不阻塞内置 IBL，重显时通知属性面板并允许显式重试', async t => {
+  const h = harness(t, true), target = backgroundTarget(), reads = captureBackgroundReads(t);
+  const sessionId = 'background-error', snapshots = [];
+  const panel = skyboxRuntimeStatus.connect(() => h.runtime.retry());
+  const unsubscribe = skyboxRuntimeStatus.subscribe(() => snapshots.push(skyboxRuntimeStatus.getSnapshot()));
+  t.after(() => { unsubscribe(); panel.dispose(); });
+  h.runtime.setEnvironmentResolver(async source => source.environment, undefined, state => panel.publish(sessionId, state));
+
   h.runtime.setLightingOverrides(sandbox(true));
-  assert.equal(h.runtime.getReadiness().phase, 'error');
-  assert.equal(h.runtime.getReadiness().message, '背景文件损坏');
-  h.runtime.desired.visible = false;
-  assert.equal(h.runtime.getReadiness().phase, 'ready', '天空盒实体隐藏时也不需要背景');
+  h.runtime.sync(target); await settle();
+  assert.equal(reads.length, 1);
+  const { sourceUrl, sha256 } = target.skybox.environment;
+  assert.equal(reads[0].url, `${sourceUrl}?assetRevision=${sha256}`);
+  reads[0].resolve(new Response(null, { status: 404 })); await settle();
+  const failed = { phase: 'error', message: '天空盒文件读取失败：HTTP 404', sourceUrl };
+  assert.deepEqual(h.runtime.getReadiness(), failed);
+  assert.equal(snapshots.at(-1).message, failed.message);
+
+  h.runtime.setLightingOverrides(sandbox(false));
+  h.runtime.sync(target);
+  assert.equal(h.runtime.getReadiness().phase, 'loading', '独立的内置 IBL 尚未完成');
+  const ibl = h.texture(); h.loads[0].resolve(ibl); await settle();
+  assert.equal(snapshots.at(-1).phase, 'ready');
+  assert.equal(h.scene.environmentTexture, ibl);
+
+  const before = h.states.length, panelEvents = snapshots.length;
+  h.runtime.sync({ ...target, selected: true });
+  assert.equal(h.states.length, before, '隐藏且无在途任务时，重复同步不再通知');
+  h.runtime.setLightingOverrides(sandbox(true));
+  h.runtime.sync(target);
+  assert.deepEqual(h.runtime.getReadiness(), failed);
+  assert.deepEqual(snapshots.at(-1), { ...failed, sceneSessionId: sessionId, stage: null });
+  h.runtime.sync({ ...target, selected: true });
+  assert.equal(h.states.length, before + 1, '同一失败状态只发一次变化通知');
+  assert.equal(snapshots.length, panelEvents + 1);
+  assert.equal(reads.length, 1, '重显只恢复原错误');
+  assert.equal(h.scene.environmentTexture, ibl);
+  skyboxRuntimeStatus.retry(sessionId);
+  skyboxRuntimeStatus.retry(sessionId); await settle();
+  assert.equal(reads.length, 2, '面板对当前会话只启动一次显式重试');
+  assert.equal(snapshots.at(-1).phase, 'loading');
+  reads[1].reject(new Error('重试读取失败')); await settle();
+  const retryFailure = { ...failed, message: '重试读取失败' };
+  assert.equal(snapshots.at(-1).message, retryFailure.message);
+
+  h.runtime.sync({ ...target, visible: false });
+  assert.equal(h.runtime.getReadiness().phase, 'ready', '隐藏实体也只需等待内置 IBL');
   h.runtime.setLightingOverrides({ visible: false, intensity: 1, source: 'scene' });
-  assert.equal(h.runtime.getReadiness().phase, 'error', '沿用场景环境时保持历史失败行为');
+  assert.equal(h.runtime.getReadiness().phase, 'idle');
+  h.runtime.sync(target);
+  assert.deepEqual(h.runtime.getReadiness(), retryFailure, '仅关闭背景显示时，可见实体的场景 IBL 仍报告失败');
+  assert.equal(reads.length, 2);
 });
 
-test('隐藏的背景加载不阻塞已就绪内置IBL，显示后重新等待背景', async t => {
-  const h = harness(t, true);
-  h.runtime.desired = { visible: true, skybox: { sourceUrl: 'pending-background.hdr' } };
-  h.runtime.pending = { controller: new AbortController() };
+test('隐藏取消在途背景读取，重显开启新读取，内置 IBL 独立持有并释放', async t => {
+  const h = harness(t, true), target = backgroundTarget(), reads = captureBackgroundReads(t);
+  const sourceUrl = target.skybox.environment.sourceUrl;
   h.runtime.setLightingOverrides(sandbox(false));
+  h.runtime.sync(target);
+  assert.equal(reads.length, 0, '未显示时无需读取背景 ENV');
   assert.equal(h.runtime.getReadiness().phase, 'loading');
-  h.loads[0].resolve(h.texture()); await settle();
+  const ibl = h.texture(); let disposed = 0;
+  ibl.onDisposeObservable.add(() => disposed++);
+  h.loads[0].resolve(ibl); await settle();
   assert.equal(h.runtime.getReadiness().phase, 'ready');
-  assert.notEqual(h.runtime.pending, null, '本次修复只改变就绪判定，不改变背景资源生命周期');
+  assert.equal(h.scene.environmentTexture, ibl);
+
   h.runtime.setLightingOverrides(sandbox(true));
-  assert.equal(h.runtime.getReadiness().phase, 'loading');
-  assert.equal(h.runtime.getReadiness().sourceUrl, 'pending-background.hdr');
-  h.runtime.desired.visible = false;
+  assert.deepEqual(h.runtime.getReadiness(), { phase: 'loading', message: null, sourceUrl });
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].signal.aborted, false);
+  h.runtime.setLightingOverrides(sandbox(false));
+  assert.equal(reads[0].signal.aborted, true, '隐藏取消已经开始的背景读取');
   assert.equal(h.runtime.getReadiness().phase, 'ready');
+  h.runtime.setLightingOverrides(sandbox(true));
+  assert.equal(reads.length, 2);
+  assert.equal(reads[1].signal.aborted, false);
+  reads[0].reject(new Error('迟到的背景错误')); await settle();
+  assert.deepEqual(h.runtime.getReadiness(), { phase: 'loading', message: null, sourceUrl });
+
+  h.runtime.sync({ ...target, visible: false });
+  assert.equal(reads[1].signal.aborted, true, '隐藏实体也取消背景读取');
+  reads[1].reject(new Error('实体已隐藏')); await settle();
+  assert.deepEqual(h.runtime.getReadiness(), { phase: 'ready', message: null, sourceUrl: h.loads[0].url });
+  assert.equal(h.loads.length, 1);
+  assert.equal(h.scene.environmentTexture, ibl);
+  assert.equal(disposed, 0);
+  h.runtime.dispose();
+  assert.equal(h.scene.environmentTexture, null);
+  assert.equal(disposed, 1);
 });
 
 

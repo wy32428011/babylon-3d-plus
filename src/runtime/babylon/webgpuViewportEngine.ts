@@ -41,7 +41,7 @@ export async function createWebGPUViewportEngine(
       release(() => _CommonDispose(engine, canvas));
       release(() => AbstractEngine.prototype.dispose.call(engine));
     }
-    if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], 'WebGPU 初始化及候选资源释放失败。');
+    if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], 'WebGPU 初始化及候选资源释放失败。', { cause: error });
     throw error;
   }
 }

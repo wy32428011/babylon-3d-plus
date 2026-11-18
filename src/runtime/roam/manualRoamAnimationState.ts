@@ -14,7 +14,7 @@ export type ManualRoamAnimationFrame = {
   walkSpeed: number;
   runSpeed?: number;
   worldScale: number;
-  turn?: { clip: typeof MANUAL_ROAM_TURN_CLIPS[number]; progress: number; weight: number };
+  turn?: { clip: typeof MANUAL_ROAM_TURN_CLIPS[number]; progress: number; weight: number; angleScale?: number };
 };
 export type ManualRoamAnimationState = {
   kind: 'ground' | 'JumpStart' | 'JumpUp' | 'Fall' | 'Land' | 'FlyIdle' | 'FlyMove';

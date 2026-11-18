@@ -57,7 +57,7 @@
     },
     {
       "name": "test:manual-roam:integration",
-      "command": "npm run build:electron && electron tests/roam/manualRoamAvatar.integration.mjs",
+      "command": "npm run build:electron && node scripts/run-manual-roam-avatar-integration.mjs",
       "category": "build-required",
       "reason": "保留入口自身编译前置与独立进程，按影响面单独执行。"
     },
@@ -149,7 +149,13 @@
       "name": "smoke:model-parameters",
       "command": "npm run test:model-parameters && node scripts/smoke-model-parameter-meters.mjs",
       "category": "legacy",
-      "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
+      "reason": "日常 smoke:units 的参数化环节。隔离工程导入仓库 GLB 并用 NullEngine 实测米、厘米、毫米。显式外部根或过滤器切换到实物审计。"
+    },
+    {
+      "name": "smoke:model-parameters:external",
+      "command": "node scripts/smoke-model-parameter-meters.mjs --external",
+      "category": "external",
+      "reason": "需准备 12 个业务源包、Assets/Models 副本及项目资产索引。支持按模型定向核验，缺失输入即失败。"
     },
     {
       "name": "smoke:model-picking",
@@ -804,6 +810,30 @@
       "command": "npm run build:electron && node tests/editor/nativeSkybox.ui.mjs",
       "category": "manual",
       "reason": "真实Electron与GPU，隔离userData和工程，验证导入/保存/重开与preload IPC；自带服务与清理。"
+    },
+    {
+      "name": "test:inspection",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/digitalTwin/inspectionModelVersion.test.ts tests/editor/inspectionBinding.test.mjs tests/runtime/inspectionAssembly.test.ts tests/runtime/inspectionFixture.test.mjs tests/runtime/inspectionViewerWebGL.test.mjs",
+      "category": "legacy",
+      "reason": "固定高模绑定、装配变换、硬件策略和隔离模型夹具的 Node/NullEngine 回归；不代表真实 GPU 或业务资源通过。"
+    },
+    {
+      "name": "test:inspection:ui",
+      "command": "node --test tests/editor/inspectionBindingUi.browser.test.mjs",
+      "category": "manual",
+      "reason": "隔离浏览器及本机临时服务验证编辑器高模绑定表单；与其他图形验收串行运行。"
+    },
+    {
+      "name": "test:inspection:webgl",
+      "command": "node tests/runtime/inspectionDetail.webgl.mjs",
+      "category": "manual",
+      "reason": "真实硬件 WebGL 与隔离模型、清单、宿主验证正式详情入口；与其他图形验收串行运行。"
+    },
+    {
+      "name": "test:inspection:bridge",
+      "command": "node --test tests/editor/inspectionCrossRepository.test.mjs",
+      "category": "external",
+      "reason": "需显式设置 CENTRAL_DATA_PLATFORM_ROOT 指向中台源码；异步模拟窗口连接两仓真实控制器，不验证真实浏览器或网络。"
     }
   ]
 }

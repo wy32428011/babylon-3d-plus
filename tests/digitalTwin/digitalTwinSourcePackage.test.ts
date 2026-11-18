@@ -32,6 +32,7 @@ async function loadSourcePackageModules() {
       import('../../electron/ipc/dataPlatformSceneRelocation.ts'),
       import('../../electron/shared/sceneLightingConfig.ts'),
       import('../../electron/shared/sceneLightingBakeContract.ts'),
+      import('../../electron/ipc/digitalTwinSourceResourcePlan.ts'),
     ]);
   } finally {
     hooks.deregister();
@@ -42,7 +43,7 @@ const [{ prepareSourceSceneEnvironment }, { buildDigitalTwinSourcePackage },
   { getSceneShadowBakeSignatureContract },
   { relocateDataPlatformScene },
   { normalizeSceneLightingConfig, normalizeSceneAppearanceConfig },
-  { getSceneLightingBakeSignature, getSceneLightingBakeError }] = await loadSourcePackageModules();
+  { getSceneLightingBakeSignature, getSceneLightingBakeError }, { createSourceResourcePlan }] = await loadSourcePackageModules();
 
 const require = createRequire(import.meta.url);
 const NO_SKYBOX_CACHE = { getSharedProjectSkyboxRoot: () => null };
@@ -1556,4 +1557,58 @@ test('源工程包拒绝普通资源目录与受管环境文件使用重叠目�
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test('SOURCE分离同模型的普通资源和固定高模，并校验完整包与元数据改写', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'zending-inspection-source-'));
+  const projectRoot = path.join(root, 'project'), sharedResourcesRoot = path.join(root, 'shared');
+  const entry = path.join(projectRoot, 'Scenes', 'main.scene.json');
+  const lowRoot = path.join(projectRoot, 'Assets', 'Models', 'Model-101-Pump');
+  const highRoot = path.join(sharedResourcesRoot, '.babylon-editor', 'fixed', 'Assets', 'Models', 'Model-101-Pump');
+  const low = path.join(lowRoot, 'main.glb'), high = path.join(highRoot, 'main.gltf'), meta = path.join(highRoot, 'meta.json');
+  const url = (value: string) => 'editor-asset://local/' + encodeURIComponent(value);
+  const signal = new AbortController().signal;
+  try {
+    for (const dir of [path.dirname(entry), lowRoot, highRoot]) await mkdir(dir, { recursive: true });
+    await writeFile(low, 'low-v2'); await writeFile(high, JSON.stringify({ asset: { version: '2.0' }, buffers: [{ uri: 'data:application/octet-stream;base64,AQ==', byteLength: 1 }] })); await writeFile(meta, '{"lengthUnit":"m"}');
+    const plan = await createSourceResourcePlan([{ sourcePath: highRoot, destinationRelativePath: 'Assets/Models/Model-101-Pump' }], projectRoot, signal);
+    const contentSha256 = plan.bundles[0].contentSha256;
+    const inspection = { schemaVersion: 1, model: { dataPlatformModel: { sourceKey: 'a'.repeat(64), kind: 'model', resourceId: '101', modelPath: 'main.gltf' },
+      versionId: '1', contentSha256, sourcePath: high, sourceUrl: url(high), metaPath: meta, metaUrl: url(meta), unitScaleToMeters: 1 },
+      configuration: { id: '1', parameters: {} }, device: { namespace: 'factory', deviceType: 'pump', deviceNo: '1' }, parts: [] };
+    const scene = { name: 'inspection', entityIds: ['pump'], entities: { pump: { id: 'pump', components: {
+      modelAsset: { sourcePath: low, sourceUrl: url(low), inspection },
+    } } }, sceneSettings: createResourceSceneSettings() };
+    await writeFile(entry, JSON.stringify({ version: 5, scene }));
+    const options = { projectRoot, sharedResourcesRoot, entrySceneFilePath: entry, outputRoot: path.join(root, 'output'),
+      manifest: { projectId: '42', projectName: 'inspection', editorProjectId: null, baseVersionId: null, resourceRevision: '1' },
+      signal, isPlatformImageReference: () => false, findSyncedImageForReference: async () => null, skyboxCacheDependencies: NO_SKYBOX_CACHE };
+    const result = await buildDigitalTwinSourcePackage(options);
+    const archive = await unzipper.Open.file(result.filePath);
+    const packaged = JSON.parse((await archive.files.find(file => file.path.replace(/\\/g, '/') === 'Scenes/main.scene.json')!.buffer()).toString('utf8')).scene.entities.pump.components.modelAsset;
+    assert.notEqual(path.posix.dirname(packaged.sourcePath), path.posix.dirname(packaged.inspection.model.sourcePath));
+    assert.match(packaged.inspection.model.sourcePath, /__zsrc-/);
+    assert.equal(decodeURIComponent(new URL(packaged.inspection.model.metaUrl).pathname.slice(1)), packaged.inspection.model.metaPath);
+    assert.equal(packaged.inspection.model.contentSha256, contentSha256);
+    assert.equal(packaged.inspection.model.sourceSnapshot, undefined);
+    const onlyHigh = structuredClone(scene);
+    delete onlyHigh.entities.pump.components.modelAsset.sourcePath;
+    delete onlyHigh.entities.pump.components.modelAsset.sourceUrl;
+    await writeFile(entry, JSON.stringify({ version: 5, scene: onlyHigh }));
+    await buildDigitalTwinSourcePackage({ ...options, outputRoot: path.join(root, 'high-only-output') });
+    onlyHigh.entities.pump.components.modelAsset.inspection.model.contentSha256 = '0'.repeat(64);
+    await writeFile(entry, JSON.stringify({ version: 5, scene: onlyHigh }));
+    await assert.rejects(buildDigitalTwinSourcePackage(options), /完整内容摘要不一致/);
+    await writeFile(entry, JSON.stringify({ version: 5, scene }));
+    await writeFile(meta, '{"lengthUnit":"cm"}');
+    await assert.rejects(buildDigitalTwinSourcePackage(options), /完整内容摘要不一致/);
+    await writeFile(meta, '{"lengthUnit":"m"}');
+    await writeFile(high, JSON.stringify({ asset: { version: '2.0' }, buffers: [{ uri: 'model.bin', byteLength: 1 }] }));
+    await writeFile(path.join(highRoot, 'model.bin'), Buffer.from([1]));
+    const external = await createSourceResourcePlan([{ sourcePath: highRoot, destinationRelativePath: 'Assets/Models/Model-101-Pump' }], projectRoot, signal);
+    inspection.model.contentSha256 = external.bundles[0].contentSha256;
+    await writeFile(entry, JSON.stringify({ version: 5, scene }));
+    await assert.rejects(buildDigitalTwinSourcePackage(options), /不支持外部缓冲区或纹理/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

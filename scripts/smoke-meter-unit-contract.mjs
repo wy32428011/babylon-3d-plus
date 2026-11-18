@@ -131,7 +131,8 @@ try {
     configFile: false,
     root: process.cwd(),
     plugins: [createDxfRenewSmokeAdapterPlugin()],
-    server: { middlewareMode: true, hmr: false },
+    // 一次性 SSR 契约不依赖文件热更新，避免监听影响模块加载。
+    server: { middlewareMode: true, hmr: false, watch: null },
     optimizeDeps: { noDiscovery: true },
     ssr: { noExternal: [DXF_RENEW_PACKAGE_ID] },
   });

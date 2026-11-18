@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  assertSnapshotModelVersions,
   collectDigitalTwinResourceIds,
   createPendingChunkIndexes,
   parseDataPlatformResourceKey,
@@ -110,4 +111,55 @@ test('组合发布拒绝未同步身份和同版本不同摘要', () => {
   const first={isFolder:true,composition:{...composition,resourceId:'1'}};
   const second={isFolder:true,composition:{...first.composition,contentSha256:'b'.repeat(64)}};
   assert.throws(()=>collectDigitalTwinResourceIds([JSON.stringify({scene:{entities:{first,second}}})]),/摘要不一致/);
+});
+
+function inspection(versionId: string, contentSha256 = 'b'.repeat(64)) {
+  return {
+    schemaVersion: 1,
+    model: {
+      dataPlatformModel: { sourceKey: 'a'.repeat(64), kind: 'model', resourceId: '101', modelPath: 'main.glb' },
+      versionId, contentSha256,
+      sourcePath: 'C:/fixed/Assets/Models/Model-101-Pump/main.glb',
+      metaPath: 'C:/fixed/Assets/Models/Model-101-Pump/meta.json',
+    },
+    device: { namespace: 'factory', deviceType: 'pump', deviceNo: 'P-1' },
+  };
+}
+
+const inspectionScene = (...bindings: ReturnType<typeof inspection>[]) => JSON.stringify({
+  scene: { entities: Object.fromEntries(bindings.map((binding, index) => [index, {
+    components: { modelAsset: { sourcePath: 'C:/latest/Assets/Models/Model-101-Pump/main.glb', inspection: binding } },
+  }])) },
+});
+
+test('同一模型的最新版本和多个高模固定版本分别收集且稳定排序', () => {
+  const resources = collectDigitalTwinResourceIds([inspectionScene(inspection('10'), inspection('1'), inspection('1'))]);
+  assert.deepEqual(resources.modelIds, ['101']);
+  assert.deepEqual(resources.modelVersions, [{ modelId: '101', versionId: '1' }, { modelId: '101', versionId: '10' }]);
+});
+
+test('固定高模缺少版本身份、设备映射或存在冲突时不能发布', () => {
+  assert.throws(() => collectDigitalTwinResourceIds([inspectionScene(inspection('0'))]), /固定版本身份/);
+  assert.throws(() => collectDigitalTwinResourceIds([inspectionScene(inspection('1'), inspection('1', 'c'.repeat(64)))]), /摘要不一致/);
+  const unbound = inspection('1');
+  unbound.device.deviceNo = '';
+  assert.throws(() => collectDigitalTwinResourceIds([inspectionScene(unbound)]), /设备映射/);
+});
+
+test('固定高模快照需要中台能力、精确版本集合及原始文件摘要', () => {
+  const requested = [{ modelId: '101', versionId: '1' }];
+  const file = (role: string) => ({ role, fileName: role, fileUrl: '/' + role, fileId: role, sha256: 'a'.repeat(64), size: '123' });
+  const snapshot = { modelVersionsSupported: true, resources: [
+    { kind: 'model', resourceId: '101', revision: 'latest', files: [] },
+    { kind: 'modelVersion', resourceId: '101', versionId: '1', revision: 'fixed', files: [file('model'), file('metadata')] },
+  ] };
+  assert.doesNotThrow(() => assertSnapshotModelVersions(requested, snapshot, structuredClone(snapshot)));
+  assert.throws(() => assertSnapshotModelVersions(requested, { ...snapshot, modelVersionsSupported: undefined }), /不支持/);
+  assert.throws(() => assertSnapshotModelVersions(requested, { ...snapshot, resources: [snapshot.resources[0]] }), /回显/);
+  assert.throws(() => assertSnapshotModelVersions(requested, { ...snapshot, resources: [...snapshot.resources, snapshot.resources[1]] }), /回显/);
+  const changed = structuredClone(snapshot);
+  changed.resources[1].files[0].sha256 = 'b'.repeat(64);
+  assert.throws(() => assertSnapshotModelVersions(requested, changed, snapshot), /发生变化/);
+  changed.resources[1].files[0].sha256 = '';
+  assert.throws(() => assertSnapshotModelVersions(requested, changed), /摘要/);
 });

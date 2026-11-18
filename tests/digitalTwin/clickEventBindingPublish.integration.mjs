@@ -44,6 +44,7 @@ async function run() {
     const asset = await importManualRoamAvatarIntoProject(projectRoot, path.resolve('public/manual-roam/EQ_People.glb'));
     const model = createModelEntity(asset.path, asset.sourceUrl, '点击模型');
     model.components.modelAsset.assetCode = 'DEVICE-001';
+    model.components.modelAsset.deviceType = 'conveyor';
     model.components.modelAsset.builtInSlotBindingConfig = { enabledParam: 'enabled', dimensionMapping: { columns: 'columns', layers: 'layers' } };
     const locator = createLocatorEntity();
     locator.components.locator.builtInBinding = { hostEntityId: model.id, originOffset: { x: 0, y: 0, z: 0 } };
@@ -59,28 +60,32 @@ async function run() {
       ],
     };
     const scene = createEmptySceneDocument('发布点击回归');
+    // 点击发布夹具使用实时照明，不依赖无关的烘焙产物。
+    scene.sceneSettings.lighting.bake.enabled = false;
     scene.entityIds = [model.id, binding.id, locator.id];
     scene.entities = { [model.id]: model, [binding.id]: binding, [locator.id]: locator };
     const content = serializeScene(scene);
 
     function assertClick(loaded, label, clickedModelId = model.id) {
-      const selections = [], focuses = [], messages = [], highlights = [], shownScreens = [];
+      const selections = [], focuses = [], messages = [], highlights = [], shownScreens = [], deviceContexts = [];
       const handler = createViewerModelClickHandler(loaded, {
         updateSelection: ids => selections.push([...ids]),
         setSlotHighlight: (id, cell) => highlights.push({ id, cell }),
+        setHighlightExcludeTrack: () => {},
         focusTarget: (id, cell) => focuses.push({ id, cell }),
         triggerManualEvents: () => {},
         emitAssetClicked: payload => messages.push(payload),
+        emitDeviceContext: context => deviceContexts.push(context),
         showScreen: screen => shownScreens.push(screen),
       });
       handler(clickedModelId);
-      assert.deepEqual(messages, [{ assetCode: 'DEVICE-001', chartId: 'data-platform-screen:project-001:screen-model' }], `${label}必须识别模型点击并发送图表事件`);
+      assert.deepEqual(messages, [{ assetCode: 'DEVICE-001', entityId: clickedModelId, deviceType: 'conveyor', chartId: 'data-platform-screen:project-001:screen-model' }], `${label}必须识别模型点击并发送图表事件`);
       assert.deepEqual(shownScreens, [{ projectId: 'project-001', screenId: 'screen-model' }], `${label}必须请求宿主展示模型绑定大屏`);
       assert.deepEqual(selections, [[clickedModelId]], `${label}必须高亮模型`);
       assert.deepEqual(focuses, [{ id: clickedModelId, cell: undefined }], `${label}必须聚焦模型`);
       const cell = { row: 2, column: 3, layer: 4 };
       handler(locator.id, { locatorEntityId: locator.id, ...cell });
-      assert.deepEqual(messages[1], { assetCode: 'DEVICE-001', slot: cell, chartId: 'data-platform-screen:project-001:screen-cell' }, `${label}必须识别货格点击并发送坐标`);
+      assert.deepEqual(messages[1], { assetCode: 'DEVICE-001', entityId: model.id, deviceType: 'conveyor', slot: cell, chartId: 'data-platform-screen:project-001:screen-cell' }, `${label}必须识别货格点击并发送坐标`);
       assert.deepEqual(shownScreens[1], { projectId: 'project-001', screenId: 'screen-cell' }, `${label}必须请求宿主展示货格绑定大屏`);
       assert.deepEqual(highlights.at(-1), { id: locator.id, cell });
       assert.deepEqual(focuses.at(-1), { id: locator.id, cell });
@@ -88,6 +93,12 @@ async function run() {
       assert.deepEqual(highlights.at(-1), { id: '', cell: null });
       assert.equal(messages.length, 2, '点击空白不能发送图表事件');
       assert.equal(shownScreens.length, 2, '点击空白不能触发大屏切换');
+      assert.equal(loaded.entities[clickedModelId].components.modelAsset.inspection, undefined);
+      assert.deepEqual(deviceContexts, [
+        { assetCode: 'DEVICE-001', entityId: clickedModelId, deviceType: 'conveyor' },
+        { assetCode: 'DEVICE-001', entityId: model.id, deviceType: 'conveyor' },
+        null,
+      ], `${label}无需高模绑定也应保留设备类型、实际实体身份和清空上下文`);
     }
 
     assertClick(deserializeScene(content), '编辑器保存加载后');

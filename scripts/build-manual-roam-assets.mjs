@@ -7,6 +7,7 @@ import { createKaykitSampler } from './manual-roam-assets/kaykitMotion.mjs';
 import { TURN_MOTION_DEFINITIONS, sampleTurnPose } from './manual-roam-assets/turnMotion.mjs';
 import { getManualRoamSkinCandidates } from './manual-roam-assets/skinWeights.mjs';
 import { identifyShirtBodyVertices, constrainShirtBodyWeights } from './manual-roam-assets/shirtBodyWeights.mjs';
+import { shapeEqPeopleSeat } from './manual-roam-assets/eqPeopleSeatShape.mjs';
 import { calibrateFootCycle } from './manual-roam-assets/contactCalibration.mjs';
 import { COMMUTE_WALK, commuteWalkCalibration, createCommuteWalkSampler } from './manual-roam-assets/commuteWalk.mjs';
 
@@ -34,6 +35,21 @@ function read(a, id) {
     const offset = (view.byteOffset??0)+(x.byteOffset??0)+Math.floor(i/width)*(view.byteStride??width*size)+i%width*size;
     return x.componentType===5126 ? a.binary.readFloatLE(offset) : a.binary.readUIntLE(offset,size);
   });
+}
+// 法线与切线和 UV 共用原交错缓冲区，只覆写各自的浮点分量，避免再携带两份整身属性。
+function writeFloatAttribute(json, binary, id, values) {
+  const accessor = json.accessors[id], view = json.bufferViews[accessor.bufferView];
+  const width = { VEC3: 3, VEC4: 4 }[accessor.type];
+  if (accessor.componentType !== 5126 || values.length !== accessor.count * width) {
+    throw new Error(`无法回写人物浮点属性 ${id}`);
+  }
+  const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+  const stride = view.byteStride ?? width * 4;
+  for (let row = 0; row < accessor.count; row++) {
+    for (let axis = 0; axis < width; axis++) {
+      binary.writeFloatLE(values[row * width + axis], start + row * stride + axis * 4);
+    }
+  }
 }
 function writer(json = {asset:{version:'2.0'},accessors:[],bufferViews:[]}, binary=Buffer.alloc(0)) {
   const chunks = [binary]; let length=binary.length;
@@ -97,7 +113,7 @@ function buildCharacter(original) {
     const direction=points[i].subtract(points[names.indexOf(parentNames[i])]).normalize();
     return points[i].add(direction.scale(name.endsWith('Hand')?0.12:name==='Head'?0.15:0.07));
   };
-  // bind 是模型原本的真实姿态；reference 是动画对齐姿态。只旋转骨架的坐标系，不重塑原网格。
+  // bind 是模型原本的真实姿态，reference 是动画对齐姿态。局部服装外形独立于骨架生成。
   const bindRotations=source.map((p,i)=>fromTo(endpoint(i,rest).subtract(rest[i]),endpoint(i,source).subtract(p)));
   const positions=read(original,0);
   const vertices=Array.from({length:positions.length/3},(_,i)=>v(positions.slice(i*3,i*3+3)).scale(100));
@@ -115,11 +131,12 @@ function buildCharacter(original) {
     const key=cell.join(','),bucket=cells.get(key)??[];bucket.push(i);cells.set(key,bucket);
   });
   const shirtMaterial=json.materials.findIndex(material=>material.name==='Ren_YiFu_M');
+  const trouserMaterial=json.materials.findIndex(material=>material.name==='Ren_KuZi_M');
   const shirtTriangles=json.meshes[0].primitives.filter(primitive=>primitive.material===shirtMaterial).flatMap(primitive=>read(original,primitive.indices));
   const shirtBody=identifyShirtBodyVertices(vertices,shirtTriangles,names,source);
   const groupedWeights=new Map();
   vertices.forEach((p,i)=>{
-    const trousers=materials.get(i)===5,side=p.x>=0?'Left':'Right';
+    const trousers=materials.get(i)===trouserMaterial,side=p.x>=0?'Left':'Right';
     // 裤腿只受骨盆与对应腿链驱动；排除附近手掌、另一条腿等无解剖关联的影响。
     const candidates=trousers?names.map((name,index)=>({name,index,factor:1})).filter(({name})=>name==='Hips'||name==='Spine'||(name.startsWith(side)&&/UpLeg|Leg|Foot|ToeBase/.test(name))):getManualRoamSkinCandidates(p,materials.get(i),names,source);
     const rawFor=(index,factor=1)=>factor/(segmentDistance(p,source[index],endpoint(index,source))+0.015)**(trousers?6:4);
@@ -136,6 +153,13 @@ function buildCharacter(original) {
     const ranked=group.map((weight,index)=>({index,weight})).sort((a,b)=>b.weight-a.weight).slice(0,4),total=ranked.reduce((sum,item)=>sum+item.weight,0);
     return[key,ranked.map(item=>({...item,weight:item.weight/total}))];
   }));
+  // 先用原网格确定权重和接缝组，再收拢后臀轮廓，避免重新选择受影响顶点的驱动骨。
+  const attributes = json.meshes[0].primitives[0].attributes;
+  const normals = read(original, attributes.NORMAL), tangents = read(original, attributes.TANGENT);
+  const garmentIndices = [...materials]
+    .filter(([, material]) => material === shirtMaterial || material === trouserMaterial)
+    .map(([index]) => index);
+  shapeEqPeopleSeat(vertices, normals, tangents, garmentIndices, source[names.indexOf('Hips')]);
   const output=vertices.flatMap(p=>p.asArray()),joints=[],weights=[];
   for(let i=0;i<positions.length/3;i++){
     const ranked=influences.get(find(i));
@@ -190,7 +214,10 @@ function buildCharacter(original) {
     node.translation=position.asArray();node.rotation=quaternion.normalize().asArray();
   });
   json.nodes.push({name:'Ren',mesh:0,skin:0});json.nodes[0].children.push(json.nodes.length-1);json.scenes=[{nodes:[0]}];json.scene=0;delete json.animations;
-  const w=writer(json,original.binary),pos=w.append(output,'VEC3'),joint=w.append(joints,'VEC4',5123),weight=w.append(weights,'VEC4');
+  const binary = Buffer.from(original.binary);
+  writeFloatAttribute(json, binary, attributes.NORMAL, normals);
+  writeFloatAttribute(json, binary, attributes.TANGENT, tangents);
+  const w=writer(json,binary),pos=w.append(output,'VEC3'),joint=w.append(joints,'VEC4',5123),weight=w.append(weights,'VEC4');
   json.meshes[0].primitives.forEach(p=>Object.assign(p.attributes,{POSITION:pos,JOINTS_0:joint,WEIGHTS_0:weight}));
   json.skins=[{name:profile.profile,skeleton:1,joints:names.map((_,i)=>i+1),inverseBindMatrices:w.append(bindWorlds.flatMap(matrix=>Array.from(Matrix.Invert(matrix).m)),'MAT4')}];
   // 脚骨局部的鞋底自然朝上方向：运行时IK以它为贴地基准，而不是把脚骨压平（压平会让翘起的鞋底再次离地）。

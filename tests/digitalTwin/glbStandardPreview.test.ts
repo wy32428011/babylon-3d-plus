@@ -24,14 +24,24 @@ test('标准预览显式使用 Sandbox 环境，保留规则和未涉及的设�
   assert.deepEqual(createGlbStandardPreviewLightingConfig(lighting, ['point']), lighting);
 });
 
-test('标准预览外观使用无色调映射基线，保留无关参数并隐藏背景', () => {
-  const appearance = normalizeSceneAppearanceConfig({ exposure: 2, contrast: 1.5, toneMappingEnabled: true, bloomEnabled: true,
-    fogEnabled: true, fogStart: 300, custom: { keep: 1 } });
-  const before = JSON.stringify(appearance), next = createGlbStandardPreviewAppearanceConfig(appearance);
-  assert.equal(JSON.stringify(appearance), before);
-  assert.equal(next.exposure, 1); assert.equal(next.contrast, 1); assert.equal(next.toneMappingEnabled, false);
-  assert.equal(next.bloomEnabled, false); assert.equal(next.fogEnabled, false); assert.equal(next.skyboxVisible, false);
-  assert.equal(next.fogStart, 300); assert.deepEqual((next as unknown as Record<string, unknown>).custom, { keep: 1 });
+test('标准预览外观使用无色调映射基线，保留天空盒显隐与无关参数', () => {
+  for (const skyboxVisible of [true, false]) {
+    const appearance = normalizeSceneAppearanceConfig({
+      skyboxVisible, exposure: 2, contrast: 1.5, toneMappingEnabled: true, bloomEnabled: true,
+      fogEnabled: true, fogStart: 300, custom: { keep: 1 },
+    });
+    const before = structuredClone(appearance);
+    const next = createGlbStandardPreviewAppearanceConfig(appearance);
+    assert.deepEqual(appearance, before);
+    assert.equal(next.skyboxVisible, skyboxVisible);
+    assert.equal(next.exposure, 1);
+    assert.equal(next.contrast, 1);
+    assert.equal(next.toneMappingEnabled, false);
+    assert.equal(next.bloomEnabled, false);
+    assert.equal(next.fogEnabled, false);
+    assert.equal(next.fogStart, 300);
+    assert.deepEqual((next as unknown as Record<string, unknown>).custom, { keep: 1 });
+  }
 });
 
 test('旧配置和旧场景缺少环境选择时不自动注入 Sandbox，归一化和迁移幂等', () => {

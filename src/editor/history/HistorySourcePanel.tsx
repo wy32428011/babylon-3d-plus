@@ -47,10 +47,11 @@ export function HistorySourcePanel(props: {
     const current = props.sources.find(item => item.sourceId === selected.sourceId && item.revision === selected.revision);
     if (current && current.status !== selected.status) setSelected({ ...selected, status: current.status });
   }, [props.sources, selected]);
+  const { onRefresh } = props;
   const onOperationChange = useCallback((value: HistoryOperationResult) => {
     setOperation(value);
-    if (value.status === 'succeeded') props.onRefresh();
-  }, [props.onRefresh]);
+    if (value.status === 'succeeded') onRefresh();
+  }, [onRefresh]);
   const onInvalid = useCallback((field: string, problem: string | null) => setInvalid(previous => {
     if (previous[field] === problem || !problem && !previous[field]) return previous;
     const next = { ...previous }; if (problem) next[field] = problem; else delete next[field]; return next;

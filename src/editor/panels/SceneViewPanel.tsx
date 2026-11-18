@@ -345,15 +345,15 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       ? { requested: requestedBackend, backend: 'webgl' as const, reasons: [...decision.reasons, '运行预览或光照管理保留完整 WebGL 路径'] }
       : decision;
   }, [sceneDocument, requestedBackend, webGLPreviewRequired]);
-  const [backendSession, setBackendSession] = useState(() => ({ sceneSessionId, decision: backendDecision }));
-  // 同一显式 WebGPU 会话只允许降级；解除不兼容功能后不重建业务运行时，重新打开场景才重新选择。
-  if (backendSession.sceneSessionId !== sceneSessionId
+  // 默认 WebGL 跨文档复用引擎；显式 WebGPU 每次打开场景时重新选择，同一会话只允许降级。
+  const backendSceneSessionId = requestedBackend === 'webgpu' ? sceneSessionId : null;
+  const [backendSession, setBackendSession] = useState(() => ({ sceneSessionId: backendSceneSessionId, decision: backendDecision }));
+  if (backendSession.sceneSessionId !== backendSceneSessionId
     || (backendSession.decision.backend === 'webgpu' && backendDecision.backend === 'webgl')) {
-    setBackendSession({ sceneSessionId, decision: backendDecision });
+    setBackendSession({ sceneSessionId: backendSceneSessionId, decision: backendDecision });
   }
-  const viewportBackendDecision = backendSession.sceneSessionId === sceneSessionId ? backendSession.decision : backendDecision;
-  // 默认 WebGL 沿用跨文档复用行为；仅显式双后端会话切换时换新画布，禁止跨 context 类型复用。
-  const viewportSessionKey = requestedBackend === 'webgpu' ? `${sceneSessionId}:${viewportBackendDecision.backend}` : 'webgl';
+  const viewportBackendDecision = backendSession.decision;
+  const viewportSessionKey = backendSession.sceneSessionId === null ? 'webgl' : `${backendSession.sceneSessionId}:${viewportBackendDecision.backend}`;
   const runtimeReady = runtimeReadyKeyRef.current === viewportSessionKey && runtimeRef.current !== null;
   const sceneStartupResourceSessionId = useEditorStore((state) => state.sceneStartupResourceSessionId);
   const sceneRuntimeStartupDeferred = sceneStartupResourceSessionId === sceneSessionId;
@@ -1013,6 +1013,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     runtimeReadyKeyRef.current = null;
     setSceneRuntimeNaturallyReady(false);
     setViewportError(null);
+    let initialSceneSessionId: string;
 
     try {
       viewport = await createBabylonViewportAsync(initialCanvas, handleRuntimeStatus, {
@@ -1027,10 +1028,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
         adaptiveResolution: adaptiveResolutionEnabledRef.current,
       });
       if (disposed || abortController.signal.aborted) { viewport.dispose(); return; }
+      const initialState = useEditorStore.getState();
+      initialSceneSessionId = initialState.sceneSessionId;
+      const savedCamera = initialState.scene.sceneSettings.camera;
       const preservedView = preservedViewportViewRef.current;
-      viewport.applyCameraView(preservedView?.sceneSessionId === useEditorStore.getState().sceneSessionId
-        ? { ...useEditorStore.getState().scene.sceneSettings.camera, ...preservedView.view }
-        : useEditorStore.getState().scene.sceneSettings.camera, { animate: false });
+      viewport.applyCameraView(preservedView?.sceneSessionId === initialSceneSessionId
+        ? { ...savedCamera, ...preservedView.view }
+        : savedCamera, { animate: false });
       runtimeModeRef.current = 'edit';
       runtime = new SceneRuntime(
         viewport.scene,
@@ -1507,7 +1511,9 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       if (event.key === 'Escape') initializedGizmo.cancelActiveDrag();
     };
     teardown = () => {
-      preservedViewportViewRef.current = { sceneSessionId, view: initializedViewport.getCameraView() };
+      // WebGL 引擎可能先后显示多个文档；视角和统计都属于它最后同步的会话。
+      const closingSessionId = statisticsSceneSessionRef.current ?? initialSceneSessionId;
+      preservedViewportViewRef.current = { sceneSessionId: closingSessionId, view: initializedViewport.getCameraView() };
       skyboxStatus.dispose();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
@@ -1525,7 +1531,6 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       setAutoPatrolRecordStore(null);
       initializedGizmo.dispose();
       initializedRuntime.onModelStatisticsChanged = undefined;
-      const closingSessionId = statisticsSceneSessionRef.current ?? sceneSessionId;
       statisticsSceneSessionRef.current = null;
       const currentState = useEditorStore.getState();
       if (currentState.sceneSessionId === closingSessionId) currentState.setSceneModelStatistics(null, closingSessionId);
@@ -1567,6 +1572,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     return () => { disposed = true; abortController.abort(); cleanup(); };
   }, [
     viewportSessionKey,
+    viewportBackendDecision,
     replaceCanvas,
     previewEntityTransform,
     commitEntityTransform,

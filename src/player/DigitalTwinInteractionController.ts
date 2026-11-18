@@ -1,4 +1,6 @@
 import type { DigitalTwinRegionViewItem, DigitalTwinRegionViewError } from './digitalTwinRegionViewProtocol';
+import { inspectionConfigurationMatches } from '../editor/model/inspectionBinding';
+import type { ModelAssetComponent } from '../editor/model/components';
 import type {
   CameraTransitionCancelReason,
   CameraViewTransitionOptions,
@@ -19,6 +21,14 @@ import {
   DIGITAL_TWIN_START_AUTO_PATROL_CAPABILITY,
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   parseDigitalTwinBridgeMessage,
+  parseDigitalTwinInspectionMessage,
+  getInspectionDataIssue,
+  isDigitalTwinInspectionBinding,
+  type DigitalTwinInspectionMessage,
+  type DigitalTwinInspectionLoad,
+  type DigitalTwinInspectionAnyLoad,
+  type DigitalTwinDeviceContext,
+  type DigitalTwinInspectionIdentity,
   type DigitalTwinAssetClickedEvent,
   type DigitalTwinBridgeMessage,
   type DigitalTwinCapability,
@@ -45,6 +55,31 @@ export type DigitalTwinFocusBounds = {
 
 export type DigitalTwinPatrolPhase = 'idle' | 'moving' | 'dwelling' | 'paused' | 'completed' | 'returning';
 
+type InspectionTarget = Omit<DigitalTwinInspectionLoad, 'loadId'>;
+export type ViewerInspectionTargetResult = { target: InspectionTarget } | { error: string };
+
+/** 场景点击与记录反向定位共用同一固定配置和协议预算检查。 */
+export function resolveViewerInspectionTarget(
+  entityId: string,
+  model: Pick<ModelAssetComponent, 'assetCode' | 'inspection' | 'parameterValues'> | undefined,
+  expectedAssetCode?: string,
+): ViewerInspectionTargetResult {
+  const assetCode = model?.assetCode?.trim();
+  if (!assetCode || (expectedAssetCode !== undefined && assetCode !== expectedAssetCode)) {
+    return { error: '设备详情未打开：当前设备缺少有效的高模或设备数据绑定。' };
+  }
+  if (model?.inspection && getInspectionDataIssue(model.inspection) === 'budget') {
+    return { error: '设备详情未打开：高模零件清单或参数超出跨窗口数据容量，请精简后重新配置。' };
+  }
+  if (!isDigitalTwinInspectionBinding(model?.inspection)) {
+    return { error: '设备详情未打开：当前设备缺少有效的高模或设备数据绑定。' };
+  }
+  if (!inspectionConfigurationMatches(model.inspection, model.parameterValues)) {
+    return { error: '设备详情未打开：设备当前模型参数与高模绑定配置不一致，请重新配置设备详情。' };
+  }
+  return { target: { entityId, assetCode, inspection: model.inspection } };
+}
+
 export type DigitalTwinInteractionRuntime = {
   hardwareGpuVerified: true;
   assetIndex: DigitalTwinAssetIndex;
@@ -52,6 +87,7 @@ export type DigitalTwinInteractionRuntime = {
   getFocusBounds: (entityId: string, slot?: DigitalTwinSlotCoordinate) => DigitalTwinFocusBounds | null;
   focusOnBounds: (bounds: DigitalTwinFocusBounds, options: CameraViewTransitionOptions) => void;
   triggerTargetClick: (entityId: string, slot?: DigitalTwinSlotCoordinate) => void;
+  resolveInspectionTarget?: (entityId: string, assetCode: string) => InspectionTarget | { error: string } | null;
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setExternalHighlightEntityIds: (entityIds: readonly string[]) => void;
   setExternalSlotHighlight: (entityId: string, coordinate: DigitalTwinSlotCoordinate | null) => void;
@@ -71,7 +107,7 @@ export type DigitalTwinInteractionControllerOptions = {
   parentWindow: unknown;
   viewerOrigin: string;
   subscribeToMessages: (listener: (event: DigitalTwinMessageEvent) => void) => () => void;
-  postToParent: (message: DigitalTwinBridgeMessage, targetOrigin: string) => void;
+  postToParent: (message: DigitalTwinBridgeMessage | DigitalTwinInspectionMessage, targetOrigin: string) => void;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
@@ -136,6 +172,8 @@ export class DigitalTwinInteractionController {
   private initialLoadPhase: DigitalTwinInitialLoadPhase | null = null;
   private activeSessionId: string | null = null;
   private activeParentOrigin: string | null = null;
+  private inspectionNegotiated = false;
+  private focusClickRequestId: string | null = null;
   private activeRequest: ActiveFocusRequest | null = null;
   private regionViewsEnabled = false;
   private activeRegionView: { requestId: string; sessionId: string } | null = null;
@@ -279,6 +317,34 @@ export class DigitalTwinInteractionController {
 
   private readonly handleMessage = (event: DigitalTwinMessageEvent): void => {
     if (this.disposed || event.source !== this.options.parentWindow || !this.isAllowedOrigin(event.origin)) return;
+    const inspection = parseDigitalTwinInspectionMessage(event.data);
+    if (inspection?.type === 'host.inspectionHello') {
+      if (this.runtime && this.activeSessionId === inspection.sessionId
+        && this.activeParentOrigin === event.origin && inspection.payload.role === 'scene') {
+        this.inspectionNegotiated = true;
+        this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+          sessionId: inspection.sessionId, type: 'viewer.inspectionReady', requestId: inspection.requestId,
+          payload: { role: 'scene', capabilities: ['openInspection', 'focusCause', 'deviceContext', ...(this.runtime.resolveInspectionTarget ? ['openAssetInspection' as const] : [])] } });
+      }
+      return;
+    }
+    if (inspection?.type === 'command.openInspectionAsset') {
+      if (!this.inspectionNegotiated || !this.runtime || this.activeSessionId !== inspection.sessionId
+        || this.activeParentOrigin !== event.origin) return;
+      let opened = false;
+      let error = '设备缺少有效的高模或设备绑定。';
+      try {
+        const target = this.runtime.resolveInspectionTarget?.(inspection.payload.entityId, inspection.payload.assetCode);
+        if (target && 'error' in target) error = target.error;
+        else opened = Boolean(target && this.openInspection({ ...target, causeRequestId: inspection.requestId }));
+      } catch {
+        error = '设备详情解析失败。';
+      }
+      if (!opened) this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId: inspection.sessionId, type: 'viewer.openInspectionAssetFailed', requestId: inspection.requestId,
+        error: error.slice(0, 1024) });
+      return;
+    }
     const message = parseDigitalTwinBridgeMessage(event.data);
     if (!message) return;
 
@@ -379,6 +445,8 @@ export class DigitalTwinInteractionController {
     this.appliedRegionView = null;
     this.cancelActiveRegionView('cancelled');
     this.regionViewsEnabled = false;
+    this.inspectionNegotiated = false;
+    this.focusClickRequestId = null;
     this.cancelActiveRequest('cancelled', false);
     this.clearHighlight();
     this.activeSessionId = null;
@@ -657,7 +725,12 @@ export class DigitalTwinInteractionController {
     this.activeRequest = null;
     try {
       // 仅聚焦成功的最新请求触发点击；先结束请求，避免完成回调重入时重复执行事件。
-      this.runtime!.triggerTargetClick(request.entityId, request.slot);
+      this.focusClickRequestId = request.requestId;
+      try {
+        this.runtime!.triggerTargetClick(request.entityId, request.slot);
+      } finally {
+        this.focusClickRequestId = null;
+      }
     } catch {
       if (this.highlightRequestId === request.requestId) this.clearHighlight();
       this.postFailure(request.requestId, 'INTERNAL_ERROR', request.sessionId);
@@ -741,11 +814,44 @@ export class DigitalTwinInteractionController {
       version: DIGITAL_TWIN_BRIDGE_VERSION,
       sessionId: this.activeSessionId,
       type: 'event.assetClicked',
-      payload,
+      payload: this.inspectionNegotiated && this.focusClickRequestId
+        ? { ...payload, inspectionFocusRequestId: this.focusClickRequestId }
+        : payload,
     });
   }
 
-  private post(message: DigitalTwinBridgeMessage): void {
+  /** 普通低模选择独立于高模绑定；焦点命令的衍生点击保留因果标记。 */
+  notifyDeviceContext(context: DigitalTwinDeviceContext | null): void {
+    if (this.disposed || !this.inspectionNegotiated || !this.activeSessionId) return;
+    const message = parseDigitalTwinInspectionMessage({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId, type: 'event.deviceContext',
+      payload: { context, ...(this.focusClickRequestId ? { causeRequestId: this.focusClickRequestId } : {}) },
+    });
+    if (message) this.post(message);
+  }
+
+  notifyInspectionDeviceSelected(payload: Omit<Extract<DigitalTwinInspectionMessage, { type: 'event.inspectionDeviceSelected' }>['payload'], 'causeRequestId'>): void {
+    if (!this.inspectionNegotiated || !this.activeSessionId) return;
+    const message = parseDigitalTwinInspectionMessage({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL,
+      version: DIGITAL_TWIN_BRIDGE_VERSION, sessionId: this.activeSessionId, type: 'event.inspectionDeviceSelected',
+      payload: { ...payload, ...(this.focusClickRequestId ? { causeRequestId: this.focusClickRequestId } : {}) } });
+    if (message) this.post(message);
+  }
+
+  /** 聚焦衍生普通点击不得再次打开详情；显式命令带独立因果标记。 */
+  openInspection(payload: Omit<DigitalTwinInspectionLoad, 'loadId'> & { causeRequestId?: string }): boolean {
+    if (!this.inspectionNegotiated || this.focusClickRequestId || !this.activeSessionId) return false;
+    const message = parseDigitalTwinInspectionMessage({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.activeSessionId, type: 'event.openInspection', payload,
+    });
+    if (!message) return false;
+    this.post(message);
+    return true;
+  }
+
+  private post(message: DigitalTwinBridgeMessage | DigitalTwinInspectionMessage): void {
     if (
       this.disposed
       || !this.activeSessionId
@@ -753,5 +859,208 @@ export class DigitalTwinInteractionController {
       || message.sessionId !== this.activeSessionId
     ) return;
     this.options.postToParent(message, this.activeParentOrigin);
+  }
+}
+
+export type DigitalTwinInspectionControllerOptions = {
+  parentWindow: unknown;
+  viewerOrigin: string;
+  subscribeToMessages: (listener: (event: DigitalTwinMessageEvent) => void) => () => void;
+  postToParent: (message: DigitalTwinBridgeMessage | DigitalTwinInspectionMessage, targetOrigin: string) => void;
+  load: (payload: DigitalTwinInspectionAnyLoad, signal: AbortSignal) => void | Promise<void>;
+  selectPart: (payload: DigitalTwinInspectionIdentity & { partKey: string | null }, signal: AbortSignal) => void | Promise<void>;
+  setProgress: (payload: DigitalTwinInspectionIdentity & { progress: number }, signal: AbortSignal) => void | Promise<void>;
+  reset: (payload: DigitalTwinInspectionIdentity, signal: AbortSignal) => void | Promise<void>;
+};
+
+/** 详情 iframe 的独立桥；调用方负责加载资产和释放被 AbortSignal 取消的资源。 */
+export class DigitalTwinInspectionController {
+  private readonly unsubscribe: () => void;
+  private readonly origins = new Set<string>();
+  private allowAnyOrigin = false;
+  private ready = false;
+  private negotiated = false;
+  private sessionId: string | null = null;
+  private origin: string | null = null;
+  private generation = 0;
+  private current: DigitalTwinInspectionIdentity | null = null;
+  private loaded = false;
+  private abort: AbortController | null = null;
+  private selectionAbort: AbortController | null = null;
+  private selectionRequestId: string | null = null;
+  private operations: Promise<void> = Promise.resolve();
+  private disposed = false;
+
+  constructor(private readonly options: DigitalTwinInspectionControllerOptions) {
+    this.unsubscribe = options.subscribeToMessages(this.handleMessage);
+  }
+
+  setAllowedParentOrigins(origins: readonly string[]): void {
+    this.origins.clear();
+    this.allowAnyOrigin = origins.includes('*');
+    for (const origin of origins) if (origin && origin !== '*') this.origins.add(origin);
+    if (this.origin && !this.isAllowedOrigin(this.origin)) this.resetSession();
+  }
+
+  markViewerReady(): void {
+    if (this.disposed) return;
+    this.ready = true;
+    this.postReady();
+  }
+
+  notifyPartSelected(payload: DigitalTwinInspectionIdentity & { partKey: string | null }): boolean {
+    if (!this.negotiated || !this.matches(payload) || !this.sessionId) return false;
+    const causeRequestId = this.selectionRequestId;
+    if (!causeRequestId) this.cancelSelection();
+    const message = parseDigitalTwinInspectionMessage({
+      channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.sessionId, type: 'event.inspectionPartSelected',
+      payload: { ...payload, ...(causeRequestId ? { causeRequestId } : {}) },
+    });
+    if (!message) return false;
+    this.post(message);
+    return true;
+  }
+
+  notifyClosed(payload: DigitalTwinInspectionIdentity): boolean {
+    if (!this.negotiated || !this.matches(payload) || !this.sessionId) return false;
+    this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.sessionId, type: 'event.inspectionClosed', payload });
+    this.cancelSelection();
+    this.abort?.abort();
+    this.abort = null;
+    this.generation++;
+    this.current = null;
+    this.loaded = false;
+    this.operations = Promise.resolve();
+    return true;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.resetSession();
+    this.disposed = true;
+    this.unsubscribe();
+  }
+
+  private isAllowedOrigin(origin: string): boolean {
+    return this.allowAnyOrigin || origin === this.options.viewerOrigin || this.origins.has(origin);
+  }
+
+  private readonly handleMessage = (event: DigitalTwinMessageEvent): void => {
+    if (this.disposed || event.source !== this.options.parentWindow || !this.isAllowedOrigin(event.origin)) return;
+    const base = parseDigitalTwinBridgeMessage(event.data);
+    if (base?.type === 'host.hello') {
+      if (this.sessionId !== base.sessionId || this.origin !== event.origin) this.resetSession();
+      this.sessionId = base.sessionId;
+      this.origin = event.origin;
+      this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId: base.sessionId, type: 'bridge.ready' });
+      this.postReady();
+      return;
+    }
+    const message = parseDigitalTwinInspectionMessage(event.data);
+    if (!message || !this.ready || !this.sessionId || message.sessionId !== this.sessionId || event.origin !== this.origin) return;
+    if (message.type === 'host.inspectionHello') {
+      if (message.payload.role !== 'detail') return;
+      this.negotiated = true;
+      this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+        sessionId: this.sessionId, type: 'viewer.inspectionReady', requestId: message.requestId,
+        payload: { role: 'detail', capabilities: ['inspectionLoad', 'modelVersionLoad', 'selectPart', 'selectionCause', 'cancelSelect', 'setProgress', 'reset'] } });
+      return;
+    }
+    if (!this.negotiated) return;
+    if (message.type === 'command.inspectionLoad' || message.type === 'command.inspectionLoadModelVersion') {
+      this.cancelSelection();
+      this.abort?.abort();
+      this.abort = new AbortController();
+      this.generation++;
+      this.current = { loadId: message.payload.loadId, assetCode: message.payload.assetCode };
+      this.loaded = false;
+      this.operations = Promise.resolve();
+      const generation = this.generation;
+      this.enqueue(message.requestId, message.payload, async signal => {
+        await this.options.load(message.payload, signal);
+        if (!signal.aborted && generation === this.generation) this.loaded = true;
+      }, false);
+      return;
+    }
+    if (message.type === 'command.inspectionCancelSelect') {
+      if (this.matches(message.payload)) this.cancelSelection();
+    } else if (message.type === 'command.inspectionSelectPart') {
+      if (!this.matches(message.payload)) return;
+      this.cancelSelection();
+      const selection = new AbortController();
+      this.selectionAbort = selection;
+      this.enqueue(message.requestId, message.payload, signal => {
+        const combined = AbortSignal.any([signal, selection.signal]);
+        combined.throwIfAborted();
+        this.selectionRequestId = message.requestId;
+        try {
+          return this.options.selectPart(message.payload, combined);
+        } finally {
+          this.selectionRequestId = null;
+        }
+      });
+    } else if (message.type === 'command.inspectionSetProgress') {
+      this.enqueue(message.requestId, message.payload, signal => this.options.setProgress(message.payload, signal));
+    } else if (message.type === 'command.inspectionReset') {
+      this.enqueue(message.requestId, message.payload, signal => this.options.reset(message.payload, signal));
+    }
+  };
+
+  private enqueue(requestId: string, identity: DigitalTwinInspectionIdentity, run: (signal: AbortSignal) => void | Promise<void>, requiresLoaded = true): void {
+    if (!this.matches(identity) || !this.abort || !this.sessionId) return;
+    const generation = this.generation;
+    const sessionId = this.sessionId;
+    const signal = this.abort.signal;
+    const task = this.operations.then(() => {
+      if (signal.aborted || generation !== this.generation) throw new Error('加载已取消');
+      if (requiresLoaded && !this.loaded) throw new Error('高模尚未成功加载');
+      return run(signal);
+    });
+    this.operations = task.catch(() => undefined);
+    void task.then(() => this.reply(requestId, identity, sessionId, generation), error => {
+      this.reply(requestId, identity, sessionId, generation, error instanceof Error ? error.message : '详情操作失败');
+    });
+  }
+
+  private reply(requestId: string, identity: DigitalTwinInspectionIdentity, sessionId: string, generation: number, error?: string): void {
+    if (this.disposed || generation !== this.generation || sessionId !== this.sessionId || !this.matches(identity)) return;
+    this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION, sessionId,
+      type: 'viewer.inspectionResult', requestId, payload: { loadId: identity.loadId, assetCode: identity.assetCode },
+      ...(error === undefined ? { ok: true } : { ok: false, error: (error || '详情操作失败').slice(0, 1024) }) });
+  }
+
+  private cancelSelection(): void {
+    this.selectionAbort?.abort();
+    this.selectionAbort = null;
+  }
+
+  private matches(identity: DigitalTwinInspectionIdentity): boolean {
+    return this.current?.loadId === identity.loadId && this.current.assetCode === identity.assetCode;
+  }
+
+  private postReady(): void {
+    if (!this.ready || !this.sessionId) return;
+    this.post({ channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: DIGITAL_TWIN_BRIDGE_VERSION,
+      sessionId: this.sessionId, type: 'viewer.ready', payload: { capabilities: [] } });
+  }
+
+  private post(message: DigitalTwinBridgeMessage | DigitalTwinInspectionMessage): void {
+    if (!this.disposed && this.origin && this.sessionId === message.sessionId) this.options.postToParent(message, this.origin);
+  }
+
+  private resetSession(): void {
+    this.cancelSelection();
+    this.abort?.abort();
+    this.abort = null;
+    this.generation++;
+    this.current = null;
+    this.loaded = false;
+    this.operations = Promise.resolve();
+    this.negotiated = false;
+    this.sessionId = null;
+    this.origin = null;
   }
 }

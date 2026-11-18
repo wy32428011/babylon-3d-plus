@@ -1070,6 +1070,7 @@ export class ManualRoamRuntime {
       if(Object.keys(turnMotion.turnDurations).length) {
         this.turnState=stepManualRoamTurnState(this.turnState,{deltaSeconds,controlYaw:this.kinematicState.yaw,
           horizontalSpeed,grounded:this.kinematicState.grounded,orientToMovement,movementYaw,
+          gaitPoseActive: horizontalSpeed <= .03 && this.skeletalAnimator.hasGaitPose(),
           fly:this.snapshot.locomotionMode==='fly',...turnMotion});
         this.applyAvatarFacing(this.avatarBaseYaw+this.turnState.visualYaw-this.kinematicState.yaw);
       } else this.turnState=createManualRoamTurnState(this.kinematicState.yaw);
@@ -1081,7 +1082,13 @@ export class ManualRoamRuntime {
         grounded: this.kinematicState.grounded, jumped: this.frameJumped,
         fly: this.snapshot.locomotionMode === 'fly', sprint: input.sprint,
         walkSpeed: this.snapshot.config.walkSpeed, runSpeed: this.snapshot.config.runSpeed, worldScale: this.avatarVisualRoot.scaling.y,
-        turn:this.turnState.turnClip?{clip:this.turnState.turnClip,progress:this.turnState.turnProgress,weight:this.turnState.turnWeight}:undefined,
+        turn: this.turnState.turnClip ? {
+          clip: this.turnState.turnClip,
+          progress: this.turnState.turnProgress,
+          weight: this.turnState.turnWeight,
+          angleScale: Math.abs(this.turnState.targetYaw - this.turnState.startYaw)
+            / (this.turnState.turnClip.endsWith('180') ? Math.PI : Math.PI / 2),
+        } : undefined,
       });
       return;
     }
@@ -1118,11 +1125,19 @@ export class ManualRoamRuntime {
 
   private updateFootIK(): void {
     if(!this.snapshot.enabled||this.disposed||!this.footIK||!this.skeletalAnimator)return;
-    this.footIK.update({dt:this.options.engine.getDeltaTime()/1000,grounded:this.kinematicState.grounded,
-      fly:this.snapshot.locomotionMode==='fly',teleported:this.motionResetThisFrame||Boolean(this.resetTransition),
-      footContacts:this.skeletalAnimator.getFootContacts(),speed:Math.hypot(this.frameVelocity.x,this.frameVelocity.z),
-      strideScale:this.skeletalAnimator.getStrideScale(),
-      turning:Math.hypot(this.frameVelocity.x,this.frameVelocity.z)>.03&&Math.abs(this.turnState.deltaYaw)>.08});
+    const speed = Math.hypot(this.frameVelocity.x, this.frameVelocity.z);
+    this.footIK.update({
+      dt: this.options.engine.getDeltaTime() / 1000,
+      grounded: this.kinematicState.grounded,
+      fly: this.snapshot.locomotionMode === 'fly',
+      teleported: this.motionResetThisFrame || Boolean(this.resetTransition),
+      footContacts: this.skeletalAnimator.getFootContacts(),
+      speed,
+      gaitPoseActive: speed <= .03 && this.skeletalAnimator.hasGaitPose(),
+      strideScale: this.skeletalAnimator.getStrideScale(),
+      movementYawRemaining: this.turnState.deltaYaw,
+      turning: speed > .03 && Math.abs(this.turnState.deltaYaw) > .08,
+    });
   }
 
   private stopCurrentAnimation(): void {

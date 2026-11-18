@@ -3468,16 +3468,20 @@
       "disposition": "asset-required",
       "domain": null,
       "command": "node scripts/smoke-real-project-loading.mjs --paired --url <中台地址> --project-id <项目ID> --freeze-scene <scene> --read-only-manifest <manifest> --resolved-baseline <baseline> --budget-file <budget> --cold 5 --warm 5 --output <全新output>",
-      "purpose": "真实Home打开的只读元数据前置、SOURCE/已批准resolved/实际图片字节冻结及冷暖配对；显式verification-only仅单次收尾验证、不代表性能验收",
+      "purpose": "真实Home打开的只读元数据前置、SOURCE/已批准resolved/实际图片字节冻结及冷暖配对；等待首帧后的模型库同步稳定，按生产规则迁移场景后对比；显式verification-only仅单次收尾验证、不代表性能验收",
       "prerequisites": [
         "先显式POST-only前置冻结可信URL/请求；未知请求与输入漂移拒绝，无上传/发布/invoke或生产MQTT消息",
         "完整构建与bundled Electron；独立userData/workspace，同一来源/硬件/分辨率，正式窗口禁止profile或并行GPU/构建/扫描",
-        "原SOURCE和已批准resolved严格分别校验，活跃logical图片需实际参数URL到原字节SHA；单次verification-only不作五冷五暖或30%通过"
+        "原SOURCE字节与按生产规则迁移后的预期分别校验，并独立校验已批准resolved；活跃logical图片需实际参数URL到原字节SHA；单次verification-only不作五冷五暖或30%通过"
       ],
       "evidence": [
         {
           "line": 27,
           "text": "const p0Mode = values.paired || values['prepare-read-only-manifest'];"
+        },
+        {
+          "line": 93,
+          "text": "// 首帧后的自动全库事务也是这次打开的一部分；再次进入准备状态必须撤销瞬时 ready。"
         },
         {
           "line": 464,
@@ -3486,6 +3490,10 @@
         {
           "line": 508,
           "text": "async function runSceneOpenP0() {"
+        },
+        {
+          "line": 545,
+          "text": "assert.ok(sceneVersions.isSupportedSceneFileVersion(expectedDocument.version),'冻结 SOURCE 格式不受当前生产迁移支持');"
         }
       ]
     },
@@ -4350,7 +4358,7 @@
     },
     {
       "file": "scripts/test-entry-manifest.json",
-      "sha256": "238798d0c9a01147ee6205112cc375ca497f34dc4fe1c0bfd7428809fbd2fd7a",
+      "sha256": "89a65c52f902c88e5f1f53a1b2af2c7ed6731ee4df48a563b5c7d9b3465ebaa2",
       "disposition": "metadata",
       "domain": null,
       "command": "npm run test:entries",
@@ -4369,7 +4377,7 @@
           "line": 2
         }
       ],
-      "reviewNote": "保留既有登记；2026-10-26仅追加六个原生天空入口，逐一核对命令与GPU/Electron/Blender前置，不把登记视为运行通过。同日Babylon专项追加两个定向入口，Electron入口须构建并显式提供已有开发服务，非GI夹具不证明工厂或GI性能。"
+      "reviewNote": "保留既有登记；2026-10-26仅追加六个原生天空入口，逐一核对命令与GPU/Electron/Blender前置，不把登记视为运行通过。同日Babylon专项追加两个定向入口，Electron入口须构建并显式提供已有开发服务，非GI夹具不证明工厂或GI性能。2026-11-11追加详情绑定、表单浏览器、硬件WebGL和跨仓桥接独立入口；图形检查须串行，跨仓检查需显式指定中台源码，夹具不代表真实业务资源。2026-11-11在原test:inspection入口增加平台固定版本协议及自包含资源校验；保持独立进程和GPU分离。"
     },
     {
       "file": "scripts/test-groups.mjs",
@@ -6510,11 +6518,11 @@
     },
     {
       "file": "tests/digitalTwin/viewerCapabilitiesBuild.test.mjs",
-      "sha256": "743d9c7752d32fbabf8715b326e493125f18bcfd57b689c5028fe68dbb0fc0fc",
+      "sha256": "4197df62b76abb3099c76ab949d071345f77ec8745dea04d45afd25c9ea2e294",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/digitalTwin/viewerCapabilitiesBuild.test.mjs",
-      "purpose": "能力清单使用最终落盘字节并覆盖入口引用的共享 JS chunk",
+      "purpose": "能力清单使用最终落盘字节并覆盖场景和高模详情入口及共享 JS chunk；检验缺失和篡改",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
         "Vite 构建或 SSR；保留源码模块图、临时目录与 teardown"
@@ -6581,7 +6589,7 @@
     },
     {
       "file": "tests/editor/alarmManager.test.mjs",
-      "sha256": "61b3d5bc3b641b576b503606778410e7610d8fd0c852853e73f675cf0c09edac",
+      "sha256": "c277ff624e09a1c281fffccd5226a051eeb9940b55ce7bef8d8defc2c3b87ecc",
       "disposition": "node-contract",
       "domain": "effects",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/alarmManager.test.mjs",
@@ -7456,7 +7464,7 @@
     },
     {
       "file": "tests/editor/clickEventBinding.test.mjs",
-      "sha256": "e828881356769c33601b574097947d1778f9ca7b722f1a87991725cd52e55ec2",
+      "sha256": "bebb0cd3a18d65682049be55d828cc5e4683765a39e05e0775bea4f89dda782e",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/clickEventBinding.test.mjs",
@@ -7483,7 +7491,7 @@
           "text": "const server = await createP4SsrTestModules(["
         }
       ],
-      "reviewNote": "24文件独立复核：63原assert调用逐字节保持，原ssrLoadModule入口保留并明确纳入同次真实模块图；业务test由根统一串行执行，登记不表示通过",
+      "reviewNote": "24文件独立复核：63原assert调用逐字节保持，原ssrLoadModule入口保留并明确纳入同次真实模块图；业务test由根统一串行执行，登记不表示通过2026-11-11补充普通低模deviceType点击和资产创建/序列化/刷新/生成器往返，仍使用隔离SSR模块图，无GPU和业务工程输入。",
       "moduleGraph": [
         [
           "/src/editor/model/clickEventBinding.ts"
@@ -9689,34 +9697,26 @@
     },
     {
       "file": "tests/editor/sceneOpenConfirmation.test.ts",
-      "sha256": "5d40041f2c0ed1a71f950566c1dddddb60ed5455f2d8c3c104c96028e00daf8e",
+      "sha256": "b2e2d060c3135b123969f5106984e34c77237ced84320ab6259822e548f072b5",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/sceneOpenConfirmation.test.ts",
-      "purpose": "文件选择器和最近文件均在反序列化通过后确认发布归属，确认完成前不提交场景",
+      "purpose": "文件选择器和最近文件在反序列化通过后确认发布归属，确认后失效的请求只撤销自己的令牌",
       "prerequisites": [
-        "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过"
+        "安装锁定依赖，在独立 Node 进程中执行编辑器场景打开动作和主进程归属逻辑，使用内存文件系统夹具。"
       ],
       "evidence": [
         {
-          "line": 1,
-          "text": "import assert from 'node:assert/strict';"
+          "line": 70,
+          "text": "test('文件选择器和最近文件均在反序列化通过后确认发布归属，确认完成前不提交场景', async () => {"
         },
         {
-          "line": 2,
-          "text": "import { readFile } from 'node:fs/promises';"
+          "line": 170,
+          "text": "const accepted = await scope.confirmScenePublishScopeFile(f.confirmations[0]);"
         },
         {
-          "line": 3,
-          "text": "import { stripTypeScriptTypes } from 'node:module';"
-        },
-        {
-          "line": 4,
-          "text": "import { runInNewContext } from 'node:vm';"
-        },
-        {
-          "line": 5,
-          "text": "import test from 'node:test';"
+          "line": 200,
+          "text": "if (newer === 'pending') assert.equal(await scope.confirmScenePublishScopeFile(nextToken!), true);"
         }
       ]
     },
@@ -12961,22 +12961,22 @@
       "file": "tests/runtime/hybridShadows.test.ts",
       "disposition": "node-contract",
       "domain": "effects",
-      "command": "npm run test:lighting-optimization",
-      "purpose": "光照预算、会话、产物或查询的定向合同回归",
+      "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/hybridShadows.test.ts",
+      "purpose": "检查原生阴影的投射物分类、整图复用、失效及贴图字节统计",
       "prerequisites": [
-        "安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。"
+        "安装锁定依赖，使用独立 Node 进程和 Babylon NullEngine。"
       ],
       "evidence": [
         {
-          "line": 1,
-          "text": "import assert from 'node:assert/strict';"
+          "line": 7,
+          "text": "import { SceneShadowRuntime } from '../../src/runtime/babylon/SceneShadowRuntime.ts';"
         },
         {
-          "line": 2,
-          "text": "import test from 'node:test';"
+          "line": 241,
+          "text": "assert.equal(metrics.textureBytes, metrics.cacheBytes, '整图复用没有独立深度副本');"
         }
       ],
-      "sha256": "8032ec53f270ad6750cc903c93c2da23376daef0461dc3575f1faa49c5cb0cf4"
+      "sha256": "6885a5e258987157ea1e783dbc057d2a446f8a86e28e3b243914dcb0e5c805a7"
     },
     {
       "file": "tests/runtime/lightingDraftPreviewController.test.mjs",

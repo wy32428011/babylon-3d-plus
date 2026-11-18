@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import type { SetStateAction } from 'react';
+import ts from 'typescript';
 import { controlCondition, evaluateSourceExpression } from '../helpers/playerContractTestHelpers.ts';
 
 import {
@@ -119,6 +121,51 @@ test('发布覆盖层绑定器通过 pointermove 捕获追加鼠标键并在释�
   assert.equal(toggleCount, 2);
 });
 
+test('PlayerApp 组合键按实际显隐切换状态层，只关闭当前异常提示', t => {
+  const canvas = new EventTarget();
+  const windowTarget = new EventTarget();
+  const bindChord = t.mock.fn(bindStatusOverlayPointerChordToggle);
+  const changeFloatingControl = t.mock.fn();
+  const statusOverlayControlRef = { current: { showOverlay: true, runtimeIssueKey: 'mqtt-offline' } };
+  const state = { visible: false, dismissedIssue: null as string | null };
+  const mount = (phase: string, isDigitalTwin: boolean) => evaluateSourceExpression(playerSource,
+    node => ts.isArrowFunction(node) && ts.isCallExpression(node.parent)
+      && node.parent.expression.getText() === 'useEffect'
+      && node.body.getText().includes('bindStatusOverlayPointerChordToggle'), {
+      canvasRef: { current: canvas }, window: windowTarget, phase, isDigitalTwin, statusOverlayControlRef,
+      bindStatusOverlayPointerChordToggle: bindChord,
+      updateOpenedDigitalTwinFloatingControl: changeFloatingControl,
+      setStatusOverlayVisible: (next: SetStateAction<boolean>) => {
+        state.visible = typeof next === 'function' ? next(state.visible) : next;
+      },
+      setDismissedStatusIssue: (next: SetStateAction<string | null>) => {
+        state.dismissedIssue = typeof next === 'function' ? next(state.dismissedIssue) : next;
+      },
+    })();
+  const pressChord = () => {
+    canvas.dispatchEvent(createPointerEvent('pointerdown', 3));
+    windowTarget.dispatchEvent(createPointerEvent('pointerup', 0));
+  };
+
+  mount('loading', true);
+  mount('blocked', true);
+  mount('ready', false);
+  assert.equal(bindChord.mock.callCount(), 0);
+  const cleanup = mount('ready', true);
+  // 用户未主动开启状态层，但运行异常令其可见，此时按键应关闭提示。
+  pressChord();
+  assert.deepEqual(state, { visible: false, dismissedIssue: 'mqtt-offline' });
+  statusOverlayControlRef.current = { showOverlay: false, runtimeIssueKey: 'mqtt-offline' };
+  pressChord();
+  assert.deepEqual(state, { visible: true, dismissedIssue: null });
+
+  cleanup();
+  statusOverlayControlRef.current = { showOverlay: true, runtimeIssueKey: 'environment-error' };
+  pressChord();
+  assert.deepEqual(state, { visible: true, dismissedIssue: null });
+  assert.equal(changeFloatingControl.mock.callCount(), 0);
+});
+
 test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥', () => {
   assert.match(
     playerSource,
@@ -131,10 +178,6 @@ test('PlayerApp 的数字孪生浮窗只能由大屏命令打开并保持互斥'
   assert.match(
     playerSource,
     /const updateOpenedDigitalTwinFloatingControl = useCallback\([\s\S]*?openedDigitalTwinFloatingControlRef\.current = control;[\s\S]*?setOpenedDigitalTwinFloatingControl\(control\);/,
-  );
-  assert.match(
-    playerSource,
-    /return bindStatusOverlayPointerChordToggle\(canvas, window, \(\) => \{\s*setStatusOverlayVisible\(\(visible\) => !visible\);\s*\}\);/,
   );
   assert.match(
     playerSource,

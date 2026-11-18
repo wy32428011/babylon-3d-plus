@@ -1,5 +1,8 @@
-import * as B from '@babylonjs/core';
-import '@babylonjs/loaders/glTF';
+import type { AbstractMesh, ArcRotateCamera, Engine, LinesMesh, Matrix, Mesh, PointerInfo, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { PointerEventTypes } from '@babylonjs/core/Events/pointerEvents.js';
+import { HighlightLayer } from '@babylonjs/core/Layers/highlightLayer.js';
+import '@babylonjs/loaders/glTF/index.js';
+import { BabylonCore as B } from '../../runtime/babylon/babylonScriptRuntimeNamespace';
 import { createAuthoringGeometry } from './portableGeometry';
 import { createAuthoringAppearance } from './portableAppearance';
 import { evaluateExpression, resolveParameterValues, validateProject } from './expression';
@@ -14,15 +17,15 @@ type Callbacks = {
   onIssues: (issues: AuthoringIssue[]) => void;
   onBusy: (busy: boolean) => void;
 };
-const tuple = (v: B.Vector3): Vec3 => [v.x, v.y, v.z];
+const tuple = (v: Vector3): Vec3 => [v.x, v.y, v.z];
 const vector = (v: Vec3) => B.Vector3.FromArray(v);
 
 export class AuthoringViewport {
-  readonly engine: B.Engine;
-  readonly scene: B.Scene;
-  readonly camera: B.ArcRotateCamera;
-  private root: B.TransformNode | null = null;
-  private entityRoot: B.TransformNode | null = null;
+  readonly engine: Engine;
+  readonly scene: Scene;
+  readonly camera: ArcRotateCamera;
+  private root: TransformNode | null = null;
+  private entityRoot: TransformNode | null = null;
   private geometry: ReturnType<typeof createAuthoringGeometry> | null = null;
   private appearance: ReturnType<typeof createAuthoringAppearance> | null = null;
   private legacy: Awaited<ReturnType<typeof createLegacyPreview>> = null;
@@ -40,16 +43,16 @@ export class AuthoringViewport {
   private lastApplied: { project: AuthoringProject; values: Record<string, any> } | null = null;
   private faceSelection: Record<string, number[]> = {};
   private frameError = '';
-  private highlight: B.HighlightLayer;
+  private highlight: HighlightLayer;
   private resizeObserver: ResizeObserver;
-  private meshIds = new Map<B.AbstractMesh, string>();
-  private layerMasks = new WeakMap<B.AbstractMesh, number>();
+  private meshIds = new Map<AbstractMesh, string>();
+  private layerMasks = new WeakMap<AbstractMesh, number>();
   private down: { x: number; y: number; pick: PickedSurface | null } | null = null;
   private polygon: { anchor: SurfaceAnchor; points: Vec2[] } | null = null;
-  private guide: B.LinesMesh | null = null;
-  private faceOverlay: B.Mesh | null = null;
-  private floor: B.Mesh;
-  private grid: B.LinesMesh;
+  private guide: LinesMesh | null = null;
+  private faceOverlay: Mesh | null = null;
+  private floor: Mesh;
+  private grid: LinesMesh;
   private keyHandler: (e: KeyboardEvent) => void;
 
   constructor(private canvas: HTMLCanvasElement, private callbacks: Callbacks) {
@@ -75,7 +78,7 @@ export class AuthoringViewport {
     floorMaterial.diffuseColor = new B.Color3(0.81, 0.85, 0.89);
     floorMaterial.specularColor = B.Color3.Black();
     this.floor.material = floorMaterial;
-    const lines: B.Vector3[][] = [];
+    const lines: Vector3[][] = [];
     for (let i = -10; i <= 10; i++) {
       lines.push([new B.Vector3(i / 10, 0, -1), new B.Vector3(i / 10, 0, 1)]);
       lines.push([new B.Vector3(-1, 0, i / 10), new B.Vector3(1, 0, i / 10)]);
@@ -83,7 +86,7 @@ export class AuthoringViewport {
     this.grid = B.MeshBuilder.CreateLineSystem('authoring-grid', { lines }, this.scene);
     this.grid.isPickable = false;
     this.grid.color = new B.Color3(0.64, 0.71, 0.77);
-    this.highlight = new B.HighlightLayer('authoring-selection', this.scene);
+    this.highlight = new HighlightLayer('authoring-selection', this.scene);
     this.highlight.innerGlow = false;
     this.highlight.blurHorizontalSize = 0.6;
     this.highlight.blurVerticalSize = 0.6;
@@ -222,7 +225,7 @@ export class AuthoringViewport {
     this.meshIds.clear();
     const context = this.geometry?.getContext();
     if (!context) return;
-    for (const [id, mesh] of context.meshes as Map<string, B.AbstractMesh>) this.meshIds.set(mesh, id);
+    for (const [id, mesh] of context.meshes as Map<string, AbstractMesh>) this.meshIds.set(mesh, id);
     for (const item of context.generated ?? []) this.meshIds.set(item.mesh, item.sourceId);
   }
 
@@ -238,11 +241,11 @@ export class AuthoringViewport {
     if (!context || !this.root) return;
     const positions: number[] = [], indices: number[] = [];
     for (const [id, selected] of Object.entries(faces)) {
-      const mesh = context.getMesh(id) as B.AbstractMesh | undefined;
+      const mesh = context.getMesh(id) as AbstractMesh | undefined;
       if (!mesh) continue;
       const source = mesh.getVerticesData(B.VertexBuffer.PositionKind), sourceIndices = mesh.getIndices();
       if (!source || !sourceIndices) continue;
-      const matrix = context.getModelMatrix(mesh) as B.Matrix;
+      const matrix = context.getModelMatrix(mesh) as Matrix;
       for (const face of selected) {
         if (face < 0 || face * 3 + 2 >= sourceIndices.length) continue;
         const triangle = [0, 1, 2].map(i => B.Vector3.TransformCoordinates(B.Vector3.FromArray(source, Number(sourceIndices[face * 3 + i]) * 3), matrix));
@@ -264,7 +267,7 @@ export class AuthoringViewport {
       if (mesh.isDisposed()) continue;
       let mask = this.layerMasks.get(mesh);
       if (mask === undefined) {
-        const source = this.geometry?.getContext().getMesh(id) as B.AbstractMesh | undefined;
+        const source = this.geometry?.getContext().getMesh(id) as AbstractMesh | undefined;
         mask = source && source !== mesh ? this.layerMasks.get(source) ?? source.layerMask : mesh.layerMask;
         this.layerMasks.set(mesh, mask);
       }
@@ -284,7 +287,7 @@ export class AuthoringViewport {
     this.frame(selected.length ? selected : [...this.meshIds.keys()]);
   }
   frameAll(): void { this.frame([...this.meshIds.keys()]); }
-  private frame(meshes: B.AbstractMesh[]): void {
+  private frame(meshes: AbstractMesh[]): void {
     const valid = meshes.filter(mesh => mesh.getTotalVertices() > 0 && !mesh.isDisposed());
     if (!valid.length) return;
     let min = new B.Vector3(Infinity, Infinity, Infinity), max = new B.Vector3(-Infinity, -Infinity, -Infinity);
@@ -317,7 +320,7 @@ export class AuthoringViewport {
     const mesh = hit.pickedMesh;
     const nodeId = this.meshIds.get(mesh)!;
     const context = this.geometry!.getContext();
-    const baseMesh = context.getMesh(nodeId) as B.AbstractMesh;
+    const baseMesh = context.getMesh(nodeId) as AbstractMesh;
     const positions = baseMesh.getVerticesData(B.VertexBuffer.PositionKind);
     const indices = baseMesh.getIndices();
     if (!positions || !indices) return null;
@@ -330,7 +333,7 @@ export class AuthoringViewport {
     if (Math.abs(denom) < 1e-20) return null;
     const b = (d11 * B.Vector3.Dot(v2, v0) - d01 * B.Vector3.Dot(v2, v1)) / denom;
     const c = (d00 * B.Vector3.Dot(v2, v1) - d01 * B.Vector3.Dot(v2, v0)) / denom;
-    const matrix = context.getModelMatrix(baseMesh) as B.Matrix;
+    const matrix = context.getModelMatrix(baseMesh) as Matrix;
     const modelPoints = p.map(point => B.Vector3.TransformCoordinates(point, matrix));
     const normal = B.Vector3.Cross(modelPoints[1].subtract(modelPoints[0]), modelPoints[2].subtract(modelPoints[0])).normalize();
     const worldNormal = hit.getNormal(true, true);
@@ -342,22 +345,22 @@ export class AuthoringViewport {
     } };
   }
 
-  private handlePointer(info: B.PointerInfo): void {
+  private handlePointer(info: PointerInfo): void {
     const e = info.event as PointerEvent;
-    if (e.button > 0 && info.type !== B.PointerEventTypes.POINTERMOVE) return;
-    if (info.type === B.PointerEventTypes.POINTERDOWN) {
+    if (e.button > 0 && info.type !== PointerEventTypes.POINTERMOVE) return;
+    if (info.type === PointerEventTypes.POINTERDOWN) {
       this.canvas.focus();
       this.down = { x: this.scene.pointerX, y: this.scene.pointerY, pick: this.pick(this.scene.pointerX, this.scene.pointerY) };
       if (this.tool !== 'select') this.camera.detachControl();
     }
-    if (info.type === B.PointerEventTypes.POINTERMOVE && this.down?.pick && this.tool === 'rectangle') {
+    if (info.type === PointerEventTypes.POINTERMOVE && this.down?.pick && this.tool === 'rectangle') {
       const current = this.pick(this.scene.pointerX, this.scene.pointerY);
       if (current) {
         const xy = this.toPlane(current.anchor.point, this.down.pick.anchor);
         this.drawGuide(this.down.pick.anchor, [[0, 0], [xy[0], 0], xy, [0, xy[1]], [0, 0]]);
       }
     }
-    if (info.type !== B.PointerEventTypes.POINTERUP || !this.down) return;
+    if (info.type !== PointerEventTypes.POINTERUP || !this.down) return;
     const down = this.down; this.down = null;
     this.camera.attachControl(this.canvas, true);
     const picked = this.pick(this.scene.pointerX, this.scene.pointerY);
@@ -411,10 +414,10 @@ export class AuthoringViewport {
     let minimum = new B.Vector3(Infinity, Infinity, Infinity), maximum = new B.Vector3(-Infinity, -Infinity, -Infinity);
     let found = false;
     for (const id of ids) {
-      const mesh = context.getMesh(id) as B.AbstractMesh | undefined;
+      const mesh = context.getMesh(id) as AbstractMesh | undefined;
       const positions = mesh?.getVerticesData(B.VertexBuffer.PositionKind);
       if (!mesh || !positions) continue;
-      const matrix = context.getModelMatrix(mesh) as B.Matrix;
+      const matrix = context.getModelMatrix(mesh) as Matrix;
       for (let i = 0; i < positions.length; i += 3) {
         const point = B.Vector3.TransformCoordinates(B.Vector3.FromArray(positions, i), matrix);
         minimum = B.Vector3.Minimize(minimum, point); maximum = B.Vector3.Maximize(maximum, point);

@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -18,6 +19,7 @@ export type DataPlatformModelSyncDescriptor = {
   kind: DataPlatformModelKind;
   resourceId: string;
   displayName: string;
+  deviceType?: string;
   packageRelativePath: string;
   /** 远端为运行时资源提供的稳定版本指纹；null 表示旧接口，必须下载后比较内容哈希。 */
   contentFingerprint: string | null;
@@ -145,18 +147,20 @@ export function buildDataPlatformModelPlan(options: {
     if (!canReuseRuntime) runtimeChanged.add(key);
 
     if (!existing) continue;
-    if (existing.displayName !== descriptor.displayName || !thumbnailMatches) {
+    if (existing.displayName !== descriptor.displayName || existing.deviceType !== descriptor.deviceType || !thumbnailMatches) {
       metadataChanged.add(key);
     }
     if (!canReusePackage) continue;
 
     const descriptorChanged = existing.displayName !== descriptor.displayName
+      || existing.deviceType !== descriptor.deviceType
       || existing.contentFingerprint !== descriptor.contentFingerprint
       || existing.thumbnailFingerprint !== descriptor.thumbnailFingerprint;
     const nextEntry: DataPlatformModelIndexEntry = descriptorChanged
       ? {
           ...existing,
           displayName: descriptor.displayName,
+          deviceType: descriptor.deviceType,
           contentFingerprint: descriptor.contentFingerprint,
           thumbnailFingerprint: descriptor.thumbnailFingerprint,
           syncedAt,
@@ -260,6 +264,7 @@ function normalizeDescriptor(value: DataPlatformModelSyncDescriptor | Record<str
     kind,
     resourceId,
     displayName,
+    ...modelDeviceTypeField(value.deviceType),
     packageRelativePath,
     contentFingerprint: normalizeOptionalSha256(value.contentFingerprint, 'contentFingerprint'),
     thumbnailFingerprint: normalizeOptionalSha256(value.thumbnailFingerprint, 'thumbnailFingerprint'),

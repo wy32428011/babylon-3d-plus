@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test, { after } from 'node:test';
 import { createServer } from 'vite';
-import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, MeshBuilder, NullEngine, Scene, SceneLoader, Skeleton, Vector3 } from '@babylonjs/core';
+import { Animation, AnimationGroup, ArcRotateCamera, AssetContainer, LoadAssetContainerAsync, MeshBuilder, NullEngine, Scene, SceneLoader, Skeleton, Vector3 } from '@babylonjs/core';
 
 const server = await createServer({ appType: 'custom', configFile: false, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true } });
 const { ManualRoamRuntime } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamRuntime.ts');
@@ -9,6 +10,107 @@ const { EditorManualRoamSpawnRuntime } = await server.ssrLoadModule('/src/runtim
 const { createManualRoamSpawnEntity } = await server.ssrLoadModule('/src/editor/model/SceneDocument.ts');
 const { ManualRoamAvatarAnimator } = await server.ssrLoadModule('/src/runtime/roam/ManualRoamAvatarAnimator.ts');
 after(() => server.close());
+
+test('默认人物实际换向时支撑鞋朝向稳定，部分转身仍交替抬脚', async (t) => {
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const canvas = new EventTarget();
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', {
+    value: Object.assign(new EventTarget(), { baseURI: 'https://assets.test/' }), configurable: true,
+  });
+  const asset = (file: string) => readFile(new URL(`../../public/manual-roam/${file}`, import.meta.url));
+  const load = async (file: string) => LoadAssetContainerAsync(new Uint8Array(await asset(file)), scene, {
+    pluginExtension: '.glb', pluginOptions: { gltf: { animationStartMode: 0, skipMaterials: true } },
+  });
+  const rad = Math.PI / 180;
+  const difference = (a: number, b: number) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b))) / rad;
+  const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas, preloadAvatar: false,
+    resolveSpawnPose: () => ({ position: { x: 0, y: 0, z: 0 }, yaw: 0 }), setOrbitControlsEnabled() {} });
+  try {
+    // 只替换网络资源边界，保留真实输入、位移、GLB绑定、动画混合、IK与场景帧顺序。
+    const avatar = await load('EQ_People_rigged_v2.glb');
+    const manifest = await asset('locomotion-v2.manifest.json');
+    t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar);
+    t.mock.method(globalThis, 'fetch', async () => new Response(manifest.toString()));
+    const create = ManualRoamAvatarAnimator.create.bind(ManualRoamAvatarAnimator);
+    t.mock.method(ManualRoamAvatarAnimator, 'create', (s, container, options) => create(s, container, {
+      ...options, loadContainer: () => load('locomotion-v2.glb'),
+    }));
+    t.mock.method(engine, 'getDeltaTime', () => 1000 / 60);
+    const ready = new Promise<void>(resolve => {
+      const off = runtime.subscribe(() => {
+        if (runtime.getSnapshot().avatarAnimationMode !== 'loading') { off(); resolve(); }
+      });
+    });
+    runtime.setEnabled(true);
+    await ready;
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'shared-skeleton');
+    const feet = (['left', 'right'] as const).map(side => {
+      const name = side === 'left' ? 'Left' : 'Right';
+      const foot = avatar.transformNodes.find(n => n.name === name + 'Foot')!;
+      const toe = avatar.transformNodes.find(n => n.name === name + 'ToeBase')!;
+      const localUp = Vector3.FromArray(foot.metadata.gltf.extras.manualRoamSoleUp);
+      return { side, pose() {
+        const world = foot.computeWorldMatrix(true);
+        const up = Vector3.TransformNormal(localUp, world).normalize();
+        const axis = toe.computeWorldMatrix(true).getTranslation().subtract(world.getTranslation());
+        const forward = axis.subtract(up.scale(Vector3.Dot(axis, up))).normalize();
+        return { yaw: Math.atan2(forward.x, forward.z), pitch: Math.asin(forward.y) };
+      } };
+    });
+    for (const [name, turn, maxDrift] of [
+      ['持续转弯', 90, 8], ['向左换向', -90, 8], ['向右换向', 90, 8], ['急反向', 180, 22],
+      ['原地转身', 45, 5], ['原地转身', 90, 7], ['停步转身', 90, 8],
+    ] as const) {
+      runtime.setEnabled(false); runtime.setEnabled(true);
+      canvas.dispatchEvent(Object.assign(new Event('pointerdown'), { pointerType: 'mouse', button: 2, pointerId: 1 }));
+      const planted = feet.map(() => ({ id: -1, yaw: 0, previousYaw: 0, samples: 0, minContact: 1, pitch: 0 }));
+      // 第28帧正处于抬跟，用这一帧停步可复现单帧俯仰跳变。
+      const start = name === '停步转身' ? 28 : 45;
+      let drift = 0, pitchStep = 0, yawStep = 0;
+      for (let tick = 0; tick < start + 75; tick++) {
+        const turning = tick >= start;
+        const standing = name === '原地转身' || (name === '停步转身' && turning);
+        const curve = name === '持续转弯';
+        const heading = turning && !curve ? turn * rad : 0;
+        runtime.setVirtualMovement(standing ? 0 : Math.sin(heading), standing ? 0 : Math.cos(heading));
+        const look = standing && tick === start ? turn : curve && turning && tick < start + 45 ? 2 : 0;
+        if (look) canvas.dispatchEvent(Object.assign(new Event('pointermove'), { pointerType: 'mouse',
+          pointerId: 1, buttons: 2, movementX: look * rad / runtime.getSnapshot().config.mouseSensitivity, movementY: 0 }));
+        scene.render();
+        if (tick < start - 1) continue;
+        const locks = runtime.footIK.getDebugState(), contacts = runtime.skeletalAnimator.getFootContacts();
+        feet.forEach(({ side, pose }, i) => {
+          const foot = pose(), track = planted[i], lock = locks[side];
+          if (lock.locked && lock.lockId === track.id) {
+            drift = Math.max(drift, difference(foot.yaw, track.yaw)); track.samples++;
+          } else track.yaw = foot.yaw;
+          track.id = lock.locked ? lock.lockId : -1;
+          if (turning) {
+            pitchStep = Math.max(pitchStep, difference(foot.pitch, track.pitch));
+            yawStep = Math.max(yawStep, difference(foot.yaw, track.previousYaw));
+          }
+          track.pitch = foot.pitch;
+          track.previousYaw = foot.yaw;
+          track.minContact = Math.min(track.minContact, contacts[side]);
+        });
+      }
+      const label = `${name} ${turn}°`;
+      assert.ok(difference(runtime.turnState.visualYaw, turn * rad) < .3, `${label}应完成实际转角`);
+      assert.ok(planted.every(foot => foot.samples >= 12 && foot.minContact < .1), `${label}双脚应实际交替摆动和连续支撑`);
+      assert.ok(drift < maxDrift, `${label}同一支撑脚内转动了${drift.toFixed(1)}°`);
+      assert.ok(pitchStep < 8, `${label}脚掌单帧俯仰跳变${pitchStep.toFixed(1)}°`);
+      assert.ok(yawStep < 8, `${label}脚掌单帧朝向跳变${yawStep.toFixed(1)}°`);
+    }
+  } finally {
+    runtime.dispose(); scene.dispose(); engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 function createAvatar(scene: Scene, name: string, animated = false) {
@@ -276,22 +378,33 @@ test('退出漫游暂停真实人物动画求值，重进恢复且反复启停�
   avatar.container.animationGroups.push(group);
   avatar.container.removeAllFromScene();
   t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(engine, 'getDeltaTime', () => 1000 / 60);
   const runtime = new ManualRoamRuntime({ scene, engine, camera, canvas: new EventTarget(),
-    avatarUrl: 'https://assets.test/animated.glb', setOrbitControlsEnabled: () => {} });
+    avatarUrl: 'https://assets.test/animated.glb', setOrbitControlsEnabled: () => {},
+    resolveSpawnPose: () => ({ position: { x: 0, y: 0, z: 0 }, yaw: 0 }) });
   try {
     await flush();
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'embedded');
     runtime.setEnabled(true);
     scene.render();
-    assert.equal(group.isPlaying, true);
-    const animatableCount = group.animatables.length;
-    assert.ok(animatableCount > 0, '动画必须有真实目标，不能用空 AnimationGroup 代替');
+    scene.render();
+    assert.ok(avatar.mesh.rotation.y > 0, '启用漫游后 Idle 应实际改变目标的姿态');
+    const [animatable] = group.animatables;
+    assert.ok(animatable, 'Idle 必须有真实的动画目标');
     for (let cycle = 0; cycle < 20; cycle += 1) {
       runtime.setEnabled(false);
-      assert.equal(group.isPlaying, false, '隐藏人物不能继续求值内置动画');
-      assert.ok(group.animatables.every(animatable => animatable.paused));
+      const frame = group.getCurrentFrame();
+      const yaw = avatar.mesh.rotation.y;
+      scene.render();
+      assert.ok(animatable.paused);
+      assert.equal(group.getCurrentFrame(), frame, '隐藏人物时停止采样');
+      assert.equal(avatar.mesh.rotation.y, yaw);
       runtime.setEnabled(true);
-      assert.equal(group.isPlaying, true);
-      assert.equal(group.animatables.length, animatableCount);
+      scene.render();
+      assert.ok(group.getCurrentFrame() > frame, '重进漫游后继续推进 Idle');
+      assert.ok(avatar.mesh.rotation.y > yaw, '恢复采样必须作用到真实目标');
+      assert.equal(group.animatables.length, 1);
+      assert.equal(group.animatables[0], animatable, '反复启停应复用同一个动画实例');
     }
     runtime.dispose();
     assert.equal(scene.animationGroups.includes(group), false);
@@ -311,10 +424,11 @@ test('碰撞阻止位移时保持待机，恢复移动后按实际位移驱动�
   Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
   Object.defineProperty(globalThis, 'document', { value: new EventTarget(), configurable: true });
   const avatar = createAvatar(scene, 'collision-avatar');
-  const groups = ['Idle', 'Walk'].map(name => {
+  const [idle, walk] = ['Idle', 'Walk'].map(name => {
     const group = new AnimationGroup(name, scene);
     const animation = new Animation(name, 'rotation.y', 30, Animation.ANIMATIONTYPE_FLOAT);
-    animation.setKeys([{ frame: 0, value: 0 }, { frame: 30, value: 0.1 }]);
+    const baseYaw = name === 'Idle' ? -0.2 : 0.2;
+    animation.setKeys([{ frame: 0, value: baseYaw }, { frame: 30, value: baseYaw + 0.1 }]);
     group.addTargetedAnimation(animation, avatar.mesh);
     avatar.container.animationGroups.push(group);
     return group;
@@ -337,17 +451,31 @@ test('碰撞阻止位移时保持待机，恢复移动后按实际位移驱动�
     });
     runtime.setVirtualMovement(0, 1);
     scene.render();
+    assert.equal(runtime.getSnapshot().avatarAnimationMode, 'embedded');
     assert.equal(runtime.getSnapshot().moving, false, '输入不能替代碰撞后的实际移动');
-    assert.equal(groups[0].isPlaying, true);
-    assert.equal(Boolean(groups[1].isPlaying), false);
+    assert.ok(avatar.mesh.rotation.y < 0, '受阻时人物保持 Idle 姿态');
+    assert.equal(walk.animatables.length, 0);
+
     displacementScale = 0.5;
     scene.render();
     assert.equal(runtime.getSnapshot().moving, true);
-    assert.equal(groups[1].isPlaying, true);
-    assert.ok(Math.abs(groups[1].speedRatio - 0.5) < 0.01, '步频应反映碰撞减速后的位移');
+    assert.ok(idle.animatables[0].weight > 0 && walk.animatables[0].weight > 0, '起步时两种姿态应渐变');
+    for (let tick = 0; tick < 11; tick++) scene.render(); // 地面过渡为 0.18 秒
+    assert.ok(avatar.mesh.rotation.y > 0, '过渡后应实际应用 Walk 的姿态');
+    const frame = walk.getCurrentFrame();
+    const sampleSeconds = 6 / 60;
+    for (let tick = 0; tick < 6; tick++) scene.render();
+    const playbackRate = (walk.getCurrentFrame() - frame) / (30 * sampleSeconds);
+    assert.ok(Math.abs(playbackRate - 0.5) < 0.01, `碰撞后实际步频应为半速，得到 ${playbackRate}`);
+
     displacementScale = 0;
+    const stoppedFrame = walk.getCurrentFrame();
     scene.render();
-    assert.equal(groups[0].isPlaying, true, '再次受阻时应回待机');
+    assert.equal(runtime.getSnapshot().moving, false);
+    assert.equal(walk.getCurrentFrame(), stoppedFrame, '再次受阻时渐出的步态不能继续推进');
+    for (let tick = 0; tick < 11; tick++) scene.render();
+    assert.equal(walk.animatables.length, 0);
+    assert.ok(avatar.mesh.rotation.y < 0, '再次受阻时应恢复 Idle 姿态');
   } finally {
     runtime.dispose(); scene.dispose(); engine.dispose();
     if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');

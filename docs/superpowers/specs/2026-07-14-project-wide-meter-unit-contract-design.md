@@ -149,5 +149,5 @@ unitScaleToMeters: number;
 - 普通 CAD 与大文件 CAD 得到一致的单位结果。
 - Inspector/日志能辨识模型或 CAD 的源单位与换算到米的结果。
 - 所有普通导入模型在 Inspector 显示只读实际尺寸；参数变化会刷新，旋转不改变数值，非均匀 scale 按实体轴生效。
-- 测量状态不进入序列化场景；`npm run smoke:units` 同时覆盖单位导入、模型测量和 12 个外部模型参数脚本的默认/自定义/旋转/非均匀缩放回归。
+- 测量状态不进入序列化场景。`npm run smoke:units` 默认用仓库内的虚拟输送线（米）、YZJ（厘米）、Shelf 与 Stacker（毫米）实测参数更新、实体旋转及非均匀缩放。另用 `npm run smoke:model-parameters:external` 核验上列 12 个业务包的实际源文件、资产副本、索引与参数脚本。[运行条件](../../test-groups.md#参数化模型米制验证)
 - `npm run typecheck`、单位 smoke、`npm run build`、`git diff --check` 通过。

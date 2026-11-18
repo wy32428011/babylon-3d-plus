@@ -1,3 +1,4 @@
+import { getModelAppearanceBaseMaterial } from './modelAppearanceMaterial.ts';
 import { resolveSceneSkyboxReference } from '../../../electron/shared/sceneSkyboxContract.ts';
 import { getSceneLightingConfig } from '../../../electron/shared/sceneLightingConfig.ts';
 import { lightingMaterialOverrideFingerprint, getLightingMaterialSourceOwner } from './lightingMaterialOverrides.ts';
@@ -118,7 +119,7 @@ export function captureLightingEnvironment(scene: Scene, document: SceneDocument
 
 /** 快速材质指纹用于运行中的静态失效检测，不读取 GPU 像素或遍历顶点。 */
 export function lightingMaterialFingerprint(mesh: AbstractMesh): string {
-  return lightingMaterialOverrideFingerprint(mesh.material, getLightingMaterialSourceOwner(mesh));
+  return lightingMaterialOverrideFingerprint(getModelAppearanceBaseMaterial(mesh), getLightingMaterialSourceOwner(mesh));
 }
 
 export async function captureRuntimeLightingInput(scene: Scene, document: SceneDocument, sources: readonly LightingRuntimeSource[], jobId: string,

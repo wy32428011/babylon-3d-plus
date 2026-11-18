@@ -1,0 +1,21 @@
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+html,
+body {
+  background: #111a26;
+}
+
+#root {
+  display: flex;
+}
+
+#root > .inspection-detail {
+  flex: 1;
+  min-height: 100vh;
+}

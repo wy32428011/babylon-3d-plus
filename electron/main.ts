@@ -5,7 +5,7 @@ import { app, BrowserWindow, dialog, protocol, safeStorage, shell } from 'electr
 import path from 'node:path';
 import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { isTrustedEditorUrl, trustEditorWindow } from './ipc/trustedEditorIpc.js';
+import { editorIpc, isTrustedEditorUrl, trustEditorWindow } from './ipc/trustedEditorIpc.js';
 import { guardEditorWindowClose, registerWindowCloseIpc } from './windowCloseGuard.js';
 import { registerAssetIpc } from './ipc/assetIpc.js';
 import { decodeAssetUrl, openAuthorizedAssetFile } from './ipc/assetRegistry.js';
@@ -13,6 +13,7 @@ import { registerEffectDataIpc } from './ipc/effectDataIpc.js';
 import { registerHistoryIpc } from './ipc/historyIpc.js';
 import { disposeLightingBakeJobs, registerLightingBakeIpc } from './ipc/lightingBakeIpc.js';
 import { registerDataPlatformIpc } from './ipc/dataPlatformIpc.js';
+import { listInspectionModels, listInspectionModelVersions, prepareInspectionModelVersion } from './ipc/inspectionModelService.js';
 import { disposeDataPlatformChartSync } from './ipc/dataPlatformChartSync.js';
 import { findDataPlatformDeepLink, parseDataPlatformDeepLink, type DataPlatformDeepLink } from './deepLink.js';
 import { disposeDataPlatformProjectTasks } from './ipc/dataPlatformProjectService.js';
@@ -21,6 +22,14 @@ import { disposeAllDigitalTwinPublishTasks, registerDigitalTwinPublishIpc } from
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
 import { resolveEditorAssetProtocolResponse } from './ipc/editorAssetCacheHeaders.js';
+
+function registerInspectionModelIpc(): void {
+  editorIpc.handle('inspection:list-models', () => listInspectionModels());
+  editorIpc.handle('inspection:list-model-versions', (_event, request: import('./types.js').InspectionModelVersionsRequest) =>
+    listInspectionModelVersions(request));
+  editorIpc.handle('inspection:prepare-model-version', (_event, request: import('./types.js').InspectionModelVersionRequest) =>
+    prepareInspectionModelVersion(request));
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -322,6 +331,7 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
   registerHistoryIpc();
   registerLightingBakeIpc();
   registerDataPlatformIpc();
+  registerInspectionModelIpc();
   registerAssetIpc();
   registerMqttIpc();
   registerDeploymentExportIpc();

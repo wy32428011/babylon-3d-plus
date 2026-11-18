@@ -1,7 +1,7 @@
 import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader.js';
 import type { AssetContainer, Scene, TransformNode, AnimationGroup } from '@babylonjs/core';
 import { AnimatorAvatar } from '@babylonjs/core/Animations/animatorAvatar.js';
-import '../babylon/babylonGltfLoader.js';
+import '../babylon/babylonGltfLoader.ts';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { MANUAL_ROAM_RIG_PROFILE, MANUAL_ROAM_RIG_PROFILE_V2, getManualRoamRigProfile, prepareManualRoamReferencePose, validateManualRoamAvatarRig, validateManualRoamRigNodes, validateManualRoamRestCompatibility } from './manualRoamAvatarRig.ts';
 import { MANUAL_ROAM_CLIPS, MANUAL_ROAM_TURN_CLIPS, createManualRoamAnimationState, stepManualRoamAnimationState, resolveManualRoamGaitFrequency, type ManualRoamClip, type ManualRoamAnimationFrame, type ManualRoamGaitTiming } from './manualRoamAnimationState.ts';
@@ -94,6 +94,7 @@ export class ManualRoamAvatarAnimator {
   private readonly legScale: number;
   private readonly clips: ManualRoamClip[];
   private readonly sampledProgress = new Map<ManualRoamClip,number>();
+  private turnContacts: { clip: ManualRoamTurnClip; weight: number } | null = null;
   private readonly rigBinding: ManualRoamRigBinding;
 
   private constructor(groups: Map<ManualRoamClip, AnimationGroup>, manifest: MotionManifest, release: () => void, legScale: number, enableStrideWarp: boolean, rigBinding: ManualRoamRigBinding) {
@@ -112,12 +113,18 @@ export class ManualRoamAvatarAnimator {
     const previousPhase = this.state.phase;
     const scaledFrame = { ...frame, worldScale: frame.worldScale * this.legScale };
     this.state = stepManualRoamAnimationState(this.state, scaledFrame, this.timing);
-    if(frame.turn&&this.groups.has(frame.turn.clip)&&frame.grounded&&!frame.fly) {
-      const weight=Math.max(0,Math.min(1,frame.turn.weight));
-      this.state.weights={Idle:1-weight,[frame.turn.clip]:weight};
+    const turn = frame.turn && this.groups.has(frame.turn.clip) && frame.grounded && !frame.fly
+      ? frame.turn : null;
+    this.turnContacts = null;
+    if (turn) {
+      const envelope = Math.max(0, Math.min(1, turn.weight));
+      const weight = envelope * Math.max(0, Math.min(1, turn.angleScale ?? 1));
+      this.state.weights = { Idle: 1 - weight, [turn.clip]: weight };
+      // 小角度只缩小动作幅度，换脚时机仍沿用完整片段的接触曲线。
+      this.turnContacts = { clip: turn.clip, weight: envelope };
     }
     const delta = Number.isFinite(frame.deltaSeconds) ? Math.min(0.1, Math.max(0, frame.deltaSeconds)) : 0;
-    if(frame.turn&&this.groups.has(frame.turn.clip)&&frame.grounded&&!frame.fly) {
+    if (turn) {
       // 转身已由同一动作进度提供包络，不能再额外延迟一层姿态混合。
       for(const clip of this.clips)this.weights.set(clip,this.state.weights[clip]??0);
       this.transition=null;
@@ -173,7 +180,7 @@ export class ManualRoamAvatarAnimator {
     for (const group of this.groups.values()) group.stop();
     this.weights.clear(); this.weights.set('Idle', 1); this.state = createManualRoamAnimationState();
     this.clipTimes.clear(); this.clipTimes.set('Idle', 0); this.transition = null;
-    this.sampledProgress.clear();
+    this.sampledProgress.clear(); this.turnContacts = null;
     const idle = this.groups.get('Idle')!;
     idle.start(true, 0); idle.setWeightForAllAnimatables(1); idle.goToFrame(idle.from);
     if (this.paused) idle.pause();
@@ -195,6 +202,13 @@ export class ManualRoamAvatarAnimator {
     return { state: this.state.kind, phase: this.state.phase, activeGroups: [...this.groups].filter(([, group]) => group.isStarted).map(([clip]) => clip) };
   }
 
+  hasGaitPose(): boolean {
+    for (const [clip, weight] of this.weights) {
+      if (weight > 1e-6 && (clip.startsWith('Walk') || clip.startsWith('Run'))) return true;
+    }
+    return false;
+  }
+
   getStrideScale(): number { return this.state.strideScale; }
   setStrideWarpEnabled(enabled: boolean): void { this.timing.enableStrideWarp = enabled && this.manifest.profile === MANUAL_ROAM_RIG_PROFILE_V2; }
   getRigBinding(): ManualRoamRigBinding { return this.rigBinding; }
@@ -207,7 +221,10 @@ export class ManualRoamAvatarAnimator {
 
   getFootContacts():{left:number;right:number} {
     const result={left:0,right:0};
-    for(const [clip,weight] of this.weights) {
+    const contactWeights: Iterable<[ManualRoamClip, number]> = this.turnContacts
+      ? [['Idle', 1 - this.turnContacts.weight], [this.turnContacts.clip, this.turnContacts.weight]]
+      : this.weights;
+    for(const [clip,weight] of contactWeights) {
       if(weight<=0)continue;
       const phase=this.sampledProgress.get(clip)??0,definition=this.manifest.clips[clip];
       for(const side of ['left','right'] as const) {
@@ -226,7 +243,8 @@ export class ManualRoamAvatarAnimator {
     if (this.disposed) return;
     this.disposed = true;
     for (const group of this.groups.values()) group.dispose();
-    this.groups.clear(); this.weights.clear(); this.clipTimes.clear();this.sampledProgress.clear(); this.transition = null; this.release();
+    this.groups.clear(); this.weights.clear(); this.clipTimes.clear(); this.sampledProgress.clear();
+    this.turnContacts = null; this.transition = null; this.release();
   }
 }
 

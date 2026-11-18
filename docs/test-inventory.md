@@ -4,10 +4,10 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：984；测试/runner/smoke 候选：866；fixture/helper/治理工具：118。
-- npm 测试/smoke 入口：147；有静态入口的候选：700；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：998；测试/runner/smoke 候选：875；fixture/helper/治理工具：123。
+- npm 测试/smoke 入口：152；有静态入口的候选：709；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
-- CI 静态可达候选：162。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
+- CI 静态可达候选：163。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
 - 解析 package.json 名称含 test/smoke 的入口（排除 test:inventory 工具）、npm run 递归、node/electron 的显式文件与 * / ** glob。构建/打包只记录前置，不运行。动态编译与 Electron runner 使用已核对的限定适配；其他动态调用保守标记待复核。
 - CI 只读取 workflow 单行 run；可达表示配置选中，不代表远端执行成功。平台为源码线索，未标 Windows 的文件也未证明跨平台。
@@ -90,7 +90,7 @@
 | scripts/smoke-published-release-cache.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-published-release-cache.mjs（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 先执行 npm run build:electron，产物必须对应当前源码；先执行 npm run build:viewer，保留 Viewer 模板能力校验；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-electron；核对 build:electron 前置；引用 dist-viewer-template；核对 build:viewer 前置；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：VIEWER_TEMPLATE_DIR, RELEASE_CACHE_TIMEOUT_MS, CHROME_PATH | 否 / 未确认 |
 | scripts/smoke-published-response-cache.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-published-response-cache.mjs（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-electron；核对 build:electron 前置；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：CHROME_PATH | 否 / 未确认 |
 | scripts/smoke-published-viewer-cache.mjs | browser / WebGL 候选；包含文件/源码断言候选；asset-required | node scripts/smoke-published-viewer-cache.mjs <已有发布scene.json> <含Draco的GLB路径>（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 先执行 npm run build:viewer，保留 Viewer 模板能力校验；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-viewer-template；核对 build:viewer 前置；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本；环境变量按原文件设置：VIEWER_TEMPLATE_DIR, CHROME_PATH；需调用方提供当前可访问的真实 CAD/GLB/EXR/scene 文件、业务工程或对应发布输出；读取下面 evidence 中的参数/默认路径，禁止把缺失输入计通过 | 否 / 未确认 |
-| scripts/smoke-real-project-loading.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选；asset-required | node scripts/smoke-real-project-loading.mjs --paired --url <中台地址> --project-id <项目ID> --freeze-scene <scene> --read-only-manifest <manifest> --resolved-baseline <baseline> --budget-file <budget> --cold 5 --warm 5 --output <全新output>（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 先显式POST-only前置冻结可信URL/请求；未知请求与输入漂移拒绝，无上传/发布/invoke或生产MQTT消息；原SOURCE和已批准resolved严格分别校验，活跃logical图片需实际参数URL到原字节SHA；单次verification-only不作五冷五暖或30%通过；含全局状态/环境变量；保留独立进程；完整构建与bundled Electron；独立userData/workspace，同一来源/硬件/分辨率，正式窗口禁止profile或并行GPU/构建/扫描；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
+| scripts/smoke-real-project-loading.mjs | Electron 候选；browser / WebGL 候选；包含文件/源码断言候选；asset-required | node scripts/smoke-real-project-loading.mjs --paired --url <中台地址> --project-id <项目ID> --freeze-scene <scene> --read-only-manifest <manifest> --resolved-baseline <baseline> --budget-file <budget> --cold 5 --warm 5 --output <全新output>（已分类，需定向执行并核对条件） | 含 Windows 路径/命令，需 Windows 复核 | 先显式POST-only前置冻结可信URL/请求；未知请求与输入漂移拒绝，无上传/发布/invoke或生产MQTT消息；原SOURCE字节与按生产规则迁移后的预期分别校验，并独立校验已批准resolved；活跃logical图片需实际参数URL到原字节SHA；单次verification-only不作五冷五暖或30%通过；含全局状态/环境变量；保留独立进程；完整构建与bundled Electron；独立userData/workspace，同一来源/硬件/分辨率，正式窗口禁止profile或并行GPU/构建/扫描；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | scripts/smoke-reference-opening-lifecycle.mjs | browser / WebGL 候选；browser-webgl | node --experimental-transform-types scripts/smoke-reference-opening-lifecycle.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
 | scripts/smoke-rgv-motion-arrow-viewer.mjs | browser / WebGL 候选；包含文件/源码断言候选；browser-webgl | node --experimental-transform-types scripts/smoke-rgv-motion-arrow-viewer.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | 含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
 | scripts/smoke-rgv-motion-arrows.mjs | browser / WebGL 候选；browser-webgl | node --experimental-transform-types scripts/smoke-rgv-motion-arrows.mjs（已分类，需定向执行并核对条件） | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；本地临时端口可用；结束后关闭本次 server；本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本 | 否 / 未确认 |
@@ -195,6 +195,7 @@
 | scripts/model-array-test.mjs | runner | test:model-array | 未证明跨平台；junction/symlink 权限 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | scripts/model-asset-relink-test.mjs | runner；node-contract/resources | test:contracts、test:contracts:resources | 未证明跨平台；junction/symlink 权限 | 专属临时tsconfig使用正式src/vite-env.d.ts及rewriteRelativeImportExtensions，strict等原规则保留；当前Node无shell执行本地tsc和原test，失败保留真实非零exitCode并经过finally清理本次临时目录/junction；临时 junction/symlink 权限；仅清理本次临时目录；前置 npm run build:electron；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | scripts/run-digital-twin-publish-integration.mjs | runner；Electron 候选 | test:digital-twin、test:digital-twin:integration、test:integration | 未证明跨平台 | 前置 npm run build:electron | 否 / 未确认 |
+| scripts/run-manual-roam-avatar-integration.mjs | runner；包含文件/源码断言候选 | test:manual-roam:integration | 未证明跨平台 | 前置 npm run build:electron | 否 / 未确认 |
 | scripts/run-publish-model-recovery-integration.mjs | runner；Electron 候选 | test:publish-model-recovery | 未证明跨平台 | 前置 npm run build:electron | 否 / 未确认 |
 | scripts/run-scene-model-update-integration.mjs | runner | smoke:scene-model-update | 未证明跨平台 | 前置 npm run build:electron；前置 npm run build:viewer | 否 / 未确认 |
 | scripts/smoke-asset-load-scheduler.mjs | Node 测试候选 | smoke:scene-capacity、test:smoke | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
@@ -232,7 +233,7 @@
 | scripts/smoke-meter-unit-contract.mjs | 包含文件/源码断言候选 | smoke:units | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-model-array.mjs | NullEngine | smoke:model-array、smoke:units | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-model-measurement.mjs | NullEngine | smoke:model-measurement、smoke:units | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
-| scripts/smoke-model-parameter-meters.mjs | NullEngine；browser / WebGL 候选；包含文件/源码断言候选 | smoke:model-parameters、smoke:units | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
+| scripts/smoke-model-parameter-meters.mjs | NullEngine；包含文件/源码断言候选 | smoke:model-parameters、smoke:model-parameters:external、smoke:units | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-model-picking.mjs | NullEngine | smoke:model-picking | 未证明跨平台 | 含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | scripts/smoke-packaged-gpu.mjs | browser / WebGL 候选；包含文件/源码断言候选 | smoke:installer:gpu、smoke:packaged:gpu | 含 Windows 路径/命令，需 Windows 复核 | 前置 npm run dist:win | 否 / 未确认 |
 | scripts/smoke-packaged-remote-scene.mjs | browser / WebGL 候选；包含文件/源码断言候选 | smoke:scene-loading | 含 Windows 路径/命令，需 Windows 复核 | 前置 npm run build；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
@@ -341,6 +342,7 @@
 | tests/digitalTwin/geographicOpeningBridge.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/glbStandardPreview.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit、test:glb-standard-preview | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/homeDataPlatformProject.test.ts | 包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程 | .github/workflows/ci.yml: windows-latest |
+| tests/digitalTwin/inspectionModelVersion.test.ts | 包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit、test:inspection | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/liftMotionArrowPackages.integration.mjs | Electron 候选；包含文件/源码断言候选 | smoke:lift-motion-arrows、test:integration、test:lift-motion-arrows:integration、test:smoke | 未证明跨平台 | Electron 二进制；前置 npm run build；前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置；引用 dist-viewer-template；核对 build:viewer 前置 | 否 / 未确认 |
 | tests/digitalTwin/lightingOptimizationSettings.test.ts | Node 测试候选；node-contract/effects | test、test:ci、test:contracts、test:contracts:effects、test:digital-twin、test:digital-twin:unit、test:lighting-optimization | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/modelClickFocusParity.test.ts | NullEngine；包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
@@ -401,7 +403,7 @@
 | tests/digitalTwin/sceneRuntimeSelection.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/sceneRuntimeShadows.test.ts | NullEngine；包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/sceneSelectionHighlight.test.ts | NullEngine | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
-| tests/digitalTwin/sceneSwitchPublishGuard.test.ts | 包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程 | .github/workflows/ci.yml: windows-latest |
+| tests/digitalTwin/sceneSwitchPublishGuard.test.ts | 包含文件/源码断言候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；模块加载 hook；保留进程隔离 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/skyboxSyncController.test.ts | Node 测试候选 | test、test:ci、test:data-platform-skybox、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/sourceResourcePlan.test.mjs | 包含文件/源码断言候选 | test:source-resource-plan | 未证明跨平台 | 前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | tests/digitalTwin/staticShadowBake.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
@@ -468,6 +470,9 @@
 | tests/editor/hierarchyGroupSelection.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/hierarchyPanelStateBinding.test.ts | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/hierarchyStateButtonStyles.test.ts | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/editor/inspectionBinding.test.mjs | Node 测试候选 | test:inspection | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/inspectionBindingUi.browser.test.mjs | browser / WebGL 候选；包含文件/源码断言候选 | test:inspection:ui | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
+| tests/editor/inspectionCrossRepository.test.mjs | Node 测试候选 | test:inspection:bridge | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/editor/lazyEditorDialog.test.mjs | 包含文件/源码断言候选 | test:optimization-p1 | 未证明跨平台 | Node 原生 transform-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/liftMotionArrows.integration.test.mjs | Node 测试候选 | test、test:ci、test:lift-motion-arrows | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/editor/lightEditor.test.ts | Node 测试候选 | test:light-editor、test:scene-theme | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -528,7 +533,7 @@
 | tests/editor/sceneModelStatisticsState.test.ts | Node 测试候选；node-contract/observability | test:contracts、test:contracts:observability | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/sceneModelSyncOverlay.test.mjs | 包含文件/源码断言候选 | test:scene-model-update | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/sceneModelSyncTransaction.test.ts | Node 测试候选 | test:scene-model-update、test:unified-model-sync | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/editor/sceneOpenConfirmation.test.ts | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/editor/sceneOpenConfirmation.test.ts | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装锁定依赖，在独立 Node 进程中执行编辑器场景打开动作和主进程归属逻辑，使用内存文件系统夹具。 | 否 / 未确认 |
 | tests/editor/sceneOpeningAnimation.integration.test.mjs | Node 测试候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/sceneOpeningAnimation.test.ts | Node 测试候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/sceneOpeningConfig.test.ts | Node 测试候选；node-contract/opening | test:contracts、test:contracts:opening | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
@@ -596,10 +601,10 @@
 | tests/p4QualityGates.test.mjs | 包含文件/源码断言候选 | test:optimization-p4 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/p4TestInventory.test.mjs | browser / WebGL 候选；包含文件/源码断言候选 | test:optimization-p4 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamAnimationState.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/roam/manualRoamAvatar.integration.mjs | Electron 候选；包含文件/源码断言候选 | test:manual-roam:integration | 未证明跨平台 | Electron 二进制；前置 npm run build:electron；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
+| tests/roam/manualRoamAvatar.integration.mjs | Electron 候选；包含文件/源码断言候选 | test:manual-roam:integration | 未证明跨平台 | Electron 二进制；受信入口和 sandbox preload；退出后清理临时工程；前置 npm run build:electron；含全局状态/环境变量；保留独立进程；引用 dist-electron；核对 build:electron 前置 | 否 / 未确认 |
 | tests/roam/manualRoamAvatarAnimator.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamAvatarImport.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/roam/manualRoamAvatarRuntime.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/roam/manualRoamAvatarRuntime.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCollisionBounds.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCollisionPolicy.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCollisionProxyPool.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -613,7 +618,7 @@
 | tests/roam/manualRoamReferencePose.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamSceneSession.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamSpawn.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/roam/manualRoamSpawnContract.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/roam/manualRoamSpawnContract.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamTurnState.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/proceduralAvatarAnimation.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/alarmReferenceEffects.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
@@ -658,7 +663,11 @@
 | tests/runtime/gpuCapabilityProfileDiagnostics.test.mjs | NullEngine | test:gpu-capability-profile | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/gpuTimerProbe.test.mjs | Node 测试候选 | test:gpu-timer-probe | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/runtime/hybridShadowSignatures.test.ts | NullEngine | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/runtime/hybridShadows.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-bake、test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，独立Node进程；宿主Python相关契约需可用Python，不代表Blender/WebGL实测。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/hybridShadows.test.ts | NullEngine；node-contract/effects | test:contracts、test:contracts:effects、test:lighting-bake、test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；安装锁定依赖，使用独立 Node 进程和 Babylon NullEngine。；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/inspectionAssembly.test.ts | NullEngine | test:inspection | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/inspectionDetail.webgl.mjs | browser / WebGL 候选 | test:inspection:webgl | 未证明跨平台 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
+| tests/runtime/inspectionFixture.test.mjs | NullEngine；包含文件/源码断言候选 | test:inspection | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/inspectionViewerWebGL.test.mjs | 包含文件/源码断言候选 | test:inspection | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/ktx2DecodeWorkerPool.test.ts | Node 测试候选 | test:local-decoders | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/ktx2WorkerDecoder.test.mjs | NullEngine；包含文件/源码断言候选 | test:local-decoders | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/liftMotionArrowRenderer.test.mjs | NullEngine | test、test:ci、test:lift-motion-arrows | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
@@ -751,7 +760,7 @@
 | tests/runtime/phase2GlRestoreTrace.test.mjs | Node 测试候选 | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/phase2GpuPickingContract.test.mjs | Node 测试候选 | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/phase2GpuQueryRegistration.test.mjs | Node 测试候选 | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/runtime/phase2HybridShadowContextLoss.test.mjs | Node 测试候选 | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/phase2HybridShadowContextLoss.test.mjs | NullEngine | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/phase2LedRootRevision.test.mjs | NullEngine；包含文件/源码断言候选 | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/phase2LightingClassificationAudit.test.mjs | NullEngine | test:optimization-phase2 | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/phase2LightmapMipIntegration.test.mjs | NullEngine；包含文件/源码断言候选 | test:phase2-codecs | 未证明跨平台 | Node 原生 transform-types；含服务/端口；复核端口与关闭流程；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -935,6 +944,11 @@
 | tests/fixtures/geographicOpeningHost.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/geographicOpeningHostLegacyViewer.html | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/gpuCapabilityProfile.harness.tsx | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/inspection/assembly-animation.glb | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/inspection/createAssemblyFixture.mjs | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/inspection/host.html | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/inspection/host.mjs | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/fixtures/inspection/vite.config.mjs | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
 | tests/fixtures/liftMotionArrows.harness.tsx | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/fixtures/lightWallFence.harness.tsx | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/fixtures/lightingTypes.harness.ts | fixture / harness | 辅助/治理文件，不计执行覆盖 | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |

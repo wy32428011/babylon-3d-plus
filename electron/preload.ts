@@ -185,6 +185,12 @@ if (isTrustedPreloadPage()) contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.invoke('data-platform:getProjectOpenTrace', request),
   getDataPlatformProject: (request: OpenDataPlatformProjectRequest): Promise<DataPlatformProjectEntry> =>
     ipcRenderer.invoke('data-platform:getProject', request),
+  listInspectionModels: (): Promise<import('./types.js').InspectionModelListItem[]> =>
+    ipcRenderer.invoke('inspection:list-models'),
+  listInspectionModelVersions: (request: import('./types.js').InspectionModelVersionsRequest): Promise<import('./types.js').InspectionModelVersionListItem[]> =>
+    ipcRenderer.invoke('inspection:list-model-versions', request),
+  prepareInspectionModelVersion: (request: import('./types.js').InspectionModelVersionRequest): Promise<import('./types.js').InspectionModelVersionPreparationResult> =>
+    ipcRenderer.invoke('inspection:prepare-model-version', request),
   syncDataPlatformModels: (): Promise<boolean> => ipcRenderer.invoke('data-platform:syncModels'),
   retryDataPlatformModelSync: (): Promise<boolean> => ipcRenderer.invoke('data-platform:retryModelSync'),
   onDataPlatformModelSyncProgress: (handler: (progress: DataPlatformModelSyncProgress) => void): (() => void) => {

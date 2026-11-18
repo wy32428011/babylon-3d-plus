@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
 import { normalizeHistoryReplaySettings, type HistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource, type SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
@@ -1439,6 +1440,7 @@ export function createModelEntity(
   builtInSlotBindingConfig?: unknown,
   layerChangePlatformBindingConfig?: unknown,
   runtimeCapabilities?: unknown,
+  deviceType?: string,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
@@ -1465,6 +1467,7 @@ export function createModelEntity(
       },
       modelAsset: {
         assetCode,
+        ...modelDeviceTypeField(deviceType),
         sourcePath,
         sourceUrl,
         ...(assetRevision ? { assetRevision } : {}),

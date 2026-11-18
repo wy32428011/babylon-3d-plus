@@ -91,6 +91,7 @@ export type DigitalTwinPreparePayload = {
   resourceSnapshotToken?: string;
   confirmResourceBindings: boolean;
   modelIds: string[];
+  modelVersions?: Array<{ modelId: string; versionId: string }>;
   envModelIds: string[];
   comboModelIds: string[];
   sourcePackage: { fileName: string; fileSize: number; sha256: string };
@@ -98,8 +99,8 @@ export type DigitalTwinPreparePayload = {
 };
 
 export type DigitalTwinResourceSnapshot = {
-  resourceSnapshotToken: string; resourceRevision: string;
-  resources: Array<{ kind: 'model' | 'combo' | 'environment' | 'composition'; resourceId: string; revision: string;
+  resourceSnapshotToken: string; resourceRevision: string; modelVersionsSupported?: boolean;
+  resources: Array<{ kind: 'model' | 'modelVersion' | 'combo' | 'environment' | 'composition'; resourceId: string; versionId?: string; revision: string;
     files: Array<{ role: string; fileName: string; fileUrl: string; fileId: string; sha256: string; size: string }> }>;
 };
 
@@ -123,7 +124,7 @@ export class DigitalTwinApiError extends Error {
 export class DigitalTwinUploadClient {
   constructor(private readonly baseUrl: string) {}
 
-  async captureResourceSnapshot(projectId: string, resources: { modelIds: string[]; comboModelIds: string[]; envModelIds: string[] }, signal: AbortSignal): Promise<DigitalTwinResourceSnapshot> {
+  async captureResourceSnapshot(projectId: string, resources: { modelIds: string[]; comboModelIds: string[]; envModelIds: string[]; modelVersions?: Array<{ modelId: string; versionId: string }> }, signal: AbortSignal): Promise<DigitalTwinResourceSnapshot> {
     return this.resourceSnapshot('capture', { projectId, ...resources }, signal);
   }
 
@@ -140,6 +141,7 @@ export class DigitalTwinUploadClient {
   }
 
   async prepare(payload: DigitalTwinPreparePayload, signal: AbortSignal): Promise<DigitalTwinPublishTask> {
+    if (payload.modelVersions?.length && !payload.resourceSnapshotToken) throw new Error('巡检高模固定版本发布必须提供资源快照令牌。');
     const task = normalizePublishTask(await this.requestJson(
       'api/v1/digital-twin/publish-tasks/prepare',
       'POST',

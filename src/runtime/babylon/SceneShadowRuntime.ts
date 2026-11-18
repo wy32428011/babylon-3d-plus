@@ -199,6 +199,8 @@ export class SceneShadowRuntime {
   private managedLight: DirectionalLight | null = null;
   private primaryLight: DirectionalLight | null = null;
   private primaryGenerator: ShadowGenerator | null = null;
+  private cascadeCameraMinZ = NaN;
+  private cascadeCameraMaxZ = NaN;
   private meshCollectionSignature = '';
   private settings: SceneShadowSettings = { ...DEFAULT_SHADOW_SETTINGS };
   private disposed = false;
@@ -631,13 +633,19 @@ export class SceneShadowRuntime {
     if (bindings.size === this.receiverLightBindings.size
       && [...bindings].every(([light, generator]) => this.receiverLightBindings.has(light)
         && this.receiverLightBindings.get(light) === generator)) return;
+    const previousCascades = [...this.receiverLightBindings.values()].find(generator => generator instanceof CascadedShadowGenerator);
+    const nextCascades = this.primaryGenerator instanceof CascadedShadowGenerator ? this.primaryGenerator : undefined;
+    const changedReceivers = previousCascades !== nextCascades ? new Set<AbstractMesh>() : null;
     this.receiverLightBindings = bindings;
 
     const materials = new Set<Material>();
     for (const mesh of this.scene.meshes) {
       if (!mesh.receiveShadows || mesh.isDisposed()) continue;
+      changedReceivers?.add(mesh instanceof InstancedMesh ? mesh.sourceMesh : mesh);
       for (const material of collectMeshMaterials(mesh)) materials.add(material);
     }
+    // 单图使用矩阵，级联使用矩阵数组。实例共用源网格的 effect，切换时需要一起失效。
+    if (changedReceivers) for (const source of changedReceivers) source.resetDrawCache();
     for (const material of materials) {
       const wasFrozen = material.isFrozen;
       if (wasFrozen) material.unfreeze();
@@ -757,7 +765,7 @@ export class SceneShadowRuntime {
     generator.darkness = this.settings.darkness;
     generator.usePercentageCloserFiltering = true;
     generator.filteringQuality = quality.filteringQuality;
-    generator.shadowMaxZ = this.resolveShadowDistance();
+    this.updateCascadeShadowDistance(generator);
     this.configureShadowMapRefresh(generator);
     this.attachHybridCache(generator);
     return generator;
@@ -767,14 +775,13 @@ export class SceneShadowRuntime {
   private createBasicGenerator(light: DirectionalLight): ShadowGenerator {
     const quality = SHADOW_QUALITY_CONFIG[this.settings.quality];
     light.autoUpdateExtends = true;
-    light.autoCalcShadowZBounds = true;
+    this.updateBasicShadowDistance(light);
     const generator = new ShadowGenerator(quality.mapSize, light);
     generator.bias = this.settings.bias;
     generator.normalBias = this.settings.normalBias;
     generator.darkness = this.settings.darkness;
     generator.usePercentageCloserFiltering = true;
     generator.filteringQuality = quality.filteringQuality;
-    light.shadowMaxZ = this.resolveShadowDistance();
     this.configureShadowMapRefresh(generator);
     this.attachHybridCache(generator);
     return generator;
@@ -1028,10 +1035,9 @@ export class SceneShadowRuntime {
     this.catcher.scaling.set(size, 1, size);
   }
 
-  private resolveShadowDistance(): number {
+  private resolveShadowDistance(camera = this.scene.activeCamera): number {
     if (this.settings.distanceMeters > 0) return this.settings.distanceMeters;
 
-    const camera = this.scene.activeCamera;
     let distance = 140;
     const radius = camera ? (camera as { radius?: number }).radius : undefined;
     if (typeof radius === 'number' && Number.isFinite(radius) && radius > 0) {
@@ -1059,15 +1065,45 @@ export class SceneShadowRuntime {
       : this.settings.bias;
   }
 
-  private updateShadowDistance(): void {
+  private updateBasicShadowDistance(light: DirectionalLight): void {
+    const autoFit = this.settings.distanceMeters === 0
+      && light.autoUpdateExtends && light.shadowFrustumSize === 0;
+    if (light.autoCalcShadowZBounds !== autoFit) {
+      light.autoCalcShadowZBounds = autoFit;
+      light.forceProjectionMatrixCompute();
+    }
+    if (autoFit) return;
+
+    // 单图沿方向光的 Z 轴裁剪，两侧都可能有投射物；相机的近远面不在这个坐标系里。
     const distance = this.resolveShadowDistance();
-    if (this.primaryGenerator instanceof CascadedShadowGenerator) {
-      this.primaryGenerator.shadowMaxZ = distance;
+    if (light.shadowMinZ !== -distance) light.shadowMinZ = -distance;
+    if (light.shadowMaxZ !== distance) light.shadowMaxZ = distance;
+  }
+
+  private updateCascadeShadowDistance(generator: CascadedShadowGenerator): void {
+    const camera = generator.camera ?? this.scene.activeCamera;
+    const distance = this.resolveShadowDistance(camera);
+    if (!camera) {
+      generator.shadowMaxZ = distance;
       return;
     }
-    // 自动深度范围由 Babylon 根据投射物求得，不能每帧覆写并使原生整图缓存持续失效。
-    const light = this.primaryLight;
-    if (light && (!light.autoCalcShadowZBounds || !light.autoUpdateExtends || light.shadowFrustumSize > 0)) light.shadowMaxZ = distance;
+    // CSM 的 setter 拒绝越界值。maxZ=0 表示无限远，仍为分级保留非零深度区间。
+    const far = camera.maxZ === 0 ? Infinity : camera.maxZ;
+    generator.shadowMaxZ = Math.min(far, Math.max(distance, camera.minZ + 0.001));
+    if (this.cascadeCameraMinZ !== camera.minZ || this.cascadeCameraMaxZ !== camera.maxZ) {
+      generator.splitFrustum();
+      this.cascadeCameraMinZ = camera.minZ;
+      this.cascadeCameraMaxZ = camera.maxZ;
+    }
+  }
+
+  private updateShadowDistance(): void {
+    if (this.primaryGenerator instanceof CascadedShadowGenerator) {
+      this.updateCascadeShadowDistance(this.primaryGenerator);
+    } else if (this.primaryLight) {
+      this.updateBasicShadowDistance(this.primaryLight);
+    }
+    for (const light of this.secondaryDirectionalGenerators.keys()) this.updateBasicShadowDistance(light);
   }
 
   private disposePrimaryGenerator(): void {

@@ -70,12 +70,12 @@ export function createExpressionEvaluator() {
           cursor++;
           const args: Ast[] = [];
           if (peek() !== ')') {
-            do {
+            args.push(parse(0, depth + 1));
+            while (peek() === ',') {
+              cursor++;
               args.push(parse(0, depth + 1));
               if (args.length > 32) throw new Error('函数参数过多');
-              if (peek() !== ',') break;
-              cursor++;
-            } while (true);
+            }
           }
           take(')');
           const fn = functions[token];

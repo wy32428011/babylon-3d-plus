@@ -20,6 +20,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [编辑器基础操作](docs/editor-operations.md)
 - [可视化参数化工作台](docs/parametric-authoring-workbench.md)：部件规则、贴图定位、局部改色、工程保存和兼容脚本导出；首页新增独立入口。
 - [领域专题：参数化模型 / MQTT / POI](docs/domain-guides.md)
+- [设备零件爆炸图与大屏联动](docs/inspection-detail.md)：模型管理登记高低模及 meta，大屏按钮按设备类型配置固定高模版本；[图文操作教程](docs/inspection-guide.html)。
 - [提升机与换层提升机运动箭头](docs/lift-motion-arrows.md)
 - [Babylon 原生阴影与间接光烘焙](docs/hybrid-lighting.md)
 - [烘焙性能与大场景稳定性评估及处理方案](docs/数字孪生编辑器烘焙性能与大场景稳定性评估.md)
@@ -88,10 +89,16 @@ npm run typecheck
 
 质量门禁还包括 `npm run lint`、`npm run format:check` 和 `npm run test:ci`。`test:ci` 与 `npm test` 执行范围明确的 core 组；集成与完整容量分别使用 `npm run test:integration`、`npm run test:smoke`。默认组不代表全仓测试，旧细分入口均保留；分组、覆盖率和渐进类型规则见[测试说明](docs/test-groups.md)，平台和隔离要求见[测试清单](docs/test-inventory.md)。`npm run format` 仅格式化 package.json、ESLint、Prettier 和 CI 四份配置，不会格式化整个项目。测试入口或夹具变动后执行 `node scripts/generate-test-inventory.mjs` 更新清单，再用 `--check` 检查漂移。
 
-执行米制导入、编辑器原生实际尺寸与 12 个外部模型参数脚本 smoke：
+验证米制导入、编辑器实际尺寸和参数更新。默认使用仓库模型夹具，在临时工程测量米、厘米和毫米模型。
 
 ```bash
 npm run smoke:units
+```
+
+已准备 12 个业务源包、对应资产副本和索引时，可运行外部实物审计。路径配置见[测试说明](docs/test-groups.md#参数化模型米制验证)。
+
+```bash
+npm run smoke:model-parameters:external
 ```
 
 执行大场景容量定向 smoke，验证静态模型共享、100 实体单源加载、选择增量同步和 4 并发加载预算：

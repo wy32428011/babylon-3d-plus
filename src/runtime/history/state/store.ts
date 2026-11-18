@@ -116,52 +116,53 @@ export class StateStage implements StateReadView {
     let open = true, writesCount = 0;
     const facts: StateFact[] = [];
     const assertOpen = (): void => requireState(open, 'TRANSACTION_CLOSED', '事务回调已结束，不能异步或延迟写入。');
-    const stage = this;
+    const { budgets } = this;
     const touch = (table: StateTable, id: string, record: RecordValue | null): void => {
       assertOpen();
       requireState(STATE_TABLES.includes(table), 'TABLE', '未知状态表。');
       writesCount += 1;
-      requireState(writesCount <= stage.budgets.maxChangesPerRevision, 'BUDGET', '事务写入次数超过预算。');
-      const before = stage.get(table, id);
+      requireState(writesCount <= budgets.maxChangesPerRevision, 'BUDGET', '事务写入次数超过预算。');
+      const before = this.get(table, id);
       validateRecordTransition(table, before, record ?? undefined);
       if (captureFacts) for (const fact of collectStateFacts(table, before, record ?? undefined, metadata.logicalTime,
         touched.get(table)?.has(id) === true)) {
         const cost = resourceCost(fact);
-        stage.#factCost.bytes += cost.bytes + 1; stage.#factCost.nodes += cost.nodes;
-        requireState(facts.length < stage.budgets.maxArrayLength && stage.#factCost.bytes <= stage.budgets.maxBytes
-          && stage.#factCost.nodes <= stage.budgets.maxNodes, 'BUDGET', '事务事实超过批次预算，不能截断或提交半态。');
+        this.#factCost.bytes += cost.bytes + 1; this.#factCost.nodes += cost.nodes;
+        requireState(facts.length < budgets.maxArrayLength && this.#factCost.bytes <= budgets.maxBytes
+          && this.#factCost.nodes <= budgets.maxNodes, 'BUDGET', '事务事实超过批次预算，不能截断或提交半态。');
         facts.push(fact);
       }
       const beforeCost = before ? resourceCost(before) : { bytes: 0, nodes: 0 };
       const afterCost = record ? resourceCost(record) : { bytes: 0, nodes: 0 };
-      stage.#cost.bytes += afterCost.bytes - beforeCost.bytes + (record ? 1 : 0) - (before ? 1 : 0);
-      stage.#cost.nodes += afterCost.nodes - beforeCost.nodes;
+      this.#cost.bytes += afterCost.bytes - beforeCost.bytes + (record ? 1 : 0) - (before ? 1 : 0);
+      this.#cost.nodes += afterCost.nodes - beforeCost.nodes;
       if (!touched.has(table)) touched.set(table, new Map());
       if (!touched.get(table)!.has(id)) touched.get(table)!.set(id, before);
-      if (!stage.writes.has(table)) stage.writes.set(table, new Map());
-      stage.writes.get(table)!.set(id, record);
+      if (!this.writes.has(table)) this.writes.set(table, new Map());
+      this.writes.get(table)!.set(id, record);
     };
+    const view = readOnlyView(this);
     const transaction: StateTransactionPort = Object.freeze({
-      ...readOnlyView(stage),
-      get metadata() { return stage.metadata; }, get logic() { return stage.logic; },
-      get logicalTime() { return stage.metadata.logicalTime; }, get inputCursor() { return stage.metadata.inputCursor; },
+      get: view.get, values: view.values,
+      get metadata() { return view.metadata; }, get logic() { return view.logic; },
+      get logicalTime() { return view.metadata.logicalTime; }, get inputCursor() { return view.metadata.inputCursor; },
       put<K extends StateTable>(table: K, record: StateTableRecords[K]): void {
         assertOpen(); requireState(STATE_TABLES.includes(table), 'TABLE', '未知状态表。');
-        const copy = copySafeJson(record, { ...stage.budgets, maxDepth: Math.max(1, stage.budgets.maxDepth - 3) }, true) as unknown as StateTableRecords[K];
-        validateJsonSchema(copy, recordSchema(table), stage.budgets, table);
+        const copy = copySafeJson(record, { ...budgets, maxDepth: Math.max(1, budgets.maxDepth - 3) }, true) as unknown as StateTableRecords[K];
+        validateJsonSchema(copy, recordSchema(table), budgets, table);
         // table 的运行时 schema 已校验记录；在具体联合类型上冻结，避免泛型 K 触发递归 JSON 的无限推导。
         const value: RecordValue = freezeData(copy as AnyStateRecord);
         touch(table, value.id, value);
       },
       remove(table: StateTable, id: string): void {
-        assertOpen(); requireState(stage.get(table, id), 'REFERENCE', '不能删除不存在的记录。'); touch(table, id, null);
+        assertOpen(); requireState(view.get(table, id), 'REFERENCE', '不能删除不存在的记录。'); touch(table, id, null);
       },
       allocateId(namespace: string): string {
         assertOpen();
         const generation = nextGeneration(transaction, namespace);
-        const id = stableKey('entity', stage.metadata.projectionId, namespace, generation);
+        const id = stableKey('entity', view.metadata.projectionId, namespace, generation);
         requireState(id.length <= 2048, 'IDENTITY', '生成的稳定身份超过合同上限。');
-        requireState(STATE_TABLES.every(table => !stage.get(table, id)), 'COUNTER_COLLISION', '生成计数落后于已有身份，须修复基线而非覆盖实体。');
+        requireState(STATE_TABLES.every(table => !view.get(table, id)), 'COUNTER_COLLISION', '生成计数落后于已有身份，须修复基线而非覆盖实体。');
         return id;
       },
     });

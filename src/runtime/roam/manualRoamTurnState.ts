@@ -8,6 +8,8 @@ export type ManualRoamTurnFrame = {
   /** 巡检行走仅改变视觉朝向；停止后保持最后朝向，站立输入按控制yaw增量转身。 */
   orientToMovement?: boolean;
   movementYaw?: number;
+  /** 停步时让最后一步的姿势先过渡到待机，再启动原地转身片段。 */
+  gaitPoseActive?: boolean;
   turnDurations?: Partial<Record<ManualRoamTurnClip, number>>;
   /** 0..1等距采样的累计转角曲线；由动作清单提供，计算本帧进度后直接插值。 */
   turnRotationCurves?: Partial<Record<ManualRoamTurnClip, readonly number[]>>;
@@ -32,6 +34,8 @@ export type ManualRoamTurnState = {
 const TURN_THRESHOLD = 40 / 180 * Math.PI;
 const TURN_180_THRESHOLD = 135 / 180 * Math.PI;
 const MAX_ANGULAR_SPEED = 8;
+// 地面步行的承重脚需要等下一步落地再换向，急转时给脚掌留出换步时间。
+const WALK_TURN_SPEED = 220 * Math.PI / 180;
 
 /** 出生、传送、场景切换时直接创建，不将瞬移角度当作人物转身。 */
 export function createManualRoamTurnState(controlYaw: number): ManualRoamTurnState {
@@ -54,7 +58,8 @@ export function stepManualRoamTurnState(previous: ManualRoamTurnState, frame: Ma
 
   if (!canTurn) {
     clearTurn(state);
-    state.visualYaw = followYaw(state.visualYaw, difference, delta, 12, MAX_ANGULAR_SPEED);
+    const speed = frame.orientToMovement && frame.grounded && !frame.fly ? WALK_TURN_SPEED : MAX_ANGULAR_SPEED;
+    state.visualYaw = followYaw(state.visualYaw, difference, delta, 12, speed);
   } else {
     if (state.turnClip) {
       const direction = Math.sign(state.targetYaw - state.startYaw);
@@ -62,7 +67,9 @@ export function stepManualRoamTurnState(previous: ManualRoamTurnState, frame: Ma
       const abrupt = Math.abs(shortestAngle(facingYaw - state.targetYaw)) > 100 / 180 * Math.PI;
       if (reverse || abrupt) clearTurn(state);
     }
-    if (!state.turnClip && Math.abs(difference) >= TURN_THRESHOLD) beginTurn(state, difference, frame);
+    if (!state.turnClip && !frame.gaitPoseActive && Math.abs(difference) >= TURN_THRESHOLD) {
+      beginTurn(state, difference, frame);
+    }
     if (state.turnClip) {
       state.elapsed = Math.min(state.duration, state.elapsed + delta);
       state.turnProgress = state.elapsed / state.duration;

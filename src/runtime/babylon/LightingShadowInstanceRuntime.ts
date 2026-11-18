@@ -1,3 +1,4 @@
+import { getModelAppearanceBaseMaterial, setModelAppearanceBaseMaterial } from './modelAppearanceMaterial.ts';
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
 import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
@@ -20,7 +21,7 @@ type GeometryState = {
 
 /** 无 GI 时只拆分规则冲突的实例族，不创建烘焙资源或改变业务权威矩阵。 */
 export class LightingShadowInstanceRuntime {
-  readonly records: ShadowInstanceRecord[] = [];
+  records: ShadowInstanceRecord[] = [];
   readonly hiddenSources = new Map<AbstractMesh, number>();
   readonly hiddenInstances = new Map<InstanceBatch, Map<number, Set<number>>>();
   private readonly sourceLayerMasks = new Map<AbstractMesh, number>();
@@ -101,7 +102,7 @@ export class LightingShadowInstanceRuntime {
       const original = sourceGeometryMesh(source.mesh);
       mesh.setPreTransformMatrix(world); mesh.computeWorldMatrix(true);
       mesh.isVisible = lightingSourceVisible(source); mesh.visibility = source.mesh.visibility;
-      mesh.material = source.mesh.material;
+      setModelAppearanceBaseMaterial(mesh, getModelAppearanceBaseMaterial(source.mesh));
       mesh.skeleton = original.skeleton; mesh.morphTargetManager = original.morphTargetManager;
       mesh.useVertexColors = original.useVertexColors; mesh.hasVertexAlpha = original.hasVertexAlpha;
       mesh.renderingGroupId = source.mesh.renderingGroupId; mesh.receiveShadows = source.entry.receiveShadows;
@@ -118,7 +119,7 @@ export class LightingShadowInstanceRuntime {
     for (const [source, layerMask] of this.hiddenSources) if (!source.isDisposed() && source.layerMask === 0) source.layerMask = layerMask;
     for (const [batch] of this.hiddenInstances) batch.setLightingHiddenInstances(new Map());
     for (const record of this.records) record.mesh.dispose(false, false);
-    this.records.length = 0; this.hiddenSources.clear(); this.hiddenInstances.clear(); this.sourceLayerMasks.clear(); this.sourcePickability.clear();
+    this.records = []; this.hiddenSources.clear(); this.hiddenInstances.clear(); this.sourceLayerMasks.clear(); this.sourcePickability.clear();
     this.geometries.clear(); this.layoutKey = lightingContentHash([]);
   }
 

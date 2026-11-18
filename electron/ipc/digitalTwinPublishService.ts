@@ -2,7 +2,7 @@ import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.
 import { isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { assertPublishSceneModelsReady } from './digitalTwinModelRecovery.js';
 import { assertPublishResourceIdentities } from './digitalTwinPublishResourceIdentity.js';
-import { isAuthorizedAssetFile, authorizeAssetFile } from './assetRegistry.js';
+import { isAuthorizedAssetFile, authorizeAssetFile, authorizeAssetRoot, encodeAssetUrl } from './assetRegistry.js';
 import { prepareLightingSceneSave } from './sceneLightingBakeResources.js';
 import { preserveLegacyLightingSceneBeforeWrite } from './sceneLightingMigrationSave.js';
 import { app } from 'electron';
@@ -21,8 +21,9 @@ import type {
 import { capturePublishSceneSnapshots, validatePreparedPublishScenes, assertPublishSceneParameterTemplates, type PublishSceneSnapshot } from './publishSceneSnapshots.js';
 import { planSceneModelUpdates, matchSceneModelUpdates, getSceneEnvironmentUpdateReference } from '../shared/sceneModelUpdatePlan.js';
 import { collectPublishModelReferences } from '../shared/publishModelRecovery.js';
+import { collectSceneResourceReferences } from '../shared/sceneResourceTraversal.js';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
-import { createDataPlatformModelSourceKey, syncSceneDataPlatformModelAssets, ModelSnapshotIntegrityError, type ModelSnapshotExpectedFile } from './dataPlatformModelIncrementalSync.js';
+import { createDataPlatformModelSourceKey, syncSceneDataPlatformModelAssets, syncInspectionModelVersion, ModelSnapshotIntegrityError, type ModelSnapshotExpectedFile } from './dataPlatformModelIncrementalSync.js';
 import { includeSceneModelPackageVariants } from './sceneModelPackageVariants.js';
 import { authorizeSceneFile } from './assetRegistry.js';
 import {
@@ -39,7 +40,7 @@ import {
   updateDataPlatformBinding,
 } from './dataPlatformBindingStore.js';
 import { buildDigitalTwinDistPackage } from './digitalTwinDistPackage.js';
-import { collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
+import { assertSnapshotModelVersions, collectDigitalTwinResourceIds } from './digitalTwinPublishProtocol.js';
 import { listIndexedDataPlatformEnvironments, readDataPlatformEnvironmentIndex } from './dataPlatformEnvironmentIndex.js';
 import { executeDataPlatformEnvironmentSync } from './dataPlatformEnvironmentSync.js';
 import { buildDigitalTwinSourcePackage, type DigitalTwinSourcePackageResult } from './digitalTwinSourcePackage.js';
@@ -102,10 +103,10 @@ type ScenePreparation = { targetToken: string; expiresAt: number; scenes: Publis
 const scenePreparations = new Map<string, ScenePreparation>();
 
 function snapshotModelFiles(snapshot?: DigitalTwinResourceSnapshot): ModelSnapshotExpectedFile[] | undefined {
-  return snapshot?.resources.flatMap(resource => (resource.kind === 'environment' || resource.kind === 'composition') ? [] : resource.files.map(file => ({
+  return snapshot?.resources.flatMap(resource => (resource.kind === 'model' || resource.kind === 'combo') ? resource.files.map(file => ({
     kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId, role: file.role,
     fileUrl: file.fileUrl, sha256: file.sha256, size: file.size,
-  })));
+  })) : []);
 }
 
 async function synchronizeSnapshotModels(baseUrl: string, sharedResourcesRoot: string,
@@ -116,6 +117,58 @@ async function synchronizeSnapshotModels(baseUrl: string, sharedResourcesRoot: s
     if (error instanceof ModelSnapshotIntegrityError) throw new DigitalTwinApiError(error.code, error.message, null, 409);
     throw error;
   }
+}
+
+function inspectionModelFingerprints(content: string): string[] {
+  const document = JSON.parse(content) as { scene: unknown };
+  return collectSceneResourceReferences(document.scene).inspections.map(({ model }) => {
+    const identity = isPlainObject(model.dataPlatformModel) ? model.dataPlatformModel : {};
+    return JSON.stringify([identity.sourceKey, identity.kind, identity.resourceId, identity.modelPath,
+      model.versionId, model.contentSha256, model.sourcePath, model.sourceUrl, model.metaPath, model.metaUrl, model.unitScaleToMeters]);
+  }).sort();
+}
+
+/** 发布准备时恢复指定高模，并只在全部下载和内容校验成功后更新内存快照。 */
+async function synchronizeInspectionSnapshots(scenes: PublishSceneSnapshot[], baseUrl: string, sharedResourcesRoot: string,
+  snapshot: DigitalTwinResourceSnapshot, signal: AbortSignal): Promise<void> {
+  const sourceKey = createDataPlatformModelSourceKey(baseUrl);
+  const parsed = scenes.map(scene => JSON.parse(scene.sceneContent) as { scene: unknown });
+  const jobs = new Map<string, Promise<ProjectModelAssetEntry>>();
+  const updates: Array<{ model: Record<string, unknown>; asset: ProjectModelAssetEntry }> = [];
+  for (const document of parsed) for (const { model } of collectSceneResourceReferences(document.scene, 'strict').inspections) {
+    const identity = model.dataPlatformModel;
+    if (!isPlainObject(identity) || identity.kind !== 'model' || identity.sourceKey !== sourceKey
+      || typeof identity.resourceId !== 'string' || typeof identity.modelPath !== 'string'
+      || typeof model.versionId !== 'string' || typeof model.contentSha256 !== 'string') {
+      throw new Error('巡检高模固定版本来源与当前数据中台不一致。');
+    }
+    const captured = snapshot.resources.find(resource => resource.kind === 'modelVersion'
+      && resource.resourceId === identity.resourceId && resource.versionId === model.versionId);
+    if (!captured) throw new Error('数据中台资源快照缺少巡检高模固定版本。');
+    const key = JSON.stringify([sourceKey, identity.resourceId, model.versionId, model.contentSha256]);
+    let pending = jobs.get(key);
+    if (!pending) {
+      pending = syncInspectionModelVersion({ baseUrl, sharedResourcesRoot, sourceKey,
+        modelId: identity.resourceId, versionId: model.versionId, contentSha256: model.contentSha256, signal,
+        expectedFiles: captured.files.map(file => ({ kind: 'model', resourceId: identity.resourceId as string,
+          role: file.role, fileUrl: file.fileUrl, sha256: file.sha256, size: file.size })) });
+      jobs.set(key, pending);
+    }
+    const asset = await pending;
+    if (!asset.packagePath || !asset.metadataPath
+      || path.relative(asset.packagePath, asset.path).replace(/\\/g, '/') !== identity.modelPath.replace(/\\/g, '/')) {
+      throw new Error('巡检高模下载后的模型路径与固定身份不一致。');
+    }
+    updates.push({ model, asset });
+  }
+  for (const { model, asset } of updates) {
+    authorizeAssetRoot(asset.packagePath!);
+    model.sourcePath = asset.path;
+    model.sourceUrl = encodeAssetUrl(asset.path);
+    model.metaPath = asset.metadataPath!;
+    model.metaUrl = encodeAssetUrl(asset.metadataPath!);
+  }
+  for (let index = 0; index < scenes.length; index++) scenes[index].sceneContent = JSON.stringify(parsed[index]);
 }
 
 /** 捕获全部 SOURCE 场景与中台资源基线，之后由 renderer 执行统一替换和实际运行时烘焙。 */
@@ -129,9 +182,10 @@ export async function prepareDigitalTwinPublishSceneSnapshots(request: DigitalTw
   let resourceRevision: string;
   let resourceSnapshotToken: string | undefined;
   let resourceSnapshot: DigitalTwinResourceSnapshot | undefined;
+  const requestedResources = collectDigitalTwinResourceIds(scenes.map(s => s.sceneContent));
   try {
-    const requestedResources = collectDigitalTwinResourceIds(scenes.map(s => s.sceneContent));
     const snapshot = await client.captureResourceSnapshot(target.metadata.projectId, requestedResources, signal);
+    assertSnapshotModelVersions(requestedResources.modelVersions ?? [], snapshot);
     for (const reference of requestedResources.compositionVersions ?? []) {
       const captured = snapshot.resources.find(r => r.kind === 'composition' && r.resourceId === reference.id + ':' + reference.revision);
       if (!captured || captured.revision !== reference.contentSha256) throw new Error('数据中台未确认组合固定版本内容，请升级中台或重新同步组合。');
@@ -142,12 +196,17 @@ export async function prepareDigitalTwinPublishSceneSnapshots(request: DigitalTw
   } catch (error) {
     // 旧服务器没有快照端点时仍严格检查全局修订；业务错误不能退化为兼容路径。
     if (!(error instanceof DigitalTwinApiError) || error.httpStatus !== 404) throw error;
+    if (requestedResources.modelVersions?.length) throw new Error('数据中台不支持巡检高模固定版本快照，请升级中台。', { cause: error });
     resourceRevision = (await requestDataPlatformProject(target.metadata.baseUrl, target.metadata.projectId, signal)).currentResourceRevision;
   }
   if (resourceSnapshot) {
+    if (requestedResources.modelVersions?.length) {
+      await synchronizeInspectionSnapshots(scenes, target.metadata.baseUrl,
+        resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata), resourceSnapshot, signal);
+    }
     await synchronizeSnapshotModels(target.metadata.baseUrl, resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
-      resourceSnapshot.resources.flatMap(resource => (resource.kind === 'environment' || resource.kind === 'composition') ? []
-        : [{ kind: resource.kind as 'model' | 'combo', resourceId: resource.resourceId }]), signal, resourceSnapshot);
+      resourceSnapshot.resources.flatMap(resource => (resource.kind === 'model' || resource.kind === 'combo')
+        ? [{ kind: resource.kind, resourceId: resource.resourceId }] : []), signal, resourceSnapshot);
   }
   await assertPublishTargetCurrent(target);
   signal.throwIfAborted();
@@ -172,6 +231,11 @@ async function validatePublishScenePreparation(request: DigitalTwinPublishReques
     entry.sourcePath ?? path.join(target.projectRoot, 'Scenes', '__entry_prepared__.scene.json'), signal);
   const contents = [...overlays.values()];
   if (JSON.stringify(collectDigitalTwinResourceIds(contents)) !== JSON.stringify(collectDigitalTwinResourceIds(preparation.scenes.map(s => s.sceneContent)))) throw new Error('发布准备期间模型资源身份集合发生变化，请重新准备。');
+  for (let index = 0; index < contents.length; index++) {
+    if (JSON.stringify(inspectionModelFingerprints(contents[index])) !== JSON.stringify(inspectionModelFingerprints(preparation.scenes[index].sceneContent))) {
+      throw new Error('发布准备期间巡检高模固定版本或路径发生变化，请重新准备。');
+    }
+  }
   for (const content of contents) await assertPublishSceneModelsReady(content, signal, {
     projectRoot: target.projectRoot,
     sharedResourcesRoot: resolveDataPlatformBindingSharedResourcesRoot(target.projectRoot, target.metadata),
@@ -227,8 +291,11 @@ async function validatePublishScenePreparation(request: DigitalTwinPublishReques
       }
     }
   }
-  if (preparation.resourceSnapshotToken) await client.validateResourceSnapshot(target.metadata.projectId, preparation.resourceSnapshotToken, signal);
-  else if ((await requestDataPlatformProject(target.metadata.baseUrl, target.metadata.projectId, signal)).currentResourceRevision !== preparation.resourceRevision) {
+  if (preparation.resourceSnapshotToken) {
+    const validatedSnapshot = await client.validateResourceSnapshot(target.metadata.projectId, preparation.resourceSnapshotToken, signal);
+    const versions = collectDigitalTwinResourceIds(contents).modelVersions ?? [];
+    assertSnapshotModelVersions(versions, validatedSnapshot, preparation.resourceSnapshot);
+  } else if ((await requestDataPlatformProject(target.metadata.baseUrl, target.metadata.projectId, signal)).currentResourceRevision !== preparation.resourceRevision) {
     throw new DigitalTwinApiError('DIGITAL_TWIN_RESOURCE_REVISION_CONFLICT', '数据中台资源在场景准备期间发生变化，正在重新对齐。', null, 409);
   }
   await assertPublishTargetCurrent(target);
@@ -588,6 +655,16 @@ export async function publishDigitalTwin(
     appendUniqueWarnings(warnings, distPackage.warnings);
     await assertPublishResourceIdentities(sourcePackage.sceneContents, current.metadata.baseUrl, signal);
     const resourceIds = collectDigitalTwinResourceIds(sourcePackage.sceneContents);
+    if (resourceIds.modelVersions?.length) {
+      if (!prepared?.preparation.resourceSnapshotToken || !prepared.preparation.resourceSnapshot) {
+        throw new Error('巡检高模固定版本发布必须先捕获数据中台资源快照。');
+      }
+      const originalVersions = collectDigitalTwinResourceIds(prepared.preparation.scenes.map(scene => scene.sceneContent)).modelVersions ?? [];
+      if (JSON.stringify(resourceIds.modelVersions) !== JSON.stringify(originalVersions)) {
+        throw new Error('发布准备期间巡检高模版本集合发生变化，请重新准备。');
+      }
+      assertSnapshotModelVersions(resourceIds.modelVersions, prepared.preparation.resourceSnapshot);
+    }
     await validateDataPlatformEnvironmentPublishReferences(
       workspaceRoot,
       current.metadata.baseUrl,

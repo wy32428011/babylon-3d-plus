@@ -232,9 +232,13 @@ test('成本诊断按真实光源区分cube、cascade、阴影图与缓存，且
     const sunCost = metrics.lights.find(light => light.entityId === 'sun-entity')!;
     assert.equal(pointCost.type, 'point'); assert.equal(pointCost.faces, 6); assert.equal(pointCost.cubeFaces, 6);
     assert.equal(sunCost.type, 'directional'); assert.equal(sunCost.faces, 1); assert.equal(sunCost.cascades, 1, 'NullEngine不支持CSM时必须报告实际单面回退，不能报告配置级联数');
-    assert.ok(metrics.shadowMapBytes > 0); assert.ok(metrics.cacheBytes >= 0);
-    assert.equal(metrics.textureBytes, metrics.shadowMapBytes + metrics.cacheBytes);
-    assert.equal(metrics.shadowMapBytes, metrics.lights.reduce((sum, light) => sum + light.shadowMapBytes, 0));
+    assert.ok(sunCost.shadowMapBytes > 0);
+    const cubeTexture = point.getShadowGenerator()?.getShadowMap()?.getInternalTexture();
+    assert.equal(pointCost.shadowMapBytes > 0, Boolean(cubeTexture), '只计入 RTT 实际持有的纹理');
+    assert.equal(metrics.shadowMapBytes, pointCost.shadowMapBytes + sunCost.shadowMapBytes);
+    for (const light of metrics.lights) assert.equal(light.cacheBytes, 0);
+    assert.equal(metrics.cacheBytes, 0);
+    assert.equal(metrics.textureBytes, metrics.cacheBytes, '整图复用没有独立深度副本');
     assert.deepEqual(JSON.parse(JSON.stringify(metrics)), metrics);
     runtime.applySettings({ ...settings, enabled: false });
     assert.equal(runtime.getHybridMetrics().lights.length, 0);

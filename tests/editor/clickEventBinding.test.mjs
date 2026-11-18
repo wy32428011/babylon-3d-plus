@@ -306,7 +306,7 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
       })),
     );
     const trigger = resolveClickEventBindingClick(scene, 'stacker-1');
-    assert.deepEqual(buildClickEventAssetClickedPayload(scene, trigger), { assetCode: '001005', chartId: 'chart-9' });
+    assert.deepEqual(buildClickEventAssetClickedPayload(scene, trigger), { assetCode: '001005', entityId: 'stacker-1', chartId: 'chart-9' });
     assert.equal(buildClickEventAssetClickedPayload(scene, { kind: 'clear' }), null);
 
     const noChartScene = createScene(
@@ -431,6 +431,7 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     });
     assert.deepEqual(buildClickEventAssetClickedPayload(scene, resolution), {
       assetCode: '001005',
+      entityId: 'conveyor-1',
       chartId: 'chart-9',
       unit: { kind: 'cargo', containerCode: '000317' },
       host: { entityId: 'conveyor-1', assetCode: '999999', name: 'conveyor-1' },
@@ -442,8 +443,47 @@ test('点击事件绑定：接管决策与清理迁移', async (t) => {
     });
     assert.deepEqual(buildClickEventAssetClickedPayload(scene, spawned), {
       assetCode: 'AGV-77',
+      entityId: 'spawned:spawn-1',
       chartId: 'chart-9',
       unit: { kind: 'spawned-device', assetCode: 'AGV-77' },
     });
   });
+});
+
+
+test('中台设备类型经过拖拽、实体创建、场景往返、刷新与生成器模板保持编码', async t => {
+  const modules = [
+    '/src/editor/assets/AssetDatabase.ts', '/src/editor/model/SceneDocument.ts',
+    '/src/editor/project/SceneSerializer.ts', '/src/editor/model/modelGenerator.ts',
+    '/src/editor/store/slices/projectAssetRefresh.ts', '/src/editor/model/clickEventBinding.ts',
+  ];
+  const server = await createP4SsrTestModules(modules);
+  t.after(() => server.close());
+  const [assets, documents, serializer, generators, refresh, clicks] = await Promise.all(modules.map(p => server.ssrLoadModule(p)));
+  const source = { id: 'asset-1', name: 'conveyor.glb', path: 'models/conveyor.glb',
+    sourceUrl: REGISTERED_URL, kind: 'model', libraryKind: 'model', deviceType: 'conveyor', lengthUnit: 'meter' };
+  const asset = assets.decodeModelAssetDragPayload(JSON.stringify(source));
+  assert.equal(asset.deviceType, 'conveyor');
+  const entity = documents.createModelEntity(asset.path, asset.sourceUrl, asset.name,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, asset.deviceType);
+  const scene = documents.createEmptySceneDocument();
+  scene.entities[entity.id] = entity;
+  scene.entityIds.push(entity.id);
+  const restored = serializer.deserializeScene(serializer.serializeScene(scene));
+  assert.equal(restored.entities[entity.id].components.modelAsset.deviceType, 'conveyor');
+  const target = generators.createModelGeneratorTargetFromAsset(asset);
+  assert.equal(target.modelAsset.deviceType, 'conveyor');
+  assert.equal(generators.sanitizeModelAssetTemplate(target.modelAsset).deviceType, 'conveyor');
+  const updated = refresh.createRefreshedModelAsset(entity.components.modelAsset, { ...asset, deviceType: 'stacker' });
+  assert.equal(updated.deviceType, 'stacker');
+  const removed = refresh.createRefreshedModelAsset(updated, { ...asset, deviceType: undefined });
+  assert.equal(removed.deviceType, undefined);
+  const payload = clicks.buildClickEventAssetClickedPayload(scene, { kind: 'trigger', entityId: entity.id, effects: ['show-chart'] });
+  assert.equal(payload.deviceType, 'conveyor');
+  assert.equal(payload.entityId, entity.id);
+  delete entity.components.modelAsset.deviceType;
+  const legacy = serializer.deserializeScene(serializer.serializeScene(scene));
+  assert.equal(legacy.entities[entity.id].components.modelAsset.deviceType, undefined);
+  assert.equal(assets.decodeModelAssetDragPayload(JSON.stringify({ ...source, deviceType: '输送机' })).deviceType, undefined);
 });

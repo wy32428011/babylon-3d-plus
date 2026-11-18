@@ -196,6 +196,37 @@ export type DigitalTwinPublishContext = {
   publishActive: boolean;
 };
 
+/** 高精度模型与版本 ID 保持平台 Long 的十进制字符串。 */
+export type InspectionModelListItem = { resourceId: string; displayName: string };
+export type InspectionModelVersionListItem = { versionId: string; label?: string };
+export type InspectionModelVersionsRequest = { resourceId: string };
+export type InspectionModelVersionRequest = InspectionModelVersionsRequest & { versionId: string };
+export type InspectionModelVersionPreparationResult = {
+  model: {
+    dataPlatformModel: import('./shared/sceneModelUpdatePlan.js').DataPlatformModelIdentity & { kind: 'model' };
+    versionId: string;
+    /** 由主进程根据完整资源包计算。 */
+    contentSha256: string;
+    sourcePath: string;
+    sourceUrl: string;
+    metaPath: string;
+    metaUrl: string;
+    unitScaleToMeters: number;
+  };
+  /** 经过版本元数据校验的适用配置；无法确认时省略。 */
+  configuration?: { id: string; parameters: Record<string, number | string | boolean | { x: number; y: number; z: number }> };
+  /** 没有经过验证的零件清单时省略。 */
+  parts?: Array<{
+    partKey: string;
+    name: string;
+    nodePath: string;
+    parentPartKey?: string;
+    axis: { x: number; y: number; z: number };
+    distanceMeters: number;
+    fixed: boolean;
+  }>;
+};
+
 export type DigitalTwinPublishContextRequest = {
   projectId: string | null;
 };
@@ -450,6 +481,8 @@ export type ModelScriptAsset = {
 export type ModelAssetLibraryKind = 'model' | 'environment';
 
 export type AssetEntry = {
+  /** 中台设备类型编码，不是显示标签或模型分类。 */
+  deviceType?: string;
   id: string;
   name: string;
   path: string;

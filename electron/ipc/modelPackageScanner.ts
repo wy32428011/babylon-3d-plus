@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
 import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharacters.ts';
 import { precompileModelScriptFile } from './modelScriptCompiler.js';
@@ -739,7 +740,11 @@ async function createModelScriptAssets(scriptPaths: string[]): Promise<NonNullab
   }));
 }
 
-export async function scanModelPackage(packagePath: string): Promise<ModelPackageScanResult> {
+/** deviceType 仅接受同步调用方传入的受控索引元数据，不读取包内标签或遥测配置。 */
+export async function scanModelPackage(
+  packagePath: string,
+  syncMetadata?: { deviceType?: string },
+): Promise<ModelPackageScanResult> {
   const entries = await fs.readdir(packagePath, { withFileTypes: true });
   const fileNames = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
   const modelFilePath = selectPrimaryModelFile(packagePath, fileNames);
@@ -777,6 +782,7 @@ export async function scanModelPackage(packagePath: string): Promise<ModelPackag
       scriptPaths,
       scriptAssets,
       parameterScriptMetadata: metadata.parameterScriptMetadata,
+      ...modelDeviceTypeField(syncMetadata?.deviceType),
       ...modelRuntimeCapabilitiesField(metadata.runtimeCapabilities),
       animationScriptMetadata: metadata.animationScriptMetadata,
       defaultAssetCode: defaultAssetCode ?? metadata.defaultAssetCode,

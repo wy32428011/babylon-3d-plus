@@ -12,6 +12,7 @@ import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMi
 import { encodeAssetUrl } from './assetRegistry.js';
 import { createDataPlatformModelRuntimeRevision, readDataPlatformModelIndex, type DataPlatformModelIndex } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import { createSourceResourcePlan } from './digitalTwinSourceResourcePlan.js';
 
 type JsonObject = Record<string, unknown>;
 export type LocalSceneResourceKind = 'model' | 'combo' | 'environment' | 'skybox' | 'other';
@@ -32,7 +33,7 @@ export type LocalSceneResourceRecoveryResult = {
   sceneContent: string; resolvedFiles: string[]; restoredReferenceCount: number;
   issues: LocalSceneResourceIssue[]; missing: MissingLocalSceneResource[];
 };
-type ResourceOwner = { value: JsonObject; kind: LocalSceneResourceKind; resourceId?: string; revision?: string; rootPath?: string; rebuildable: boolean };
+type ResourceOwner = { value: JsonObject; kind: LocalSceneResourceKind; resourceId?: string; revision?: string; rootPath?: string; rebuildable: boolean; fixedInspection?: boolean };
 type Reference = {
   owner: ResourceOwner; parent: JsonObject | unknown[]; key: string | number; jsonPath: string;
   value: string; sourcePath: string; suffix: string; url: boolean; directory: boolean; required: boolean; relative: boolean;
@@ -67,7 +68,8 @@ export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneR
   for (const reference of references) {
     // 同文件在不同资源身份下引用时分别验证；磁盘校验与版本计算仍共享缓存。
     const key = JSON.stringify([reference.sourcePath.toLowerCase(), reference.owner.kind, reference.owner.resourceId,
-      reference.owner.revision, reference.owner.value.dataPlatformModel, reference.owner.value.fileSizeBytes, reference.directory]);
+      reference.owner.revision, reference.owner.value.dataPlatformModel, reference.owner.value.fileSizeBytes, reference.directory,
+      reference.owner.fixedInspection, reference.owner.value.versionId, reference.owner.value.contentSha256]);
     const group = groups.get(key) ?? []; group.push(reference); groups.set(key, group);
   }
   const resolver = new ResourceResolver(options);
@@ -104,7 +106,7 @@ export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneR
       (reference.parent as JsonObject)[reference.key] = reference.url ? `${encodeAssetUrl(result.file)}${reference.suffix}` : result.file;
       restoredReferenceCount += 1;
       const identity = object(reference.owner.value.dataPlatformModel);
-      if (result.sourceKey && identity) identity.sourceKey = result.sourceKey;
+      if (result.sourceKey && identity && !reference.owner.fixedInspection) identity.sourceKey = result.sourceKey;
     }
   }
   if (restoreLighting && !restoreLighting(document)) throw new Error('本地资源恢复改变了光照烘焙的输入或产物身份，已停止提交恢复结果。');
@@ -118,15 +120,17 @@ function collectReferences(document: JsonObject, sceneFilePath?: string): Refere
   visitSceneResourceValues(document, (value, location) => {
     if (value && typeof value === 'object') paths.set(value, location.path);
   });
-  const add = (value: JsonObject, kind: LocalSceneResourceKind, rebuildable = false) => {
+  const add = (value: JsonObject, kind: LocalSceneResourceKind, rebuildable = false, fixedInspection = false) => {
     if (owners.has(value)) return; owners.add(value);
     const source = [value.sourcePath, value.sourceUrl, value.packagePath, value.activeVariantUrl, value.url].find(item => typeof item === 'string') as string | undefined;
     const identity = object(value.dataPlatformModel);
     const inferred = source ? inferResourceIdentity(decodeLocalReference(source)?.file ?? source) : undefined;
+    const rawMeta = fixedInspection && typeof value.metaPath === 'string' ? decodeLocalReference(value.metaPath)?.file : undefined;
+    const metaPath = rawMeta && !path.isAbsolute(rawMeta) && sceneFilePath ? path.resolve(path.dirname(sceneFilePath), rawMeta) : rawMeta;
     const owner: ResourceOwner = { value, kind: identity?.kind === 'combo' ? 'combo' : inferred?.kind ?? kind,
       resourceId: stringValue(identity?.resourceId) ?? stringValue(value.dataPlatformResourceId) ?? inferred?.resourceId,
       revision: value.format === 'env' ? stringValue(value.sha256) : stringValue(value.assetRevision) ?? stringValue(value.dataPlatformRevision),
-      rootPath: stringValue(value.packagePath), rebuildable };
+      rootPath: fixedInspection && metaPath ? path.dirname(metaPath) : stringValue(value.packagePath), rebuildable, fixedInspection };
     const addField = (parent: JsonObject | unknown[], key: string | number, directory: boolean, required: boolean) => {
       const value = (parent as JsonObject)[key]; if (typeof value !== 'string') return;
       const decoded = decodeLocalReference(value); if (!decoded) return;
@@ -152,6 +156,7 @@ function collectReferences(document: JsonObject, sceneFilePath?: string): Refere
   for (const model of collectLightingPolicyResourceModels(document, false)) add(model, 'model');
   const collected = collectSceneResourceReferences(document);
   for (const { asset } of collected.models) add(asset, 'model');
+  for (const { model } of collected.inspections) add(model, 'model', false, true);
   for (const { deviceType } of collected.clickEventBindings) add(deviceType, 'model');
   for (const { environment } of collected.environments) add(environment, 'environment');
   for (const { value, kind, rebuildable } of collected.entityResources) add(value, kind, rebuildable);
@@ -190,6 +195,7 @@ class ResourceResolver {
   private readonly versions = new Map<string, Promise<{ layout: string; files: string[] }>>();
   private readonly hashes = new Map<string, Promise<string>>();
   private readonly gltfFiles = new Map<string, Promise<string[]>>();
+  private readonly inspections = new Map<string, Promise<string[]>>();
   private sharedIndex?: Promise<DataPlatformModelIndex | null>;
   private readonly workspace: string;
   private readonly project: string | null;
@@ -216,7 +222,7 @@ class ResourceResolver {
     }
     if (valid.size === 1) return [...valid.values()][0];
     if (valid.size > 1) return { error: '当前工作区和项目目录存在多个有效候选，资源位置有歧义，未自动替换。' };
-    if (!this.options.additionalMappings?.has(reference.sourcePath) && !this.options.additionalMappings?.has(reference.value)) {
+    if (!reference.owner.fixedInspection && !this.options.additionalMappings?.has(reference.sourcePath) && !this.options.additionalMappings?.has(reference.value)) {
       try {
         const indexed = await this.indexedCandidate(reference);
         if (indexed) return await this.validateCandidate(reference, indexed);
@@ -228,6 +234,19 @@ class ResourceResolver {
   private validateSource(reference: Reference): void {
     const normalized = reference.sourcePath.replace(/\\/g, '/');
     if (containsAsciiControlCharacters(normalized) || normalized.split('/').some(part => part === '..' || part === '.')) throw new Error('资源路径包含不安全的路径穿越或控制字符。');
+    if (reference.owner.fixedInspection) {
+      const model = reference.owner.value, identity = object(model.dataPlatformModel);
+      if (identity?.kind !== 'model' || typeof identity.sourceKey !== 'string' || !SHA256.test(identity.sourceKey)
+        || typeof identity.resourceId !== 'string' || !/^[1-9]\d{0,63}$/.test(identity.resourceId)
+        || typeof identity.modelPath !== 'string' || !identity.modelPath || typeof model.versionId !== 'string' || !/^[1-9]\d{0,63}$/.test(model.versionId)
+        || typeof model.contentSha256 !== 'string' || !SHA256.test(model.contentSha256) || !reference.owner.rootPath) {
+        throw new Error('巡检高模固定版本身份无效。');
+      }
+      if (this.options.sourceKey && identity.sourceKey !== this.options.sourceKey) throw new Error('巡检高模来源与当前数据中台不一致。');
+      const localModel = typeof model.sourcePath === 'string' ? decodeLocalReference(model.sourcePath)?.file : undefined;
+      const relativeModel = localModel && path.isAbsolute(localModel) ? path.relative(reference.owner.rootPath, localModel).replace(/\\/g, '/') : identity.modelPath;
+      if (relativeModel !== identity.modelPath.replace(/\\/g, '/') || /(?:^|\/)\.\.?(?:\/|$)/.test(relativeModel)) throw new Error('巡检高模模型路径与固定身份不一致。');
+    }
     const bakeAsset = reference.owner.value;
     if (['geometry', 'lightmap', 'probes'].includes(String(bakeAsset.kind)) && typeof bakeAsset.url === 'string') {
       // 扩展名必须与已知kind/codec成对匹配；不能把新产物恢复放宽成任意bin读取。
@@ -350,8 +369,29 @@ class ResourceResolver {
       if (!reference.required && layout && layout[1].toLowerCase() !== verified.layout) throw new Error('候选缩略图与原固定包布局版本不同。');
     }
     const extension = path.extname(candidate.file).toLowerCase();
+    const inspectionRelative = reference.owner.fixedInspection ? path.relative(reference.owner.rootPath!, reference.sourcePath) : '';
+    if (reference.owner.fixedInspection && (!inspectionRelative || inspectionRelative.startsWith('..') || path.isAbsolute(inspectionRelative))) {
+      throw new Error('巡检高模文件不在固定资源包内。');
+    }
+    const packageRoot = inspectionRelative ? inspectionRelative.split(path.sep).reduce(dir => path.dirname(dir), candidate.file) : undefined;
     const supportingFiles = stat.isFile && extension === '.gltf'
-      ? await this.verifyGltf(candidate.file, stat.size, verifiedPackageRoot) : [];
+      ? await this.verifyGltf(candidate.file, stat.size, verifiedPackageRoot ?? packageRoot) : [];
+    if (reference.owner.fixedInspection) {
+      if (!packageRoot || !isInside(packageRoot, candidate.file)) throw new Error('巡检高模候选路径无效。');
+      const key = identityKey(packageRoot) + '\0' + reference.owner.value.contentSha256;
+      let check = this.inspections.get(key);
+      if (!check) {
+        check = (async () => {
+          await this.requireFile(candidate.root, packageRoot, true);
+          const plan = await createSourceResourcePlan([{ sourcePath: packageRoot, destinationRelativePath: 'Assets/Models/inspection' }], packageRoot,
+            this.options.signal ?? new AbortController().signal);
+          if (plan.bundles[0].contentSha256 !== reference.owner.value.contentSha256) throw new Error('巡检高模候选完整资源包内容摘要不一致。');
+          return plan.files.map(file => file.sourcePath);
+        })();
+        this.inspections.set(key, check);
+      }
+      supportingFiles.push(...await check);
+    }
     if (stat.isFile && extension === '.glb') {
       let checked = this.models.get(stat.real);
       if (!checked) { checked = validateGlbModelFile(candidate.file).then(ok => { if (!ok) throw new Error('候选 GLB 模型文件结构无效。'); }); this.models.set(stat.real, checked); }

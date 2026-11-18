@@ -5,6 +5,7 @@ import { createModelAssetCode, extractModelAssetCodePrefix, type SceneDocument }
 import type { Vector3Data } from '../../model/math';
 import { cloneAutoPatrolComponent } from '../../model/autoPatrolInspection';
 import { cloneModelGeneratorComponent } from '../../model/modelGenerator';
+import { cloneInspectionWithoutDevice } from '../../model/inspectionBinding';
 import { cloneClickEventBindingComponent } from '../../model/clickEventBinding';
 import { cloneJsonValue, cloneTransform, cloneMeshRenderer, cloneLocator, cloneCadReference, cloneModelAsset, cloneVector3, cloneLight, sanitizeEntityName } from './entityValueOperations';
 import type { EntityClipboardEntry, EntityClipboard } from './editorStoreTypes';
@@ -243,6 +244,7 @@ export function createDuplicatedRuntimeEntity(
         overrides.assetNumber?.kind === 'modelAsset'
           ? overrides.assetNumber.value
           : createModelAssetCode(extractModelAssetCodePrefix(components.modelAsset.assetCode), id),
+      ...(components.modelAsset.inspection ? { inspection: cloneInspectionWithoutDevice(components.modelAsset.inspection) } : {}),
     };
   }
   if (components.autoPatrol) {
@@ -297,7 +299,7 @@ export function createModelArrayInstanceEntity(
         z: source.components.transform.position.z + offset.z,
       },
     },
-    modelAsset: { ...modelAsset, assetCode },
+    modelAsset: { ...modelAsset, assetCode, ...(modelAsset.inspection ? { inspection: cloneInspectionWithoutDevice(modelAsset.inspection) } : {}) },
     modelArrayInstance: { sourceEntityId },
   };
   delete components.modelArray;

@@ -23,7 +23,7 @@ function viewerCapabilitiesPlugin(): Plugin {
       // Vite 内置的后置处理仍会改变 generateBundle 中的入口；只对最终落盘字节签名。
       // 全部 JS chunk（含可见的 worker 输出）和 CSS 都属于当前 Viewer 的必要运行代码。
       const entryFiles = await Promise.all(outputs.filter(output => output.type === 'chunk'
-        || output.fileName === 'index.html' || /\.(?:css|js)$/.test(output.fileName))
+        || ['index.html', 'inspection.html'].includes(output.fileName) || /\.(?:css|js)$/.test(output.fileName))
         .map(output => readOutput(output.fileName)));
       const openingAssets = await Promise.all(outputs.flatMap(output => {
         if (output.type !== 'asset') return [];
@@ -45,7 +45,13 @@ export default defineConfig({
   publicDir: path.join(workspaceRoot, 'public'),
   plugins: [react(), viewerCapabilitiesPlugin(), ...buildAnalysisPlugins('viewer')],
   build: {
-    rolldownOptions: { output: { strictExecutionOrder: true, codeSplitting: babylonCodeSplitting() } },
+    rolldownOptions: {
+      input: {
+        index: path.join(workspaceRoot, 'src', 'player', 'index.html'),
+        inspection: path.join(workspaceRoot, 'src', 'player', 'inspection.html'),
+      },
+      output: { strictExecutionOrder: true, codeSplitting: babylonCodeSplitting() },
+    },
     outDir: path.join(workspaceRoot, 'dist-viewer-template'),
     emptyOutDir: true,
   },

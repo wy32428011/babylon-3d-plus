@@ -192,12 +192,16 @@ export class HistoryQueryService {
   }
   async #closeWindow(s: Session, window: Window): Promise<void> {
     if (!s.windows.delete(window.id)) return;
+    const failures: unknown[] = [];
     try {
       if (window.budget.active) this.#finishLease(s, window.budget, true);
       else { this.#syncLease(s, window.budget); this.#finishLease(s, window.budget); }
-    } finally {
-      try { await this.options.archive.closeReadSession(window.lease); }
-      catch (error) { this.#cleanupFailed = true; throw error; }
+    } catch (error) { failures.push(error); }
+    try { await this.options.archive.closeReadSession(window.lease); }
+    catch (error) { this.#cleanupFailed = true; failures.push(error); }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) {
+      throw new AggregateError(failures, '归档读取用量结算和租约关闭均失败。', { cause: failures[0] });
     }
   }
   #close(s: Session): Promise<void> {

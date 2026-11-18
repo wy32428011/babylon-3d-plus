@@ -1,3 +1,4 @@
+import { getModelAppearanceBaseMaterial } from './modelAppearanceMaterial.ts';
 import { encodeLightingPng } from './lightingPngWorker.ts';
 import { compactLightingGeometryInWorker } from './lightingGeometryCompactWorker.ts';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
@@ -217,12 +218,13 @@ export async function exportLightingMesh(mesh: AbstractMesh, identity: LightingM
   }
   const groups = source.subMeshes?.length ? source.subMeshes : [{ materialIndex: 0, indexStart: 0,
     indexCount: indices?.length ?? 0, verticesStart: 0, verticesCount: vertexCount }];
+  const base = getModelAppearanceBaseMaterial(mesh);
   const primitives: Array<{ index: number; indices: Uint32Array; material: Material | null }> = [];
   for (let index = 0; index < groups.length; index++) {
     const group = groups[index], start = unindexed ? group.verticesStart : group.indexStart;
     const count = unindexed ? group.verticesCount : group.indexCount;
     if (count === 0) continue;
-    const material = source.material instanceof MultiMaterial ? source.material.subMaterials[group.materialIndex] : mesh.material;
+    const material = base instanceof MultiMaterial ? base.subMaterials[group.materialIndex] : base;
     if (unindexed && (material?.fillMode ?? Material.TriangleFillMode) !== Material.TriangleFillMode) {
       throw new Error(`对象「${mesh.name}」的 primitive:${index} 不是无索引三角面拓扑，不能将线或点作为三角面烘焙。`);
     }

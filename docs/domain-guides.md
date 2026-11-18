@@ -31,7 +31,7 @@
 - 编辑器原生测量会把内容根单位缩放、参数脚本几何变化和用户 `Transform.scale` 一并计入，默认在 `Model Asset` 中显示约 `X=0.18 m、Y=0.18 m、Z=0.32 m`；即使删除参数脚本，只要保留 `lengthUnit: "centimeter"`，基础实际尺寸仍可测量。
 - Inspector 暴露 `长度 (m)`、`宽度 (m)`、`高度 (m)`，默认分别为 `0.32 m`、`0.18 m`、`0.18 m`，输入范围 `0.01–100 m`，步长 `0.01 m`。
 - 轴向契约为 X=宽、Y=高、Z=长；脚本从单位换算后的缩放与归一化位置基线绝对重算，参数反复修改不会累计误差，并同步补偿 GLB 的微小底部中心偏移，使极端尺寸下模型底面仍严格锚定实体原点地面。
-- 源包和 `Assets/Models/box` 中的 `box.model.ts`、`meta.json` 必须保持 SHA-256 一致；修改源脚本后应同步资产副本或在编辑器中重新导入模型包。 全量回归由 `npm run smoke:model-parameters` 校验，并随 `npm run smoke:units` 一并执行。
+- 源包和 `Assets/Models/box` 中的 `box.model.ts`、`meta.json` 必须保持 SHA-256 一致。修改源脚本后同步资产副本或重新导入，设置 `BABYLON_MODEL_ROOT` 后运行 `npm run smoke:model-parameters:external` 核验包括 Box 的 12 个业务包。日常 `npm run smoke:units` 使用仓库模型夹具。[测试分组与外部根配置](test-groups.md#参数化模型米制验证)
 - 当前项目 `.babylon-editor/asset-index.json` 的 Box 条目已重新扫描并生成新 `assetRevision`，模型库会按 `Box 纸箱`、`centimeter / 0.01` 和三个米制参数读取该资产。
 
 ## Stacker 堆垛机参数化说明

@@ -28,8 +28,8 @@ type SnapshotBundle = SourceResourceBundle & {
   members: Map<string, { relative: string; kind: string }>;
 };
 const LOCAL_URL = 'editor-asset://local/';
-const PATH_FIELDS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path', 'scriptPaths']);
-const URL_FIELDS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl', 'url']);
+const PATH_FIELDS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'metaPath', 'thumbnailPath', 'path', 'scriptPaths']);
+const URL_FIELDS = new Set(['sourceUrl', 'metaUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl', 'url']);
 const key = (value: string): string => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
 const targetKey = (value: string): string => value.replace(/\\/g, '/').toLowerCase();
 const abort = (signal: AbortSignal): void => { signal.throwIfAborted(); };
@@ -168,7 +168,7 @@ export async function createSourceResourcePlan(bundles: readonly SourceResourceB
   function validateModelReferences(value: unknown, location = 'scene', field = '', effectMetadata = new WeakSet(collectEffectModelReferences(value))): void {
     if (typeof value === 'string' && (value.startsWith(LOCAL_URL) || PATH_FIELDS.has(field) || URL_FIELDS.has(field))) {
       const found = reference(value);
-      if (found && (!found.kind || ((URL_FIELDS.has(field) || ['sourcePath', 'scriptPaths', 'metadataPath', 'thumbnailPath'].includes(field)) && found.kind !== 'file'))) {
+      if (found && (!found.kind || ((URL_FIELDS.has(field) || ['sourcePath', 'scriptPaths', 'metadataPath', 'metaPath', 'thumbnailPath'].includes(field)) && found.kind !== 'file'))) {
         throw new Error(`场景资源引用不存在或不是文件：${location}；${value}`);
       }
       return;
@@ -176,9 +176,35 @@ export async function createSourceResourcePlan(bundles: readonly SourceResourceB
     if (!value || typeof value !== 'object') return;
     const object = value as Record<string, unknown>;
     if (effectMetadata.has(object)) return;
+    if (object.inspection !== undefined && (field === 'modelAsset' || field === 'avatar' || object.sourcePath !== undefined || object.sourceUrl !== undefined)) {
+      const binding = object.inspection;
+      if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('巡检高模绑定无效：' + location);
+      const model = (binding as Record<string, unknown>).model;
+      if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error('巡检高模资源无效：' + location);
+      const fixed = model as Record<string, unknown>;
+      const modelPath = typeof fixed.sourcePath === 'string' ? reference(fixed.sourcePath) : null;
+      if (!modelPath || modelPath.kind !== 'file' || !modelPath.bundle.isDirectory
+        || typeof fixed.contentSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(fixed.contentSha256)
+        || modelPath.bundle.contentSha256 !== fixed.contentSha256) {
+        throw new Error('巡检高模资源包未获授权、缺失或完整内容摘要不一致：' + location);
+      }
+      for (const fieldName of ['sourceUrl', 'metaPath', 'metaUrl']) {
+        const other = typeof fixed[fieldName] === 'string' ? reference(fixed[fieldName] as string) : null;
+        if (!other || other.kind !== 'file' || other.bundle !== modelPath.bundle) {
+          throw new Error('巡检高模模型与元数据必须在同一授权资源包内：' + location + '.' + fieldName);
+        }
+        if (fieldName === 'sourceUrl' && targetKey(other.destination) !== targetKey(modelPath.destination)) {
+          throw new Error('巡检高模模型路径与 URL 不一致：' + location);
+        }
+      }
+      const metaPath = reference(fixed.metaPath as string)!;
+      const metaUrl = reference(fixed.metaUrl as string)!;
+      if (targetKey(metaPath.destination) !== targetKey(metaUrl.destination)) throw new Error('巡检高模元数据路径与 URL 不一致：' + location);
+    }
     const source = typeof object.sourcePath === 'string' ? reference(object.sourcePath) : null;
     if (source && /\.(glb|gltf)$/i.test(source.destination)) {
       const visit = (child: unknown, field: string, at: string): void => {
+        if (field === 'inspection') return;
         if (typeof child === 'string' && (PATH_FIELDS.has(field) || URL_FIELDS.has(field))) {
           const other = reference(child);
           if (other && targetKey(other.bundle.originalDestination) === targetKey(source.bundle.originalDestination)

@@ -205,6 +205,10 @@ export type DigitalTwinAssetClickedEvent = {
   type: 'event.assetClicked';
   payload: {
     assetCode?: string;
+    entityId?: string;
+    deviceType?: string;
+    namespace?: string;
+    deviceNo?: string;
     slot?: DigitalTwinAssetClickedSlot;
     chartId?: string;
     unit?: { kind: 'cargo' | 'spawned-device'; containerCode?: string; assetCode?: string };
@@ -271,8 +275,16 @@ function isBoundedString(value: unknown, maxLength: number, trim = true): value 
   return !trim || value.trim().length > 0;
 }
 
+function hasAsciiControlChar(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function isSceneNavigationUrl(value: unknown): value is string {
-  if (!isBoundedString(value, MAX_SCENE_URL_LENGTH) || /[\u0000-\u001f\u007f]/.test(value)
+  if (!isBoundedString(value, MAX_SCENE_URL_LENGTH) || hasAsciiControlChar(value)
     || !/^https?:\/\//i.test(value.trim()) || value.includes(String.fromCharCode(92))) return false;
   try {
     const url = new URL(value);
@@ -374,6 +386,10 @@ export function isDigitalTwinClickPayload(value: unknown): value is DigitalTwinA
   };
   if (!isRecord(value) || !isSafeValue(value, 0)) return false;
   if (value.assetCode !== undefined && !isBoundedString(value.assetCode, MAX_ASSET_CODE_LENGTH)) return false;
+  if (['entityId', 'deviceType', 'namespace', 'deviceNo'].some(key => value[key] !== undefined
+    && (!isBoundedString(value[key], 256) || hasAsciiControlChar(value[key] as string)))) return false;
+  if (value.parameterValues !== undefined && !isRecord(value.parameterValues)) return false;
+  if (value.parametersUnavailable !== undefined && value.parametersUnavailable !== true) return false;
   if (value.chartId !== undefined && !isBoundedString(value.chartId, MAX_CHART_ID_LENGTH)) return false;
   if (value.slot !== undefined && !isAssetClickedSlot(value.slot)) return false;
   if (value.unit !== undefined) {
@@ -484,6 +500,298 @@ export function parseDigitalTwinBridgeMessage(value: unknown): DigitalTwinBridge
         && isDigitalTwinClickPayload(value.payload)
         ? value as DigitalTwinAssetClickedEvent
         : null;
+    default:
+      return null;
+  }
+}
+
+/** 巡检扩展在原 v1 ready 之后单独探测，绝不添加到 viewer.ready.capabilities。 */
+export const DIGITAL_TWIN_INSPECTION_CAPABILITIES = [
+  'openInspection', 'focusCause', 'openAssetInspection', 'inspectionLoad', 'selectPart', 'selectionCause', 'cancelSelect', 'setProgress', 'reset', 'deviceContext', 'modelVersionLoad',
+] as const;
+export type DigitalTwinInspectionCapability = (typeof DIGITAL_TWIN_INSPECTION_CAPABILITIES)[number];
+export type DigitalTwinInspectionRole = 'scene' | 'detail';
+export type DigitalTwinInspectionDevice = { namespace: string; deviceType: string; deviceNo: string };
+export type DigitalTwinInspectionBinding = {
+  schemaVersion: 1;
+  device?: DigitalTwinInspectionDevice;
+  model: {
+    dataPlatformModel: { sourceKey: string; kind: 'model'; resourceId: string; modelPath: string };
+    versionId: string;
+    contentSha256: string;
+    sourcePath: string;
+    sourceUrl: string;
+    metaPath: string;
+    metaUrl: string;
+    unitScaleToMeters: number;
+  };
+  configuration: { id: string; parameters: Record<string, unknown> };
+  parts: Array<{ partKey: string; name: string; nodePath: string; parentPartKey?: string; axis: { x: number; y: number; z: number }; distanceMeters: number; fixed: boolean }>;
+};
+export type DigitalTwinInspectionLoad = {
+  loadId: string;
+  assetCode: string;
+  entityId: string;
+  inspection: DigitalTwinInspectionBinding & { device: DigitalTwinInspectionDevice };
+};
+export type DigitalTwinInspectionIdentity = { loadId: string; assetCode: string };
+
+/** 场景提供真实设备上下文；设备数据键可缺省，不能由 assetCode 推导。 */
+export type DigitalTwinDeviceContext = {
+  assetCode: string;
+  entityId: string;
+  deviceType?: string;
+  namespace?: string;
+  deviceNo?: string;
+  parameterValues?: Record<string, unknown>;
+  parametersUnavailable?: true;
+};
+
+/** 中台版本资源与场景包资源分开表达，不伪造本地路径或完整包摘要。 */
+export type DigitalTwinModelVersionInspectionLoad = {
+  loadId: string;
+  assetCode: string;
+  entityId: string;
+  inspection: {
+    schemaVersion: 2;
+    source: 'model-version';
+    device: { deviceType: string; namespace?: string; deviceNo?: string };
+    model: {
+      modelId: string;
+      versionId: string;
+      fileUrl: string;
+      fileExtension: '.glb' | '.gltf';
+      unitScaleToMeters: number;
+    };
+    configuration?: DigitalTwinInspectionBinding['configuration'];
+    parts: DigitalTwinInspectionBinding['parts'];
+  };
+};
+export type DigitalTwinInspectionAnyLoad = DigitalTwinInspectionLoad | DigitalTwinModelVersionInspectionLoad;
+
+type InspectionEnvelope = {
+  channel: typeof DIGITAL_TWIN_BRIDGE_CHANNEL;
+  version: typeof DIGITAL_TWIN_BRIDGE_VERSION;
+  sessionId: string;
+};
+export type DigitalTwinInspectionMessage = InspectionEnvelope & (
+  | { type: 'host.inspectionHello'; requestId: string; payload: { role: DigitalTwinInspectionRole } }
+  | { type: 'viewer.inspectionReady'; requestId: string; payload: { role: DigitalTwinInspectionRole; capabilities: DigitalTwinInspectionCapability[] } }
+  | { type: 'event.openInspection'; payload: Omit<DigitalTwinInspectionLoad, 'loadId'> & { causeRequestId?: string } }
+  | { type: 'command.openInspectionAsset'; requestId: string; payload: { assetCode: string; entityId: string } }
+  | { type: 'viewer.openInspectionAssetFailed'; requestId: string; error: string }
+  | { type: 'event.inspectionDeviceSelected'; payload: { assetCode: string; entityId: string; device: DigitalTwinInspectionDevice; causeRequestId?: string } }
+  | { type: 'event.deviceContext'; payload: { context: DigitalTwinDeviceContext | null; causeRequestId?: string } }
+  | { type: 'command.inspectionLoadModelVersion'; requestId: string; payload: DigitalTwinModelVersionInspectionLoad }
+  | { type: 'command.inspectionLoad'; requestId: string; payload: DigitalTwinInspectionLoad }
+  | { type: 'command.inspectionSelectPart'; requestId: string; payload: DigitalTwinInspectionIdentity & { partKey: string | null } }
+  | { type: 'command.inspectionCancelSelect'; payload: DigitalTwinInspectionIdentity }
+  | { type: 'command.inspectionSetProgress'; requestId: string; payload: DigitalTwinInspectionIdentity & { progress: number } }
+  | { type: 'command.inspectionReset'; requestId: string; payload: DigitalTwinInspectionIdentity }
+  | { type: 'event.inspectionPartSelected'; payload: DigitalTwinInspectionIdentity & { partKey: string | null; causeRequestId?: string } }
+  | { type: 'event.inspectionClosed'; payload: DigitalTwinInspectionIdentity }
+  | { type: 'viewer.inspectionResult'; requestId: string; payload: DigitalTwinInspectionIdentity; ok: boolean; error?: string }
+);
+
+/** 限制跨窗口数据规模，同时区分超出预算和无效结构，供入口给出明确提示。 */
+export function getInspectionDataIssue(value: unknown): 'budget' | 'invalid' | null {
+  let nodes = 160_000;
+  let characters = 16 * 1_048_576;
+  let issue: 'budget' | 'invalid' = 'invalid';
+  const budgetExceeded = (): false => { issue = 'budget'; return false; };
+  const visit = (entry: unknown, depth: number): boolean => {
+    if (--nodes < 0 || depth > 12) return budgetExceeded();
+    if (entry === null || typeof entry === 'boolean') return true;
+    if (typeof entry === 'number') return Number.isFinite(entry);
+    if (typeof entry === 'string') {
+      if (entry.length > 16_384 || (characters -= entry.length) < 0) return budgetExceeded();
+      return true;
+    }
+    if (Array.isArray(entry)) return entry.length > 10_000 ? budgetExceeded() : entry.every(item => visit(item, depth + 1));
+    if (!isRecord(entry) || ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) return false;
+    return Object.entries(entry).every(([key, item]) => {
+      if (!key.length || ['__proto__', 'prototype', 'constructor'].includes(key)) return false;
+      if (key.length > 128 || (characters -= key.length) < 0) return budgetExceeded();
+      return visit(item, depth + 1);
+    });
+  };
+  return visit(value, 0) ? null : issue;
+}
+
+function isSafeInspectionValue(value: unknown): boolean {
+  return getInspectionDataIssue(value) === null;
+}
+
+export function isDigitalTwinInspectionBinding(value: unknown): value is DigitalTwinInspectionBinding & { device: DigitalTwinInspectionDevice } {
+  if (!isRecord(value) || !isSafeInspectionValue(value) || value.schemaVersion !== 1
+    || !isRecord(value.device) || !isRecord(value.model) || !isRecord(value.model.dataPlatformModel)
+    || !isRecord(value.configuration) || !isRecord(value.configuration.parameters) || !Array.isArray(value.parts)) return false;
+  const device = value.device;
+  const model = value.model;
+  const source = model.dataPlatformModel as Record<string, unknown>;
+  return [device.namespace, device.deviceType, device.deviceNo, value.configuration.id,
+    source.sourceKey, source.modelPath, model.sourcePath, model.sourceUrl, model.metaPath, model.metaUrl]
+    .every(item => isBoundedString(item, 4096))
+    && source.kind === 'model'
+    && typeof source.resourceId === 'string' && /^[1-9]\d*$/.test(source.resourceId)
+    && typeof model.versionId === 'string' && /^[1-9]\d*$/.test(model.versionId)
+    && typeof model.contentSha256 === 'string' && /^[a-f\d]{64}$/i.test(model.contentSha256)
+    && typeof model.unitScaleToMeters === 'number' && model.unitScaleToMeters > 0 && Number.isFinite(model.unitScaleToMeters)
+    && value.parts.every(part => isRecord(part) && isBoundedString(part.partKey, 256)
+      && isBoundedString(part.name, 4096) && isBoundedString(part.nodePath, 4096)
+      && (part.parentPartKey === undefined || isBoundedString(part.parentPartKey, 256))
+      && isRecord(part.axis) && [part.axis.x, part.axis.y, part.axis.z].every(v => typeof v === 'number' && Number.isFinite(v))
+      && typeof part.distanceMeters === 'number' && Number.isFinite(part.distanceMeters) && typeof part.fixed === 'boolean');
+}
+
+export function isDigitalTwinDeviceContext(value: unknown): value is DigitalTwinDeviceContext {
+  return isRecord(value)
+    && hasAllowedKeys(value, ['assetCode', 'entityId', 'deviceType', 'namespace', 'deviceNo', 'parameterValues', 'parametersUnavailable'])
+    && isDigitalTwinClickPayload(value)
+    && isBoundedString(value.assetCode, MAX_ASSET_CODE_LENGTH)
+    && isBoundedString(value.entityId, MAX_ENTITY_ID_LENGTH)
+    && ['deviceType', 'namespace', 'deviceNo'].every(key => value[key] === undefined || isInspectionText(value[key], 256))
+    && (value.parameterValues === undefined || isRecord(value.parameterValues))
+    && (value.parametersUnavailable === undefined || value.parametersUnavailable === true)
+    && !(value.parametersUnavailable && value.parameterValues !== undefined);
+}
+
+function isInspectionText(value: unknown, max: number): value is string {
+  return isBoundedString(value, max) && value === value.trim() && !hasAsciiControlChar(value);
+}
+
+export function isDigitalTwinModelVersionInspection(value: unknown): value is DigitalTwinModelVersionInspectionLoad['inspection'] {
+  if (!isRecord(value) || !isSafeInspectionValue(value) || value.schemaVersion !== 2 || value.source !== 'model-version'
+    || !hasAllowedKeys(value, ['schemaVersion', 'source', 'device', 'model', 'configuration', 'parts'])
+    || !isRecord(value.device) || !isRecord(value.model) || !Array.isArray(value.parts)
+    || value.parts.length < 1 || value.parts.length > 10_000) return false;
+  const { device, model } = value;
+  if (!hasAllowedKeys(device, ['deviceType', 'namespace', 'deviceNo']) || !isInspectionText(device.deviceType, 256)
+    || !['namespace', 'deviceNo'].every(key => device[key] === undefined || isInspectionText(device[key], 256))
+    || !hasOnlyKeys(model, ['modelId', 'versionId', 'fileUrl', 'fileExtension', 'unitScaleToMeters'])
+    || ![model.modelId, model.versionId].every(id => typeof id === 'string' && /^[1-9]\d{0,18}$/.test(id) && (id.length < 19 || id <= '9223372036854775807'))
+    || !isInspectionText(model.fileUrl, 4096) || model.fileUrl.includes('\\')
+    || (model.fileExtension !== '.glb' && model.fileExtension !== '.gltf')
+    || typeof model.unitScaleToMeters !== 'number' || !Number.isFinite(model.unitScaleToMeters) || model.unitScaleToMeters <= 0) return false;
+  try {
+    const url = new URL(model.fileUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash
+      || !url.pathname.startsWith('/api/v1/files/') || /%(?:2f|5c|2e|00)/i.test(url.pathname)) return false;
+  } catch { return false; }
+  if (value.configuration !== undefined) {
+    if (!isRecord(value.configuration) || !hasOnlyKeys(value.configuration, ['id', 'parameters'])
+      || !isInspectionText(value.configuration.id, 256) || !isRecord(value.configuration.parameters)) return false;
+  }
+  const parents = new Map<string, string | undefined>();
+  const paths = new Set<string>();
+  for (const part of value.parts) {
+    if (!isRecord(part) || !hasAllowedKeys(part, ['partKey', 'name', 'nodePath', 'parentPartKey', 'axis', 'distanceMeters', 'fixed'])
+      || !isInspectionText(part.partKey, 256) || !isInspectionText(part.name, 256) || !isInspectionText(part.nodePath, 2048)
+      || (part.parentPartKey !== undefined && !isInspectionText(part.parentPartKey, 256))
+      || parents.has(part.partKey) || paths.has(part.nodePath) || !isRecord(part.axis)
+      || !hasOnlyKeys(part.axis, ['x', 'y', 'z'])
+      || ![part.axis.x, part.axis.y, part.axis.z].every(v => typeof v === 'number' && Number.isFinite(v))
+      || [part.axis.x, part.axis.y, part.axis.z].every(v => v === 0)
+      || typeof part.distanceMeters !== 'number' || !Number.isFinite(part.distanceMeters) || part.distanceMeters < 0
+      || typeof part.fixed !== 'boolean') return false;
+    if (part.nodePath !== '.' && (/[;,]/.test(part.nodePath)
+      || part.nodePath.split('/').some(segment => !segment || segment === '.' || segment === '..'))) return false;
+    parents.set(part.partKey, part.parentPartKey as string | undefined);
+    paths.add(part.nodePath);
+  }
+  const checked = new Set<string>();
+  for (const key of parents.keys()) {
+    const chain = new Set<string>();
+    let current: string | undefined = key;
+    while (current !== undefined && !checked.has(current)) {
+      if (!parents.has(current) || chain.has(current)) return false;
+      chain.add(current);
+      current = parents.get(current);
+    }
+    for (const item of chain) checked.add(item);
+  }
+  return true;
+}
+
+/** 单独解析新扩展；旧版严格 v1 解析及能力白名单保持原样。 */
+export function parseDigitalTwinInspectionMessage(value: unknown): DigitalTwinInspectionMessage | null {
+  if (!isRecord(value) || !isBaseEnvelope(value) || typeof value.type !== 'string') return null;
+  const envelope = ['channel', 'version', 'sessionId', 'type'];
+  const payload = value.payload;
+  const request = isBoundedString(value.requestId, MAX_IDENTIFIER_LENGTH);
+  const identity = isRecord(payload) && isBoundedString(payload.loadId, MAX_IDENTIFIER_LENGTH)
+    && isBoundedString(payload.assetCode, MAX_ASSET_CODE_LENGTH);
+  const part = isRecord(payload) && (payload.partKey === null || isBoundedString(payload.partKey, 256));
+  const exact = (keys: string[]) => hasOnlyKeys(value, [...envelope, ...keys]);
+  switch (value.type) {
+    case 'host.inspectionHello':
+      return exact(['requestId', 'payload']) && request && isRecord(payload) && hasOnlyKeys(payload, ['role'])
+        && (payload.role === 'scene' || payload.role === 'detail') ? value as DigitalTwinInspectionMessage : null;
+    case 'viewer.inspectionReady':
+      return exact(['requestId', 'payload']) && request && isRecord(payload) && hasOnlyKeys(payload, ['role', 'capabilities'])
+        && (payload.role === 'scene' || payload.role === 'detail') && Array.isArray(payload.capabilities)
+        && payload.capabilities.length <= DIGITAL_TWIN_INSPECTION_CAPABILITIES.length
+        && new Set(payload.capabilities).size === payload.capabilities.length
+        && payload.capabilities.every(item => typeof item === 'string' && DIGITAL_TWIN_INSPECTION_CAPABILITIES.includes(item as DigitalTwinInspectionCapability))
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'event.openInspection':
+      return exact(['payload']) && isRecord(payload) && hasAllowedKeys(payload, ['assetCode', 'entityId', 'inspection', 'causeRequestId'])
+        && isBoundedString(payload.assetCode, MAX_ASSET_CODE_LENGTH) && isBoundedString(payload.entityId, MAX_ENTITY_ID_LENGTH)
+        && (payload.causeRequestId === undefined || isBoundedString(payload.causeRequestId, MAX_IDENTIFIER_LENGTH))
+        && isDigitalTwinInspectionBinding(payload.inspection) ? value as DigitalTwinInspectionMessage : null;
+    case 'command.openInspectionAsset':
+      return exact(['requestId', 'payload']) && request && isRecord(payload) && hasOnlyKeys(payload, ['assetCode', 'entityId'])
+        && isBoundedString(payload.assetCode, MAX_ASSET_CODE_LENGTH) && isBoundedString(payload.entityId, MAX_ENTITY_ID_LENGTH)
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'viewer.openInspectionAssetFailed':
+      return exact(['requestId', 'error']) && request && isBoundedString(value.error, MAX_ERROR_MESSAGE_LENGTH)
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'event.inspectionDeviceSelected':
+      return exact(['payload']) && isRecord(payload) && hasAllowedKeys(payload, ['assetCode', 'entityId', 'device', 'causeRequestId'])
+        && isBoundedString(payload.assetCode, MAX_ASSET_CODE_LENGTH) && isBoundedString(payload.entityId, MAX_ENTITY_ID_LENGTH)
+        && (payload.causeRequestId === undefined || isBoundedString(payload.causeRequestId, MAX_IDENTIFIER_LENGTH))
+        && isRecord(payload.device) && hasOnlyKeys(payload.device, ['namespace', 'deviceType', 'deviceNo'])
+        && [payload.device.namespace, payload.device.deviceType, payload.device.deviceNo].every(item => isBoundedString(item, 256))
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'event.deviceContext':
+      return exact(['payload']) && isRecord(payload) && hasAllowedKeys(payload, ['context', 'causeRequestId'])
+        && (payload.context === null || isDigitalTwinDeviceContext(payload.context))
+        && (payload.causeRequestId === undefined || isBoundedString(payload.causeRequestId, MAX_IDENTIFIER_LENGTH))
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'command.inspectionLoadModelVersion':
+      return exact(['requestId', 'payload']) && request && identity && isRecord(payload)
+        && hasOnlyKeys(payload, ['loadId', 'assetCode', 'entityId', 'inspection'])
+        && isBoundedString(payload.entityId, MAX_ENTITY_ID_LENGTH) && isDigitalTwinModelVersionInspection(payload.inspection)
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'command.inspectionLoad':
+      return exact(['requestId', 'payload']) && request && identity && isRecord(payload)
+        && hasOnlyKeys(payload, ['loadId', 'assetCode', 'entityId', 'inspection'])
+        && isBoundedString(payload.entityId, MAX_ENTITY_ID_LENGTH) && isDigitalTwinInspectionBinding(payload.inspection)
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'command.inspectionSelectPart':
+      return exact(['requestId', 'payload']) && request && identity && part && isRecord(payload)
+        && hasOnlyKeys(payload, ['loadId', 'assetCode', 'partKey']) ? value as DigitalTwinInspectionMessage : null;
+    case 'event.inspectionPartSelected':
+      return exact(['payload']) && identity && part && isRecord(payload)
+        && hasAllowedKeys(payload, ['loadId', 'assetCode', 'partKey', 'causeRequestId'])
+        && (payload.causeRequestId === undefined || isBoundedString(payload.causeRequestId, MAX_IDENTIFIER_LENGTH))
+        ? value as DigitalTwinInspectionMessage : null;
+    case 'command.inspectionSetProgress':
+      return exact(['requestId', 'payload']) && request && identity && isRecord(payload)
+        && hasOnlyKeys(payload, ['loadId', 'assetCode', 'progress']) && typeof payload.progress === 'number'
+        && Number.isFinite(payload.progress) && payload.progress >= 0 && payload.progress <= 1 ? value as DigitalTwinInspectionMessage : null;
+    case 'command.inspectionCancelSelect':
+    case 'command.inspectionReset':
+    case 'event.inspectionClosed':
+      return exact(value.type === 'command.inspectionReset' ? ['requestId', 'payload'] : ['payload'])
+        && (value.type !== 'command.inspectionReset' || request) && identity && isRecord(payload)
+        && hasOnlyKeys(payload, ['loadId', 'assetCode']) ? value as DigitalTwinInspectionMessage : null;
+    case 'viewer.inspectionResult':
+      return request && identity && isRecord(payload) && hasOnlyKeys(payload, ['loadId', 'assetCode'])
+        && typeof value.ok === 'boolean' && (value.ok
+          ? exact(['requestId', 'payload', 'ok'])
+          : exact(['requestId', 'payload', 'ok', 'error']) && isBoundedString(value.error, MAX_ERROR_MESSAGE_LENGTH))
+        ? value as DigitalTwinInspectionMessage : null;
     default:
       return null;
   }

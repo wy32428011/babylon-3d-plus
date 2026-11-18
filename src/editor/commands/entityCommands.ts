@@ -25,6 +25,7 @@ import {
   resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import type { ModelParameterValues } from '../model/modelParameters';
+import type { InspectionBinding } from '../model/inspectionBinding';
 import type { Vector3Data } from '../model/math';
 import type { SceneDocument, SceneEnvironmentSettings } from '../model/SceneDocument';
 
@@ -579,6 +580,32 @@ export function updateModelParameterValuesCommand(
     label: '更新模型参数',
     execute: (scene) => updateModelParameterValues(scene, entityId, after),
     undo: (scene) => updateModelParameterValues(scene, entityId, before),
+  };
+}
+
+/** 高精度绑定作为独立快照进入命令历史，撤销重做不会复用可变引用。 */
+export function updateInspectionBindingCommand(
+  entityId: string,
+  before: InspectionBinding | undefined,
+  after: InspectionBinding | undefined,
+): Command {
+  const previous = before ? structuredClone(before) : undefined;
+  const next = after ? structuredClone(after) : undefined;
+  const apply = (scene: SceneDocument, binding: InspectionBinding | undefined): SceneDocument => {
+    const entity = scene.entities[entityId];
+    const modelAsset = entity?.components.modelAsset;
+    if (!entity || !modelAsset) return scene;
+    const updated = { ...modelAsset };
+    if (binding) updated.inspection = structuredClone(binding);
+    else delete updated.inspection;
+    return { ...scene, entities: { ...scene.entities, [entityId]: {
+      ...entity, components: { ...entity.components, modelAsset: updated },
+    } } };
+  };
+  return {
+    label: '更新高精度详情绑定',
+    execute: (scene) => apply(scene, next),
+    undo: (scene) => apply(scene, previous),
   };
 }
 

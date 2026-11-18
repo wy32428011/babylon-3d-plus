@@ -1,6 +1,6 @@
 import { verifySkyboxEnvironmentFile } from './skyboxEnvironmentResources.ts';
 import { isAuthorizedAssetFile, decodeAssetUrl, encodeAssetUrl } from './assetRegistry.ts';
-import { collectSceneSkyboxReferences, visitSceneResourceValues, mapSceneResourceValues, sceneResourceFieldKind } from '../shared/sceneResourceTraversal.js';
+import { collectSceneResourceReferences, collectSceneSkyboxReferences, visitSceneResourceValues, mapSceneResourceValues, sceneResourceFieldKind } from '../shared/sceneResourceTraversal.js';
 import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { ZipArchive } from 'archiver';
 import { createHash, randomUUID } from 'node:crypto';
@@ -27,6 +27,7 @@ import { captureSceneLightingBakeRelocation, stripLightingPolicyIdentityLocation
 import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
 import { collectLightingMipArchiveStorePaths, applyLightingMipArchiveStore } from './lightingMipArchiveStore.js';
 import { readModelResourceDependencies } from './modelResourceDependencies.js';
+import { assertInspectionModelSelfContained } from './inspectionModelResource.js';
 
 const require = createRequire(import.meta.url);
 const runtimeExtension = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
@@ -291,6 +292,14 @@ export async function buildDigitalTwinSourcePackage(
     const bundles = resourcePlan.bundles;
     for (const scene of scenes) {
       resourcePlan.validateModelReferences(scene.parsed, scene.relativePath);
+      for (const { model } of collectSceneResourceReferences(scene.parsed.scene, 'strict').inspections) {
+        if (typeof model.sourcePath !== 'string') throw new Error('巡检高模缺少模型路径。');
+        const mapped = resourcePlan.reference(model.sourcePath);
+        if (!mapped || mapped.kind !== 'file' || !mapped.bundle.isDirectory) throw new Error('巡检高模资源包无效。');
+        const modelPath = model.sourcePath.startsWith('editor-asset://local/') ? decodeAssetUrl(model.sourcePath)
+          : path.resolve(projectRoot, model.sourcePath);
+        await assertInspectionModelSelfContained(modelPath, mapped.bundle.sourcePath, options.signal);
+      }
       const portableScene = rewriteSceneToPortableAssets(scene.parsed, null, platformImageBundleMap, resourcePlan,
         new WeakSet(collectEffectModelReferences(scene.parsed)), stableSkyboxObjects);
       const restoreLighting = restoreRelocatedLighting.get(scene);
@@ -956,7 +965,10 @@ function rewriteSceneToPortableAssets(
       if (skyboxMetadata.has(value) && value.format !== 'env' && model?.kind === 'file') {
         rewritten.packagePath = path.posix.dirname(model.destination);
       }
-      if (model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
+      // 巡检高模已携带完整包摘要，不改写为普通模型的 sourceSnapshot。
+      const fixedInspectionModel = typeof value.versionId === 'string' && typeof value.contentSha256 === 'string'
+        && isPlainObject(value.dataPlatformModel);
+      if (!fixedInspectionModel && model && /^Assets\/Models\//i.test(model.destination) && /\.(glb|gltf)$/i.test(model.destination)) {
         rewritten.sourceSnapshot = { contentSha256: model.bundle.contentSha256 };
       }
       return rewritten;

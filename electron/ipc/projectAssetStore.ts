@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
 import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
@@ -465,6 +466,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     path: modelPath,
     sourceUrl: encodeAssetUrl(modelPath),
     assetRevision,
+    ...modelDeviceTypeField(asset.deviceType),
     kind: 'model',
     libraryKind,
     packagePath,
@@ -1196,7 +1198,7 @@ export async function importModelPackagesIntoProject(
 
     try {
       await copyDirectory(sourcePackagePath, targetPackagePath);
-      const copiedPackage = await scanModelPackage(targetPackagePath);
+      const copiedPackage = await scanModelPackage(targetPackagePath, scannedAsset);
 
       if (copiedPackage.asset) {
         const importedAsset: ProjectModelAssetEntry = {

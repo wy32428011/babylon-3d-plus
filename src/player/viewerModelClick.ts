@@ -7,6 +7,8 @@ import {
   type GeneratedUnitClickHit,
 } from '../editor/model/clickEventBinding';
 import type { SceneDocument } from '../editor/model/SceneDocument';
+import { buildDeviceContext } from '../editor/model/deviceContext';
+import type { DigitalTwinDeviceContext } from './digitalTwinInteractionProtocol';
 import type { DigitalTwinSlotCoordinate } from '../shared/digitalTwinSlotCodes';
 
 type ViewerModelClickEffects = {
@@ -19,6 +21,12 @@ type ViewerModelClickEffects = {
   setHighlightExcludeTrack: (entityIds: readonly string[]) => void;
   /** 命中 show-chart 效果时向宿主页面发送点击事件。 */
   emitAssetClicked?: (payload: ClickEventAssetClickedPayload) => void;
+  /** 独立选择上下文，不依赖 show-chart 或高模绑定；空白/取消发送 null。 */
+  emitDeviceContext?: (context: DigitalTwinDeviceContext | null) => void;
+  /** 绑定了设备身份时通知新宿主，旧 v1 点击保持原状。 */
+  emitInspectionDeviceSelected?: (entityId: string, generated: boolean) => void;
+  /** 仅显式动作打开详情；生成器产物必须另有实例绑定。 */
+  openInspectionDetail?: (entityId: string, generated: boolean) => void;
   /** 绑定包含数据中台大屏标识时，请求已握手的宿主切换大屏。 */
   showScreen?: (screen: { projectId: string; screenId: string }) => void;
 };
@@ -28,20 +36,34 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
   return (
     targetEntityId: string | null,
     pickedCell: ClickEventBindingPickedCell | null = null,
-    options: { focus?: boolean; generatedUnit?: GeneratedUnitClickHit | null } = {},
+    options: { focus?: boolean; generatedUnit?: GeneratedUnitClickHit | null; fromFocusCommand?: boolean } = {},
   ): void => {
     const entityId = (targetEntityId && scene.entities[targetEntityId]?.components.locator?.builtInBinding?.hostEntityId)
       || targetEntityId;
     // 命中生成产物时按产物自身的绑定决策；生成器未配置点击事件则回落到常规点击。
     const resolution = (options.generatedUnit ? resolveGeneratedUnitClick(scene, options.generatedUnit) : null)
       ?? resolveClickEventBindingClick(scene, entityId, pickedCell);
-    if (resolution.kind !== 'ignore') effects.beginSelection?.();
+    if (resolution.kind !== 'ignore') {
+      effects.beginSelection?.();
+      const selectedEntityId = resolution.kind === 'clear' ? null
+        : resolution.kind === 'pass-through' ? entityId : resolution.entityId;
+      effects.emitDeviceContext?.(resolution.kind === 'clear' ? null
+        : buildDeviceContext(scene, selectedEntityId, options.generatedUnit));
+    }
     const assetClickedPayload = buildClickEventAssetClickedPayload(scene, resolution);
     if (assetClickedPayload) effects.emitAssetClicked?.(assetClickedPayload);
+    if (resolution.kind === 'trigger' || resolution.kind === 'trigger-cell') {
+      effects.emitInspectionDeviceSelected?.(resolution.entityId, Boolean(options.generatedUnit));
+    }
+    if (!options.fromFocusCommand && (resolution.kind === 'trigger' || resolution.kind === 'trigger-cell')
+      && (resolution.effects as readonly string[]).includes('open-inspection-detail')) {
+      effects.openInspectionDetail?.(resolution.entityId, Boolean(options.generatedUnit));
+    }
     if ((resolution.kind === 'trigger' || resolution.kind === 'trigger-cell') && resolution.screen) {
       effects.showScreen?.(resolution.screen);
     }
     if (resolution.kind === 'pass-through') {
+      if (entityId) effects.emitInspectionDeviceSelected?.(entityId, Boolean(options.generatedUnit));
       effects.setHighlightExcludeTrack([]);
       effects.updateSelection(entityId ? [entityId] : []);
       if (entityId) effects.triggerManualEvents(entityId);

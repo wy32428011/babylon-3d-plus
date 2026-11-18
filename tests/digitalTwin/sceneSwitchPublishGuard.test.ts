@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { registerHooks } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import test from 'node:test';
@@ -116,24 +118,52 @@ for (const channel of ['scene:load', 'scene:loadFile']) {
   }
 }
 
-test('各异步打开边界关闭会话后，真实发布归属拒绝迟到 token', { timeout: 10000 }, async () => {
-  const scopeSource = await readFile(new URL('../../electron/ipc/scenePublishScope.ts', import.meta.url), 'utf8');
+test('用户取消场景文件选择时返回取消结果', async () => {
+  const context: Record<string, unknown> = {
+    isDigitalTwinPublishActive: () => false,
+    beginScenePublishScopeUpdate: () => 42, getScenePublishScope: () => ({ generation: 0 }),
+    dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
+  };
+  context.assertSceneSwitchAllowed = fn(0, 'assertSceneSwitchAllowed', context);
+  const result = await handler(0, 'scene:load', context)();
+  assert.deepEqual({ ...result }, { canceled: true, filePath: null, content: null });
+});
+
+/** 仅在直接加载 Electron 源码时把编译产物的 .js 引用解析到同名 .ts。 */
+async function loadScenePublishScope() {
+  const electronRoot = new URL('../../electron/', import.meta.url).href;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(electronRoot) && specifier.startsWith('.') && specifier.endsWith('.js')) {
+        const compiled = new URL(specifier, context.parentURL);
+        const source = new URL(specifier.slice(0, -3) + '.ts', context.parentURL);
+        if (!existsSync(compiled) && existsSync(source)) return nextResolve(source.href, context);
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+  try {
+    return await import('../../electron/ipc/scenePublishScope.ts');
+  } finally {
+    hooks.deregister();
+  }
+}
+
+test('各异步打开边界关闭会话后，真实发布归属拒绝迟到 token', { timeout: 10000 }, async t => {
+  const scope = await loadScenePublishScope();
   for (const channel of ['scene:load', 'scene:loadFile']) {
     for (const phase of channel === 'scene:load' ? ['dialog', 'read', 'opening', 'lighting'] : ['read', 'opening', 'lighting']) {
-      // 使用真实 token/暂存/重置实现；磁盘与资源准备只提供可控异步边界。
-      const scope = evaluate('(() => {' + scopeSource.replace(/^import .*$/gm, '').replace(/^export /gm, '')
-        + '; return { beginScenePublishScopeUpdate, resetScenePublishScope, stageScenePublishScopeFile, getScenePublishScope, confirmScenePublishScopeFile }; })()', {});
+      scope.setBoundScenePublishScope('previous-project');
+      const beginOpen = t.mock.fn(scope.beginScenePublishScopeUpdate);
+      const stageFile = t.mock.fn(scope.stageScenePublishScopeFile);
       const gate = deferred<void>(); const entered = deferred<void>();
       const boundary = async (name: string) => { if (name === phase) { entered.resolve(); await gate.promise; } };
-      const staged: boolean[] = [];
       const effects: string[] = [];
       const context: Record<string, unknown> = {
         isDigitalTwinPublishActive: () => false,
-        beginScenePublishScopeUpdate: scope.beginScenePublishScopeUpdate,
+        beginScenePublishScopeUpdate: beginOpen,
         getScenePublishScope: scope.getScenePublishScope,
-        stageScenePublishScopeFile: (token: number, path: string) => {
-          const result = scope.stageScenePublishScopeFile(token, path); staged.push(result); return result;
-        },
+        stageScenePublishScopeFile: stageFile,
         dialog: { showOpenDialog: async () => { await boundary('dialog'); return { canceled: false, filePaths: ['scene.scene.json'] }; } },
         validateLoadSceneFileRequest: (value: unknown) => value, assertRecentSceneFile: async () => 'scene.scene.json',
         readUtf8File: async () => { await boundary('read'); return '{}'; },
@@ -156,12 +186,19 @@ test('各异步打开边界关闭会话后，真实发布归属拒绝迟到 toke
         resetDataPlatformProjectSession: async () => {}, resetDataPlatformChartSyncSession: async () => {},
         clearCurrentDataPlatformBinding() {}, clearProjectAssetStoreSession() {},
       })();
+      const closedScope = scope.getScenePublishScope();
+      assert.equal(closedScope.kind, 'unspecified');
+      const rejected = assert.rejects(pending, /场景打开请求已失效/, channel + ':' + phase);
       gate.resolve();
-      assert.deepEqual({ ...await pending }, { canceled: true, filePath: null, content: null }, channel + ':' + phase);
-      assert.deepEqual(staged, []);
+      await rejected;
+      assert.equal(stageFile.mock.callCount(), 0);
       assert.deepEqual(effects, [], channel + ':' + phase);
-      assert.equal(scope.getScenePublishScope().kind, 'unspecified');
-      assert.equal(await scope.confirmScenePublishScopeFile(1), false);
+      assert.equal(beginOpen.mock.callCount(), 1);
+      const token = beginOpen.mock.calls[0].result;
+      assert.ok(typeof token === 'number');
+      assert.equal(scope.stageScenePublishScopeFile(token, 'scene.scene.json'), false);
+      assert.equal(await scope.confirmScenePublishScopeFile(token), false);
+      assert.equal(scope.getScenePublishScope(), closedScope);
     }
   }
 });

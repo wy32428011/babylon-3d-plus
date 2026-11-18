@@ -1,3 +1,4 @@
+import { getModelAppearanceBaseMaterial, setModelAppearanceBaseMaterial } from './modelAppearanceMaterial.ts';
 import { registerGeometryUpdateDelegate } from './lightingGeometryUpdates.ts';
 import { lightingStaticGiBatchSignature, planLightingStaticGiBatches, type LightingStaticGiBatchWatch, type LightingStaticGiSurface } from './lightingStaticGiBatch.ts';
 import { inspectLightingCaptureAdmission } from './lightingBakeAdmission.ts';
@@ -179,6 +180,10 @@ export class SceneLightingRuntime {
   private capturedInput: { signature: string; geometrySignature: string; materials: string; lighting: string } | null = null;
   private pendingActivation: PendingLightingActivation | null = null;
   private readonly shadowInstances: LightingShadowInstanceRuntime;
+  private readonly renderMeshIndexes = new WeakMap<
+    readonly Pick<RenderBinding, 'source' | 'mesh' | 'proxy'>[],
+    Map<string, Map<AbstractMesh, Set<AbstractMesh>>>
+  >();
   private lastCollectEndedAt = Number.NEGATIVE_INFINITY;
   private lastCollectDurationMs = 0;
   private preparationDeferredFrames = 0;
@@ -332,6 +337,30 @@ export class SceneLightingRuntime {
     }
     return [...output];
   }
+  /** 按逻辑设备和源部件找到实际绘制网格。每批光照记录仅在首次报警查询时索引一次。 */
+  getRenderMeshOverrides(entityId: string): ReadonlyMap<AbstractMesh, ReadonlySet<AbstractMesh>> | undefined {
+    const records = this.renderingRecords();
+    if (!records.length) return undefined;
+    let index = this.renderMeshIndexes.get(records);
+    if (!index) {
+      index = new Map();
+      for (const record of records) {
+        if (!record.proxy) continue;
+        const { source, mesh } = record;
+        let parts = index.get(source.entry.entityId);
+        if (!parts) { parts = new Map(); index.set(source.entry.entityId, parts); }
+        for (const part of new Set([source.mesh, source.logicalMesh])) {
+          if (!part) continue;
+          let surfaces = parts.get(part);
+          if (!surfaces) { surfaces = new Set(); parts.set(part, surfaces); }
+          surfaces.add(mesh);
+        }
+      }
+      this.renderMeshIndexes.set(records, index);
+    }
+    return index.get(entityId);
+  }
+
   private renderingRecords(): ReadonlyArray<Pick<RenderBinding, 'source' | 'mesh' | 'proxy'>> {
     return this.state?.records ?? this.shadowInstances.records;
   }
@@ -532,11 +561,12 @@ export class SceneLightingRuntime {
           const replacedMaterials = new Map<AbstractMesh, Material | null>();
           for (const [mesh, original] of previous.originalMaterials) {
             const working = (previous.bindings.get(mesh) as BakedLightingBinding & { workingMaterial?: Material }).workingMaterial;
-            if (mesh.material !== original) replacedMaterials.set(mesh, mesh.material);
+            const current = getModelAppearanceBaseMaterial(mesh);
+            if (current !== original) replacedMaterials.set(mesh, current);
             else restoreLightingMaterialValues(working ?? null, original, lightingMaterialValueSignature(working ?? null));
           }
           this.activateState(previous);
-          for (const [mesh, replacement] of replacedMaterials) mesh.material = replacement;
+          for (const [mesh, replacement] of replacedMaterials) setModelAppearanceBaseMaterial(mesh, replacement);
           if (replacedMaterials.size) this.requestChange('bindings', 'rollback-material-replaced');
         }
         else { this.updateShadowRoles(); this.rebuildDebug(); }
@@ -589,8 +619,9 @@ export class SceneLightingRuntime {
   }
   private sourceMaterial(mesh: AbstractMesh, dynamic = false): Material | null {
     const owner = getLightingMaterialSourceOwner(mesh);
-    const current = this.state?.originalMaterials.has(owner) && this.state.materials.has(mesh.material!)
-      ? this.state.originalMaterials.get(owner)! : mesh.material;
+    const base = getModelAppearanceBaseMaterial(mesh);
+    const current = this.state?.originalMaterials.has(owner) && base && this.state.materials.has(base)
+      ? this.state.originalMaterials.get(owner)! : base;
     const resolved = dynamic ? resolveLightingMaterialDirect(current, owner) : resolveLightingMaterialOverride(current, owner);
     // 动态材质值正常更新不要求重烘焙；但未知target借用绝不能获得该豁免。
     if (!resolved.targetValid || !resolved.stable && !dynamic) throw new Error('静态对象的显示材质存在真实业务修改，请重新烘焙。');
@@ -751,14 +782,15 @@ export class SceneLightingRuntime {
         } else state.originalMaterials.set(mesh, this.sourceMaterial(mesh, source.entry.mobility === 'dynamic'));
         const binding: BakedLightingBinding = { enabled: !this.beforeBake && !this.suppressPreviewIndirect };
         state.bindings.set(mesh, binding);
-        state.records.push({ source, mesh, binding, proxy: needsProxy, dynamic: source.entry.mobility === 'dynamic', lastProbePosition: null, workingMaterial: mesh.material,
+        const base = getModelAppearanceBaseMaterial(mesh);
+        state.records.push({ source, mesh, binding, proxy: needsProxy, dynamic: source.entry.mobility === 'dynamic', lastProbePosition: null, workingMaterial: base,
           ...(needsProxy ? { sourceMaterial: this.sourceMaterial(source.mesh, source.entry.mobility === 'dynamic'),
             sourceMaterialSignature: lightingPhysicalMaterialValueSignature(this.sourceMaterial(source.mesh, source.entry.mobility === 'dynamic')) } : {}) });
-        if (!needsProxy) material(mesh.material);
+        if (!needsProxy) material(base);
       }
       // 暂存工作材质映射，正式提交前不改任何源网格的材质。
       for (const [mesh, original] of state.originalMaterials) {
-        const working = material(mesh.material ?? original);
+        const working = material(getModelAppearanceBaseMaterial(mesh) ?? original);
         (state.bindings.get(mesh) as BakedLightingBinding & { workingMaterial?: Material }).workingMaterial = working;
         const record = state.records.find(row => row.mesh === mesh); if (record) record.workingMaterial = working;
         bindTarget(working, mesh);
@@ -795,7 +827,7 @@ export class SceneLightingRuntime {
     for (const [mesh] of state.originalMaterials) {
       state.originalMaterialValues.set(mesh, lightingMaterialValueSignature(state.originalMaterials.get(mesh)!));
       const binding = state.bindings.get(mesh) as BakedLightingBinding & { workingMaterial?: Material };
-      mesh.material = binding.workingMaterial!;
+      setModelAppearanceBaseMaterial(mesh, binding.workingMaterial!);
     }
     for (const [mesh] of state.hiddenSources) mesh.layerMask = 0;
     for (const [batch, hidden] of state.hiddenInstances) batch.setLightingHiddenInstances(hidden);
@@ -809,11 +841,12 @@ export class SceneLightingRuntime {
     this.restoreProxyLightPolicies();
     for (const [mesh, original] of state.originalMaterials) {
       const expected = (state.bindings.get(mesh) as BakedLightingBinding & { workingMaterial?: Material }).workingMaterial ?? null;
-      const owned = ownership ? ownership.has(mesh) && mesh.material === ownership.get(mesh) : isLightingMaterialOverrideOf(mesh.material, expected, mesh);
+      const current = getModelAppearanceBaseMaterial(mesh);
+      const owned = ownership ? ownership.has(mesh) && current === ownership.get(mesh) : isLightingMaterialOverrideOf(current, expected, mesh);
       if (!owned) continue;
       // 精确租约在释放时合并真实delta；不能把入口初始化的透明模式等显示值写回物理源。
-      if (!ownership && !state.materialOverrides.length) restoreLightingMaterialValues(original, mesh.material, state.originalMaterialValues.get(mesh) ?? 'changed');
-      mesh.material = original;
+      if (!ownership && !state.materialOverrides.length) restoreLightingMaterialValues(original, current, state.originalMaterialValues.get(mesh) ?? 'changed');
+      setModelAppearanceBaseMaterial(mesh, original);
     }
     for (const [mesh, layerMask] of state.hiddenSources) if (!mesh.isDisposed() && mesh.layerMask === 0) mesh.layerMask = layerMask;
     for (const [batch] of state.hiddenInstances) batch.setLightingHiddenInstances(new Map());
@@ -863,7 +896,8 @@ export class SceneLightingRuntime {
     const ownership = new Map<AbstractMesh, Material | null>();
     for (const [mesh] of state.originalMaterials) {
       const expected = (state.bindings.get(mesh) as BakedLightingBinding & { workingMaterial?: Material }).workingMaterial ?? null;
-      if (isLightingMaterialOverrideOf(mesh.material, expected, mesh)) ownership.set(mesh, mesh.material);
+      const current = getModelAppearanceBaseMaterial(mesh);
+      if (isLightingMaterialOverrideOf(current, expected, mesh)) ownership.set(mesh, current);
     }
     try {
       for (const lease of [...state.materialOverrides].reverse()) release(() => lease.release());
@@ -1013,10 +1047,13 @@ export class SceneLightingRuntime {
 
   private validateStaticState(state: LightingState): boolean {
     if (this.pendingInvalidation) { this.invalidate(this.pendingInvalidation); return false; }
-    for (const record of state.records) if (record.proxy && !record.dynamic
-      && (!isLightingMaterialOverrideOf(record.mesh.material, record.workingMaterial ?? null, record.mesh)
-        || !resolveLightingMaterialOverride(record.mesh.material, record.mesh).stable)) {
-      this.invalidate(`静态对象「${record.source.entry.name}」的可见代理材质发生变化，请重新烘焙。`); return false;
+    for (const record of state.records) {
+      if (!record.proxy || record.dynamic) continue;
+      const current = getModelAppearanceBaseMaterial(record.mesh);
+      if (!isLightingMaterialOverrideOf(current, record.workingMaterial ?? null, record.mesh)
+        || !resolveLightingMaterialOverride(current, record.mesh).stable) {
+        this.invalidate(`静态对象「${record.source.entry.name}」的可见代理材质发生变化，请重新烘焙。`); return false;
+      }
     }
     const sourceState = new Map<AbstractMesh, { visibility: number; material: string; geometry: Geometry | null; carrierMatrix: Matrix }>();
     const revisions = new Map<LightingInstanceBatch, number | null>();
@@ -1086,7 +1123,7 @@ export class SceneLightingRuntime {
         applyWorldMatrix(record.mesh as Mesh, world);
       }
       if (record.proxy) {
-        const current = record.source.mesh.material, owner = getLightingMaterialSourceOwner(record.source.mesh);
+        const current = getModelAppearanceBaseMaterial(record.source.mesh), owner = getLightingMaterialSourceOwner(record.source.mesh);
         // 每个source只校其合法直接链；逐实例绝不能重复audit整个物理root的全部children。
         if (!isLightingMaterialOverrideOf(current, record.sourceMaterial ?? null, owner)) continue;
         let physical = materialSignatures.get(current);
@@ -1099,10 +1136,11 @@ export class SceneLightingRuntime {
           materialSignatures.set(current, physical);
         }
         if (physical.signature !== record.sourceMaterialSignature) {
-          if (record.mesh.material && !synchronizedMaterials.has(record.mesh.material)
-            && isLightingMaterialOverrideOf(record.mesh.material, record.workingMaterial ?? null, record.mesh)) {
-            synchronizeLightingMaterialDisplay(record.mesh.material, record.mesh);
-            synchronizedMaterials.add(record.mesh.material);
+          const display = getModelAppearanceBaseMaterial(record.mesh);
+          if (display && !synchronizedMaterials.has(display)
+            && isLightingMaterialOverrideOf(display, record.workingMaterial ?? null, record.mesh)) {
+            synchronizeLightingMaterialDisplay(display, record.mesh);
+            synchronizedMaterials.add(display);
           }
           record.sourceMaterialSignature = physical.signature;
         }
@@ -1124,8 +1162,8 @@ export class SceneLightingRuntime {
 
   private dynamicMaterialReplaced(state: LightingState): boolean {
     return state.records.some(record => record.dynamic && (record.proxy
-      ? !isLightingMaterialOverrideOf(record.source.mesh.material, record.sourceMaterial ?? null, getLightingMaterialSourceOwner(record.source.mesh))
-      : !isLightingMaterialOverrideOf(record.mesh.material, record.workingMaterial ?? null, record.mesh)));
+      ? !isLightingMaterialOverrideOf(getModelAppearanceBaseMaterial(record.source.mesh), record.sourceMaterial ?? null, getLightingMaterialSourceOwner(record.source.mesh))
+      : !isLightingMaterialOverrideOf(getModelAppearanceBaseMaterial(record.mesh), record.workingMaterial ?? null, record.mesh)));
   }
 
   private refreshDynamicGeometry(state: LightingState): void {
@@ -1217,10 +1255,14 @@ export class SceneLightingRuntime {
     // Babylon 的 excludedMeshes=[] setter 不会重同步被移除的网格；included setter 会完整刷新。
     light.includedOnlyMeshes = [...included];
     const materials = new Set<Material>();
-    for (const mesh of affected) {
-      const material = mesh.material;
+    const collect = (material: Material | null) => {
       if (material instanceof MultiMaterial) for (const child of material.subMaterials) { if (child) materials.add(child); }
       else if (material) materials.add(material);
+    };
+    for (const mesh of affected) {
+      collect(mesh.material);
+      const base = getModelAppearanceBaseMaterial(mesh);
+      if (base !== mesh.material) collect(base);
     }
     for (const material of materials) {
       const frozen = material.isFrozen;

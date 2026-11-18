@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
 import { normalizeHistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { collectSceneSkyboxReferences } from '../../../electron/shared/sceneResourceTraversal.ts';
@@ -15,6 +16,7 @@ import { isDigitalTwinEffectKind, validateDigitalTwinEffectConfig, type DigitalT
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import { normalizeAlarmManager } from '../model/alarmManager';
 import { normalizeModelSourceSnapshot } from '../model/modelSourceSnapshot';
+import { cloneInspectionWithoutDevice, normalizeInspectionBinding } from '../model/inspectionBinding';
 import { normalizeEntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
 import { migrateSceneLightingDocument, normalizeSceneLightingConfig, normalizeSceneAppearanceConfig } from '../../../electron/shared/sceneLightingConfig';
 import type { Entity } from '../model/Entity';
@@ -834,6 +836,7 @@ function migrateLegacyModelArrays(
       components.modelAsset = {
         ...components.modelAsset!,
         assetCode: item.assetCode,
+        ...(components.modelAsset?.inspection ? { inspection: cloneInspectionWithoutDevice(components.modelAsset.inspection) } : {}),
       };
       components.modelArrayInstance = { sourceEntityId: source.id };
 
@@ -1209,10 +1212,12 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
   return {
     assetCode,
     ...(modelAsset.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(modelAsset.dataPlatformModel) }),
+    ...modelDeviceTypeField(modelAsset.deviceType),
     sourcePath,
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
     ...(sourceSnapshot ? { sourceSnapshot } : {}),
+    ...(modelAsset.inspection === undefined ? {} : { inspection: normalizeInspectionBinding(modelAsset.inspection) }),
     lengthUnit: unitInfo.lengthUnit,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     ...(scriptAssets.length ? { scriptAssets } : {}),

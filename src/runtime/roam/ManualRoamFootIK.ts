@@ -25,7 +25,11 @@ export type ManualRoamFootIKFrame = {
   teleported?: boolean;
   footContacts: { left: number; right: number };
   speed?: number;
+  /** 已停步但最后一步仍在渐出时，保留这一步的脚掌滚动。 */
+  gaitPoseActive?: boolean;
   strideScale?: number;
+  /** 视觉根朝行进方向尚需转过的世界yaw，用于摆脚预先对准下一步。 */
+  movementYawRemaining?: number;
   /** 移动转向时逐脚保留可达支撑；超限脚独立释放并继续有界贴地。 */
   turning?: boolean;
 };
@@ -48,7 +52,11 @@ export type ManualRoamFootIKFootDebug = {
   residualCorrection: number;
   lockPoint: Vector3|null;
 };
-type Leg = { soleUp: Vector3; soleForward: Vector3 | null; thigh: TransformNode; knee: TransformNode; foot: TransformNode; toe: TransformNode | null; sole:ManualRoamSoleGeometry; solePoints:Vector3[]; strideOffset:Vector3; lock: Vector3 | null; lockId:number;releaseReason:string;plantOffsets:Vector3[]|null; phase:ManualRoamFootPhaseState; previousClearance:number|null; pole:Vector3|null; ground:{point:Vector3;normal:Vector3}|null; debug: ManualRoamFootIKFootDebug };
+type Leg = { soleUp: Vector3; soleForward: Vector3 | null; thigh: TransformNode; knee: TransformNode; foot: TransformNode; toe: TransformNode | null; sole:ManualRoamSoleGeometry; solePoints:Vector3[]; strideOffset:Vector3; yawOffset:number; previousHeading:number|null; lock: Vector3 | null; lockId:number;releaseReason:string;plantOffsets:Vector3[]|null; phase:ManualRoamFootPhaseState; previousClearance:number|null; pole:Vector3|null; ground:{point:Vector3;normal:Vector3}|null; debug: ManualRoamFootIKFootDebug };
+// 支撑相允许鞋掌保持落地方向；急转超出踝部余量时绕支点随身转动。
+const MAX_PLANTED_YAW = 35 * Math.PI / 180;
+const MAX_SWING_LEAD = 20 * Math.PI / 180;
+const SWING_YAW_RECOVERY = 220 * Math.PI / 180;
 const emptyDebug = (reason = 'inactive'): ManualRoamFootIKFootDebug => ({ locked: false, target: null, targetError: 0, normalAlignment: 1, kneeForward: 0, reason,phase:'Swing',weights:{position:0,rotation:0,plant:0},pelvisOffset:0,poleCorrectionRadians:0,lockId:0,releaseReason:reason,soleResidualBefore:0,soleResidualAfter:0,residualIterations:0,residualCorrection:0,lockPoint:null });
 /** 参考姿态把脚骨拉平，鞋网格仍按真实绑定蒙皮；资产在脚骨局部记录“鞋底自然朝上”的方向，缺省时回退脚骨Up轴。 */
 function readSoleUp(foot: TransformNode): Vector3 {
@@ -126,7 +134,7 @@ export class ManualRoamFootIK {
       const forward = toe ? position(toe).subtract(position(foot)) : Vector3.TransformNormal(Vector3.Forward(),this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity());
       const soleForward = options.automatic ? project(Vector3.TransformNormal(forward,inverse),up).normalize() : null;
       if (options.automatic && (!finiteVector(up) || !finiteVector(soleForward!) || soleForward!.lengthSquared()<1e-8)) throw new Error(`足底参考朝向无法确定：${side}`);
-      return { soleUp:up,soleForward,thigh,knee,foot,toe,sole,solePoints:sole.points,strideOffset:Vector3.Zero(),lock:null,lockId:0,releaseReason:'inactive',plantOffsets:null,phase:createManualRoamFootPhaseState(),previousClearance:null,pole:null,ground:null,debug:emptyDebug() };
+      return { soleUp:up,soleForward,thigh,knee,foot,toe,sole,solePoints:sole.points,strideOffset:Vector3.Zero(),yawOffset:0,previousHeading:null,lock:null,lockId:0,releaseReason:'inactive',plantOffsets:null,phase:createManualRoamFootPhaseState(),previousClearance:null,pole:null,ground:null,debug:emptyDebug() };
     };
     this.legs = { left:leg('Left'),right:leg('Right') };
     const initialForward = project(footForward(this.legs.left).add(footForward(this.legs.right)),Vector3.Up());
@@ -148,11 +156,43 @@ export class ManualRoamFootIK {
     if (!Number.isFinite(frame.dt) || frame.dt < 0 || frame.teleported) { this.reset(); return; }
     if(!frame.grounded||frame.fly){this.resetLegs();this.applyPelvis(0,frame.dt);return;}
     const moving=(frame.speed??0)>0.03;
+    const walkingPose = moving || frame.gaitPoseActive === true;
     const stride=Number.isFinite(frame.strideScale)?Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,frame.strideScale!)):1;
     const forward=Vector3.TransformNormal(this.bodyForward,this.hips.parent?.computeWorldMatrix(true) ?? Matrix.Identity()).normalize(),center=position(this.hips);
-    for(const side of ['left','right'] as const){const leg=this.legs[side];leg.solePoints=leg.sole.sample();leg.strideOffset=forward.scale(Vector3.Dot(position(leg.foot).subtract(center),forward)*(stride-1));this.prepareLeg(leg,frame.footContacts[side],moving,frame.dt);}
-    this.fitPelvis(moving,frame.dt);
-    for (const side of ['left','right'] as const) this.updateLeg(this.legs[side],frame.footContacts[side],moving,!!frame.turning);
+    for (const side of ['left', 'right'] as const) {
+      const leg = this.legs[side];
+      const ankle = position(leg.foot);
+      this.steerFoot(leg, moving, frame.footContacts[side], frame);
+      leg.solePoints = leg.sole.sample();
+      leg.strideOffset = forward.scale(Vector3.Dot(ankle.subtract(center), forward) * (stride - 1));
+      this.prepareLeg(leg, frame.footContacts[side], walkingPose, frame.dt);
+    }
+    this.fitPelvis(walkingPose, frame.dt);
+    for (const side of ['left', 'right'] as const) {
+      this.updateLeg(this.legs[side], frame.footContacts[side], walkingPose, !!frame.turning);
+    }
+  }
+
+  /** 在地面探测前抵消承重鞋的水平转动，保留源动作的抬跟、脚尖外展和坡面贴合。 */
+  private steerFoot(leg: Leg, moving: boolean, contact: number, frame: ManualRoamFootIKFrame): void {
+    const forward = project(footForward(leg), worldDirection(leg.foot, leg.soleUp));
+    // 鞋头竖直时水平朝向没有定义，待方向可测时重新建立基准。
+    const heading = Math.hypot(forward.x, forward.z) > 1e-5 ? Math.atan2(forward.x, forward.z) : null;
+    const difference = heading !== null && leg.previousHeading !== null ? heading - leg.previousHeading : 0;
+    leg.previousHeading = heading;
+    if (moving && leg.lock && contact > .35) {
+      const yawDelta = Math.atan2(Math.sin(difference), Math.cos(difference));
+      leg.yawOffset = Math.max(-MAX_PLANTED_YAW, Math.min(MAX_PLANTED_YAW, leg.yawOffset - yawDelta));
+    } else {
+      const remaining = moving && Number.isFinite(frame.movementYawRemaining) ? frame.movementYawRemaining! : 0;
+      const lead = Math.max(-MAX_SWING_LEAD, Math.min(MAX_SWING_LEAD, remaining));
+      const step = SWING_YAW_RECOVERY * Math.min(.1, frame.dt);
+      leg.yawOffset += Math.max(-step, Math.min(step, lead - leg.yawOffset));
+    }
+    if (Math.abs(leg.yawOffset) > 1e-6) {
+      // 两个世界水平向量确定纯yaw；aim在父级空间应用它，也适用于glTF镜像根。
+      aim(leg.foot, Vector3.Forward(), new Vector3(Math.sin(leg.yawOffset), 0, Math.cos(leg.yawOffset)));
+    }
   }
 
   private solePose(leg:Leg,normal:Vector3,moving:boolean,weight=1):{offset:Vector3;reference:Vector3;up:Vector3;forward:Vector3} {
@@ -216,7 +256,15 @@ export class ManualRoamFootIK {
   private updateLeg(leg: Leg, rawWeight: number,moving:boolean,turning:boolean,allowFallback=true): void {
     const weight=leg.phase.positionWeight;
     if(!leg.ground)return;
-    if(!moving&&rawWeight<.15){this.release(leg,'swing');return;}
+    if (!moving && rawWeight < .15) {
+      // 原地换脚时位置立即解锁，姿态按ToeOff权重释放，避免一帧跳回源鞋掌俯仰。
+      if (leg.phase.rotationWeight > 0) {
+        const up = worldDirection(leg.foot, leg.soleUp);
+        aim(leg.foot, up, Vector3.Lerp(up, leg.ground.normal, leg.phase.rotationWeight));
+      }
+      this.release(leg, 'swing');
+      return;
+    }
     if (weight < 0.15) leg.lock=null;
     const hip = position(leg.thigh), knee = position(leg.knee), foot = position(leg.foot);
     const scale = Math.cbrt(Math.abs(leg.foot.getWorldMatrix().determinant()));
@@ -347,7 +395,14 @@ export class ManualRoamFootIK {
     return result;
   }
 
-  private resetLegs():void {for(const leg of Object.values(this.legs)){this.release(leg,'reset');leg.pole=null;}}
+  private resetLegs(): void {
+    for (const leg of Object.values(this.legs)) {
+      this.release(leg, 'reset');
+      leg.pole = null;
+      leg.yawOffset = 0;
+      leg.previousHeading = null;
+    }
+  }
   reset(): void {this.resetLegs();this.pelvisOffset=0;this.pelvisVelocity=0;}
   dispose(): void { this.reset(); this.disposed = true; }
   getDebugState(): Record<'left' | 'right', ManualRoamFootIKFootDebug> {

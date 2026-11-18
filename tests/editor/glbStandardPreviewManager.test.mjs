@@ -94,7 +94,8 @@ test('GLB标准预览同时暂存照明与显示，保留规则、烘焙资产�
   assert.deepEqual(new Set(next.lighting.disabledLightIds), new Set(['saved-disabled', lightId]));
   assert.equal(next.appearance.exposure, 1);
   assert.equal(next.appearance.contrast, 1);
-  for (const field of ['skyboxVisible', 'toneMappingEnabled', 'bloomEnabled', 'fogEnabled']) assert.equal(next.appearance[field], false, field);
+  assert.equal(next.appearance.skyboxVisible, true, '预设保留已开启的天空盒');
+  for (const field of ['toneMappingEnabled', 'bloomEnabled', 'fogEnabled']) assert.equal(next.appearance[field], false, field);
   assert.deepEqual(next.lighting.bake, { ...draft.lighting.bake, enabled: false });
   assert.deepEqual(next.lighting.policy, draft.lighting.policy);
   assert.deepEqual(next.lighting.result, draft.lighting.result);
@@ -109,7 +110,10 @@ test('GLB标准预览同时暂存照明与显示，保留规则、烘焙资产�
 test('标准预览通过现有事务一次应用、一次撤销，并随保存重开保留环境来源', () => {
   store.getState().createLight('point');
   const state = store.getState(), before = serializeScene(state.scene), undoCount = state.history.undoStack.length;
-  const draft = applyLightingManagerPreset(createLightingManagerDraft(state.scene, state.sceneSessionId), presetId, 'lighting');
+  const current = createLightingManagerDraft(state.scene, state.sceneSessionId);
+  current.appearance.skyboxVisible = false;
+  const draft = applyLightingManagerPreset(current, presetId, 'lighting');
+  assert.equal(draft.appearance.skyboxVisible, false, '预设保留草稿中已关闭的天空盒');
   assert.equal(serializeScene(store.getState().scene), before);
   assert.equal(state.applyLightingManagementDraft(draft).ok, true);
   const applied = store.getState();
@@ -120,6 +124,7 @@ test('标准预览通过现有事务一次应用、一次撤销，并随保存�
   const saved = serializeScene(applied.scene), reopened = deserializeScene(saved);
   assert.equal(reopened.sceneSettings.lighting.environment?.source, 'sandbox');
   assert.equal(reopened.sceneSettings.appearance.exposure, 1);
+  assert.equal(reopened.sceneSettings.appearance.skyboxVisible, false);
   store.getState().undo();
   assert.equal(serializeScene(store.getState().scene), before);
   store.getState().redo();

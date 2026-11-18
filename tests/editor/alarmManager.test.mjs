@@ -411,3 +411,58 @@ test('报警特效按设备独立附着、逐帧跟随、隐藏解除释放并�
     assert.equal(scene.transformNodes.some(node => node.name === key + '_poiEffectRoot'), false);
   } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
 });
+
+test('报警覆盖光照代理，模型表面特效沿原部件路径选择切片并在解除时还原', async () => {
+  const { NullEngine, Scene, MeshBuilder, StandardMaterial, TransformNode, Vector3 } = await import('@babylonjs/core');
+  const { AlarmManagerRuntime } = await server.ssrLoadModule('/src/runtime/babylon/AlarmManagerRuntime.ts');
+  const { deviceTelemetryStore } = await server.ssrLoadModule('/src/runtime/mqtt/deviceTelemetry.ts');
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const root = new TransformNode('device', scene);
+  const cabinet = new TransformNode('cabinet', scene);
+  cabinet.parent = root;
+  const baseline = new StandardMaterial('shared-physical', scene);
+  const makeMesh = (name, parent = null) => {
+    const mesh = MeshBuilder.CreateBox(name, {}, scene);
+    mesh.material = baseline;
+    mesh.parent = parent;
+    return mesh;
+  };
+  const top = makeMesh('top', cabinet), base = makeMesh('base', cabinet);
+  top.layerMask = base.layerMask = 0;
+  const roofA = makeMesh('lightmap-tile-0'), roofB = makeMesh('lightmap-tile-1');
+  const bottom = makeMesh('lower-proxy'), other = makeMesh('other-device');
+  const overrides = new Map([[top, new Set([roofA, roofB])], [base, new Set([bottom])]]);
+  const manager = alarm.createAlarmManagerEntity({ x: 0, y: 0, z: 0 });
+  const doc = { ...createEmptySceneDocument('代理模型报警'), entityIds: [manager.id, model.id], entities: { [manager.id]: manager, [model.id]: model } };
+  const runtime = new AlarmManagerRuntime(scene, {
+    meshes: () => [top, base], node: () => root, getRenderMeshOverrides: id => id === model.id ? overrides : undefined,
+    visible: () => true, bounds: () => ({ minimum: Vector3.Zero(), maximum: Vector3.One() }),
+    activate: () => {}, report: message => { throw new Error(message); },
+  });
+  let time = 0;
+  const send = runningState => {
+    time += 500;
+    deviceTelemetryStore.upsert({ ...snapshot, fields: { runningState }, sourceId: 'default', deviceType: 'device',
+      assetCode: model.id, sequence: time, topic: 'test', sourceTimestamp: null, receivedAt: time });
+    runtime.update(time);
+  };
+  try {
+    for (const effectKind of ['alarm-zone', 'hologram']) {
+      manager.components.alarmManager = alarm.normalizeAlarmManager({
+        ...manager.components.alarmManager, warehouseAlarm: false, targets: [{ id: 'slot', model: null, entityId: model.id }],
+        appearanceEffect: { effectKind, configuration: { parameters: { nodePaths: 'cabinet/top' } } },
+      });
+      runtime.sync(doc);
+      send('running');
+      for (const roof of [roofA, roofB]) {
+        assert.notEqual(roof.material, baseline, '每块可见切片均应应用报警');
+        if (effectKind === 'hologram') assert.equal(roof.material.wireframe, true);
+      }
+      if (effectKind === 'hologram') assert.equal(bottom.material, baseline, '未选中的部件保留原外观');
+      else assert.notEqual(bottom.material, baseline, '设备覆盖色作用于全部可见部件');
+      for (const mesh of [top, base, other]) assert.equal(mesh.material, baseline);
+      send('idle');
+      for (const mesh of [roofA, roofB, bottom, top, base, other]) assert.equal(mesh.material, baseline);
+    }
+  } finally { runtime.dispose(); deviceTelemetryStore.clear(); scene.dispose(); engine.dispose(); }
+});

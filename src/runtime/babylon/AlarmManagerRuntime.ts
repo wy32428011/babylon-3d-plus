@@ -1,6 +1,5 @@
 import { AssetContainer } from '@babylonjs/core/assetContainer.js';
 import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
-import { Material } from '@babylonjs/core/Materials/material.js';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Quaternion } from '@babylonjs/core/Maths/math.vector.js';
@@ -18,7 +17,8 @@ import { deviceTelemetryStore } from '../mqtt/deviceTelemetry';
 import { AlarmTelemetryTracker } from '../mqtt/AlarmTelemetryTracker';
 import { ChartMarkerPresentation, getChartMarkerStyle } from './ChartMarkerPresentation';
 import { PoiEffectRuntime } from './effects/PoiEffectRuntime';
-import { suspendTargetModelEffects } from './effects/TargetModelEffects';
+import { suspendTargetModelEffects, type ResolveRenderMeshOverrides } from './effects/TargetModelEffects';
+import { applyModelAppearanceMaterial } from './modelAppearanceMaterial';
 import { MODEL_EFFECT_KINDS } from '../../editor/model/digitalTwinEffect';
 import { createDefaultPoiEffectComponent } from '../../editor/model/poiEffect';
 import { createDefaultEffectConfiguration } from '../../editor/model/effectConfigurationValidation';
@@ -30,6 +30,7 @@ import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 export type AlarmActivation = { managerId: string; targetId: string; focusCamera: boolean; theme: ChartMarkerThemeScreen | null };
 type Host = {
   meshes: (id: string) => readonly AbstractMesh[];
+  getRenderMeshOverrides?: ResolveRenderMeshOverrides;
   node?: (id: string) => TransformNode | AbstractMesh | null;
   bounds: (id: string) => RuntimeWorldBounds | null;
   visible: (id: string) => boolean;
@@ -37,7 +38,7 @@ type Host = {
   report: (message: string) => void;
 };
 type ActiveAlarm = { manager: Entity; target: Entity; trigger: AlarmTriggerKind; activatedAt: number; activatedTimeText: string; root: TransformNode; marker?: Mesh; markerMaterial?: StandardMaterial; style: DataPlatformScreenOverlayItem['markerStyle']; appearance?: TransformNode; disposeAppearance?: () => void; generation: number; modelEffectLeases: Map<AbstractMesh, () => void> };
-type Tint = { original: Material | null; replacement: Material; mesh: AbstractMesh; proxy?: Mesh; originalEnabled: boolean; color: string; releaseModelEffectLease: () => void };
+type Tint = { replacement: StandardMaterial; proxy?: Mesh; originalEnabled: boolean; releaseMaterial?: () => void; releaseModelEffectLease: () => void };
 const STATIC_EMISSIVE_STRENGTH = 0.35;
 const ALARM_BREATHING_PERIOD_MS = 1600;
 
@@ -58,10 +59,8 @@ export class AlarmColorOverrides {
   apply(desired: ReadonlyMap<AbstractMesh, string>, activeAlarms?: ReadonlySet<AbstractMesh>, breathingStrength = STATIC_EMISSIVE_STRENGTH): void {
     for (const [mesh, entry] of this.entries) {
       if (desired.has(mesh) && !mesh.isDisposed()) continue;
-      if (!mesh.isDisposed()) {
-        if (entry.proxy) mesh.setEnabled(entry.originalEnabled);
-        else if (mesh.material === entry.replacement) mesh.material = entry.original;
-      }
+      entry.releaseMaterial?.();
+      if (entry.proxy && !mesh.isDisposed()) mesh.setEnabled(entry.originalEnabled);
       entry.proxy?.dispose(false, false);
       entry.replacement.dispose(false, false);
       this.entries.delete(mesh);
@@ -86,11 +85,12 @@ export class AlarmColorOverrides {
           proxy.metadata = mesh.metadata;
           proxy.setEnabled(originalEnabled && !this.modelEntranceHidden);
           mesh.setEnabled(false);
-        } else mesh.material = material;
-        entry = { original, replacement: material, mesh, proxy, originalEnabled, color, releaseModelEffectLease };
+        }
+        entry = { replacement: material, proxy, originalEnabled, releaseModelEffectLease,
+          releaseMaterial: proxy ? undefined : applyModelAppearanceMaterial(mesh, material) };
         this.entries.set(mesh, entry);
       }
-      const material = entry.replacement as StandardMaterial;
+      const material = entry.replacement;
       material.diffuseColor = Color3.FromHexString(color);
       // 仅活动报警目标改变自发光强度；普通状态色和共享原材质保持原行为。
       const emissiveStrength = activeAlarms?.has(mesh) && Number.isFinite(breathingStrength)
@@ -127,7 +127,7 @@ export class AlarmManagerRuntime {
   private modelEntranceHidden = false;
 
   constructor(private readonly scene: Scene, private readonly host: Host) {
-    this.effects = new PoiEffectRuntime(scene, id => this.host.node?.(id) ?? this.host.meshes(id)[0] ?? null, () => false, true);
+    this.effects = new PoiEffectRuntime(scene, id => this.host.node?.(id) ?? this.host.meshes(id)[0] ?? null, () => false, true, { getRenderMeshOverrides: host.getRenderMeshOverrides });
   }
 
   /** 入场期间隐藏报警附属外观，不改变报警激活和遥测状态。 */
@@ -232,8 +232,12 @@ export class AlarmManagerRuntime {
         const trigger = resolveAlarmTrigger(c, target, snapshot, now);
         const key = manager.id + ':alarm:' + target.id;
         if (!trigger) { this.resumedActivations.delete(key); continue; }
-        const meshes = this.host.meshes(target.id);
-        if (!meshes.length) continue;
+        const sources = this.host.meshes(target.id);
+        if (!sources.length) continue;
+        const overrides = this.host.getRenderMeshOverrides?.(target.id);
+        const meshes = overrides
+          ? sources.flatMap(source => Array.from(overrides.get(source) ?? [source]))
+          : sources;
         desired.add(key);
         if (c.overrideColorEnabled !== false) for (const mesh of meshes) {
           if (!colors.has(mesh)) colors.set(mesh, c.overrideColor);
@@ -245,12 +249,17 @@ export class AlarmManagerRuntime {
           else this.createEntry(key, manager, target, trigger, now);
           if (!newTarget || trigger === 'warehouse') { newTarget = target.id; newTrigger = trigger; }
         }
-        if (c.appearanceEffect?.enabled && MODEL_EFFECT_KINDS.has(c.appearanceEffect.effectKind)) {
-          const leases = this.active.get(key)!.modelEffectLeases;
-          for (const [mesh, release] of leases) if (!meshes.includes(mesh) || mesh.isDisposed()) { release(); leases.delete(mesh); }
-          for (const mesh of meshes) {
-            modelAppearanceMeshes.add(mesh);
-            if (!leases.has(mesh)) leases.set(mesh, suspendTargetModelEffects(mesh));
+        const surfaceEffect = c.appearanceEffect?.enabled && MODEL_EFFECT_KINDS.has(c.appearanceEffect.effectKind);
+        if (surfaceEffect) for (const mesh of meshes) modelAppearanceMeshes.add(mesh);
+        // 颜色层自行占用绘制网格，另暂停其源部件上的常驻特效；模型特效同时占用两者。
+        const leases = this.active.get(key)!.modelEffectLeases;
+        if (surfaceEffect || overrides || leases.size) {
+          const required = surfaceEffect ? new Set([...sources, ...meshes]) : new Set(
+            c.overrideColorEnabled !== false && overrides ? sources.filter(source => overrides.has(source)) : [],
+          );
+          for (const [mesh, release] of leases) if (!required.has(mesh) || mesh.isDisposed()) { release(); leases.delete(mesh); }
+          for (const mesh of required) {
+            if (!mesh.isDisposed() && !leases.has(mesh)) leases.set(mesh, suspendTargetModelEffects(mesh));
           }
         }
       }

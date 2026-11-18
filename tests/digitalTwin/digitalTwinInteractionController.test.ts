@@ -908,12 +908,15 @@ test('命中 show-chart 绑定时向宿主发送 event.assetClicked，未握手�
     const events = f.posted.slice(handshakeCount);
     assert.deepEqual(events.map((entry) => entry.message.type), ['event.assetClicked', 'event.assetClicked']);
     assert.ok(events.every((entry) => entry.targetOrigin === sameOrigin));
+    // 普通点击及内置货格点击均携带货架宿主的场景实体身份。
     assert.deepEqual(events[0].message.type === 'event.assetClicked' && events[0].message.payload, {
       assetCode: 'SHELF-01',
+      entityId: 'shelf',
       chartId: 'chart-click',
     });
     assert.deepEqual(events[1].message.type === 'event.assetClicked' && events[1].message.payload, {
       assetCode: 'SHELF-01',
+      entityId: 'shelf',
       slot: { row: 2, column: 3, layer: 4 },
       chartId: 'chart-cell',
     });
@@ -1077,4 +1080,229 @@ test('取消选择清理异常返回失败，修复后同一选择可以重试',
     dispatch(bus, command);
     assert.equal(count, 1);
   } finally { controller.dispose(); }
+});
+
+
+test('新宿主能识别聚焦衍生点击，旧宿主仍收到原 v1 载荷', () => {
+  const f = createFixture();
+  const runtime = new FakeRuntime([{ assetCode: 'DDJ2', entityIds: ['entity_1'] }]);
+  runtime.triggerTargetClick = () => f.controller.notifyAssetClicked({ assetCode: 'DDJ2' });
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, focusCommand('old', 'DDJ2'));
+    runtime.completeFocus();
+    const oldClick = f.posted.find(entry => entry.message.type === 'event.assetClicked')?.message;
+    assert.deepEqual(oldClick?.type === 'event.assetClicked' && oldClick.payload, { assetCode: 'DDJ2' });
+    dispatch(f.bus, { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'scene' } });
+    dispatch(f.bus, focusCommand('new', 'DDJ2'));
+    runtime.completeFocus();
+    const clicks = f.posted.filter(entry => entry.message.type === 'event.assetClicked');
+    const latest = clicks.at(-1)?.message;
+    assert.deepEqual(latest?.type === 'event.assetClicked' && latest.payload, { assetCode: 'DDJ2', inspectionFocusRequestId: 'new' });
+  } finally { f.controller.dispose(); }
+});
+
+test('显式打开详情不依赖 show-chart，聚焦衍生点击不会再次打开', () => {
+  const sourceUrl = 'editor-asset://pump.glb';
+  const scene = { entities: {
+    pump: { id: 'pump', components: { modelAsset: { sourceUrl, assetCode: 'PUMP' } } },
+    binding: { id: 'binding', components: { clickEventBinding: {
+      deviceSlots: [{ deviceType: { sourceUrl } }], events: [{ eventType: 'click', effects: ['open-inspection-detail'] }],
+    } } },
+  } } as unknown as SceneDocument;
+  const opened: string[] = [];
+  const clicked: unknown[] = [];
+  const handler = createViewerModelClickHandler(scene, {
+    updateSelection: () => {}, setSlotHighlight: () => {}, focusTarget: () => {}, triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {}, emitAssetClicked: payload => clicked.push(payload),
+    openInspectionDetail: id => opened.push(id),
+  });
+  handler('pump');
+  handler('pump', null, { focus: false, fromFocusCommand: true });
+  assert.deepEqual(opened, ['pump']);
+  assert.deepEqual(clicked, []);
+});
+
+test('详情控制器隔离加载代次、关闭事件和单条失败', async () => {
+  const { DigitalTwinInspectionController } = await viteServer.ssrLoadModule('/src/player/DigitalTwinInteractionController.ts') as typeof import('../../src/player/DigitalTwinInteractionController.ts');
+  const bus = new FakeMessageBus();
+  const posted: any[] = [];
+  let resolveFirst!: () => void;
+  const signals: AbortSignal[] = [];
+  let selects = 0;
+  const detail = new DigitalTwinInspectionController({
+    parentWindow, viewerOrigin: sameOrigin, subscribeToMessages: bus.subscribe,
+    postToParent: message => posted.push(message),
+    load: (payload, signal) => { signals.push(signal); return payload.loadId === 'a' ? new Promise<void>(resolve => { resolveFirst = resolve; }) : Promise.resolve(); },
+    selectPart: () => { if (++selects === 1) throw new Error('select failed'); },
+    setProgress: () => {}, reset: () => {},
+  });
+  const envelope = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId };
+  const send = (value: unknown, origin = sameOrigin, source = parentWindow) => dispatch(bus, value, origin, source);
+  const inspection = {
+    schemaVersion: 1, device: { namespace: 'n', deviceType: 't', deviceNo: '0007' },
+    model: { dataPlatformModel: { sourceKey: 's', kind: 'model', resourceId: '1', modelPath: 'a.glb' }, versionId: '2',
+      contentSha256: 'a'.repeat(64), sourcePath: 'a.glb', sourceUrl: 'editor-asset://a.glb', metaPath: 'm.json', metaUrl: 'editor-asset://m.json', unitScaleToMeters: 1 },
+    configuration: { id: 'config', parameters: {} }, parts: [],
+  };
+  const load = (loadId: string) => ({ ...envelope, type: 'command.inspectionLoad', requestId: `load-${loadId}`, payload: { loadId, assetCode: 'DEVICE', entityId: 'entity', inspection } });
+  try {
+    detail.markViewerReady();
+    send(hostHello(), 'https://bad.example');
+    assert.equal(posted.length, 0);
+    send(hostHello());
+    send({ ...envelope, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'detail' } }, sameOrigin, otherWindow);
+    assert.equal(posted.some(item => item.type === 'viewer.inspectionReady'), false);
+    send({ ...envelope, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'detail' } });
+    send(load('a'));
+    await Promise.resolve();
+    send(load('b'));
+    assert.equal(signals[0].aborted, true);
+    resolveFirst();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(posted.some(item => item.requestId === 'load-a' && item.type === 'viewer.inspectionResult'), false);
+    assert.equal(posted.some(item => item.requestId === 'load-b' && item.ok === true), true);
+    const select = (requestId: string) => ({ ...envelope, type: 'command.inspectionSelectPart', requestId, payload: { loadId: 'b', assetCode: 'DEVICE', partKey: 'p' } });
+    send(select('bad'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    send(select('good'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(posted.some(item => item.requestId === 'bad' && item.ok === false), true);
+    assert.equal(posted.some(item => item.requestId === 'good' && item.ok === true), true);
+    assert.equal(detail.notifyClosed({ loadId: 'a', assetCode: 'DEVICE' }), false);
+    assert.equal(detail.notifyClosed({ loadId: 'b', assetCode: 'DEVICE' }), true);
+    assert.equal(detail.notifyPartSelected({ loadId: 'b', assetCode: 'DEVICE', partKey: 'p' }), false);
+  } finally { detail.dispose(); }
+});
+
+
+test('未启用点击接管时普通选择仍上报设备，生成器命中保持标记', () => {
+  const scene = { entities: { pump: { id: 'pump', components: { modelAsset: { assetCode: 'PUMP' } } } } } as unknown as SceneDocument;
+  const selected: Array<{ entityId: string; generated: boolean }> = [];
+  const handler = createViewerModelClickHandler(scene, {
+    updateSelection: () => {}, setSlotHighlight: () => {}, focusTarget: () => {}, triggerManualEvents: () => {},
+    setHighlightExcludeTrack: () => {}, emitInspectionDeviceSelected: (entityId, generated) => selected.push({ entityId, generated }),
+  });
+  handler('pump');
+  handler(null);
+  handler('pump', null, { generatedUnit: { bindingEntityId: 'missing', assetCode: 'D', highlightEntityId: 'generated', unitKind: 'spawned-device' } });
+  assert.deepEqual(selected, [{ entityId: 'pump', generated: false }, { entityId: 'pump', generated: true }]);
+});
+
+
+test('场景只对已握手宿主打开匹配设备的详情并回传请求因果', () => {
+  const f = createFixture();
+  const inspection = {
+    schemaVersion: 1, device: { namespace: 'site', deviceType: 'pump', deviceNo: '0008' },
+    model: { dataPlatformModel: { sourceKey: 's', kind: 'model', resourceId: '1', modelPath: 'a.glb' }, versionId: '2',
+      contentSha256: 'a'.repeat(64), sourcePath: 'a.glb', sourceUrl: 'editor-asset://a.glb', metaPath: 'm.json', metaUrl: 'editor-asset://m.json', unitScaleToMeters: 1 },
+    configuration: { id: 'config', parameters: {} }, parts: [],
+  } as const;
+  const runtime = Object.assign(new FakeRuntime([{ assetCode: 'PUMP', entityIds: ['entity'] }]), {
+    resolveInspectionTarget: (entityId: string, assetCode: string) => entityId === 'entity' && assetCode === 'PUMP'
+      ? { entityId, assetCode, inspection: { ...inspection, parts: [] } } : null,
+  });
+  const envelope = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId };
+  const command = { ...envelope, type: 'command.openInspectionAsset', requestId: 'open', payload: { entityId: 'entity', assetCode: 'PUMP' } };
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, { ...envelope, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'scene' } });
+    dispatch(f.bus, command, sameOrigin, otherWindow);
+    assert.equal(f.posted.some(item => item.message.type === 'event.openInspection'), false);
+    dispatch(f.bus, command);
+    const opened = f.posted.at(-1)?.message;
+    assert.ok(opened?.type === 'event.openInspection');
+    assert.equal(opened.payload.causeRequestId, 'open');
+    dispatch(f.bus, { ...command, requestId: 'missing', payload: { entityId: 'wrong', assetCode: 'PUMP' } });
+    assert.equal(f.posted.at(-1)?.message.type, 'viewer.openInspectionAssetFailed');
+  } finally { f.controller.dispose(); }
+});
+
+
+test('点击和记录定位共用参数与清单容量校验', async () => {
+  const { resolveViewerInspectionTarget } = await viteServer.ssrLoadModule('/src/player/DigitalTwinInteractionController.ts') as typeof import('../../src/player/DigitalTwinInteractionController.ts');
+  const f = createFixture();
+  const model: any = { assetCode: 'A', parameterValues: { width: 6 }, inspection: {
+    schemaVersion: 1, device: { namespace: 'n', deviceType: 'pump', deviceNo: '08' },
+    model: { dataPlatformModel: { sourceKey: 's', kind: 'model', resourceId: '1', modelPath: 'a.glb' }, versionId: '2',
+      contentSha256: 'a'.repeat(64), sourcePath: 'a.glb', sourceUrl: 'editor-asset://a.glb', metaPath: 'm.json', metaUrl: 'editor-asset://m.json', unitScaleToMeters: 1 },
+    configuration: { id: 'config', parameters: { width: 6 } }, parts: [],
+  } };
+  const runtime = Object.assign(new FakeRuntime([{ assetCode: 'A', entityIds: ['entity'] }]), {
+    resolveInspectionTarget: (entityId: string, assetCode: string) => {
+      const result = resolveViewerInspectionTarget(entityId, model, assetCode);
+      return 'error' in result ? result : result.target;
+    },
+  });
+  const env = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId };
+  const command = { ...env, type: 'command.openInspectionAsset', requestId: 'record', payload: { entityId: 'entity', assetCode: 'A' } };
+  try {
+    f.controller.markViewerReady(runtime);
+    dispatch(f.bus, hostHello());
+    dispatch(f.bus, { ...env, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'scene' } });
+    const click = resolveViewerInspectionTarget('entity', model);
+    assert.ok('target' in click);
+    assert.equal(f.controller.openInspection(click.target), true);
+    dispatch(f.bus, command);
+    assert.equal(f.posted.at(-1)?.message.type, 'event.openInspection');
+    model.parameterValues.width = 7;
+    const mismatch = resolveViewerInspectionTarget('entity', model);
+    assert.ok('error' in mismatch && /参数.*不一致/.test(mismatch.error));
+    dispatch(f.bus, { ...command, requestId: 'mismatch' });
+    const failure = f.posted.at(-1)?.message;
+    assert.ok(failure?.type === 'viewer.openInspectionAssetFailed');
+    assert.match(failure.error, /参数.*不一致/);
+    model.parameterValues.width = 6;
+    model.inspection.parts = Array.from({ length: 10001 }, () => ({}));
+    const oversized = resolveViewerInspectionTarget('entity', model);
+    assert.ok('error' in oversized && /清单.*容量/.test(oversized.error));
+    dispatch(f.bus, { ...command, requestId: 'oversized' });
+    const tooLarge = f.posted.at(-1)?.message;
+    assert.ok(tooLarge?.type === 'viewer.openInspectionAssetFailed');
+    assert.match(tooLarge.error, /清单.*容量/);
+  } finally { f.controller.dispose(); }
+});
+
+test('零件命令携带因果并取消旧选择，人工选择不带因果', async () => {
+  const { DigitalTwinInspectionController } = await viteServer.ssrLoadModule('/src/player/DigitalTwinInteractionController.ts') as typeof import('../../src/player/DigitalTwinInteractionController.ts');
+  const bus = new FakeMessageBus();
+  const posted: any[] = [];
+  let resolveOld!: () => void;
+  let oldSignal!: AbortSignal;
+  let detail: InstanceType<typeof DigitalTwinInspectionController>;
+  detail = new DigitalTwinInspectionController({ parentWindow, viewerOrigin: sameOrigin, subscribeToMessages: bus.subscribe,
+    postToParent: message => posted.push(message), load: () => {},
+    selectPart: (payload, signal) => {
+      detail.notifyPartSelected(payload);
+      if (payload.partKey === 'old') { oldSignal = signal; return new Promise<void>(resolve => { resolveOld = resolve; }); }
+    }, setProgress: () => {}, reset: () => {},
+  });
+  const env = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId };
+  const send = (message: unknown) => dispatch(bus, message);
+  const identity = { loadId: 'load', assetCode: 'A' };
+  const inspection = { schemaVersion: 1, device: { namespace: 'n', deviceType: 't', deviceNo: '1' },
+    model: { dataPlatformModel: { sourceKey: 's', kind: 'model', resourceId: '1', modelPath: 'a.glb' }, versionId: '2',
+      contentSha256: 'a'.repeat(64), sourcePath: 'a.glb', sourceUrl: 'editor-asset://a.glb', metaPath: 'm.json', metaUrl: 'editor-asset://m.json', unitScaleToMeters: 1 },
+    configuration: { id: 'config', parameters: {} }, parts: [] };
+  try {
+    detail.markViewerReady(); send(hostHello());
+    send({ ...env, type: 'host.inspectionHello', requestId: 'probe', payload: { role: 'detail' } });
+    send({ ...env, type: 'command.inspectionLoad', requestId: 'load', payload: { ...identity, entityId: 'e', inspection } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    send({ ...env, type: 'command.inspectionSelectPart', requestId: 'old', payload: { ...identity, partKey: 'old' } });
+    await Promise.resolve();
+    assert.equal(posted.findLast(item => item.type === 'event.inspectionPartSelected')?.payload.causeRequestId, 'old');
+    send({ ...env, type: 'command.inspectionCancelSelect', payload: identity });
+    assert.equal(oldSignal.aborted, true);
+    detail.notifyPartSelected({ ...identity, partKey: 'manual' });
+    assert.equal(posted.findLast(item => item.type === 'event.inspectionPartSelected')?.payload.causeRequestId, undefined);
+    send({ ...env, type: 'command.inspectionSelectPart', requestId: 'new', payload: { ...identity, partKey: 'new' } });
+    resolveOld();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const latest = posted.findLast(item => item.type === 'event.inspectionPartSelected');
+    assert.equal(latest?.payload.partKey, 'new');
+    assert.equal(latest?.payload.causeRequestId, 'new');
+  } finally { detail.dispose(); }
 });

@@ -147,3 +147,23 @@ test('副本改写保留原文档、普通字符串、数组顺序、空值与�
   assert.deepEqual(scene, original);
   assert.notEqual(mapped, scene);
 });
+
+
+test('巡检固定高模在严格和宽容模式独立遍历，元数据参与本地资源定位', () => {
+  const model = { sourcePath: 'high.glb', sourceUrl: 'high-url', metaPath: 'meta.json', metaUrl: 'meta-url' };
+  const binding = { schemaVersion: 1, model };
+  const low = { sourcePath: 'low.glb', inspection: binding };
+  const scene = { entities: { pump: { components: { modelAsset: low } } } };
+  for (const mode of ['strict', 'tolerant'] as const) {
+    const references = collectSceneResourceReferences(scene, mode);
+    assert.deepEqual(references.models.map(item => item.asset), [low]);
+    assert.deepEqual(references.inspections, [{ binding, model }]);
+  }
+  assert.equal(sceneResourceFieldKind('metaPath'), 'path');
+  assert.equal(sceneResourceFieldKind('metaUrl'), 'url');
+  assert.deepEqual(collectLocalSceneResourceFields(model).map(field => field.key),
+    ['sourcePath', 'metaPath', 'sourceUrl', 'metaUrl']);
+  const invalid = { entities: { pump: { components: { modelAsset: { ...low, inspection: { schemaVersion: 2, model } } } } } };
+  assert.equal(collectSceneResourceReferences(invalid).inspections.length, 0);
+  assert.throws(() => collectSceneResourceReferences(invalid, 'strict'), /inspection 版本无效/);
+});

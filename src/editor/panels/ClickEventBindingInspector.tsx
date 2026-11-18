@@ -37,6 +37,7 @@ const EFFECT_OPTIONS: readonly { value: ClickEventBindingEffect; label: string }
   { value: 'highlight', label: '高亮选中' },
   { value: 'focus', label: '聚焦动画' },
   { value: 'show-chart', label: '展示图表' },
+  { value: 'open-inspection-detail', label: '打开设备详情' },
 ];
 
 /** 判断拖拽事件是否包含模型库可用于设备类型槽位的载荷；内置基础网格没有模型包来源，不接受。 */

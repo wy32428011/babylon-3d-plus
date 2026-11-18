@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import ts from 'typescript';
+import { createStore } from 'zustand/vanilla';
 
 /** 执行实际拆出的函数，依赖替身仅用于观察命令、事件清理和异步所有权。 */
 function loadFunction(file: string, name: string, dependencies: Record<string, unknown> = {}) {
@@ -112,16 +113,59 @@ test('P3 相机投影、方向、保存视角 effect 按原顺序注册，区域
   assert.deepEqual(calls, [['projection', 'orthographic'], ['orientation', 'top'], ['save', 'save-a', pose]]);
 });
 
-test('P3 烘焙 cleanup 中止当前请求，异步旧结果不回写，退役 Runtime 不重新同步', async () => {
-  const effects: Array<() => (() => void) | undefined> = [], result = deferred<unknown>(), writes: unknown[] = [], lighting: unknown[] = [];
-  let signal: AbortSignal | undefined;
-  const runtime = { bakeLighting: (_scene: unknown, requestSignal: AbortSignal) => { signal = requestSignal; return result.promise; }, syncLighting: (...args: unknown[]) => lighting.push(args) };
-  const runtimeRef = { current: runtime as unknown }, state = { scene: {}, completeLightingBake: (...args: unknown[]) => writes.push(args), failLightingBake: (...args: unknown[]) => writes.push(args) };
-  const hook = loadFunction('scene-view/useSceneLightingPreview.ts', 'useSceneLightingPreview', { AbortController,
-    useEffect: (effect: () => (() => void) | undefined) => effects.push(effect), useEditorStore: { getState: () => state } });
-  hook({ lightingBakeRequest: { id: 'bake-a' }, runtimeRef, isRuntimePreview: false, sceneSessionId: 'scene-a', sceneDocument: { sceneSettings: {}, entities: {} } });
-  const cleanup = effects[0](); assert.ok(signal); assert.equal(signal.aborted, false);
-  runtimeRef.current = {}; cleanup?.(); assert.equal(signal.aborted, true);
-  result.resolve({ valid: true }); await settle();
-  assert.deepEqual(writes, []); assert.deepEqual(lighting, []);
+test('P3 烘焙 cleanup 中止当前请求，异步旧结果不回写，只向仍在使用的 Runtime 恢复光照', async () => {
+  for (const replaceRuntime of [false, true]) {
+    const effects: Array<() => void | (() => void)> = [];
+    const result = deferred<unknown>(), writes: unknown[] = [], lighting: unknown[] = [];
+    const scene = { sceneSettings: {}, entities: {} }, request = { id: 'bake-a' };
+    const store = createStore(() => ({
+      scene, lightingBakeRequest: request, lightingBakeStatus: { phase: 'idle', message: '' },
+      lightingBakePreflightRequest: null, lightingDraftPreview: null, lightingInspectorEntityIds: [],
+      lightingManagerOpen: false, lightingManagerTab: 'overview',
+      completeLightingBake: (...args: unknown[]) => writes.push(['complete', ...args]),
+      failLightingBake: (...args: unknown[]) => writes.push(['fail', ...args]),
+      setLightingBakeRuntimeError() {}, setLightingRuntimeDiagnostic() {},
+    }));
+    const useEditorStore = Object.assign((select: (s: ReturnType<typeof store.getState>) => unknown) => select(store.getState()), store);
+    type Progress = (message: string, fraction: number, phase: string) => void;
+    const bakes: Array<{ document: unknown; signal: AbortSignal; progress: Progress }> = [];
+    const runtime = {
+      bakeLighting(document: unknown, signal: AbortSignal, progress: Progress) {
+        bakes.push({ document, signal, progress });
+        return result.promise;
+      },
+      syncLighting: (document: unknown) => lighting.push(['original', document]),
+      setLightingPreview() {}, getLightingBakeRuntimeError: () => null, getLightingRuntimeDiagnostic: () => null,
+    };
+    const runtimeRef = { current: runtime };
+    const hook = loadFunction('scene-view/useSceneLightingPreview.ts', 'useSceneLightingPreview', {
+      AbortController, useEditorStore, useRef: (current: unknown) => ({ current }),
+      useEffect: (setup: typeof effects[number]) => effects.push(setup),
+      window: { setInterval: () => 1, clearInterval() {} },
+    });
+    hook({ lightingBakeRequest: request, sceneDocument: scene, sceneSessionId: 'scene-a', runtimeRef,
+      runtimeReady: true, runtimeReadyGeneration: 1, isRuntimePreview: false,
+      lightingManagerOpen: false, lightingDebugVisible: false, lightingComparisonEnabled: false,
+      lightingNodeFocusRequest: null, lightingManagerPreviewRequest: 0,
+      viewportRef: { current: null }, statisticsSceneSessionRef: { current: 'scene-a' },
+    });
+    const cleanups = effects.map(setup => setup());
+    assert.equal(bakes.length, 1);
+    const bake = bakes[0];
+    assert.equal(bake.document, scene);
+    assert.equal(bake.signal.aborted, false);
+    bake.progress('正在准备', 0.25, 'preparing');
+    const lastStatus = store.getState().lightingBakeStatus;
+    assert.equal(lastStatus.message, '正在准备');
+
+    if (replaceRuntime) runtimeRef.current = { ...runtime, syncLighting: doc => lighting.push(['replacement', doc]) };
+    cleanups.forEach(cleanup => { if (cleanup) cleanup(); });
+    assert.equal(bake.signal.aborted, true);
+    bake.progress('迟到的进度', 1, 'applying');
+    result.resolve({ valid: true });
+    await result.promise;
+    assert.equal(store.getState().lightingBakeStatus, lastStatus);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(lighting, replaceRuntime ? [] : [['original', scene]]);
+  }
 });

@@ -30,6 +30,7 @@ import { ClickEventBindingInspector } from './ClickEventBindingInspector';
 import { LocatorInspector } from './LocatorInspector';
 import { PoiEffectInspector } from './PoiEffectInspector';
 import { ModelParametersInspector } from './ModelParametersInspector';
+import { InspectionBindingInspector } from './InspectionBindingInspector';
 import { TelemetryBindingInspector, CargoGeneratorInspector } from './TelemetryBindingInspector';
 import { SceneSettingsPanel } from './SceneSettingsPanel';
 import { LightingBakeInspector } from './LightingBakeInspector';
@@ -803,6 +804,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
             </>
           ) : null}
           <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />
+          <InspectionBindingInspector key={selectedEntity.id} modelAsset={modelAsset} disabled={isLocked} />
         </>
       ) : null}
     </section>

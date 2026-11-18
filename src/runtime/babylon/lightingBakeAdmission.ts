@@ -1,3 +1,4 @@
+import { getModelAppearanceBaseMaterial } from './modelAppearanceMaterial.ts';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import type { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture.js';
 import { MultiMaterial } from '@babylonjs/core/Materials/multiMaterial.js';
@@ -56,7 +57,8 @@ export async function inspectLightingCaptureAdmission(scene: Scene, document: Sc
       meshCount++; receiverCount += source.entry.bakeIndirect ? 1 : 0; triangleCount += count / 3; vertexCount += vertices; bytes += size;
       largest = Math.max(largest, compactVertices * (channels * 8 * 3 + 64) + count * 16 + 64,
         mesh.getTotalIndices() * 8 + (mesh.isVerticesDataPresent(VertexBuffer.NormalKind) ? 0 : vertices * 3 * 8));
-      const material = mesh.material instanceof MultiMaterial ? mesh.material.subMaterials[group.materialIndex] : source.mesh.material;
+      const base = getModelAppearanceBaseMaterial(source.mesh);
+      const material = base instanceof MultiMaterial ? base.subMaterials[group.materialIndex] : base;
       await exportLightingMaterial(material, textureMetadata, source.mesh);
     }
     geometries.add(mesh.geometry ?? mesh);

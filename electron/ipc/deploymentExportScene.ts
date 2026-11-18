@@ -15,6 +15,8 @@ import { captureSceneLightingBakeRelocation, restoreSceneLightingBakeAfterMapped
 import { resolveSceneLightingBakeAssets } from './sceneLightingBakeResources.js';
 import path from 'node:path';
 import { readModelResourceDependencies } from './modelResourceDependencies.js';
+import { assertInspectionModelSelfContained } from './inspectionModelResource.js';
+import { createSourceResourcePlan } from './digitalTwinSourceResourcePlan.js';
 import type { ProjectModelAssetEntry } from '../types.js';
 import { decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { getCurrentProjectRoot, getSharedProjectAssetRoot, readProjectAssetIndex } from './projectAssetStore.js';
@@ -244,6 +246,31 @@ export async function prepareDeploymentExport(
     references.clickEventBindings, resolvedModels, projectContext, bundles, signal,
   );
 
+  // 固定高模与普通模型分开解析，不能作为点击事件的最新模型候选。
+  const resolvedInspections: Array<{ reference: ResolvedModelReference; metaPath: string }> = [];
+  const inspectionIntegrity = new Map<string, { expectedSize: number; expectedSha256: string }>();
+  for (const { model } of references.inspections) {
+    const reference = await resolveModelReference({ asset: model }, projectContext, bundles, signal);
+    const metaPath = resolveLocalAssetPath(model.metaPath, undefined, '巡检高模元数据');
+    const sourceUrlPath = resolveLocalAssetPath(undefined, model.sourceUrl, '巡检高模 URL');
+    const metaUrlPath = resolveLocalAssetPath(undefined, model.metaUrl, '巡检高模元数据 URL');
+    if (toLocalPathKey(sourceUrlPath) !== toLocalPathKey(reference.sourcePath)
+      || toLocalPathKey(metaUrlPath) !== toLocalPathKey(metaPath)
+      || !isPathInsideOrEqual(reference.bundle.sourceRoot, metaPath) || !reference.bundle.copyCompleteDirectory) {
+      throw new Error('巡检高模模型与元数据必须来自同一授权完整资源包。');
+    }
+    assertAuthorizedDeploymentSourceFile(metaPath, '巡检高模元数据');
+    addExplicitFileToBundle(reference.bundle, metaPath);
+    const plan = await createSourceResourcePlan([{ sourcePath: reference.bundle.sourceRoot,
+      destinationRelativePath: 'Assets/Models/inspection' }], reference.bundle.sourceRoot, signal);
+    if (typeof model.contentSha256 !== 'string' || plan.bundles[0].contentSha256 !== model.contentSha256) {
+      throw new Error('巡检高模完整资源包内容摘要不一致。');
+    }
+    await assertInspectionModelSelfContained(reference.sourcePath, reference.bundle.sourceRoot, signal);
+    for (const file of plan.files) inspectionIntegrity.set(toLocalPathKey(file.sourcePath), file);
+    resolvedInspections.push({ reference, metaPath });
+  }
+
   const resolvedEnvironments: ResolvedEnvironmentReference[] = [];
   for (const reference of references.environments) {
     resolvedEnvironments.push(await resolveEnvironmentReference(reference, projectContext, bundles, signal));
@@ -310,6 +337,8 @@ export async function prepareDeploymentExport(
   for (const file of assetFiles) {
     const integrity = openingIntegrity.get(toLocalPathKey(file.sourcePath));
     if (integrity) { file.expectedSize = integrity.size; file.expectedSha256 = integrity.sha256; file.integrityLabel = '开场包固定版本资源'; }
+    const inspection = inspectionIntegrity.get(toLocalPathKey(file.sourcePath));
+    if (inspection) { file.expectedSize = inspection.expectedSize; file.expectedSha256 = inspection.expectedSha256; file.integrityLabel = '巡检高模固定版本资源'; }
   }
   if (opening) {
     opening.binding.manifestUrl = requireMappedUrl(sourceUrlMap, opening.manifestPath, '开场包');
@@ -336,7 +365,12 @@ export async function prepareDeploymentExport(
     lightingReferenceMap.set(asset.asset.url, mapped); asset.asset.url = mapped;
   }
   normalizeEffectDeploymentReferences(scene, sourceUrlMap);
-  const precompiledScripts = await rewriteModelReferences(resolvedModels, sourceUrlMap, signal);
+  const precompiledScripts = await rewriteModelReferences([...resolvedModels, ...resolvedInspections.map(item => item.reference)], sourceUrlMap, signal);
+  for (const { reference, metaPath } of resolvedInspections) {
+    const metaUrl = requireMappedUrl(sourceUrlMap, metaPath, '巡检高模元数据');
+    reference.asset.metaPath = metaUrl;
+    reference.asset.metaUrl = metaUrl;
+  }
   rewriteClickEventBindingReferences(resolvedClickEventBindings, sourceUrlMap);
   rewriteEnvironmentReferences(resolvedEnvironments, sourceUrlMap);
   rewriteSkyboxReferences(resolvedSkyboxes, sourceUrlMap);

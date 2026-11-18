@@ -5,6 +5,7 @@ import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTw
 import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
 import type { Vector3Data } from './math';
+import type { InspectionBinding } from './inspectionBinding';
 import type { BuiltInSlotBindingConfig, LayerChangePlatformBindingConfig, LocatorBuiltInBinding } from './builtInSlotBinding';
 import type { ModelParameterConfig, ModelParameterValues } from './modelParameters';
 import type { ModelSourceLengthUnit } from './sceneUnits';
@@ -139,6 +140,8 @@ export type ModelSourceSnapshot = { contentSha256: string; composition?: true; c
 
 /** 可复用的模型资产模板，不包含实例级 assetCode。 */
 export type ModelAssetTemplate = {
+  /** 中台 model_device_type.devType；缺失表示旧模型尚未配置。 */
+  deviceType?: string;
   /** 模型版本更新时保留来源和包内身份，避免跨中台误关联。 */
   dataPlatformModel?: DataPlatformModelIdentity;
   sourcePath: string;
@@ -164,6 +167,8 @@ export type ModelAssetTemplate = {
 /** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */
 export type ModelAssetComponent = ModelAssetTemplate & {
   assetCode: string;
+  /** 高精度详情是实例绑定，不进入生成器通用模型模板。 */
+  inspection?: InspectionBinding;
 };
 
 /**
@@ -425,7 +430,7 @@ export type ManualRoamSpawnComponent = { avatar?: ManualRoamAvatar };
 export type ClickEventBindingEventType = 'click' | 'click-cell';
 
 /** 点击命中后执行的效果类型，单个事件内同类效果只保留一条；show-chart 命中后通过 postMessage 通知宿主页面展示图表。 */
-export type ClickEventBindingEffect = 'highlight' | 'focus' | 'show-chart';
+export type ClickEventBindingEffect = 'highlight' | 'focus' | 'show-chart' | 'open-inspection-detail';
 
 /** show-chart 效果绑定的数据中台大屏引用；projectId/screenId 供发布 Viewer 请求宿主切换大屏，id 兼容旧图表事件。 */
 export type ClickEventBindingChartRef = {

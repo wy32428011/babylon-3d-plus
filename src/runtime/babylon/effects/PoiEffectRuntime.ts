@@ -6,7 +6,7 @@ import { ConfiguredLegacyEffects, supportsConfiguredLegacyEffect } from './Confi
 import { AlarmReferenceEffects, supportsAlarmReferenceEffect } from './AlarmReferenceEffects';
 import { isDigitalTwinEffectKind } from '../../../editor/model/digitalTwinEffect';
 import { SpatialEffects, supportsSpatialEffect } from './SpatialEffects';
-import { TargetModelEffects } from './TargetModelEffects';
+import { TargetModelEffects, type ResolveRenderMeshOverrides } from './TargetModelEffects';
 import { SceneEnvironmentEffects } from './SceneEnvironmentEffects';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture.js';
@@ -91,9 +91,9 @@ export class PoiEffectRuntime {
   private modelEntranceHidden = false;
 
   /** 创建运行时并注册唯一 before-render 观察者。 */
-  constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, private readonly alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[] } = {}) {
+  constructor(private readonly scene: Scene, resolveNode: (id: string) => TransformNode | AbstractMesh | null = () => null, canFollow: () => boolean = () => false, private readonly alarmAppearance = false, options: { getRuntimeTargets?: () => readonly EffectRuntimeTarget[]; getRenderMeshOverrides?: ResolveRenderMeshOverrides } = {}) {
     this.resolveTarget = id => this.bindings?.resolveAnchor(id) ?? resolveNode(id);
-    this.targetEffects = new TargetModelEffects(scene, this.resolveTarget, alarmAppearance);
+    this.targetEffects = new TargetModelEffects(scene, this.resolveTarget, alarmAppearance, options.getRenderMeshOverrides);
     this.environmentEffects = new SceneEnvironmentEffects(scene, this.resolveTarget, canFollow);
     this.bindings = new EffectBindingRuntime(scene, { resolveNode, isRunning: canFollow,
       apply: (entity, selected, visible, pickable, ownerId) => this.syncResolved(entity, selected, visible, pickable, ownerId),

@@ -61,7 +61,7 @@ async function readStore(): Promise<ProtectedStore> {
     return { version: 1, entries };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, entries: Object.create(null) as Record<string, ProtectedEntry> };
-    throw new Error('历史管理凭据存储无法读取，请检查本机安全存储；未覆盖原文件。');
+    throw new Error('历史管理凭据存储无法读取，请检查本机安全存储；未覆盖原文件。', { cause: error });
   }
 }
 

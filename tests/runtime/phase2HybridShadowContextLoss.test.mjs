@@ -1,54 +1,116 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Observable } from '@babylonjs/core/Misc/observable.js';
-import { HybridShadowCache } from '../../src/runtime/babylon/HybridShadowCache.ts';
+import '../../src/runtime/babylon/babylonSideEffects.ts';
+import { FreeCamera } from '@babylonjs/core/Cameras/freeCamera.js';
+import { NullEngine } from '@babylonjs/core/Engines/nullEngine.js';
+import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight.js';
+import { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { Scene } from '@babylonjs/core/scene.js';
+import { HybridShadowCache, HybridShadowMeshState } from '../../src/runtime/babylon/HybridShadowCache.ts';
 
 function fixture() {
-  let generation = 1, lost = false, sequence = 0;
-  const deleted = [], invalidDeletes = [];
-  const remove = (kind, handle) => { if (lost || handle.generation !== generation) invalidDeletes.push({ kind, generation, handle }); else deleted.push({ kind, handle }); };
-  const gl = { blitFramebuffer() {}, isContextLost: () => lost, deleteFramebuffer: handle => remove('framebuffer', handle), deleteRenderbuffer: handle => remove('renderbuffer', handle) };
-  const engine = { webGLVersion: 2, _gl: gl, onContextLostObservable: new Observable(), onContextRestoredObservable: new Observable() };
-  const scene = { getEngine: () => engine, getFrameId: () => 4 }, originalRender = () => {};
-  const map = { customRenderFunction: originalRender, onBeforeRenderObservable: new Observable(), onBeforeBindObservable: new Observable() };
-  const generator = { getLight: () => ({ getScene: () => scene }), getShadowMap: () => map }, state = { refreshForFrame() {} };
+  const engine = new NullEngine(), scene = new Scene(engine);
+  const camera = new FreeCamera('camera', new Vector3(0, 4, -8), scene);
+  camera.setTarget(Vector3.Zero());
+  const cube = MeshBuilder.CreateBox('static-caster', {}, scene);
+  const light = new DirectionalLight('sun', new Vector3(-1, -2, 1), scene);
+  light.autoCalcShadowZBounds = true;
+  const generator = new ShadowGenerator(128, light);
+  generator.addShadowCaster(cube, false);
+  const map = generator.getShadowMap(), originalRender = map.customRenderFunction;
+  const state = new HybridShadowMeshState();
+  state.setMeshes([cube], new Map([[cube, { mobility: 'static', castShadows: true, receiveShadows: true }]]));
+  engine.onContextLostObservable.add(() => {});
+  engine.onContextRestoredObservable.add(() => {});
+  const observables = [engine.onContextLostObservable, engine.onContextRestoredObservable,
+    scene.onBeforeRenderTargetsRenderObservable, scene.onAfterRenderObservable, generator.onAfterShadowMapRenderMeshObservable,
+    map.onBeforeBindObservable, map.onClearObservable, map.onAfterUnbindObservable];
+  const observers = () => observables.map(list => list.observers.filter(observer => !observer._willBeUnregistered));
+  const originalObservers = observers();
   const cache = new HybridShadowCache(generator, state);
-  const populate = () => { const handle = () => ({ generation, id: ++sequence });
-    const face = { framebuffer: handle(), color: handle(), depth: handle(), signature: 'stable', bytes: 100 }; cache.faces.set(0, face); return face; };
-  const lose = (notify = true) => { lost = true; if (notify) engine.onContextLostObservable.notifyObservers(engine); };
-  const restore = () => { generation++; lost = false; engine.onContextRestoredObservable.notifyObservers(engine); };
-  return { cache, engine, map, originalRender, deleted, invalidDeletes, populate, lose, restore };
+  const warm = async () => {
+    scene.render();
+    await scene.whenReadyAsync();
+    scene.render();
+    scene.render();
+    assert.ok(cache.metrics.staticRenders > 0);
+    assert.equal(cache.cachedFaces, 1);
+    assert.equal(cache.textureBytes, 0);
+  };
+  const dispose = () => { cache.dispose(); state.dispose(); scene.dispose(); engine.dispose(); };
+  return { engine, scene, cube, generator, map, cache, warm, dispose, observers, originalObservers, originalRender };
 }
 
-test('真实lost→新世代restore遗忘旧FBO/RBO，不向新context delete旧句柄；恢复后新资源正常释放', () => {
-  const f = fixture(); f.populate(); const revision = f.cache.revision;
-  try { f.lose(); const afterLost = f.cache.cachedFaces; assert.deepEqual(f.deleted, []);
-    f.restore(); assert.deepEqual(f.invalidDeletes, [], '新context不能删除旧世代资源'); assert.equal(afterLost, 0, 'lost事件立即遗忘浏览器已释放的faces');
-    assert.deepEqual(f.deleted, []); assert.equal(f.cache.revision, revision + 1, '保留原restore invalidate频率');
-    const fresh = f.populate(); f.cache.setEnabled(false);
-    assert.deepEqual(f.deleted.map(value => value.handle), [fresh.framebuffer, fresh.color, fresh.depth]); assert.deepEqual(f.invalidDeletes, []);
-  } finally { f.cache.dispose(); }
+test('lost 和 restore 通知清除旧整图命中，重建的原生 RTT 绘制最新姿态后才能复用', async () => {
+  const f = fixture();
+  try {
+    await f.warm();
+    const previous = f.generator.getTransformMatrix().clone();
+    const before = { ...f.cache.metrics };
+    f.engine.onContextLostObservable.notifyObservers(f.engine);
+    assert.equal(f.cache.cachedFaces, 0);
+    f.cube.position.x += 3;
+    f.generator.recreateShadowMap();
+    const replacement = f.generator.getShadowMap(), nativeRender = replacement.customRenderFunction;
+    assert.notEqual(replacement, f.map);
+    f.engine.onContextRestoredObservable.notifyObservers(f.engine);
+    assert.equal(f.cache.cachedFaces, 0);
+    assert.equal(replacement.customRenderFunction, nativeRender);
+    await f.scene.whenReadyAsync();
+    f.scene.render();
+    assert.equal(f.cache.metrics.nativeMapRenders, before.nativeMapRenders + 1);
+    assert.equal(f.cache.metrics.staticRenders, before.staticRenders + 1);
+    assert.equal(f.cache.metrics.cacheHits, before.cacheHits);
+    assert.ok(!f.generator.getTransformMatrix().equals(previous));
+    f.scene.render();
+    assert.equal(f.cache.metrics.nativeMapRenders, before.nativeMapRenders + 1);
+    assert.equal(f.cache.metrics.cacheHits, before.cacheHits + 1);
+    assert.equal(f.cache.cachedFaces, 1);
+  } finally { f.dispose(); }
 });
 
-test('lost期间disable/dispose（包括lost通知尚未派发）都不能delete失效资源', async t => {
-  for (const notify of [true, false]) for (const action of ['disable', 'dispose']) await t.test(JSON.stringify({ notify, action }), () => {
-    const f = fixture(); f.populate(); f.lose(notify);
-    if (action === 'disable') f.cache.setEnabled(false); else f.cache.dispose();
-    assert.equal(f.cache.cachedFaces, 0); assert.deepEqual(f.deleted, []); assert.deepEqual(f.invalidDeletes, []);
-    f.restore(); assert.deepEqual(f.invalidDeletes, []); f.cache.dispose();
-  });
+test('有无先收到 lost 通知，关闭或释放缓存均归还原生 RTT 及逐帧刷新', async t => {
+  for (const notify of [true, false]) for (const action of ['disable', 'dispose']) {
+    await t.test(JSON.stringify({ notify, action }), async () => {
+      const f = fixture();
+      try {
+        await f.warm();
+        const texture = f.map.getInternalTexture();
+        assert.ok(texture);
+        if (notify) f.engine.onContextLostObservable.notifyObservers(f.engine);
+        if (action === 'disable') f.cache.setEnabled(false); else f.cache.dispose();
+        f.engine.onContextRestoredObservable.notifyObservers(f.engine);
+        assert.equal(f.cache.cachedFaces, 0);
+        assert.equal(f.map.getInternalTexture(), texture);
+        assert.equal(f.map.customRenderFunction, f.originalRender);
+        assert.equal(f.map.refreshRate, 1);
+        assert.ok(f.map._shouldRender());
+        assert.ok(f.map._shouldRender());
+      } finally { f.dispose(); }
+    });
+  }
 });
 
-test('正常disable/dispose和无lost手动restored通知仍精确删除有效资源，原observer/render身份保留', async () => {
-  const f = fixture(), externalLost = f.engine.onContextLostObservable.add(() => {}), externalRestore = f.engine.onContextRestoredObservable.add(() => {});
-  const first = f.populate(); f.engine.onContextRestoredObservable.notifyObservers(f.engine);
-  assert.deepEqual(f.deleted.map(value => value.handle), [first.framebuffer, first.color, first.depth]);
-  const second = f.populate(); f.cache.dispose(); f.cache.dispose();
-  assert.deepEqual(f.deleted.map(value => value.handle), [first.framebuffer, first.color, first.depth, second.framebuffer, second.color, second.depth]);
-  assert.deepEqual(f.invalidDeletes, []); assert.equal(f.map.customRenderFunction, f.originalRender);
-  await new Promise(resolve => setTimeout(resolve, 1));
-  assert.deepEqual(f.engine.onContextLostObservable.observers, [externalLost]); assert.deepEqual(f.engine.onContextRestoredObservable.observers, [externalRestore]);
-  assert.equal(f.map.onBeforeRenderObservable.observers.length, 0); assert.equal(f.map.onBeforeBindObservable.observers.length, 0);
-  const revision = f.cache.revision; f.engine.onContextLostObservable.notifyObservers(f.engine); f.engine.onContextRestoredObservable.notifyObservers(f.engine);
-  assert.equal(f.cache.revision, revision, 'dispose后不能收到重复生命周期callback');
+test('单独的 restored 通知使整图失效，重复释放完整归还原生观察者与绘制函数', async () => {
+  const f = fixture();
+  try {
+    await f.warm();
+    f.engine.onContextRestoredObservable.notifyObservers(f.engine);
+    assert.equal(f.cache.cachedFaces, 0);
+    const before = f.cache.metrics.staticRenders;
+    f.scene.render();
+    assert.equal(f.cache.metrics.staticRenders, before + 1);
+    f.cache.dispose();
+    f.cache.dispose();
+    assert.deepEqual(f.observers(), f.originalObservers);
+    assert.equal(f.map.customRenderFunction, f.originalRender);
+    assert.equal(f.generator.getShadowMap(), f.map);
+    const renders = f.cache.metrics.nativeMapRenders;
+    f.engine.onContextLostObservable.notifyObservers(f.engine);
+    f.engine.onContextRestoredObservable.notifyObservers(f.engine);
+    f.scene.render();
+    assert.equal(f.cache.metrics.nativeMapRenders, renders);
+  } finally { f.dispose(); }
 });

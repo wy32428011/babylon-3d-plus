@@ -7,7 +7,7 @@ import { updateSceneOpeningAnimationCommand } from '../../commands/sceneOpeningA
 import { compositionDescendants } from '../../composition/composition';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../../model/alarmManager';
 import { createCommandHistory, executeCommand, redoCommand, undoCommand } from '../../commands/CommandHistory';
-import { commitFolderGroupRotation as commitFolderGroupRotationState, commitFolderGroupTranslation as commitFolderGroupTranslationState, commitHierarchyGroupRotation as commitHierarchyGroupRotationState, commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState, updateAutoPatrolCommand, createEntityCommand, createFolderCommand, moveEntitiesToFolderCommand, renameEntityCommand, updateCadReferenceCommand, updateSceneDocumentCommand, updateSceneDefaultCargoGeneratorCommand, updateEntityLockCommand, updateEntityVisibilityCommand, updateLightCommand, updateLocatorCommand, updateMeshRendererCommand, updateModelAssetCodeCommand, updateModelGeneratorCommand, updateDeviceSpawnerCommand, updateClickEventBindingCommand, updatePoiEffectCommand, updateModelParameterValuesCommand, updateTelemetryBindingCommand, updateTransformCommand } from '../../commands/entityCommands';
+import { commitFolderGroupRotation as commitFolderGroupRotationState, commitFolderGroupTranslation as commitFolderGroupTranslationState, commitHierarchyGroupRotation as commitHierarchyGroupRotationState, commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState, updateAutoPatrolCommand, createEntityCommand, createFolderCommand, moveEntitiesToFolderCommand, renameEntityCommand, updateCadReferenceCommand, updateSceneDocumentCommand, updateSceneDefaultCargoGeneratorCommand, updateEntityLockCommand, updateEntityVisibilityCommand, updateLightCommand, updateLocatorCommand, updateMeshRendererCommand, updateModelAssetCodeCommand, updateInspectionBindingCommand, updateModelGeneratorCommand, updateDeviceSpawnerCommand, updateClickEventBindingCommand, updatePoiEffectCommand, updateModelParameterValuesCommand, updateTelemetryBindingCommand, updateTransformCommand } from '../../commands/entityCommands';
 import { createId } from '../../../shared/ids';
 import type { ChartMarkerComponent, DeviceSpawnerComponent, LocatorComponent } from '../../model/components';
 import { normalizeLightSettings } from '../../model/lightSettings';
@@ -23,6 +23,7 @@ import { cloneAutoPatrolComponent, sanitizeAutoPatrolComponent, updateAutoPatrol
 import { getBuiltInSlotBindingConfig, getLayerChangePlatformBindingConfig, patchBuiltInSlotDimensions, patchLayerChangePlatformDimensions } from '../../model/builtInSlotBinding';
 import { areModelParameterValuesEqual, restoreModelParameterValues, sanitizeEditedModelParameterValues } from '../../model/modelParameters';
 import { cloneModelGeneratorComponent, sanitizeModelGeneratorComponent } from '../../model/modelGenerator';
+import { inspectionConfigurationMatches, normalizeInspectionBinding } from '../../model/inspectionBinding';
 import { sanitizeDeviceSpawnerComponent } from '../../model/deviceSpawner';
 import { cloneClickEventBindingComponent, sanitizeClickEventBindingComponent } from '../../model/clickEventBinding';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../../model/telemetryBinding';
@@ -104,6 +105,7 @@ export const createSceneDocumentSlice: EditorSlice<
   "updateSelectedCadReference" |
   "updateSelectedLight" |
   "updateSelectedModelAssetCode" |
+  "updateSelectedInspectionBinding" |
   "updateSelectedModelGenerator" |
   "updateSelectedDeviceSpawner" |
   "updateSelectedClickEventBinding" |
@@ -1181,6 +1183,24 @@ export const createSceneDocumentSlice: EditorSlice<
       };
     });
   },
+  updateSelectedInspectionBinding: (binding) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '更新高精度详情绑定');
+      const entity = getSelectedEntity(state);
+      const modelAsset = entity?.components.modelAsset;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !modelAsset) return state;
+      let after;
+      try {
+        after = binding === null ? undefined : normalizeInspectionBinding(binding);
+        if (after && !inspectionConfigurationMatches(after, modelAsset.parameterValues)) return state;
+      } catch { return state; }
+      const before = modelAsset.inspection;
+      if (areJsonValuesEqual(before, after)) return state;
+      const command = updateInspectionBindingCommand(entity.id, before, after);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
   updateSelectedModelGenerator: (component, label = '更新模型生成器') => {
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
@@ -1930,7 +1950,13 @@ export const createSceneDocumentSlice: EditorSlice<
       if (openTrace) pendingTraceTask = beginProjectOpenTask(openTrace, 'sceneConfirm');
       const confirmed = await window.editorApi.confirmSceneOpen({ sceneOpenToken });
       if (openTrace) endProjectOpenTask(openTrace, pendingTraceTask, 'ok'); pendingTraceTask = undefined;
-      if (!confirmed || !isCurrent() || get().sceneSessionId !== openingSceneSessionId) { stopTrace('stale'); return false; }
+      if (!confirmed) { stopTrace('stale'); return false; }
+      if (!isCurrent() || get().sceneSessionId !== openingSceneSessionId) {
+        // 主进程已确认，renderer 放弃应用；主进程按令牌保留任何更新的归属。
+        await window.editorApi.cancelSceneOpen({ sceneOpenToken });
+        stopTrace('stale');
+        return false;
+      }
       setSyncedImageAssets(cachedImages);
       set((state) => {
         const loaded = createLoadedSceneState(state, scene, `场景已加载：${result.filePath ?? scene.name}`);

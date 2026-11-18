@@ -12,6 +12,8 @@ import {
   DIGITAL_TWIN_START_MANUAL_ROAM_CAPABILITY,
   DIGITAL_TWIN_VIEWER_ERROR_CODES,
   parseDigitalTwinBridgeMessage,
+  parseDigitalTwinInspectionMessage,
+  getInspectionDataIssue,
 } from '../../src/player/digitalTwinInteractionProtocol.ts';
 
 type ContractFixture = {
@@ -149,4 +151,57 @@ test('取消选择协议携带选择标记且严格校验命令和回执', () =>
   const screen = { ...base, type: 'viewer.showScreen', payload: { projectId: '1', screenId: '2', selectionToken: 'selection-1' } };
   assert.deepEqual(parseDigitalTwinBridgeMessage(screen), screen);
   assert.equal(parseDigitalTwinBridgeMessage({ ...screen, payload: { ...screen.payload, selectionToken: '' } }), null);
+});
+
+
+test('巡检扩展独立于 v1 能力握手，并校验固定版本和设备身份', () => {
+  const envelope = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId: 's' };
+  const ready = { ...envelope, type: 'viewer.inspectionReady', requestId: 'r', payload: { role: 'detail', capabilities: ['inspectionLoad', 'selectPart'] } };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(ready), ready);
+  assert.equal(parseDigitalTwinBridgeMessage(ready), null);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...ready, payload: { ...ready.payload, capabilities: ['unknown'] } }), null);
+  assert.equal(parseDigitalTwinBridgeMessage({ ...envelope, type: 'viewer.ready', payload: { capabilities: ['inspectionLoad'] } }), null);
+  const open = { ...envelope, type: 'command.openInspectionAsset', requestId: 'open', payload: { assetCode: 'A', entityId: 'e' } };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(open), open);
+  assert.equal(parseDigitalTwinBridgeMessage(open), null);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...open, payload: { ...open.payload, partKey: 'unexpected' } }), null);
+  const inspection = {
+    schemaVersion: 1, device: { namespace: 'tenant', deviceType: 'pump', deviceNo: '0005' },
+    model: { dataPlatformModel: { sourceKey: 'server', kind: 'model', resourceId: '2051942646011785218', modelPath: 'pump.glb' },
+      versionId: '2051942646011785219', contentSha256: 'a'.repeat(64), sourcePath: 'pump.glb',
+      sourceUrl: 'editor-asset://pump.glb', metaPath: 'meta.json', metaUrl: 'editor-asset://meta.json', unitScaleToMeters: 1 },
+    configuration: { id: 'fixed', parameters: {} }, parts: [],
+  };
+  const load = { ...envelope, type: 'command.inspectionLoad', requestId: 'load', payload: { loadId: 'generation-1', assetCode: 'ASSET-01', entityId: 'entity', inspection } };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(load), load);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...load, payload: { ...load.payload, inspection: { ...inspection, device: undefined } } }), null);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...load, payload: { ...load.payload, inspection: { ...inspection, model: { ...inspection.model, versionId: 2051942646011785219 } } } }), null);
+  const closed = { ...envelope, type: 'event.inspectionClosed', payload: { loadId: 'generation-1', assetCode: 'ASSET-01' } };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(closed), closed);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...closed, payload: { ...closed.payload, progress: 0.5 } }), null);
+});
+
+test('巡检协议支持一万零件并对超出容量及因果字段严格限界', () => {
+  const envelope = { channel: DIGITAL_TWIN_BRIDGE_CHANNEL, version: 1, sessionId: 's' };
+  const identity = { loadId: 'load', assetCode: 'A' };
+  const inspection = {
+    schemaVersion: 1, device: { namespace: 'tenant', deviceType: 'pump', deviceNo: '0005' },
+    model: { dataPlatformModel: { sourceKey: 's', kind: 'model', resourceId: '1', modelPath: 'a.glb' },
+      versionId: '2', contentSha256: 'a'.repeat(64), sourcePath: 'a.glb', sourceUrl: 'editor-asset://a.glb',
+      metaPath: 'meta.json', metaUrl: 'editor-asset://meta.json', unitScaleToMeters: 1 },
+    configuration: { id: 'fixed', parameters: {} },
+    parts: Array.from({ length: 10_000 }, (_, index) => ({ partKey: `p${index}`, name: `part${index}`,
+      nodePath: `node${index}`, axis: { x: 0, y: 1, z: 0 }, distanceMeters: 1, fixed: false })),
+  };
+  const load = { ...envelope, type: 'command.inspectionLoad', requestId: 'r', payload: { ...identity, entityId: 'e', inspection } };
+  assert.equal(parseDigitalTwinInspectionMessage(load)?.type, 'command.inspectionLoad');
+  assert.equal(getInspectionDataIssue({ ...inspection, parts: [...inspection.parts, inspection.parts[0]] }), 'budget');
+  const oversized = { ...inspection, parts: inspection.parts.map((part, index) => ({ ...part, nodePath: `${'n'.repeat(1900)}${index}` })) };
+  assert.equal(getInspectionDataIssue(oversized), 'budget');
+  const selected = { ...envelope, type: 'event.inspectionPartSelected', payload: { ...identity, partKey: 'p1', causeRequestId: 'request' } };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(selected), selected);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...selected, payload: { ...selected.payload, causeRequestId: '' } }), null);
+  const cancel = { ...envelope, type: 'command.inspectionCancelSelect', payload: identity };
+  assert.deepEqual(parseDigitalTwinInspectionMessage(cancel), cancel);
+  assert.equal(parseDigitalTwinInspectionMessage({ ...cancel, requestId: 'extra' }), null);
 });

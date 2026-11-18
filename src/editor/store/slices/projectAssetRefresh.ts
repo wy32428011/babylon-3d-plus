@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../../../../electron/shared/modelDeviceType.ts';
 import { modelRuntimeCapabilitiesField } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../../assets/mergeModelAssetUpdate';
 import type { AssetEntry } from '../../assets/AssetDatabase';
@@ -18,6 +19,7 @@ export function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset
 
   return mergeModelAssetUpdate(modelAsset, {
 
+    ...modelDeviceTypeField(asset.deviceType),
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
@@ -48,6 +50,7 @@ export function areJsonValuesEqual(left: unknown, right: unknown): boolean {
 function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetComponent): boolean {
   return (
     left.assetCode === right.assetCode &&
+    left.deviceType === right.deviceType &&
     left.sourcePath === right.sourcePath &&
     left.sourceUrl === right.sourceUrl &&
     (left.assetRevision ?? '') === (right.assetRevision ?? '') &&

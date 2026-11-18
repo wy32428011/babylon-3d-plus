@@ -4,6 +4,7 @@ import { stripTypeScriptTypes } from 'node:module';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { resolveEnvironmentRuntimeSettings } from '../../src/editor/model/environmentRuntime.ts';
 import { shouldValidateSceneModelResources } from '../../src/editor/assets/sceneModelSyncTransaction.ts';
 // 从实际 Slice 提取动作，不依赖方法相邻或聚合门面的文本布局。
 const requiredActions = [
@@ -29,23 +30,27 @@ for (const file of ['sceneDocumentSlice', 'dataPlatformAndPublishSlice']) {
 }
 assert.deepEqual([...actionSources.keys()].sort(), [...requiredActions].sort());
 function storeFixture() {
-  let state: any = { sceneSessionId: '', runtimeMode: 'edit', logs: [], history: {}, sceneResourceIssues: [] };
+  let state: any = { sceneSessionId: '', scene: { sceneSettings: {} }, runtimeMode: 'edit', logs: [], history: {}, sceneResourceIssues: [] };
   let session = 0;
   const observed: any[] = [];
-  const imageRegistrations: unknown[][] = [];
+  const cachedImages = [{ reference: 'image-a' }], imageRegistrations: unknown[][] = [];
+  const confirmations: number[] = [], cancellations: number[] = [];
   const editorApi = {
-    loadSceneFile: async () => ({ content: '{"sceneSettings":{}}', filePath: 'startup.scene.json', sceneOpenToken: 1 }),
-    loadScene: async () => ({ content: '{"sceneSettings":{}}', filePath: 'dialog.scene.json', sceneOpenToken: 1 }),
-    listSyncedImages: async (): Promise<unknown[]> => [],
-    confirmSceneOpen: async () => true,
+    loadSceneFile: async () => ({ canceled: false, content: '{"sceneSettings":{}}', filePath: 'startup.scene.json', sceneOpenToken: 1 }),
+    loadScene: async () => ({ canceled: false, content: '{"sceneSettings":{}}', filePath: 'dialog.scene.json', sceneOpenToken: 1 }),
+    listSyncedImages: async (): Promise<unknown[]> => cachedImages,
+    confirmSceneOpen: async ({ sceneOpenToken }: { sceneOpenToken: number }) => { confirmations.push(sceneOpenToken); return true; },
+    cancelSceneOpen: async ({ sceneOpenToken }: { sceneOpenToken: number }) => { cancellations.push(sceneOpenToken); },
   };
   const code = `({${requiredActions.map(name => actionSources.get(name)).join(',')}})`;
   const actions = runInNewContext(stripTypeScriptTypes(code), {
-    set: (update: any) => { const next = typeof update === 'function' ? update(state) : update; state = { ...state, ...next }; observed.push(state); },
+    Error, set: (update: any) => { const next = typeof update === 'function' ? update(state) : update; state = { ...state, ...next }; observed.push(state); },
     get: () => state, isRuntimePreviewState: () => false,
+    confirmSceneLeave: async (get: () => typeof state) => ({ sessionId: get().sceneSessionId, content: JSON.stringify(get().scene) }),
+    isSceneLeaveApprovalCurrent: (s: typeof state, approval: { sessionId: string; content: string }) =>
+      s.sceneSessionId === approval.sessionId && JSON.stringify(s.scene) === approval.content,
     createLoadedSceneState: (_state: any, scene: any) => ({ scene, sceneSessionId: `session-${++session}` }),
     window: { editorApi },
-    // 两个打开入口都先恢复本地图片登记；本夹具验证资源门控，缓存授权另有专项。
     setSyncedImageAssets: (images: unknown[]) => imageRegistrations.push(images),
     deserializeScene: JSON.parse, syncDataPlatformImagesAfterLocalSceneLoad() {},
     updateSceneDocumentCommand: (_name: string, update: () => unknown) => update,
@@ -54,8 +59,12 @@ function storeFixture() {
     restoreFailedSceneResources: () => { throw new Error('本地恢复不能回滚失效的旧路径'); },
   });
   state = { ...state, ...actions };
-  return { getState: () => state, setState: (next: any) => { state = { ...state, ...next }; }, observed, editorApi, imageRegistrations,
-    open: async (remote: boolean) => { await state.loadSceneFromFile('startup.scene.json', () => true, remote); return state; } };
+  return { getState: () => state, setState: (next: any) => { state = { ...state, ...next }; }, observed,
+    editorApi, cachedImages, imageRegistrations, confirmations, cancellations,
+    open: async (remote: boolean) => {
+      assert.equal(await state.loadSceneFromFile('startup.scene.json', () => true, remote), true, state.logs.join('；'));
+      return state;
+    } };
 }
 
 test('中台 SOURCE 和本地文件写入文档时都原子关闭运行时启动门控并记录源文件位置', async () => {
@@ -70,23 +79,44 @@ test('中台 SOURCE 和本地文件写入文档时都原子关闭运行时启动
 
 test('文件选择器入口也保存源文件位置并在写入文档的同一提交门控', async () => {
   const f = storeFixture();
-  await f.getState().loadScene();
-  assert.equal(f.getState().sceneSourceFilePath, 'dialog.scene.json');
-  assert.equal(f.observed[0].sceneStartupResourceSessionId, f.getState().sceneSessionId);
-  assert.equal(f.getState().sceneResourcePolicy, 'local-refresh');
-  assert.equal(f.imageRegistrations.length, 1);
+  const original = f.getState().scene;
+  assert.equal(await f.getState().loadScene(), true, f.getState().logs.join('；'));
+  const loaded = f.getState();
+  assert.notEqual(loaded.scene, original);
+  assert.notEqual(loaded.sceneSessionId, '');
+  const firstCommit = f.observed.find(state => state.scene !== original);
+  assert.ok(firstCommit, '订阅者应观察到新文档');
+  for (const state of [firstCommit, loaded]) {
+    assert.equal(state.scene, loaded.scene);
+    assert.equal(state.sceneSessionId, loaded.sceneSessionId);
+    assert.equal(state.sceneSourceFilePath, 'dialog.scene.json');
+    assert.equal(state.sceneStartupResourceSessionId, loaded.sceneSessionId);
+    assert.equal(state.sceneResourcePolicy, 'local-refresh');
+  }
+  assert.deepEqual(f.imageRegistrations, [f.cachedImages]);
+  assert.deepEqual(f.confirmations, [1]);
+  assert.deepEqual(f.cancellations, []);
 });
 
 test('文件选择器图片缓存恢复失败时保持原文档与登记表，不能发布新的启动门控', async () => {
   const f = storeFixture(), original = { id: 'existing', sceneSettings: {} };
-  f.setState({ scene: original });
-  f.editorApi.listSyncedImages = async () => { throw new Error('cached-image-read-failed'); };
-  assert.equal(await f.getState().loadScene(), false);
-  assert.equal(f.getState().scene, original);
-  assert.equal(f.getState().sceneSessionId, '');
-  assert.equal(f.imageRegistrations.length, 0);
-  assert.equal(f.getState().sceneStartupResourceSessionId, undefined);
+  f.setState({ scene: original, sceneSessionId: 'existing', sceneSourceFilePath: 'existing.scene.json', sceneStartupResourceSessionId: null });
+  let cacheReads = 0;
+  f.editorApi.listSyncedImages = async () => { cacheReads++; throw new Error('cached-image-read-failed'); };
+  const failures: string[] = [];
+  assert.equal(await f.getState().loadScene((message: string) => failures.push(message)), false);
+  assert.equal(cacheReads, 1);
+  assert.deepEqual(failures, ['cached-image-read-failed']);
   assert.ok(f.getState().logs.some((message: string) => message.includes('cached-image-read-failed')));
+  for (const state of f.observed) {
+    assert.equal(state.scene, original);
+    assert.equal(state.sceneSessionId, 'existing');
+    assert.equal(state.sceneSourceFilePath, 'existing.scene.json');
+    assert.equal(state.sceneStartupResourceSessionId, null);
+  }
+  assert.deepEqual(f.imageRegistrations, []);
+  assert.deepEqual(f.confirmations, []);
+  assert.deepEqual(f.cancellations, [1]);
 });
 
 test('本地恢复按会话和文档身份提交，保持历史，首帧完成前不清除问题', async () => {
@@ -175,34 +205,57 @@ test('查询失败释放本轮初始门控，旧会话不能释放新场景，�
 });
 
 const panel = (await readFile(new URL('../../src/editor/panels/SceneViewPanel.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
-function extractEffect(marker: string): string {
-  const start = panel.indexOf('  useEffect(() => {', panel.indexOf(marker));
-  const end = panel.indexOf('\n\n', panel.indexOf('  ]);', start));
-  assert.ok(start >= 0 && end > start);
-  return stripTypeScriptTypes(panel.slice(start, end));
+const panelAst = ts.createSourceFile('SceneViewPanel.tsx', panel, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+function extractRuntimeEffect(method: string): string {
+  const matches = new Set<ts.CallExpression>();
+  function visit(node: ts.Node, effect?: ts.CallExpression): void {
+    if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      if (ts.isIdentifier(callee) && callee.text === 'useEffect') effect = node;
+      if (effect && ts.isPropertyAccessExpression(callee) && callee.name.text === method
+        && ts.isIdentifier(callee.expression) && callee.expression.text === 'runtime') matches.add(effect);
+    }
+    ts.forEachChild(node, child => visit(child, effect));
+  }
+  visit(panelAst);
+  assert.equal(matches.size, 1, `应有一个 effect 调用 runtime.${method}`);
+  return stripTypeScriptTypes([...matches][0].getText(panelAst));
 }
 
 test('97 个旧 SOURCE 模型不会在资源确认前触发 runtime.sync，释放后只提交最终模型', () => {
-  const effect = extractEffect('参数值变化走单实体同步');
-  for (const deferred of [true, false]) {
-    const synced: unknown[] = [];
-    const document = { entities: {}, entityIds: [] };
-    runInNewContext(effect, {
+  const effect = extractRuntimeEffect('beginSceneSession');
+  const entityIds = Array.from({ length: 97 }, (_, index) => `model-${index}`);
+  const models = (assetRevision: string) => ({ entityIds, entities: Object.fromEntries(entityIds.map(id =>
+    [id, { id, components: { modelAsset: { assetCode: id, assetRevision } } }])) });
+  const source = models('source'), latest = models('latest');
+  for (const runtimeFirst of [true, false]) {
+    const synced: unknown[] = [], generations: number[] = [];
+    const documentRef = { current: runtimeFirst ? source : latest }, synchronized = { current: 0 };
+    const context = {
       useEffect: (run: () => void) => run(), runtimeRef: { current: { sync: (scene: unknown) => synced.push(scene),
         beginSceneSession() {}, getModelStatistics: () => null } },
       gizmoRef: { current: { cancelActiveGroupDrag() {} } }, isRuntimePreview: false, runtimeModeRef: { current: 'edit' },
-      sceneStartupResourceSessionId: deferred ? 'A' : null, sceneSessionId: 'A', sceneRuntimeStartupDeferred: deferred,
-      // ref 是前序 effect 发布的最新快照；闭包旧值不能替代已确认的最终文档。
-      modelParameterSyncEntityId: null, editRuntimeSceneDocument: { stale: true },
-      editRuntimeSceneDocumentRef: { current: document },
-      statisticsSceneSessionRef: { current: null },
-      // 此旧调用没有Home trace；保持业务同步门控，诊断注入为空。
+      sceneSessionId: 'A', sceneRuntimeStartupDeferred: runtimeFirst,
+      runtimeReady: runtimeFirst, runtimeReadyGeneration: runtimeFirst ? 1 : 0,
+      runtimeSynchronizedGenerationRef: synchronized, setRuntimeSyncedGeneration: (generation: number) => generations.push(generation),
+      modelParameterSyncEntityId: null, localSyncEntityIds: null, editRuntimeSceneDocument: source,
+      editRuntimeSceneDocumentRef: documentRef, statisticsSceneSessionRef: { current: null },
       getSceneProjectOpenRecorder: () => undefined,
       useEditorStore: { getState: () => ({ hierarchySelectionIds: [], setSceneModelStatistics() {} }) },
       attachCurrentSelectionGizmo() {}, publishSelectedInspectorSpatialInfo() {}, selectedEntityIdRef: { current: null },
-    });
-    assert.equal(synced.length, deferred ? 0 : 1);
-    if (!deferred) assert.equal(synced[0], document);
+    };
+    runInNewContext(effect, context);
+    assert.deepEqual(synced, []);
+    assert.deepEqual(generations, []);
+    assert.equal(synchronized.current, 0);
+
+    documentRef.current = latest;
+    Object.assign(context, { sceneRuntimeStartupDeferred: false, runtimeReady: true, runtimeReadyGeneration: 1 });
+    runInNewContext(effect, context);
+    assert.equal(synced.length, 1);
+    assert.equal(synced[0], latest);
+    assert.deepEqual(generations, [1]);
+    assert.equal(synchronized.current, 1);
   }
 });
 
@@ -238,20 +291,28 @@ test('天空盒仍在加载时即使 98 个模型均就绪也不能完成，失�
 });
 
 test('确认资源前天空盒与环境都不启动，释放门控后在同一设置同步中各启动一次', () => {
-  const effect = extractEffect('  useEffect(() => {\n    const viewport = viewportRef.current;\n    const runtime = runtimeRef.current;\n    // 场景设置单独同步');
-  for (const deferred of [true, false]) {
-    const events: string[] = [];
-    runInNewContext(effect, {
-      useEffect: (run: () => void) => run(),
-      viewportRef: { current: { setViewDistance() {}, setSensitivity() {} } },
-      runtimeRef: { current: { syncDefaultCargoGenerator() {}, syncAppearance() {}, syncLighting() {}, syncSkybox: () => events.push('skybox'), syncEnvironment: () => events.push('environment') } },
-      sceneDocument: { sceneSettings: { camera: {} } }, sceneRuntimeStartupDeferred: deferred,
-      sceneDocumentRef: { current: { sceneSettings: { camera: {} } } },
-      environmentApplyRequest: null, environmentAdjustmentActive: false, environmentRuntimeOverride: null,
-      environmentStartupRelinkSessionId: null, sceneSessionId: 'A', resolveEnvironmentRuntimeSettings: () => null,
-    });
-    assert.deepEqual(events, deferred ? [] : ['skybox', 'environment']);
-  }
+  const effect = extractRuntimeEffect('syncSkybox');
+  const document = (revision: string) => ({ sceneSettings: { camera: {},
+    skybox: { sourceUrl: `${revision}.exr` }, environment: { packagePath: `${revision}.glb` } } });
+  const source = document('source'), latest = document('latest');
+  const sceneDocumentRef = { current: source }, events: unknown[] = [];
+  const context = {
+    useEffect: (run: () => void) => run(), runtimeReadyGeneration: 1,
+    viewportRef: { current: { setViewDistance() {}, setSensitivity() {} } },
+    runtimeRef: { current: { syncDefaultCargoGenerator() {}, syncAppearance() {}, syncLighting() {},
+      syncSkybox: (scene: typeof source) => events.push(['skybox', scene.sceneSettings.skybox]),
+      syncEnvironment: (settings: unknown) => events.push(['environment', settings]),
+    } },
+    sceneDocument: source, sceneDocumentRef, sceneRuntimeStartupDeferred: true,
+    environmentApplyRequest: null, environmentAdjustmentActive: false, environmentRuntimeOverride: null,
+    environmentStartupRelinkSessionId: null, sceneSessionId: 'A', resolveEnvironmentRuntimeSettings,
+  };
+  runInNewContext(effect, context);
+  assert.deepEqual(events, []);
+  sceneDocumentRef.current = latest;
+  context.sceneRuntimeStartupDeferred = false;
+  runInNewContext(effect, context);
+  assert.deepEqual(events, [['skybox', latest.sceneSettings.skybox], ['environment', latest.sceneSettings.environment]]);
 });
 
 const projectPanel = (await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');

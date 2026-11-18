@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
 import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
@@ -28,6 +29,8 @@ import {
   type DataPlatformModelSyncDescriptor,
 } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
+import { createSourceResourcePlan } from './digitalTwinSourceResourcePlan.js';
+import { assertInspectionModelSelfContained } from './inspectionModelResource.js';
 import {
   assertPathInside,
   DataPlatformRollbackError,
@@ -100,6 +103,7 @@ type NormalModelScript = {
 
 type NormalModelRecord = {
   kind: 'model';
+  deviceType?: string;
   id: string;
   name: string;
   fileName: string | null;
@@ -463,7 +467,8 @@ export async function syncSceneDataPlatformModelAssets(
         || descriptor.thumbnailFingerprint !== entry.thumbnailFingerprint) return null;
       const asset = createManagedAssetMap(sharedAssets.assets).get(resourceKey(resource));
       if (!asset) return null;
-      return pinSceneModelVersion(asset, entry, sharedRoot, versionRoot, signal);
+      // 业务类型不参与模型包修订；复用固定版本时仍采用本次接口返回的类型。
+      return pinSceneModelVersion(asset, { ...entry, deviceType: descriptor.deviceType }, sharedRoot, versionRoot, signal);
     }, signal);
     if (sharedPinned) {
       const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
@@ -501,6 +506,133 @@ export async function syncSceneDataPlatformModelAssets(
     assertNotAborted(signal);
     return result;
   }, signal, path.resolve(cacheRoot).toLowerCase());
+}
+
+/** 指定版本只查询历史版本列表；不读取模型详情的当前文件。 */
+/** 从中台完整分页读取模型清单；ID 按 Long 字符串契约严格检查。 */
+export async function listRemoteInspectionModels(options: {
+  baseUrl: string; signal?: AbortSignal; dependencies?: Partial<ModelSyncDependencies>;
+}): Promise<Array<{ resourceId: string; displayName: string }>> {
+  const signal = options.signal ?? new AbortController().signal;
+  const requestJson = options.dependencies?.requestJson ?? DEFAULT_DEPENDENCIES.requestJson;
+  const records = await queryAllPages(normalizeDataPlatformSourceUrl(options.baseUrl), MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson);
+  const seen = new Set<string>();
+  return records.map((value, index) => {
+    const item = requireRecord(value, '普通模型', index);
+    if (typeof item.id !== 'string' || !/^[1-9]\d{0,63}$/.test(item.id) || seen.has(item.id)) {
+      throw new Error('数据中台模型列表包含无效或重复的模型 ID。');
+    }
+    seen.add(item.id);
+    return { resourceId: item.id, displayName: normalizeOptionalString(item.modelName) ?? '模型-' + item.id };
+  });
+}
+
+async function queryInspectionVersionRecords(baseUrl: string, modelId: string, signal: AbortSignal,
+  requestJson: ModelSyncDependencies['requestJson']): Promise<Record<string, unknown>[]> {
+  const response = await requestJson({ baseUrl, endpointPath: 'api/v1/models/' + modelId + '/versions/query', body: {},
+    signal, timeoutMs: QUERY_TIMEOUT_MS, context: '查询巡检高模历史版本 ' + modelId });
+  if (!isPlainObject(response) || response.success !== true || !Array.isArray(response.data)) {
+    throw new Error('数据中台不支持巡检高模历史版本查询。');
+  }
+  if (response.data.length > MAX_MODEL_RECORDS) throw new Error('巡检高模历史版本数量超出限制。');
+  const seen = new Set<string>();
+  return response.data.map((value: unknown, index: number) => {
+    const item = requireRecord(value, '巡检高模版本', index);
+    if (typeof item.versionId !== 'string' || !/^[1-9]\d{0,63}$/.test(item.versionId) || seen.has(item.versionId)) {
+      throw new Error('数据中台巡检高模版本列表包含无效或重复的版本 ID。');
+    }
+    seen.add(item.versionId);
+    return item;
+  });
+}
+
+/** 查询全部版本，不能把版本序号当作版本记录 ID。 */
+export async function listRemoteInspectionModelVersions(options: {
+  baseUrl: string; modelId: string; signal?: AbortSignal; dependencies?: Partial<ModelSyncDependencies>;
+}): Promise<Array<{ versionId: string; label?: string }>> {
+  if (!/^[1-9]\d{0,63}$/.test(options.modelId)) throw new Error('巡检高模模型 ID 无效。');
+  const records = await queryInspectionVersionRecords(normalizeDataPlatformSourceUrl(options.baseUrl), options.modelId,
+    options.signal ?? new AbortController().signal, options.dependencies?.requestJson ?? DEFAULT_DEPENDENCIES.requestJson);
+  return records.map(item => {
+    const label = typeof item.versionNumber === 'string' && /^\d+$/.test(item.versionNumber) ? '版本 ' + item.versionNumber
+      : typeof item.versionNumber === 'number' && Number.isSafeInteger(item.versionNumber) && item.versionNumber >= 0 ? '版本 ' + item.versionNumber : undefined;
+    return { versionId: item.versionId as string, ...(label ? { label } : {}) };
+  });
+}
+
+async function queryInspectionModelVersion(baseUrl: string, modelId: string, versionId: string,
+  signal: AbortSignal, requestJson: ModelSyncDependencies['requestJson']): Promise<NormalModelRecord> {
+  const records = await queryInspectionVersionRecords(baseUrl, modelId, signal, requestJson);
+  const matches = records.filter(item => item.versionId === versionId);
+  if (matches.length !== 1) throw new Error('数据中台不存在唯一指定的巡检高模版本：' + modelId + ':' + versionId);
+  if (typeof matches[0].metaFileUrl !== 'string' || !matches[0].metaFileUrl.trim()) throw new Error('巡检高模版本缺少元数据文件。');
+  return normalizeNormalModelRecord({ ...matches[0], id: modelId, modelName: '固定模型-' + modelId,
+    packageRevision: versionId }, 0);
+}
+
+export type SyncInspectionModelVersionOptions = {
+  baseUrl: string; sharedResourcesRoot: string; sourceKey: string; modelId: string; versionId: string;
+  /** 首次绑定省略摘要，由主进程下载校验后计算；发布时必须传场景中保存的摘要。 */
+  contentSha256?: string; expectedFiles: readonly ModelSnapshotExpectedFile[]; signal?: AbortSignal;
+  onProgress?: (message: string) => void; dependencies?: Partial<ModelSyncDependencies>;
+};
+
+/** 固定高模以来源、模型 ID、版本 ID 和完整包摘要隔离，绝不覆盖可变共享库。 */
+export async function syncInspectionModelVersion(options: SyncInspectionModelVersionOptions): Promise<ProjectModelAssetEntry & { contentSha256: string }> {
+  const baseUrl = normalizeDataPlatformSourceUrl(options.baseUrl);
+  if (!/^[a-f0-9]{64}$/.test(options.sourceKey) || createDataPlatformModelSourceKey(baseUrl) !== options.sourceKey
+    || !/^[1-9]\d{0,63}$/.test(options.modelId) || !/^[1-9]\d{0,63}$/.test(options.versionId)
+    || (options.contentSha256 !== undefined && !/^[a-f0-9]{64}$/.test(options.contentSha256))) throw new Error('巡检高模固定版本来源或身份无效。');
+  if (!options.expectedFiles.length || options.expectedFiles.some(file => file.kind !== 'model' || file.resourceId !== options.modelId)) {
+    throw new Error('巡检高模缺少对应版本的原始文件快照。');
+  }
+  const signal = options.signal ?? new AbortController().signal;
+  const sharedRoot = path.resolve(options.sharedResourcesRoot);
+  const versionRoot = path.join(sharedRoot, '.babylon-editor', 'inspection-model-versions', options.sourceKey,
+    options.modelId, options.versionId);
+  const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  return queueModelSync(async () => {
+    assertNotAborted(signal);
+    await assertRecoveryPathInsideRoot(sharedRoot, versionRoot);
+    await fs.mkdir(versionRoot, { recursive: true });
+    const stageRoot = path.join(versionRoot, '.pending-' + randomUUID());
+    await assertRecoveryPathInsideRoot(sharedRoot, stageRoot);
+    await fs.mkdir(stageRoot, { recursive: false });
+    try {
+      const before = await queryInspectionModelVersion(baseUrl, options.modelId, options.versionId, signal, dependencies.requestJson);
+      await runDataPlatformModelSync({ baseUrl, editorRoot: stageRoot, requiredResources: [{ kind: 'model', resourceId: options.modelId }],
+        queriedRecords: [before], forceRefresh: true, expectedFiles: options.expectedFiles,
+        dependencies, signal, onProgress: options.onProgress });
+      const after = await queryInspectionModelVersion(baseUrl, options.modelId, options.versionId, signal, dependencies.requestJson);
+      if (hashFingerprint(before) !== hashFingerprint(after)) throw new ModelSnapshotIntegrityError('巡检高模版本在下载期间发生变化。');
+      const [index, loaded] = await Promise.all([readDataPlatformModelIndex(stageRoot), dependencies.readAssetIndex(stageRoot)]);
+      const entry = index.entries.find(item => item.kind === 'model' && item.resourceId === options.modelId);
+      const asset = createManagedAssetMap(loaded.assets).get('model:' + options.modelId);
+      if (!entry || !asset?.packagePath || !asset.metadataPath) throw new Error('巡检高模版本下载后的模型包或元数据不完整。');
+      const packageRelative = path.relative(stageRoot, asset.packagePath);
+      if (!packageRelative || packageRelative.startsWith('..') || path.isAbsolute(packageRelative)) throw new Error('巡检高模缓存路径无效。');
+      await assertInspectionModelSelfContained(asset.path, asset.packagePath, signal);
+      const digest = async (packagePath: string, root: string) => {
+        const plan = await createSourceResourcePlan([{ sourcePath: packagePath, destinationRelativePath: 'Assets/Models/fixed' }], root, signal);
+        return plan.bundles[0].contentSha256;
+      };
+      const contentSha256 = await digest(asset.packagePath, stageRoot);
+      if (options.contentSha256 !== undefined && contentSha256 !== options.contentSha256) throw new ModelSnapshotIntegrityError('巡检高模完整资源包内容摘要不一致。');
+      const finalRoot = path.join(versionRoot, contentSha256);
+      const finalPackage = path.join(finalRoot, packageRelative);
+      if (await pathExists(finalRoot)) {
+        await assertRecoveryPathInsideRoot(sharedRoot, finalPackage);
+        if (await digest(finalPackage, finalRoot) !== contentSha256) throw new ModelSnapshotIntegrityError('已有巡检高模固定缓存内容摘要不一致。');
+      } else {
+        await assertRecoveryPathInsideRoot(sharedRoot, finalRoot);
+        assertNotAborted(signal);
+        await renamePathWithWindowsRetry(stageRoot, finalRoot);
+      }
+      return { ...relocateAssetEntry(asset, asset.packagePath, finalPackage, entry), contentSha256 };
+    } finally {
+      await fs.rm(stageRoot, { recursive: true, force: true });
+    }
+  }, signal, path.resolve(versionRoot).toLowerCase());
 }
 
 /** 将已校验的共享库包固定为独立快照，恢复本地场景后后台同步不会改变其内容。 */
@@ -869,6 +1001,7 @@ async function runDataPlatformModelSync(
       if (!currentAsset) throw new Error(`模型同步索引与资产索引不一致：缺少 ${key}`);
       finalEntries.push(reuse.nextEntry);
       finalManagedAssets.push(refreshIndexedAssetMetadata(currentAsset, reuse.nextEntry));
+      if (currentAsset.deviceType !== reuse.nextEntry.deviceType) runtimeChangedKeys.add(key);
     }
 
     for (const item of validated) {
@@ -905,7 +1038,7 @@ async function runDataPlatformModelSync(
         finalManagedAssets.push(refreshIndexedAssetMetadata(currentAsset, nextEntry));
       }
 
-      if (runtimeChanged) runtimeChangedKeys.add(key);
+      if (runtimeChanged || currentAsset?.deviceType !== nextEntry.deviceType) runtimeChangedKeys.add(key);
     }
 
     // 定向恢复只对选中的稳定 ID 提交变化，其余共享模型和项目自有资源保持原样。
@@ -1051,8 +1184,10 @@ async function queryAllNormalModels(
   signal: AbortSignal,
   requestJson: ModelSyncDependencies['requestJson'],
 ): Promise<NormalModelRecord[]> {
-  const rawRecords = await queryAllPages(baseUrl, MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson);
-  return rawRecords.map((value, index) => normalizeNormalModelRecord(value, index));
+  const rawRecords = await queryAllPages(baseUrl, MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson, { modelPurpose: 'SCENE' });
+  // 旧接口未声明用途的普通模型继续兼容；显式详情/恢复路径不经过此筛选。
+  return rawRecords.filter((value) => !isPlainObject(value) || value.modelPurpose == null || value.modelPurpose === 'SCENE')
+    .map((value, index) => normalizeNormalModelRecord(value, index));
 }
 
 async function queryAllComboModels(
@@ -1071,6 +1206,7 @@ async function queryAllPages(
   nameField: 'modelName' | 'comboModelName',
   signal: AbortSignal,
   requestJson: ModelSyncDependencies['requestJson'],
+  filters: { modelPurpose?: 'SCENE' } = {},
 ): Promise<unknown[]> {
   const records: unknown[] = [];
   let stableTotal: number | null = null;
@@ -1084,6 +1220,7 @@ async function queryAllPages(
         pageSize: MODEL_QUERY_PAGE_SIZE,
         [nameField]: '',
         excludeIds: [],
+        ...filters,
       },
       signal,
       timeoutMs: QUERY_TIMEOUT_MS,
@@ -1155,6 +1292,7 @@ function normalizeNormalModelRecord(value: unknown, index: number): NormalModelR
     kind: 'model',
     id,
     name: normalizeOptionalString(record.modelName) ?? `模型-${id}`,
+    ...modelDeviceTypeField(record.deviceType),
     fileName: normalizeOptionalString(record.fileName),
     fileUrl: normalizeRequiredUrl(record.fileUrl, '普通模型', index),
     metaFileUrl: normalizeOptionalString(record.metaFileUrl),
@@ -1257,6 +1395,7 @@ function createSyncDescriptor(
     kind: record.kind,
     resourceId: record.id,
     displayName: record.name,
+    ...modelDeviceTypeField(record.kind === 'model' ? record.deviceType : undefined),
     packageRelativePath: existingPackageRelativePath ?? createPackageRelativePath(record),
     contentFingerprint: createRuntimeRemoteFingerprint(record),
     thumbnailFingerprint: createThumbnailRemoteFingerprint(record),
@@ -1443,7 +1582,7 @@ async function validatePreparedPackage(
   assertNotAborted(signal);
   await normalizeLocalMetadata(prepared);
   await validateModelFile(prepared.mainFilePath);
-  const scanResult = await scanModelPackage(prepared.packagePath);
+  const scanResult = await scanModelPackage(prepared.packagePath, prepared.descriptor);
   if (!scanResult.asset) {
     throw new Error(`${modelKindLabel(prepared.record.kind)}“${prepared.record.name}”校验失败：${scanResult.skipped?.reason ?? '无法扫描模型包。'}`);
   }
@@ -1554,6 +1693,7 @@ function relocateAssetEntry(
     sourceUrl: encodeAssetUrl(finalPath),
     assetRevision: indexEntry.runtimeRevision,
     displayName: indexEntry.displayName,
+    deviceType: indexEntry.deviceType,
     packagePath: targetPackagePath,
     metadataPath: relocate(asset.metadataPath),
     thumbnailPath: finalThumbnailPath,
@@ -1574,6 +1714,7 @@ function refreshIndexedAssetMetadata(
   return {
     ...asset,
     displayName: entry.displayName,
+    deviceType: entry.deviceType,
     assetRevision: entry.runtimeRevision,
   };
 }
@@ -1701,6 +1842,7 @@ function areIndexEntriesSemanticallyEqual(
   return left.kind === right.kind
     && left.resourceId === right.resourceId
     && left.displayName === right.displayName
+    && left.deviceType === right.deviceType
     && left.packageRelativePath === right.packageRelativePath
     && left.contentFingerprint === right.contentFingerprint
     && left.thumbnailFingerprint === right.thumbnailFingerprint

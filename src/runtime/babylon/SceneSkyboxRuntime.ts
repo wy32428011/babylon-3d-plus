@@ -62,6 +62,7 @@ export class SceneSkyboxRuntime {
   private environmentResolver: SkyboxEnvironmentResolver | null = null;
   private onEnvironmentPrepared: SkyboxEnvironmentPrepared | undefined;
   private readinessListener: ((state: SkyboxReadiness) => void) | undefined;
+  private lastPublishedReadiness: SkyboxReadiness | null = null;
   private active: ActiveSkybox | null = null;
   private pending: PendingSkybox | null = null;
   private desired: SceneSkyboxRuntimeTarget | null = null;
@@ -90,9 +91,13 @@ export class SceneSkyboxRuntime {
 
   setEnvironmentResolver(resolver: SkyboxEnvironmentResolver, onPrepared?: SkyboxEnvironmentPrepared,
     onReadiness?: (state: SkyboxReadiness) => void): void {
+    if (this.readinessListener !== onReadiness) this.lastPublishedReadiness = null;
     this.environmentResolver = resolver; this.onEnvironmentPrepared = onPrepared; this.readinessListener = onReadiness;
   }
-  private publishReadiness(state: SkyboxReadiness): void {
+  private publishReadiness(state: SkyboxReadiness, skipUnchanged = false): void {
+    const last = this.lastPublishedReadiness;
+    if (skipUnchanged && last?.phase === state.phase && last.message === state.message && last.sourceUrl === state.sourceUrl) return;
+    this.lastPublishedReadiness = state;
     this.onReadinessChanged(state);
     this.readinessListener?.(state);
   }
@@ -121,7 +126,8 @@ export class SceneSkyboxRuntime {
     if (!this.active) return;
     this.applyTarget(this.active, target);
     if (!this.requiresSkybox()) {
-      this.cancelPending(); this.publishReadiness(this.getReadiness()); return;
+      const hadPending = this.pending !== null;
+      this.cancelPending(); this.publishReadiness(this.getReadiness(), !hadPending); return;
     }
     const signature = createSceneSkyboxSignature(target.skybox);
     if (this.active.texture && (this.active.signature === signature
@@ -137,7 +143,11 @@ export class SceneSkyboxRuntime {
       return;
     }
     if (this.pending?.entityKey === entityKey && this.pending.signature === signature) return;
-    if (this.failedTarget?.entityKey === entityKey && this.failedTarget.signature === signature) return;
+    if (this.failedTarget?.entityKey === entityKey && this.failedTarget.signature === signature) {
+      // 重显已失败的背景时恢复错误通知；同一签名仍由显式重试入口重新加载。
+      this.publishReadiness(this.getReadiness(), true);
+      return;
+    }
     this.cancelPending(); this.startLoad(target, entityKey, signature);
   }
 

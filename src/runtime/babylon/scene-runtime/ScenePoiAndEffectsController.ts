@@ -353,6 +353,7 @@ export class ScenePoiAndEffectsController {
     if (this.updatesStopped || this.alarmRuntime) return;
     this.alarmRuntime = new AlarmManagerRuntime(this.context.scene, {
       node: id => this.updatesStopped ? null : this.dependencies.presentation.meshes.get(id) ?? this.dependencies.assets.models.get(id)?.root ?? null,
+      getRenderMeshOverrides: id => this.dependencies.environment.lightingRuntime.getRenderMeshOverrides(id),
       meshes: id => this.updatesStopped ? [] : this.dependencies.assets.models.get(id)?.meshes ?? (this.dependencies.presentation.meshes.has(id) ? [this.dependencies.presentation.meshes.get(id)!] : []),
       bounds: id => this.updatesStopped ? null : this.dependencies.bounds.getEntityWorldBounds(id), visible: id => !this.updatesStopped && this.dependencies.document.isEntityVisible(id),
       activate: event => { if (!this.updatesStopped) this.onAlarmActivated?.call(this.context.callbackReceiver, event); },

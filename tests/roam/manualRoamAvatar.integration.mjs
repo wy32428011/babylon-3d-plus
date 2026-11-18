@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog } from 'electron';
 import unzipper from 'unzipper';
 
-const root = await mkdtemp(path.join(tmpdir(), 'zending-roam-avatar-'));
+const root = process.env.MANUAL_ROAM_AVATAR_TEST_ROOT;
+assert.ok(root && path.dirname(root) === path.resolve(tmpdir()) && path.basename(root).startsWith('zending-roam-avatar-'),
+  '请通过 npm run test:manual-roam:integration 启动测试');
 const userData = path.join(root, 'user-data');
 await mkdir(userData);
 app.setPath('userData', userData);
+// 最后一个测试窗口关闭后，由断言和清理结果决定退出码。
+app.on('window-all-closed', () => {});
 
 function inspectAdaptedGlb(bytes) {
   const jsonLength = bytes.readUInt32LE(12);
@@ -26,6 +31,7 @@ async function run() {
   const { prepareDeploymentExport } = await import('../../dist-electron/ipc/deploymentExportScene.js');
   const { buildDigitalTwinSourcePackage } = await import('../../dist-electron/ipc/digitalTwinSourcePackage.js');
   const { registerAssetIpc } = await import('../../dist-electron/ipc/assetIpc.js');
+  const { trustEditorWindow } = await import('../../dist-electron/ipc/trustedEditorIpc.js');
   const projectRoot = path.join(root, 'project');
   await mkdir(projectRoot);
   setCurrentProjectRoot(projectRoot);
@@ -94,11 +100,25 @@ async function run() {
   assert.match(portableAvatar.sourcePath, /^Assets\/Models\/RoamAvatar-/);
   registerAssetIpc();
   const originalDialog = dialog.showOpenDialog;
-  const window = new BrowserWindow({ show: false, webPreferences: {
-    preload: path.resolve('dist-electron/preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false,
-  } });
+  const editorPage = path.join(root, 'editor.html');
+  await writeFile(editorPage, '<!doctype html><meta charset="utf-8"><title>漫游人物上传验收</title>');
+  const editorUrl = pathToFileURL(editorPage).href;
+  const window = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: path.resolve('dist-electron/preload.cjs'),
+      additionalArguments: [`--editor-entry-url=${encodeURIComponent(editorUrl)}`],
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
   try {
-    await window.loadURL('data:text/html,<html><body>avatar preload integration</body></html>');
+    trustEditorWindow(window, editorUrl);
+    await window.loadURL('about:blank');
+    assert.equal(await window.webContents.executeJavaScript('typeof window.editorApi'), 'undefined');
+    await window.loadURL(editorUrl);
+    assert.equal(await window.webContents.executeJavaScript('typeof window.editorApi?.importManualRoamAvatar'), 'function');
     dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
     const canceled = await window.webContents.executeJavaScript('window.editorApi.importManualRoamAvatar()');
     assert.equal(canceled.canceled, true);
@@ -111,14 +131,10 @@ async function run() {
     window.destroy();
     dialog.showOpenDialog = originalDialog;
   }
-  console.log('PASS: 普通 Mixamo 人物自动适配、源文件/蒙皮保留、同名隔离、损坏/外部资源拒绝、项目索引、Viewer 派生资源改写、SOURCE ZIP 适配数据保留、sandbox preload 上传及取消。');
+  await writeFile(path.join(root, 'result.txt'), 'PASS: 普通 Mixamo 人物自动适配、源文件/蒙皮保留、同名隔离、损坏/外部资源拒绝、项目索引、Viewer 派生资源改写、SOURCE ZIP 适配数据保留、sandbox preload 上传及取消。');
 }
 
-app.whenReady().then(run).then(async () => {
-  await rm(root, { recursive: true, force: true });
-  app.exit(0);
-}, async (error) => {
+app.whenReady().then(run).then(() => app.exit(0), (error) => {
   console.error(error);
-  await rm(root, { recursive: true, force: true });
   app.exit(1);
 });

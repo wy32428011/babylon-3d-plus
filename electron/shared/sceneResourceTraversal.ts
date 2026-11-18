@@ -7,6 +7,7 @@ export type SceneModelReference = {
 };
 export type SceneResourceReferences = {
   models: SceneModelReference[];
+  inspections: Array<{ binding: SceneResourceObject; model: SceneResourceObject }>;
   environments: Array<{ environment: SceneResourceObject; variants: SceneResourceObject[] }>;
   skyboxes: Array<{ skybox: SceneResourceObject }>;
   cadReferences: Array<{ cad: SceneResourceObject }>;
@@ -66,11 +67,23 @@ export function collectSceneResourceReferences(
     });
   };
   const result: SceneResourceReferences = {
-    models: [], environments: [], skyboxes: [], cadReferences: [], images: [], entityResources: [], clickEventBindings: [],
+    models: [], inspections: [], environments: [], skyboxes: [], cadReferences: [], images: [], entityResources: [], clickEventBindings: [],
+  };
+  // 高模单独登记，不能加入按最新模型 ID 更新和恢复的 models。
+  const addInspection = (asset: SceneResourceObject, label: string) => {
+    if (asset.inspection === undefined) return;
+    const binding = readObject(asset.inspection, label + ' inspection');
+    if (!binding) return;
+    if (binding.schemaVersion !== 1) {
+      if (strict) throw new Error(label + ' inspection 版本无效。');
+      return;
+    }
+    const model = readObject(binding.model, label + ' inspection.model');
+    if (model) result.inspections.push({ binding, model });
   };
   const addModel = (value: unknown, label: string, clickTarget = false) => {
     const asset = readObject(value, label);
-    if (asset) result.models.push({ asset, clickTarget });
+    if (asset) { result.models.push({ asset, clickTarget }); addInspection(asset, label); }
   };
   const addTarget = (value: unknown, packageOwner: SceneResourceObject, label: string, clickTarget = false) => {
     if (value === null || value === undefined) return;
@@ -81,8 +94,11 @@ export function collectSceneResourceReferences(
       return;
     }
     const asset = readObject(target.modelAsset, `${label} modelAsset`);
-    if (asset) result.models.push({ asset, target,
-      packageOwner: target.packagePath !== undefined ? target : packageOwner, clickTarget });
+    if (asset) {
+      result.models.push({ asset, target,
+        packageOwner: target.packagePath !== undefined ? target : packageOwner, clickTarget });
+      addInspection(asset, label);
+    }
   };
   const addGenerator = (value: unknown, entityId: string) => {
     const generator = readObject(value, `实体 ${entityId} modelGenerator`);
@@ -173,8 +189,8 @@ export function collectLightingPolicyResourceModels(scene: unknown, includeIdent
   });
 }
 
-const PATH_FIELDS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'thumbnailPath', 'path']);
-const URL_FIELDS = new Set(['sourceUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl', 'url']);
+const PATH_FIELDS = new Set(['sourcePath', 'packagePath', 'metadataPath', 'metaPath', 'thumbnailPath', 'path']);
+const URL_FIELDS = new Set(['sourceUrl', 'metaUrl', 'thumbnailUrl', 'activeVariantUrl', 'manifestUrl', 'assetUrl', 'url']);
 
 /** 参数字符串本身不是资源；仅字段契约或调用方认可的资产协议可以触发改写。 */
 export function sceneResourceFieldKind(field: string | null): 'path' | 'url' | 'path-array' | null {
@@ -198,8 +214,8 @@ export function collectLocalSceneResourceFields(owner: SceneResourceObject): Loc
     }
   };
   const fields = (target: SceneResourceObject, packageDirectory = true) => {
-    for (const key of ['sourcePath', 'path', 'packagePath', 'metadataPath', 'thumbnailPath']) add(target, key, key === 'packagePath' && packageDirectory);
-    for (const key of ['sourceUrl', 'activeVariantUrl', 'thumbnailUrl', 'url']) add(target, key);
+    for (const key of ['sourcePath', 'path', 'packagePath', 'metadataPath', 'metaPath', 'thumbnailPath']) add(target, key, key === 'packagePath' && packageDirectory);
+    for (const key of ['sourceUrl', 'metaUrl', 'activeVariantUrl', 'thumbnailUrl', 'url']) add(target, key);
     if (Array.isArray(target.scriptPaths)) target.scriptPaths.forEach((_, key) => add(target.scriptPaths as unknown[], key));
     if (Array.isArray(target.scriptAssets)) for (const script of target.scriptAssets) {
       const asset = object(script); if (asset) fields(asset, false);

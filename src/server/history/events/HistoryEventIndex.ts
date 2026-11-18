@@ -98,7 +98,7 @@ export class HistoryEventIndex {
     const watermark = HistoryEventIndex.watermark(options.archive, options.projectionId);
     const anchorReceipt = options.archive.findCheckpoint(options.projectionId, watermark.retainedFrom);
     const anchorSession = await options.archive.openReadSession({ mode: 'cursor-recovery', projectionId: options.projectionId, atCursor: anchorReceipt.cursor });
-    let files: EventFiles | undefined, anchorClosed = false;
+    let files: EventFiles | undefined;
     try {
       const checkpoint = await options.archive.readCheckpoint(anchorSession.sessionId);
       need(same(checkpoint.state.metadata.cursor, anchorReceipt.cursor) && checkpoint.checksum.value === anchorReceipt.checksum,
@@ -128,15 +128,21 @@ export class HistoryEventIndex {
         await files.recover((location, payload) => instance.install(location, payload));
       });
       await instance.restoreFollower(checkpoint);
-      await options.archive.closeReadSession(anchorSession.sessionId); anchorClosed = true;
+      await options.archive.closeReadSession(anchorSession.sessionId);
       return instance;
     } catch (error) {
+      const failures = [error];
       if (files) {
         try { await HistoryEventIndex.gated(options, async () => files!.release()); }
-        catch (releaseError) { throw new Error(`事件索引打开失败且锁释放失败：${String(error)}；${String(releaseError)}`); }
+        catch (releaseError) { failures.push(releaseError); }
+      }
+      try { await options.archive.closeReadSession(anchorSession.sessionId); }
+      catch (closeError) { failures.push(closeError); }
+      if (failures.length > 1) {
+        throw new AggregateError(failures, '事件索引打开失败且资源释放失败。', { cause: error });
       }
       throw error;
-    } finally { if (!anchorClosed) await options.archive.closeReadSession(anchorSession.sessionId); }
+    }
   }
   private static async gated<T>(options: HistoryEventIndexOptions, fn: () => Promise<T>): Promise<T> {
     let calls = 0;

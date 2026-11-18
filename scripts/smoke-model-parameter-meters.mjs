@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { parseArgs } from 'node:util';
 import {
   ArcRotateCamera,
   LoadAssetContainerAsync,
@@ -15,17 +17,30 @@ import '@babylonjs/loaders/glTF/index.js';
 import ts from 'typescript';
 import { createServer } from 'vite';
 
-const MODEL_ROOT = path.resolve(
-  process.env.BABYLON_MODEL_ROOT ?? path.join(process.cwd(), '..', '3d-models', 'models'),
-);
-const ASSET_MODEL_ROOT = path.resolve(
-  process.env.BABYLON_ASSET_MODEL_ROOT ?? path.join(MODEL_ROOT, 'Assets', 'Models'),
-);
-const ASSET_INDEX_PATH = path.resolve(
-  process.env.BABYLON_ASSET_INDEX_PATH ?? path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json'),
-);
-// Inspector 会根据 unit 自动追加 (m)；仅在显式兼容审计时要求源标签重复携带单位。
+const WORKSPACE_ROOT = path.resolve(import.meta.dirname, '..');
+const VISUAL_FIXTURE_ROOT = path.join(WORKSPACE_ROOT, 'tests', 'fixtures', 'model-packages');
+const { values: options } = parseArgs({ options: { external: { type: 'boolean' } } });
+
+function readOptionalSetting(name) {
+  const value = process.env[name];
+  if (value === undefined) return undefined;
+  assert.ok(value.trim(), `${name} 不能为空`);
+  return value.trim();
+}
+
+const modelRootSetting = readOptionalSetting('BABYLON_MODEL_ROOT');
+const assetRootSetting = readOptionalSetting('BABYLON_ASSET_MODEL_ROOT');
+const indexSetting = readOptionalSetting('BABYLON_ASSET_INDEX_PATH');
+const MODEL_FILTER = readOptionalSetting('BABYLON_MODEL_FILTER');
+const PARAMETER_KEY = readOptionalSetting('BABYLON_PARAMETER_KEY');
+const PARAMETER_BISECT = process.env.BABYLON_PARAMETER_BISECT === '1';
+// Inspector 根据 unit 追加 (m)，只有显式兼容审计需要源标签也携带单位。
 const REQUIRE_LABEL_UNIT_SUFFIX = process.env.BABYLON_REQUIRE_LABEL_UNIT_SUFFIX === '1';
+const EXTERNAL_AUDIT = Boolean(options.external || modelRootSetting || assetRootSetting || indexSetting
+  || MODEL_FILTER || PARAMETER_BISECT || PARAMETER_KEY || REQUIRE_LABEL_UNIT_SUFFIX);
+const MODEL_ROOT = path.resolve(modelRootSetting ?? path.join(WORKSPACE_ROOT, '..', '3d-models', 'models'));
+const ASSET_MODEL_ROOT = path.resolve(assetRootSetting ?? path.join(MODEL_ROOT, 'Assets', 'Models'));
+const ASSET_INDEX_PATH = path.resolve(indexSetting ?? path.join(MODEL_ROOT, '.babylon-editor', 'asset-index.json'));
 const NON_UNIFORM_SCALE = { x: 2, y: 3, z: 4 };
 const SSR_MODULE_LOAD_TIMEOUT_MS = 60_000;
 const MAX_REASONABLE_MODEL_SIZE_METERS = Number(process.env.BABYLON_MAX_REASONABLE_MODEL_SIZE_METERS ?? 100);
@@ -208,11 +223,36 @@ const MODEL_SPECS = [
   },
 ];
 
-const MODEL_FILTER = process.env.BABYLON_MODEL_FILTER?.trim();
-const ACTIVE_MODEL_SPECS = MODEL_FILTER
-  ? MODEL_SPECS.filter((spec) => spec.name === MODEL_FILTER)
-  : MODEL_SPECS;
+// 只固定参数直接定义的物理轴。双深货架的 Z 跨度为两格深度加中缝。
+const VISUAL_FIXTURES = [
+  { name: 'Shelf', base: 'shelf', meters: { defaultSize: { z: 1.183 }, customSize: { z: 2 * 1.5 + 0.3 } } },
+  { name: 'Stacker', base: 'stacker', meters: { defaultSize: { z: 23.012 }, customSize: { z: 25 } } },
+  { name: 'YZJ', base: 'yzj', meters: { defaultSize: { x: 1.8276 }, customSize: { x: 2.4 } } },
+];
+const REPOSITORY_SPECS = [
+  {
+    name: 'virtual-conveyor',
+    repositoryPackage: path.join(WORKSPACE_ROOT, 'public', 'builtin-model-packages', 'virtual-conveyor'),
+    script: 'virtual-conveyor.model.ts',
+    lengthUnit: 'meter',
+    linearKeys: ['length', 'width'],
+    customValues: { length: 4, width: 2 },
+    meters: { defaultSize: { x: 2, y: 0.05, z: 1 }, customSize: { x: 4, y: 0.05, z: 2 } },
+  },
+  ...VISUAL_FIXTURES.map(({ name, base, meters }) => {
+    const spec = MODEL_SPECS.find((item) => item.name === name);
+    assert.ok(spec, `${name} 缺少米制验收规格`);
+    return { ...spec, meters, repositoryPackage: path.join(VISUAL_FIXTURE_ROOT, `${base}-assets`) };
+  }),
+];
+const selectedSpecs = EXTERNAL_AUDIT ? MODEL_SPECS : REPOSITORY_SPECS;
+const ACTIVE_MODEL_SPECS = MODEL_FILTER ? selectedSpecs.filter((spec) => spec.name === MODEL_FILTER) : selectedSpecs;
 if (MODEL_FILTER) assert.equal(ACTIVE_MODEL_SPECS.length, 1, `未找到模型过滤项：${MODEL_FILTER}`);
+if (PARAMETER_KEY) {
+  assert.ok(PARAMETER_BISECT, 'BABYLON_PARAMETER_KEY 需要 BABYLON_PARAMETER_BISECT=1');
+  assert.ok(ACTIVE_MODEL_SPECS.some((spec) => Object.hasOwn(spec.customValues, PARAMETER_KEY)),
+    `未找到参数过滤项：${PARAMETER_KEY}`);
+}
 
 /** 确认真实源包、编辑器资产副本与资产索引都可用。 */
 async function assertModelRootAvailable() {
@@ -619,7 +659,7 @@ async function runModelScenario({
   root.scaling.copyFromFloats(rootTransform.scale.x, rootTransform.scale.y, rootTransform.scale.z);
   const contentRoot = new TransformNode(`${spec.name}_contentRoot`, scene);
   contentRoot.parent = root;
-  const unitScale = getUnitScaleToMeters(spec.lengthUnit);
+  const unitScale = metadata.unitScaleToMeters;
   contentRoot.scaling.copyFromFloats(unitScale, unitScale, unitScale);
 
   let runtime;
@@ -632,6 +672,7 @@ async function runModelScenario({
     normalizeModelContentOrigin(root);
 
     const baselineSize = measureModelSizeMeters(root, contentRoot);
+    assert.ok(baselineSize, `${spec.name} 导入的 GLB 必须包含可测几何`);
     const baselineMaterialSnapshot = spec.colorKey ? collectMaterialSnapshot(contentRoot) : null;
     const scriptText = await fs.readFile(scriptPath, 'utf8');
     const defaults = {
@@ -895,35 +936,68 @@ async function assertStackerColorIsolation({ spec, metadata, glbPath, scriptPath
   }
 }
 
-/** 校验当前项目资产索引已刷新为新的显式单位和参数快照。 */
-async function assertAssetIndexContract() {
-  const index = JSON.parse(await fs.readFile(ASSET_INDEX_PATH, 'utf8'));
+/** 通过与模型库相同的扫描、整包导入及落盘索引路径准备隔离工程。 */
+async function importRepositoryFixtures(server, projectRoot) {
+  const { scanModelPackage } = await loadSsrModuleWithTimeout(server, '/electron/ipc/modelPackageScanner.ts');
+  const store = await loadSsrModuleWithTimeout(server, '/electron/ipc/projectAssetStore.ts');
+  store.setCurrentProjectRoot(projectRoot);
+  try {
+    const scanned = [];
+    for (const spec of REPOSITORY_SPECS) {
+      const { asset, skipped } = await scanModelPackage(spec.repositoryPackage);
+      assert.ok(asset, `${spec.name} 夹具扫描失败：${skipped?.reason}`);
+      scanned.push(asset);
+    }
+    const { importedAssets, skipped } = await store.importModelPackagesIntoProject(scanned, 'model');
+    assert.deepEqual(skipped, [], '夹具导入不能跳过任何模型包');
+    assert.equal(importedAssets.length, REPOSITORY_SPECS.length, '夹具必须全部导入');
+    return {
+      assetModelRoot: store.getProjectModelsRoot(projectRoot),
+      assetIndexPath: store.getProjectAssetIndexPath(projectRoot),
+    };
+  } finally {
+    store.clearProjectAssetStoreSession();
+  }
+}
+
+/** 校验磁盘上的资产条目，返回运行时实际使用的导入单位与参数快照。 */
+async function readCheckedModelEntries(assetIndexPath) {
+  const index = JSON.parse(await fs.readFile(assetIndexPath, 'utf8'));
   const modelEntries = new Map(
     (index.assets ?? [])
       .filter((asset) => asset.libraryKind === 'model')
       .map((asset) => [path.basename(asset.packagePath), asset]),
   );
   for (const spec of ACTIVE_MODEL_SPECS) {
-    const assetName = spec.assetName ?? spec.name;
+    const assetName = spec.assetName ?? path.basename(spec.repositoryPackage ?? spec.name);
     const asset = modelEntries.get(assetName);
     assert.ok(asset, `资产索引缺少 ${assetName}`);
     assert.equal(asset.lengthUnit, spec.lengthUnit, `资产索引 ${assetName}.lengthUnit 未刷新`);
     assert.equal(asset.unitScaleToMeters, getUnitScaleToMeters(spec.lengthUnit), `资产索引 ${assetName}.unitScaleToMeters 未刷新`);
     assert.ok(typeof asset.assetRevision === 'string' && asset.assetRevision.length > 0, `资产索引 ${assetName} 缺少 assetRevision`);
   }
+  return modelEntries;
 }
 
 let server;
+let fixtureProject;
 const engine = new NullEngine();
 
 try {
-  await assertModelRootAvailable();
+  if (EXTERNAL_AUDIT) await assertModelRootAvailable();
   server = await createServer({
     configFile: false,
-    root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    root: WORKSPACE_ROOT,
+    // Node 只替换 Electron 窗口宿主，扫描器、工程资源库和 Babylon 运行时均加载正式模块。
+    resolve: { alias: [{ find: /^electron$/, replacement: path.join(WORKSPACE_ROOT, 'tests/dataPlatform/fixtures/electronStub.mjs') }] },
+    server: { middlewareMode: true, hmr: false, watch: null, ws: false },
     optimizeDeps: { noDiscovery: true },
   });
+  if (!EXTERNAL_AUDIT) fixtureProject = await fs.mkdtemp(path.join(tmpdir(), 'babylon-parameter-meters-'));
+  const { assetModelRoot, assetIndexPath } = fixtureProject
+    ? await importRepositoryFixtures(server, fixtureProject)
+    : { assetModelRoot: ASSET_MODEL_ROOT, assetIndexPath: ASSET_INDEX_PATH };
+  const modelEntries = await readCheckedModelEntries(assetIndexPath);
   const [{ ExternalModelScriptRuntime }, { measureModelSizeMeters }, { focusArcRotateCameraOnBounds }] = await Promise.all([
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/ExternalModelScriptRuntime.ts'),
     loadSsrModuleWithTimeout(server, '/src/runtime/babylon/modelMeasurement.ts'),
@@ -931,27 +1005,39 @@ try {
   ]);
 
   const summaries = [];
+  const diagnosticCases = [];
   for (const spec of ACTIVE_MODEL_SPECS) {
-    const sourcePackage = path.join(MODEL_ROOT, spec.name);
-    const copiedPackage = path.join(ASSET_MODEL_ROOT, spec.assetName ?? spec.name);
-    const metadataPath = path.join(sourcePackage, 'meta.json');
-    const copiedMetadataPath = path.join(copiedPackage, 'meta.json');
-    const scriptPath = path.join(sourcePackage, spec.script);
-    const copiedScriptPath = path.join(copiedPackage, spec.script);
-    const packageFiles = await fs.readdir(sourcePackage);
-    const glbName = packageFiles.find((fileName) => fileName.toLowerCase().endsWith('.glb'));
-    assert.ok(glbName, `${spec.name} 缺少 GLB`);
-    const glbPath = path.join(sourcePackage, glbName);
-
-    const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf8'));
-    assertMetadataContract(spec, metadata);
+    const sourcePackage = spec.repositoryPackage ?? path.join(MODEL_ROOT, spec.name);
+    const packageName = spec.assetName ?? path.basename(sourcePackage);
+    const copiedPackage = path.join(assetModelRoot, packageName);
+    const indexed = modelEntries.get(packageName);
+    const glbName = path.basename(indexed.path);
+    assert.equal(path.extname(glbName).toLowerCase(), '.glb', `${spec.name} 索引必须指向 GLB`);
+    const glbPath = path.join(copiedPackage, glbName);
+    const scriptPath = path.join(copiedPackage, spec.script);
+    for (const file of ['meta.json', spec.script, glbName]) {
+      assert.equal(await hashFile(path.join(sourcePackage, file)), await hashFile(path.join(copiedPackage, file)),
+        `${spec.name} ${file} 源包/Assets 副本不一致`);
+    }
+    const sourceMetadata = JSON.parse(await fs.readFile(path.join(sourcePackage, 'meta.json'), 'utf8'));
+    assertMetadataContract(spec, sourceMetadata);
+    const metadata = { ...sourceMetadata, unitScaleToMeters: indexed.unitScaleToMeters };
+    if (spec.repositoryPackage) {
+      assert.equal(indexed.path, glbPath, `${spec.name} 必须加载本次导入的 GLB`);
+      assert.ok(indexed.scriptAssets?.some((script) => script.path === scriptPath), `${spec.name} 导入索引缺少参数脚本`);
+      Object.assign(metadata, {
+        lengthUnit: indexed.lengthUnit,
+        modelParameters: indexed.parameterConfig,
+        parameterScripts: indexed.parameterScriptMetadata,
+        animationScripts: indexed.animationScriptMetadata,
+      });
+      assertMetadataContract(spec, metadata);
+    }
     await assertScriptTranspiles(scriptPath);
-    assert.equal(await hashFile(metadataPath), await hashFile(copiedMetadataPath), `${spec.name} meta 源包/Assets 副本不一致`);
-    assert.equal(await hashFile(scriptPath), await hashFile(copiedScriptPath), `${spec.name} script 源包/Assets 副本不一致`);
 
-    if (process.env.BABYLON_PARAMETER_BISECT === '1') {
+    if (PARAMETER_BISECT) {
       for (const [key, value] of Object.entries(spec.customValues)) {
-        if (process.env.BABYLON_PARAMETER_KEY && key !== process.env.BABYLON_PARAMETER_KEY) continue;
+        if (PARAMETER_KEY && key !== PARAMETER_KEY) continue;
         if (key === 'showDirectionArrow') continue;
         const caseSpec = {
           ...spec,
@@ -989,7 +1075,8 @@ try {
           focusArcRotateCameraOnBounds,
           engine,
         });
-        console.log(JSON.stringify({ key, value, unit: caseUnit.customSize, rotated: caseRotated.customSize, unitGenerated: caseUnit.generatedBounds, rotatedGenerated: caseRotated.generatedBounds, unitZ: caseUnit.zExtremes, rotatedZ: caseRotated.zExtremes }));
+        diagnosticCases.push({ model: spec.name, key });
+        console.log(JSON.stringify({ model: spec.name, key, value, unit: caseUnit.customSize, rotated: caseRotated.customSize, unitGenerated: caseUnit.generatedBounds, rotatedGenerated: caseRotated.generatedBounds, unitZ: caseUnit.zExtremes, rotatedZ: caseRotated.zExtremes }));
       }
       continue;
     }
@@ -1054,6 +1141,11 @@ try {
       engine,
     });
     if (MODEL_FILTER) console.log(JSON.stringify({ spec: spec.name, unitScenario, rotatedScenario, scaledScenario, transformedScenario }, null, 2));
+    for (const [state, dimensions] of Object.entries(spec.meters ?? {})) {
+      for (const [axis, meters] of Object.entries(dimensions)) {
+        assertClose(unitScenario[state][axis], meters, `${spec.name} ${state}.${axis} 绝对米数`);
+      }
+    }
     assertVectorClose(rotatedScenario.defaultSize, unitScenario.defaultSize, `${spec.name} 默认参数不应受实体旋转影响`);
     assertVectorClose(rotatedScenario.customSize, unitScenario.customSize, `${spec.name} 自定义参数不应受实体旋转影响`);
     assertTransformScalePreserved(unitScenario.defaultSize, scaledScenario.defaultSize, `${spec.name} 默认参数必须保留用户 Transform.scale`);
@@ -1066,30 +1158,29 @@ try {
     summaries.push({ name: spec.name, lengthUnit: spec.lengthUnit, defaultSize: unitScenario.defaultSize, customSize: unitScenario.customSize });
   }
 
-  const fixtureSpecs = [
-    { name: 'Shelf', base: 'shelf' },
-    { name: 'Stacker', base: 'stacker' },
-    { name: 'YZJ', base: 'yzj' },
-  ];
-  for (const fixture of fixtureSpecs.filter((fixture) => !MODEL_FILTER || fixture.name === MODEL_FILTER)) {
-    const spec = MODEL_SPECS.find((item) => item.name === fixture.name);
-    const sourcePackage = path.join(MODEL_ROOT, fixture.name);
-    const fixturePackage = path.join(process.cwd(), 'output', 'playwright', `${fixture.base}-assets`);
-    assert.equal(await hashFile(path.join(sourcePackage, spec.script)), await hashFile(path.join(fixturePackage, `${fixture.base}.model.ts`)), `${fixture.name} 可视夹具 TS 未同步`);
-    assert.equal(await hashFile(path.join(sourcePackage, spec.script)), await hashFile(path.join(fixturePackage, `${fixture.base}.model.txt`)), `${fixture.name} 可视夹具 TXT 未同步`);
-    assert.equal(await hashFile(path.join(sourcePackage, 'meta.json')), await hashFile(path.join(fixturePackage, 'meta.json')), `${fixture.name} 可视夹具 meta 未同步`);
+  for (const { name, base } of VISUAL_FIXTURES.filter(({ name }) => !MODEL_FILTER || name === MODEL_FILTER)) {
+    const fixturePackage = path.join(VISUAL_FIXTURE_ROOT, `${base}-assets`);
+    const sourcePackage = EXTERNAL_AUDIT ? path.join(MODEL_ROOT, name) : path.join(assetModelRoot, `${base}-assets`);
+    const scriptHash = await hashFile(path.join(sourcePackage, `${base}.model.ts`));
+    assert.equal(scriptHash, await hashFile(path.join(fixturePackage, `${base}.model.ts`)), `${name} 可视夹具 TS 未同步`);
+    assert.equal(scriptHash, await hashFile(path.join(fixturePackage, `${base}.model.txt`)), `${name} 可视夹具 TXT 未同步`);
+    assert.equal(await hashFile(path.join(sourcePackage, 'meta.json')), await hashFile(path.join(fixturePackage, 'meta.json')), `${name} 可视夹具 meta 未同步`);
   }
 
-  await assertAssetIndexContract();
+  if (PARAMETER_BISECT) assert.ok(diagnosticCases.length > 0, '没有执行任何参数诊断');
+  else assert.equal(summaries.length, MODEL_FILTER ? 1 : EXTERNAL_AUDIT ? 12 : 4, '实际测量模型数不符');
   console.log(JSON.stringify({
     ok: true,
-    modelRoot: MODEL_ROOT,
-    assetModelRoot: ASSET_MODEL_ROOT,
-    assetIndexPath: ASSET_INDEX_PATH,
+    mode: EXTERNAL_AUDIT ? 'external-models' : 'repository-fixtures',
+    ...(EXTERNAL_AUDIT ? { modelRoot: MODEL_ROOT, assetModelRoot, assetIndexPath, modelFilter: MODEL_FILTER } : {}),
     requireLabelUnitSuffix: REQUIRE_LABEL_UNIT_SUFFIX,
-    models: summaries,
+    ...(PARAMETER_BISECT ? { diagnosticCases } : { models: summaries }),
   }, null, 2));
 } finally {
-  engine.dispose();
-  await server?.close();
+  try {
+    engine.dispose();
+    await server?.close();
+  } finally {
+    if (fixtureProject) await fs.rm(fixtureProject, { recursive: true, force: true });
+  }
 }

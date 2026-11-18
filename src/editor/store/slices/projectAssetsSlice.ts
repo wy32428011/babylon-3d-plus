@@ -479,6 +479,7 @@ export const createProjectAssetsSlice: EditorSlice<
       asset.builtInSlotBindingConfig,
       asset.layerChangePlatformBindingConfig,
       asset.runtimeCapabilities,
+      asset.deviceType,
     );
     const modelIdentity = createModelTypeIdentityFromAsset(asset);
     if (modelIdentity && entity.components.modelAsset) entity.components.modelAsset.dataPlatformModel = modelIdentity;

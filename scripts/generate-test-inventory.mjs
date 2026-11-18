@@ -37,6 +37,7 @@ const adapters = {
   'scripts/model-asset-relink-test.mjs': { targets: ['tests/editor/modelAssetRelink.test.ts'], proof: ["run(['--test', join(outDir, 'tests/editor/modelAssetRelink.test.js')", 'rewriteRelativeImportExtensions: true', "normalizedProjectRoot + '/src/vite-env.d.ts'"], condition: 'runner 临时 tsc 编译；junction；清理临时输出' },
   'scripts/run-digital-twin-publish-integration.mjs': { targets: ['tests/digitalTwin/digitalTwinPublish.integration.mjs', 'tests/digitalTwin/publishBindingRecovery.integration.mjs'], proof: ["'digitalTwinPublish.integration.mjs'", "'publishBindingRecovery.integration.mjs'", 'spawn(electronPath, [testEntry]'], condition: 'Electron 二进制；共享 TEST_ROOT；runner 顺序执行' },
   'scripts/run-scene-model-update-integration.mjs': { targets: ['tests/dataPlatform/sceneModelUpdate.integration.mjs'], proof: ["['tests/dataPlatform/sceneModelUpdate.integration.mjs']"], condition: 'Electron 二进制；独立临时目录；240s 超时' },
+  'scripts/run-manual-roam-avatar-integration.mjs': { targets: ['tests/roam/manualRoamAvatar.integration.mjs'], proof: ["['tests/roam/manualRoamAvatar.integration.mjs']", 'MANUAL_ROAM_AVATAR_TEST_ROOT: root'], condition: 'Electron 二进制；受信入口和 sandbox preload；退出后清理临时工程' },
   'scripts/run-publish-model-recovery-integration.mjs': { targets: ['tests/digitalTwin/publishModelRecovery.integration.mjs'], proof: ["['tests/digitalTwin/publishModelRecovery.integration.mjs']"], condition: 'Electron 二进制；独立临时 userData；退出后清理' },
 };
 for (const [file, adapter] of Object.entries(adapters)) {

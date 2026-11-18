@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
 import { modelRuntimeCapabilitiesField, modelRuntimeConfigurationKey } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
@@ -20,6 +21,7 @@ import { normalizeModelSourceSnapshot } from './modelSourceSnapshot';
 
 /** 模型生成器从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ModelGeneratorSourceAsset = {
+  deviceType?: string;
   id: string;
   name: string;
   path: string;
@@ -162,6 +164,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     sourcePath,
     sourceUrl,
     ...(value.dataPlatformModel === undefined ? {} : { dataPlatformModel: normalizeDataPlatformModelIdentity(value.dataPlatformModel) }),
+    ...modelDeviceTypeField(value.deviceType),
     ...(assetRevision ? { assetRevision } : {}),
     ...(sourceSnapshot ? { sourceSnapshot } : {}),
     ...modelRuntimeCapabilitiesField(value.runtimeCapabilities),
@@ -197,6 +200,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
 
   return {
     ...(dataPlatformModel ? { dataPlatformModel } : {}),
+    ...modelDeviceTypeField(asset.deviceType),
     sourcePath: asset.path,
     sourceUrl: asset.sourceUrl,
     ...(asset.assetRevision ? { assetRevision: asset.assetRevision } : {}),
@@ -378,6 +382,7 @@ export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget
     sourcePath: target.modelAsset.sourcePath,
     sourceUrl: target.modelAsset.sourceUrl,
     assetRevision: target.modelAsset.assetRevision ?? null,
+    deviceType: target.modelAsset.deviceType ?? null,
     sourceSnapshot: target.modelAsset.sourceSnapshot ?? null,
     dataPlatformModel: target.modelAsset.dataPlatformModel ?? null,
     // 生成输出在签名相同时直接复用；声明撤销或配置换代必须先释放旧共享实例再重新准入。

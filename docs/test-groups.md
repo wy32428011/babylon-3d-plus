@@ -4,7 +4,7 @@
 
 `npm run test:integration` 运行 digital-twin 发布集成和升降动作箭头 SOURCE/DIST 场景，保留 Electron 编译前置与 Windows 进程隔离。`npm run test:smoke` 运行完整 scene-capacity 聚合及升降箭头实机路径，内部已有的 editor-performance 不重复安排。
 
-既有入口及命令逐项冻结在 `scripts/test-entry-manifest.json`；P4 保留入场 79 项完整字段，追加 8 个治理/领域入口，共 87 项。`npm run test:entries` 检查名称、命令与分组有效性，遗漏为 0 才通过。清单保留 legacy、build-required、external、manual 分类及逐项原因；分类不是执行证据。真实窗口、安装包、GPU、外部环境和其他兼容入口按需单独运行，不计入 core 通过数。
+入口及命令逐项登记在 `scripts/test-entry-manifest.json`；P4 保留入场 79 项完整字段并追加治理/领域入口，后续入口以清单为准。`npm run test:entries` 检查名称、命令与分组有效性，遗漏为 0 才通过。清单保留 legacy、build-required、external、manual 分类及逐项原因；分类不是执行证据。真实窗口、安装包、GPU、外部环境和其他兼容入口按需单独运行，不计入 core 通过数。
 
 P4 增加六个定向 Node 契约领域：
 
@@ -35,6 +35,12 @@ runner 每项最多 10 分钟，顺序执行；失败、取消及超时立即停
 
 固定源码的 headless SSR 入口关闭 watcher 与 WebSocket；相机过渡和 string 参数测试使用实际 SSR build 后导入。它们不验证热更新，产品开发服务器的监听与HMR行为不受这些测试设施配置影响。
 
+## 参数化模型米制验证
+
+`npm run smoke:model-parameters` 是 `smoke:units` 的参数化环节。默认将内置 `virtual-conveyor`（米）、YZJ（厘米）、Shelf 和 Stacker（毫米）导入一次性临时工程。Node/NullEngine 从导入副本加载 GLB，运行参数脚本并测量默认、自定义、重置再更新、旋转及非均匀缩放后的几何。输出 `repository-fixtures` 及各模型的米制尺寸，结束后清理工程。[仓库业务夹具](../tests/fixtures/model-packages/)
+
+`npm run smoke:model-parameters:external` 单独核验 12 个业务源包、`Assets/Models` 副本、`.babylon-editor/asset-index.json` 和三个仓库可视夹具。提供 `BABYLON_MODEL_ROOT` 指向模型工程根，缺省路径是仓库旁的 `../3d-models/models`。副本与索引可分别用 `BABYLON_ASSET_MODEL_ROOT`、`BABYLON_ASSET_INDEX_PATH` 指定。设置这些路径或 `BABYLON_MODEL_FILTER` 后，日常入口也按外部审计执行。缺包、路径错误、空值、未知模型和校验不一致均返回非零。`BABYLON_MODEL_FILTER=Stacker` 仅核验所选模型，参数二分诊断另列实际执行的模型与参数。[米制契约与业务包清单](superpowers/specs/2026-07-14-project-wide-meter-unit-contract-design.md)
+
 ## 原生无限远天空与 ENV
 
 - `npm run test:native-skybox`：契约、旧格式迁移、队列共享/取消/会话隔离、源/产物哈希、授权/Junction、缓存租约和运行时状态机。模拟 GPU 用例只证明状态机，不替代下述真实运行。
@@ -46,4 +52,4 @@ runner 每项最多 10 分钟，顺序执行；失败、取消及超时立即停
 
 浏览器类入口默认使用本机 Chrome，可通过 `SKYBOX_TEST_BROWSER`（独立 Viewer 为 `CHROME_PATH`）覆盖。可传 `SKYBOX_TEST_URL` 复用已有本机开发服务；未指定时各入口管理自己的临时服务，不关闭其它任务的服务。不要与性能采样、烘焙或其它 GPU 任务并发。历史章节中的入口数量是当时记录，当前登记以生成的 [测试清单](test-inventory.md) 为准。
 
-P2-R0 追加独立入口 npm run test:optimization-p2-r0，覆盖真实 Babylon 计数器的缺失/实际零值、墙钟帧窗口及报告/UI 的空值传播；不纳入默认 core。当前清单在 P4 的 87 项基础上保留 GLB 任务新增 3 项及 R0 新增 1 项，共 91 项。Node/NullEngine 和 JSX 渲染校准不证明硬件 GPU 性能；B0 必须使用已冻结构建、输入和 harness 另行串行采样，细节见 docs/tasks/2026-10-22-project-optimization-p2-r0.md。
+P2-R0 追加独立入口 `npm run test:optimization-p2-r0`，覆盖真实 Babylon 计数器的缺失/实际零值、墙钟帧窗口及报告/UI 的空值传播；不纳入默认 core。P2-R0 完成时登记了 91 项入口，后续变更以当前测试清单为准。Node/NullEngine 和 JSX 渲染校准不证明硬件 GPU 性能；B0 必须使用已冻结构建、输入和 harness 另行串行采样，细节见 `docs/tasks/2026-10-22-project-optimization-p2-r0.md`。

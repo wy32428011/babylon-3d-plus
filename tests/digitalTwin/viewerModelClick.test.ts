@@ -3,6 +3,8 @@ import test, { after } from 'node:test';
 import { createServer } from 'vite';
 import type { SceneDocument } from '../../src/editor/model/SceneDocument.ts';
 import type { ClickEventBindingEffect } from '../../src/editor/model/components.ts';
+import type { DigitalTwinDeviceContext } from '../../src/player/digitalTwinInteractionProtocol.ts';
+import { isDigitalTwinClickPayload } from '../../src/player/digitalTwinInteractionProtocol.ts';
 
 const server = await createServer({
   configFile: false,
@@ -30,14 +32,16 @@ function fixture(effects?: ClickEventBindingEffect[], cellEvent = false) {
   const focuses: unknown[] = [];
   const events: string[] = [];
   const trackExclusions: string[][] = [];
+  const contexts: (DigitalTwinDeviceContext | null)[] = [];
   const handler = createViewerModelClickHandler(scene, {
+    emitDeviceContext: context => contexts.push(context),
     updateSelection: (ids) => selections.push([...ids]),
     setSlotHighlight: (id, cell) => highlights.push({ id, cell }),
     focusTarget: (id, cell) => focuses.push({ id, cell }),
     triggerManualEvents: (id) => events.push(id),
     setHighlightExcludeTrack: (ids) => trackExclusions.push([...ids]),
   });
-  return { handler, selections, highlights, focuses, events, trackExclusions, scene };
+  return { handler, selections, highlights, focuses, events, trackExclusions, contexts, scene };
 }
 
 test('搜索和鼠标点击共用选中与手动事件，搜索不重复覆盖相机聚焦', () => {
@@ -131,6 +135,7 @@ test('模型、货格和生成产物禁用聚焦时保留选中、高亮、手�
       }] : []);
       assert.deepEqual(calls.emitted, [{
         assetCode: '001005', chartId: 'chart-click',
+        entityId: target === 'generated' ? 'host' : 'model',
         ...(target === 'cell' ? { slot: cell } : {}),
         ...(target === 'generated' ? {
           unit: { kind: 'cargo', containerCode: '000317' },
@@ -201,7 +206,9 @@ function generatorFixture(events: unknown[] | null) {
   const selections: string[][] = [];
   const focuses: unknown[] = [];
   const emitted: unknown[] = [];
+  const contexts: (DigitalTwinDeviceContext | null)[] = [];
   const handler = createViewerModelClickHandler(scene, {
+    emitDeviceContext: context => contexts.push(context),
     updateSelection: (ids) => selections.push([...ids]),
     setSlotHighlight: () => {},
     focusTarget: (id, cell) => focuses.push({ id, cell }),
@@ -209,7 +216,7 @@ function generatorFixture(events: unknown[] | null) {
     setHighlightExcludeTrack: () => {},
     emitAssetClicked: (payload) => emitted.push(payload),
   });
-  return { handler, selections, focuses, emitted, scene };
+  return { handler, selections, focuses, emitted, contexts, scene };
 }
 
 test('生成器产物命中：货箱高亮产物自身，事件载荷说明箱号与承运设备', () => {
@@ -233,6 +240,7 @@ test('生成器产物命中：货箱高亮产物自身，事件载荷说明箱�
   assert.deepEqual(f.emitted, [{
     assetCode: '001005',
     chartId: 'chart-cargo',
+    entityId: 'host',
     unit: { kind: 'cargo', containerCode: '000317' },
     host: { entityId: 'host', assetCode: '999999' },
   }]);
@@ -244,7 +252,7 @@ test('生成器产物命中：动态设备实例上报自身编号并高亮合�
     generatedUnit: { bindingEntityId: 'generator', assetCode: 'AGV-77', highlightEntityId: 'spawned:spawn-1', unitKind: 'spawned-device' },
   });
   assert.deepEqual(f.selections, [['spawned:spawn-1']]);
-  assert.deepEqual(f.emitted, [{ assetCode: 'AGV-77', chartId: 'chart-agv', unit: { kind: 'spawned-device', assetCode: 'AGV-77' } }]);
+  assert.deepEqual(f.emitted, [{ assetCode: 'AGV-77', entityId: 'spawned:spawn-1', chartId: 'chart-agv', unit: { kind: 'spawned-device', assetCode: 'AGV-77' } }]);
 });
 
 test('生成器未配置点击事件时产物命中回落到常规点击', () => {
@@ -264,4 +272,94 @@ test('生成器实体不存在绑定组件时产物命中回落到默认点击�
   });
   assert.deepEqual(f.selections, [[]]);
   assert.deepEqual(f.emitted, []);
+});
+
+
+test('无 inspection 的默认点击和仅高亮点击发送类型与参数，空白清空上下文', () => {
+  for (const effects of [undefined, ['highlight']] as const) {
+    const f = fixture(effects ? [...effects] : undefined);
+    const model = f.scene.entities.model.components.modelAsset!;
+    Object.assign(model, { assetCode: '001005', deviceType: 'conveyor', parameterValues: {
+      length: 0, enabled: false, position: { x: 1, y: 2, z: 3 }, label: '000021',
+    } });
+    f.handler('model');
+    assert.deepEqual(f.contexts, [{ assetCode: '001005', entityId: 'model', deviceType: 'conveyor',
+      parameterValues: { length: 0, enabled: false, position: { x: 1, y: 2, z: 3 }, label: '000021' } }]);
+    assert.equal(isDigitalTwinClickPayload(f.contexts[0]), true);
+    (model.parameterValues!.position as { x: number }).x = 9;
+    assert.deepEqual(f.contexts[0]!.parameterValues!.position, { x: 1, y: 2, z: 3 });
+    f.handler(null);
+    assert.equal(f.contexts.at(-1), null);
+  }
+});
+
+test('ignore 不覆盖已选择设备；聚焦命令触发的点击仍提供设备上下文', () => {
+  const f = fixture(['highlight']);
+  f.scene.entities.model.components.modelAsset!.assetCode = '000021';
+  f.handler('model', null, { fromFocusCommand: true, focus: false });
+  f.handler('other');
+  assert.deepEqual(f.contexts, [{ assetCode: '000021', entityId: 'model' }]);
+  f.handler(null);
+  assert.equal(f.contexts.at(-1), null);
+});
+
+test('旧模型不从中文分类、遥测或 inspection 类型猜编码，真实编号保持前导零', () => {
+  const f = fixture();
+  Object.assign(f.scene.entities.model.components.modelAsset!, {
+    assetCode: 'SCENE-01', deviceType: '输送机',
+    parameterScriptMetadata: [{ values: { deviceType: { value: '输送机' } } }],
+    dataDrivenConfig: { device: { devType: 'conveyor' } },
+    inspection: { device: { namespace: 'warehouse-a', deviceType: 'conveyor', deviceNo: '000021' } },
+  });
+  f.handler('model');
+  assert.deepEqual(f.contexts, [{ assetCode: 'SCENE-01', entityId: 'model', namespace: 'warehouse-a', deviceNo: '000021' }]);
+});
+
+test('超限或非法参数只标记不可用，基础设备点击仍可通过协议预算', () => {
+  const invalidValues: unknown[] = [
+    { oversized: 'x'.repeat(16_385) },
+    Object.fromEntries(Array.from({ length: 257 }, (_, i) => ['p' + i, i])),
+    Object.fromEntries(Array.from({ length: 100 }, (_, i) => ['p' + i, { x: 0, y: 0, z: 0 }])),
+    { nested: { deeper: { value: 1 } } }, { invalid: Infinity },
+    JSON.parse('{"__proto__":true}'),
+  ];
+  const cycle: Record<string, unknown> = {}; cycle.self = cycle; invalidValues.push(cycle);
+  const getter = {}; Object.defineProperty(getter, 'secret', { enumerable: true, get() { throw new Error('不能执行访问器'); } });
+  invalidValues.push(getter);
+  for (const parameterValues of invalidValues) {
+    const f = fixture();
+    Object.assign(f.scene.entities.model.components.modelAsset!, { assetCode: 'ASSET-1', deviceType: 'stacker', parameterValues });
+    f.handler('model');
+    assert.deepEqual(f.contexts, [{ assetCode: 'ASSET-1', entityId: 'model', deviceType: 'stacker', parametersUnavailable: true }]);
+    assert.equal(isDigitalTwinClickPayload(f.contexts[0]), true);
+  }
+});
+
+test('货箱上下文使用承运设备；动态设备不会继承生成器模板实例身份', () => {
+  const f = generatorFixture([{ eventType: 'click', effects: ['highlight'] }]);
+  Object.assign(f.scene.entities.host.components.modelAsset!, {
+    deviceType: 'conveyor', parameterValues: { length: 6 },
+    inspection: { device: { namespace: 'wh', deviceType: 'conveyor', deviceNo: '000021' } },
+  });
+  f.scene.entities.generator.components.modelAsset = {
+    ...f.scene.entities.host.components.modelAsset!, assetCode: 'GENERATOR', deviceType: 'fake_template',
+  };
+  f.handler(null, null, { generatedUnit: { bindingEntityId: 'generator', assetCode: '999999',
+    highlightEntityId: 'cargo:1', unitKind: 'cargo', hostEntityId: 'host' } });
+  assert.deepEqual(f.contexts[0], { assetCode: '999999', entityId: 'host', deviceType: 'conveyor',
+    namespace: 'wh', deviceNo: '000021', parameterValues: { length: 6 } });
+  f.handler(null, null, { generatedUnit: { bindingEntityId: 'generator', assetCode: 'AGV-0002',
+    highlightEntityId: 'spawned:2', unitKind: 'spawned-device' } });
+  assert.deepEqual(f.contexts[1], { assetCode: 'AGV-0002', entityId: 'spawned:2' });
+});
+
+
+test('中台类型更新后不混用旧 inspection 的另一类设备身份', () => {
+  const f = fixture();
+  Object.assign(f.scene.entities.model.components.modelAsset!, {
+    assetCode: 'SCENE-01', deviceType: 'conveyor',
+    inspection: { device: { namespace: 'wh', deviceType: 'stacker', deviceNo: '000021' } },
+  });
+  f.handler('model');
+  assert.deepEqual(f.contexts, [{ assetCode: 'SCENE-01', entityId: 'model', deviceType: 'conveyor' }]);
 });

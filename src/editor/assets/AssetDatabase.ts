@@ -1,3 +1,4 @@
+import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { ModelParameterConfig } from '../model/modelParameters';
@@ -15,6 +16,8 @@ export type SkyboxAssetFormat = 'hdr' | 'exr';
 export type ModelAssetLibraryKind = 'model' | 'environment';
 
 export type AssetEntry = {
+  /** 中台设备类型编码，不是显示标签或模型分类。 */
+  deviceType?: string;
   id: string;
   name: string;
   path: string;
@@ -207,6 +210,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
       sourceUrl: payload.sourceUrl,
       kind: 'model',
       libraryKind,
+      ...modelDeviceTypeField(payload.deviceType),
     };
 
     const packagePath = readOptionalString(payload, 'packagePath');

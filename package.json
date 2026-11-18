@@ -36,7 +36,7 @@
     "test:light-editor": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/lightEditor.test.ts tests/editor/lightSettings.test.ts tests/editor/lightSettings.integration.test.mjs tests/editor/lightLibrary.test.mjs tests/runtime/localLightShadows.test.ts",
     "test:auto-patrol": "node --experimental-strip-types --test tests/editor/autoPatrol.test.ts tests/editor/autoPatrolPlayback.test.ts",
     "test:manual-roam": "node --experimental-strip-types --test --test-concurrency=1 tests/roam/*.test.ts tests/runtime/manualRoamAvatarAsset.test.ts tests/runtime/manualRoamRiggedAssets.test.ts tests/runtime/manualRoamMotionQuality.test.ts tests/runtime/manualRoamUpperSkin.test.ts tests/runtime/manualRoamFlightSkin.test.ts tests/runtime/manualRoamTurnMotion.test.mjs tests/runtime/manualRoamContactCalibration.test.mjs",
-    "test:manual-roam:integration": "npm run build:electron && electron tests/roam/manualRoamAvatar.integration.mjs",
+    "test:manual-roam:integration": "npm run build:electron && node scripts/run-manual-roam-avatar-integration.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
     "test:virtual-conveyor": "node --test tests/runtime/virtualConveyorPackage.test.mjs",
@@ -53,6 +53,7 @@
     "smoke:hierarchy-clipboard": "node scripts/smoke-hierarchy-clipboard.mjs",
     "test:model-parameters": "node --test tests/editor/modelStringParameters.test.mjs",
     "smoke:model-parameters": "npm run test:model-parameters && node scripts/smoke-model-parameter-meters.mjs",
+    "smoke:model-parameters:external": "node scripts/smoke-model-parameter-meters.mjs --external",
     "smoke:model-picking": "node scripts/smoke-model-picking.mjs",
     "smoke:selection-highlight": "node scripts/smoke-selection-highlight.mjs",
     "smoke:grid": "node scripts/smoke-editor-ground-grid.mjs",
@@ -97,6 +98,10 @@
     "smoke:data-platform-skybox": "npm run build && npm run smoke:data-platform-skybox:built",
     "smoke:data-platform": "npm run build && npm run test:data-platform-relink && node scripts/smoke-data-platform-project.mjs && npm run smoke:data-platform-skybox:built",
     "test:digital-twin": "npm run test:digital-twin:unit && npm run test:digital-twin:integration",
+    "test:inspection": "node --experimental-strip-types --test --test-concurrency=1 tests/digitalTwin/inspectionModelVersion.test.ts tests/editor/inspectionBinding.test.mjs tests/runtime/inspectionAssembly.test.ts tests/runtime/inspectionFixture.test.mjs tests/runtime/inspectionViewerWebGL.test.mjs",
+    "test:inspection:webgl": "node tests/runtime/inspectionDetail.webgl.mjs",
+    "test:inspection:ui": "node --test tests/editor/inspectionBindingUi.browser.test.mjs",
+    "test:inspection:bridge": "node --test tests/editor/inspectionCrossRepository.test.mjs",
     "test:unified-model-sync": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/unifiedModelAssetUpdate.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelLibrarySync.test.ts tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/digitalTwin/publishOrchestration.test.ts tests/digitalTwin/preparePublishResources.test.ts tests/digitalTwin/publishSceneSnapshots.test.ts tests/digitalTwin/publishPreloadBridge.test.mjs tests/digitalTwin/publishParameterWarnings.test.ts tests/runtime/modelParameterBindingExecution.test.ts tests/editor/modelParameterRestoration.test.mjs tests/editor/publishModelRecovery.test.ts tests/digitalTwin/publishModelPackageRecovery.test.ts",
     "test:scene-model-update": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/sceneModelUpdatePlan.test.ts tests/dataPlatform/sceneModelVersionSync.test.ts tests/dataPlatform/sceneModelResourceValidation.test.ts tests/editor/modelAssetUpdateMerge.test.ts tests/editor/sceneLatestModelUpdate.test.ts tests/editor/sceneModelSyncTransaction.test.ts tests/editor/sceneModelSyncOverlay.test.mjs tests/editor/sceneModelLibrarySync.test.ts tests/editor/scenePreparationRuntimeMonitorContract.test.ts tests/editor/dataPlatformSceneResourcePreparation.test.ts tests/runtime/sceneModelReadinessError.test.ts tests/editor/restoreFailedSceneResources.test.ts tests/editor/scenePreparationProgress.test.ts",
     "smoke:scene-model-update": "npm run build:viewer && npm run build:electron && node scripts/run-scene-model-update-integration.mjs",
@@ -193,6 +198,7 @@
     "@babylonjs/ktx2decoder": "9.12.0",
     "@babylonjs/loaders": "^9.12.0",
     "@babylonjs/serializers": "9.12.0",
+    "@babylonjs/viewer": "9.12.0",
     "@linkiez/dxf-renew": "^7.4.5",
     "archiver": "^8.0.0",
     "fflate": "0.8.2",
@@ -260,7 +266,9 @@
       {
         "from": "public/builtin-skybox-environments",
         "to": "builtin-skybox-environments",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "dist-viewer-template",

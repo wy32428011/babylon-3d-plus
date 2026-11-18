@@ -15,7 +15,12 @@ import type { Scene, UniformBuffer, BaseTexture } from '@babylonjs/core';
 import type { PoiEffectComponent } from '../../../editor/model/components';
 import { ENVIRONMENT_EFFECT_TARGET_ID, isEnvironmentBuildingEffectKind } from '../../../editor/model/environmentBuildingEffect';
 import { cloneEnvironmentMaterial } from '../cloneEnvironmentMaterial';
+import { resolveLightingMaterialDirect } from '../lightingMaterialOverrides';
 import { cloneMaterialWithSharedTexturePixels } from '../cloneMaterialWithSharedTexturePixels';
+import { applyModelAppearanceMaterial } from '../modelAppearanceMaterial';
+
+export type ResolveRenderMeshOverrides = (entityId: string) =>
+  ReadonlyMap<AbstractMesh, ReadonlySet<AbstractMesh>> | undefined;
 
 type Visual = NonNullable<PoiEffectComponent['visual']>;
 type BoundEffect = {
@@ -25,8 +30,8 @@ type BoundEffect = {
 };
 type MotionState = { node: TransformNode; offset: Vector3; applied: Vector3; lastPosition: Vector3; explicit?: boolean };
 type MeshState = {
-  source: Mesh | InstancedMesh; mesh: Mesh | InstancedMesh; proxy: boolean; originalEnabled: boolean;
-  originalMaterial: Material | null; replacement: Material | null; materials: Material[];
+  source: Mesh | InstancedMesh; mesh: Mesh | InstancedMesh; logicalMesh?: AbstractMesh; proxy: boolean; originalEnabled: boolean;
+  originalMaterial: Material | null; replacement: Material | null; releaseMaterial?: () => void; materials: Material[];
   outline: boolean; outlineColor: Color3; outlineWidth: number;
   edgesColor: Color4; edgesWidth: number; ownsEdges: boolean; roof: boolean;
   plugins: ModelSurfacePlugin[]; textures: Set<BaseTexture>; suspend?: () => void;
@@ -246,7 +251,7 @@ export class TargetModelEffects {
     const blend = isColorOverlay(effect.component.effectKind) ? 1 - numberParameter(effect.component, 'originalMix', 0, 0, 1) : 1;
     return this.glowIntensity * numberParameter(effect.component, 'glowIntensity', 1, 0, 5) * blend * (flashVisible(effect) ? 1 : 0);
   }
-  constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null, private readonly alarmAppearance = false) {}
+  constructor(private readonly scene: Scene, private readonly resolveTarget: (id: string) => TransformNode | AbstractMesh | null, private readonly alarmAppearance = false, private readonly getRenderMeshOverrides?: ResolveRenderMeshOverrides) {}
 
   getStatus(id: string): { status: 'active' | 'inactive' | 'loading' | 'occupied' | 'invalid'; message: string } {
     const effect=this.effects.get(id);
@@ -335,11 +340,29 @@ export class TargetModelEffects {
       if (targetId && effect.active) claimedTargets.add(targetId);
       if (!root || root.isDisposed()) { this.release(effect); continue; }
       if (root !== effect.root) { this.release(effect); effect.root = root; }
-      const candidates = new Set<AbstractMesh>(root.getChildMeshes(false));
+      let candidates = new Set<AbstractMesh>(root.getChildMeshes(false));
       if (root instanceof AbstractMesh) candidates.add(root);
       if (parsePaths(parameters(effect.component).nodePaths).length > 0) {
         const selected = selectedNodes(root, parameters(effect.component).nodePaths);
         for (const mesh of candidates) if (!withinSelection(mesh, selected)) candidates.delete(mesh);
+      }
+      // 先用原模型层级筛选 nodePaths，再将外观应用到真正绘制的光照表面。
+      // 拆层和爆炸仍移动业务节点，由光照运行时跟随源节点姿态。
+      const overrides = !STRUCTURE_KINDS.has(effect.component.effectKind) && targetId
+        ? this.getRenderMeshOverrides?.(targetId) : undefined;
+      let logicalMeshes: Map<AbstractMesh, AbstractMesh> | undefined;
+      if (overrides) {
+        logicalMeshes = new Map();
+        const rendered = new Set<AbstractMesh>();
+        for (const source of candidates) {
+          const surfaces = overrides.get(source);
+          if (!surfaces) rendered.add(source);
+          else for (const mesh of surfaces) {
+            rendered.add(mesh);
+            logicalMeshes.set(mesh, source);
+          }
+        }
+        candidates = rendered;
       }
       // 同一模型的任一部件被报警接管时暂停整项，避免重新包裹报警材质或其代理。
       if (!this.alarmAppearance && [...candidates].some(mesh => modelEffectSuspensions.has(mesh))) { this.release(effect); continue; }
@@ -358,6 +381,7 @@ export class TargetModelEffects {
         if (source instanceof Mesh && (source.hasThinInstances || source.instances.length > 0) && !source.metadata?.editorEnvironmentMesh) continue;
         const state = this.attachMesh(effect, source);
         if (!state) continue;
+        state.logicalMesh = logicalMeshes?.get(source);
         effect.meshes.set(source, state);
         this.owners.set(source, effect.id);
         // 报警外观拥有暂停租约，不再被自己的租约暂停；普通场景特效仍遵守暂停规则。
@@ -413,7 +437,11 @@ export class TargetModelEffects {
       if (state.ownsEdges) mesh.enableEdgesRendering(numberParameter(effect.component, 'edgeThreshold', .95, 0, 1));
     } else if (!structural) {
       const clone = this.cloneMaterial(effect, state, originalMaterial);
-      if (clone) { state.replacement = clone; mesh.material = clone; }
+      if (clone) {
+        state.replacement = clone;
+        if (this.alarmAppearance) state.releaseMaterial = applyModelAppearanceMaterial(mesh, clone);
+        else mesh.material = clone;
+      }
     }
     if ((kind === 'xray' || kind === 'hologram') && parameters(effect.component).edgeEnabled === true) {
       state.ownsEdges = !mesh.edgesRenderer;
@@ -438,7 +466,11 @@ export class TargetModelEffects {
       return multi;
     }
     const materialNames = parsePaths(parameters(effect.component).materialNames);
-    if (materialNames.length > 0 && (!original || !materialNames.includes(original.name))) return null;
+    if (materialNames.length > 0 && (!original || !materialNames.includes(original.name))) {
+      const sourceName = this.alarmAppearance && original
+        ? resolveLightingMaterialDirect(original, state.source).material?.name : undefined;
+      if (!sourceName || !materialNames.includes(sourceName)) return null;
+    }
     // 自定义 Shader/Node 材质不能安全注入本插件，保持其原样。
     if (original && !(original instanceof StandardMaterial || original instanceof PBRBaseMaterial)) return null;
     const material = original
@@ -502,11 +534,11 @@ export class TargetModelEffects {
     const kind = effect.component.effectKind;
     if (kind === 'roof-fade') {
       const states = [...effect.meshes.values()];
-      const named = states.filter(state => /roof|屋顶|房顶|顶盖/i.test(state.source.name));
+      const named = states.filter(state => /roof|屋顶|房顶|顶盖/i.test((state.logicalMesh ?? state.source).name));
       const highest = Math.max(...states.map(state => state.source.getBoundingInfo().boundingBox.centerWorld.y));
       const configured = parsePaths(parameters(effect.component).roofPaths);
       const selected = effect.root ? selectedNodes(effect.root, parameters(effect.component).roofPaths) : [];
-      for (const state of states) state.roof = configured.length > 0 ? withinSelection(state.source, selected) : named.length > 0 ? named.includes(state) : state.source.getBoundingInfo().boundingBox.centerWorld.y >= highest - 0.01;
+      for (const state of states) state.roof = configured.length > 0 ? withinSelection(state.logicalMesh ?? state.source, selected) : named.length > 0 ? named.includes(state) : state.source.getBoundingInfo().boundingBox.centerWorld.y >= highest - 0.01;
     }
     if (!STRUCTURE_KINDS.has(kind) || !effect.root) return;
     const groups = configuredRows(effect.component, 'structureGroups');
@@ -678,8 +710,9 @@ export class TargetModelEffects {
     }
     if (mesh instanceof Mesh) effect.glow?.removeIncludedOnlyMesh(mesh);
     if (!source.isDisposed() && state.proxy) source.setEnabled(state.originalEnabled);
+    state.releaseMaterial?.();
     if (!mesh.isDisposed() && mesh instanceof Mesh) {
-      if (mesh.material === state.replacement) mesh.material = state.originalMaterial;
+      if (!state.releaseMaterial && state.replacement && mesh.material === state.replacement) mesh.material = state.originalMaterial;
       mesh.renderOutline = state.outline;
       mesh.outlineColor.copyFrom(state.outlineColor);
       mesh.outlineWidth = state.outlineWidth;

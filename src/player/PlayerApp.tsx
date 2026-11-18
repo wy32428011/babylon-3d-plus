@@ -58,7 +58,8 @@ import {
   type DigitalTwinProjectRuntimeConfig,
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
-import { DigitalTwinInteractionController } from './DigitalTwinInteractionController';
+import { DigitalTwinInteractionController, resolveViewerInspectionTarget } from './DigitalTwinInteractionController';
+import { isDigitalTwinInspectionBinding } from './digitalTwinInteractionProtocol';
 import { createViewerModelClickHandler } from './viewerModelClick';
 import type { DataPlatformScreenCommand } from '../runtime/babylon/dataPlatformScreenBridge';
 import type { DataPlatformViewportScreenComponent } from '../editor/model/dataPlatformScreen';
@@ -882,6 +883,7 @@ export function PlayerApp() {
           setManualRoamSnapshot(manualRoam.getSnapshot());
         }
         const clearViewerSelection = (): void => {
+          interactionController?.notifyDeviceContext(null);
           localHighlightedEntityIds = [];
           setViewerSelectedEntityIds([]);
           runtime?.setClickHighlightTrackExclusion([]);
@@ -912,6 +914,28 @@ export function PlayerApp() {
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),
+          emitDeviceContext: (context) => interactionController?.notifyDeviceContext(context),
+          emitInspectionDeviceSelected: (entityId, generated) => {
+            const model = generated ? undefined : sceneDocument.entities[entityId]?.components.modelAsset as
+              ({ assetCode?: string; inspection?: unknown } | undefined);
+            if (model?.assetCode && isDigitalTwinInspectionBinding(model.inspection)) {
+              interactionController?.notifyInspectionDeviceSelected({ entityId, assetCode: model.assetCode, device: model.inspection.device });
+            }
+          },
+          openInspectionDetail: (entityId, generated) => {
+            // 生成器运行实例没有单独的持久化设备绑定，不能借用模板身份。
+            const model = generated ? undefined : sceneDocument.entities[entityId]?.components.modelAsset;
+            const result = resolveViewerInspectionTarget(entityId, model);
+            if ('error' in result) {
+              setChartMarkerError(result.error);
+              return;
+            }
+            if (!interactionController?.openInspection(result.target)) {
+              setChartMarkerError('设备详情未打开：中台尚未连接或不支持设备详情。');
+              return;
+            }
+            setChartMarkerError('');
+          },
           showScreen: (screen) => {
             if (interactionController?.showScreen(screen, true)) {
               setChartMarkerError('');
@@ -1066,7 +1090,11 @@ export function PlayerApp() {
           },
           triggerTargetClick: (entityId, slot) => {
             pauseHistoryReplay();
-            handleModelClick(entityId, slot ? { locatorEntityId: entityId, ...slot } : null, { focus: false });
+            handleModelClick(entityId, slot ? { locatorEntityId: entityId, ...slot } : null, { focus: false, fromFocusCommand: true });
+          },
+          resolveInspectionTarget: (entityId, assetCode) => {
+            const result = resolveViewerInspectionTarget(entityId, sceneDocument.entities[entityId]?.components.modelAsset, assetCode);
+            return 'error' in result ? result : result.target;
           },
           cancelCameraTransition: (reason) => viewport!.cancelCameraTransition(reason),
           setExternalHighlightEntityIds: (entityIds) => runtime!.setExternalHighlightEntityIds(entityIds),

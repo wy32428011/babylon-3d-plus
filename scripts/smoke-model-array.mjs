@@ -150,7 +150,8 @@ try {
   server = await createServer({
     configFile: false,
     root: process.cwd(),
-    server: { middlewareMode: true, hmr: false },
+    // 阵列 smoke 只加载固定源码，不需要文件热更新。
+    server: { middlewareMode: true, hmr: false, watch: null },
     optimizeDeps: { noDiscovery: true },
     // dxf-renew 的 ESM 发布物省略了相对导入扩展名，交给 Vite 转换后再加载 SceneRuntime。
     ssr: { noExternal: ['@linkiez/dxf-renew'] },
@@ -234,6 +235,7 @@ try {
     modelArrayBatch: null,
     modelArraySourceSignature: '',
     modelArrayFailureSignature: '',
+    parameterBaseline: new Map(),
     highlighted: false,
     measurementReady: true,
   });
