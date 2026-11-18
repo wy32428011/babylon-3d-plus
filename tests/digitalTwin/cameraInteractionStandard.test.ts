@@ -13,6 +13,7 @@ import {
   clampDigitalTwinCameraRadius,
   hasDigitalTwinCameraPoseChanged,
   hasPendingDigitalTwinCameraInput,
+  setDigitalTwinCameraNearPlaneOverride,
   syncDigitalTwinCameraPanScale,
 } from '../../src/runtime/babylon/cameraControlStandard.ts';
 
@@ -196,6 +197,28 @@ test('透视相机缩远时动态提高近裁剪面，正交和近景仍保留 2
       DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.zoom.minZMeters,
       '近景必须继续保留 2 cm 近裁剪保护，避免贴近模型时被裁空',
     );
+  } finally {
+    disposeCamera(fixture);
+  }
+});
+
+test('漫游期间逐帧同步与重新绑定都保留近裁剪面，退出后恢复轨道裁剪', () => {
+  const fixture = createCamera();
+  const { camera } = fixture;
+  try {
+    camera.minZ = 0.18;
+    setDigitalTwinCameraNearPlaneOverride(camera, 0.025);
+    for (const radius of [1, 2.5]) {
+      camera.radius = radius;
+      applyDigitalTwinCameraControlStandard(camera, { zoom: 10, pan: 10, rotate: 10 });
+      syncDigitalTwinCameraPanScale(camera);
+      assert.equal(camera.minZ, 0.025);
+    }
+    setDigitalTwinCameraNearPlaneOverride(camera, null);
+    assert.equal(camera.minZ, 0.18);
+    camera.radius = 100;
+    syncDigitalTwinCameraPanScale(camera);
+    assert.equal(camera.minZ, 0.1);
   } finally {
     disposeCamera(fixture);
   }

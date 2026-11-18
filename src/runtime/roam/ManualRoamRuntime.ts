@@ -1,5 +1,6 @@
 import '../babylon/babylonSideEffects.js';
 import '../babylon/babylonGltfLoader.js';
+import { setDigitalTwinCameraNearPlaneOverride } from '../babylon/cameraControlStandard.ts';
 import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera.js';
 import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { Ray } from '@babylonjs/core/Culling/ray.js';
@@ -213,15 +214,13 @@ export class ManualRoamRuntime {
   private avatarStrideAbort: AbortController | null = null;
   private resetTransition: ResetTransition | null = null;
   private previousCameraMode = Camera.PERSPECTIVE_CAMERA;
-  private previousCameraMinZ: number;
   private previousSceneCollisionsEnabled: boolean;
   private fallbackGroundRequired = false;
   private lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
   private disposed = false;
 
   constructor(private readonly options: ManualRoamRuntimeOptions) {
-    const { scene, camera } = options;
-    this.previousCameraMinZ = camera.minZ;
+    const { scene } = options;
     this.previousSceneCollisionsEnabled = scene.collisionsEnabled;
     this.collider = MeshBuilder.CreateCapsule(COLLIDER_NAME, {
       height: this.snapshot.config.capsuleHeight,
@@ -313,9 +312,8 @@ export class ManualRoamRuntime {
         this.ensureSpawnInitialized();
       }
       this.previousCameraMode = this.options.camera.mode;
-      this.previousCameraMinZ = this.options.camera.minZ;
       this.options.camera.mode = Camera.PERSPECTIVE_CAMERA;
-      this.options.camera.minZ = 0.025;
+      setDigitalTwinCameraNearPlaneOverride(this.options.camera, 0.025);
       this.options.setOrbitControlsEnabled(false);
       this.collider.setEnabled(true);
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
@@ -342,7 +340,7 @@ export class ManualRoamRuntime {
     this.collisionProxyPool?.deactivate();
     this.localTriangleCollider.deactivate();
     this.deactivateCollisionWorld();
-    this.options.camera.minZ = this.previousCameraMinZ;
+    setDigitalTwinCameraNearPlaneOverride(this.options.camera, null);
     this.options.camera.mode = this.previousCameraMode;
     this.options.setOrbitControlsEnabled(true);
     this.options.onDeactivated?.();

@@ -67,6 +67,20 @@ export const DIGITAL_TWIN_CAMERA_CONTROL_STANDARD = {
 
 const panSensitivityMultiplierByCamera = new WeakMap<ArcRotateCamera, number>();
 const depthPrecisionCameras = new WeakSet<ArcRotateCamera>();
+const previousNearPlaneByCamera = new WeakMap<ArcRotateCamera, number>();
+
+/** 漫游接管近裁剪面期间，轨道相机仍更新平移灵敏度。释放时还原接管前的裁剪距离。 */
+export function setDigitalTwinCameraNearPlaneOverride(camera: ArcRotateCamera, near: number | null): void {
+  if (near !== null) {
+    if (!previousNearPlaneByCamera.has(camera)) previousNearPlaneByCamera.set(camera, camera.minZ);
+    camera.minZ = near;
+    return;
+  }
+  const previous = previousNearPlaneByCamera.get(camera);
+  if (previous === undefined) return;
+  camera.minZ = previous;
+  previousNearPlaneByCamera.delete(camera);
+}
 
 /** 编辑器与 Viewer 的轨道视口可启用有限的深度精度补偿，人物漫游保持原裁剪规则。 */
 export function setDigitalTwinCameraDepthPrecision(camera: ArcRotateCamera, enabled: boolean): void {
@@ -129,6 +143,7 @@ function resolveDigitalTwinCameraMinZ(camera: ArcRotateCamera): number {
 
 /** 仅在近裁剪面实际变化时更新投影矩阵，避免稳定画面每帧重复失效。 */
 function syncDigitalTwinCameraNearPlane(camera: ArcRotateCamera): void {
+  if (previousNearPlaneByCamera.has(camera)) return;
   const nextMinZ = resolveDigitalTwinCameraMinZ(camera);
   if (camera.minZ !== nextMinZ) camera.minZ = nextMinZ;
 }
