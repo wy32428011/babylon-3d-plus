@@ -32,6 +32,19 @@ import type { SceneTransformPreviewController } from './SceneTransformPreviewCon
 import type { SceneTelemetryController } from './SceneTelemetryController';
 import { SELECTED_MATERIAL_COLOR, LOCATOR_EDGE_COLOR, LOCATOR_SURFACE_ALPHA, SELECTED_LOCATOR_SURFACE_ALPHA, LOCATOR_CONTIGUOUS_EPSILON, LOCATOR_COLUMN_LABEL_TEXTURE_SIZE, LOCATOR_COLUMN_LABEL_MIN_SIZE, LOCATOR_COLUMN_LABEL_MAX_SIZE, SLOT_HIGHLIGHT_SIZE_SCALE, SLOT_HIGHLIGHT_SURFACE_ALPHA, SLOT_HIGHLIGHT_EDGE_THICKNESS, EDITOR_ENTITY_ID_METADATA_KEY, type ModelRuntimeEntry, type ModelGeneratorRuntimeEntry, type LocatorColumnLabel, type LocatorRuntimeEntry, type LocatorSlotHighlightOverlay, type LocatorBindingSteps, type BuiltInSlotRowLayoutInfo, type BuiltInSlotLayoutInfo, type LayerChangePlatformLayoutInfo } from './sceneRuntimeTypes';
 
+/** 解析内置货格的运动父节点；未声明或节点尚未就绪时保持原有模型根挂载。 */
+export function resolveBuiltInSlotLayoutParent(
+  model: Pick<ModelRuntimeEntry, 'root' | 'contentRoot'>,
+  layout: BuiltInSlotLayoutInfo | null,
+): TransformNode {
+  if (!layout?.parentNodeName) return model.root;
+  return [
+    model.contentRoot,
+    ...model.contentRoot.getChildTransformNodes(false),
+    ...model.contentRoot.getChildMeshes(false),
+  ].find(node => node.name === layout.parentNodeName) ?? model.root;
+}
+
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
   readonly outputs: Pick<GeneratedModelOutputController, 'reportedCargoIssues' | 'modelGenerators' | 'defaultCargoGeneratorId'>;
@@ -503,7 +516,7 @@ export class SceneLocatorController {
         // 布局 metadata 未就绪（脚本尚未运行），先落在货架局部原点，脚本就绪后由 refreshBuiltInSlotBindings 修正。
         : { x: offset.x, y: offset.y, z: offset.z };
       if (hostEntry) {
-        runtimeLocator.root.parent = hostEntry.root;
+        runtimeLocator.root.parent = resolveBuiltInSlotLayoutParent(hostEntry, layout);
         runtimeLocator.root.position.set(localPosition.x, localPosition.y, localPosition.z);
         runtimeLocator.root.rotationQuaternion = null;
         runtimeLocator.root.rotation.set(0, 0, 0);
@@ -931,7 +944,17 @@ export class SceneLocatorController {
         rows.push(rowDepthZ === null ? { depthCenterZ: rowCenterZ } : { depthCenterZ: rowCenterZ, depthZ: rowDepthZ });
       }
     }
-    return { firstCellCenterX, firstLayerSurfaceY, columnSpacing, layerStepY, depthCenterZ, ...(rows.length > 0 ? { rows } : {}) };
+    return {
+      firstCellCenterX,
+      firstLayerSurfaceY,
+      columnSpacing,
+      layerStepY,
+      depthCenterZ,
+      ...(typeof layout.parentNodeName === 'string' && layout.parentNodeName.trim()
+        ? { parentNodeName: layout.parentNodeName.trim() }
+        : {}),
+      ...(rows.length > 0 ? { rows } : {}),
+    };
   }
 
   /** 读取货架脚本写入 contentRoot metadata 的换层站台布局；字段缺失或非有限数字时视为未就绪。 */

@@ -1,6 +1,6 @@
 # MQTT 数据驱动指南
 
-本文说明 Babylon Electron Unity-like Editor 的 MQTT 数据驱动机制：现场设备遥测经统一快照进入运行时，由按设备类型注册的专用驱动（当前内置 `stacker`、`conveyor`、`shuttle`、`rgv`、`lift`）转换为编辑器运行时的只读可视化运动，帮助联调人员确认模型、资产编号、字段映射和驱动行为是否正确。
+本文说明 Babylon Electron Unity-like Editor 的 MQTT 数据驱动机制：现场设备遥测经统一快照进入运行时，由按设备类型注册的专用驱动（当前内置 `stacker`、`conveyor`、`shuttle`、`rgv`、`rgv_nl`、`lift`）转换为编辑器运行时的只读可视化运动，帮助联调人员确认模型、资产编号、字段映射和驱动行为是否正确。
 
 ## 边界
 
@@ -148,6 +148,16 @@ export const dataDriven = {
 - 若本机最新报文为 `task=0`，本机仍持有上述站台货物且尚未取得首次出库任务，则下游 conveyor 的首次非零任务订阅可以作为出库任务：本机把同一运行时货物改为该任务，更新内存中的 `currentTask/lastTask`，并按订阅方向登记自驱。旧任务已有下游订阅时不得换号。
 - 两种首次出库路径都不解除 `platformPlacedCargo` 出口门控：货物必须完成本机走行并到达出口，才能交付下游；换号不创建第二份货物，也不从站台直接隔空交付。
 - 这些规则只处理 MQTT 数据在 Babylon 运行时中的只读可视化，不写入场景，不向 WCS/PLC 回写任务。若现场任务号来源异常，仍需单独检查 WCS 数据；运行时不能验证业务任务号本身是否正确。
+
+### rgv_nl 诺力定制载货台（独立驱动）
+
+诺力五期定制 RGV 使用独立设备类型 `rgv_nl` 和 `RgvNlTelemetryDriver`，不是 conveyor 变体，也不进入普通 RGV 驱动。`motion.deckTransfer.protocol='working_mode'` 只由该驱动读取；设备具有独立的 `rgvNlTelemetry` 状态与 `rgvNlCargoMeshes` 货物表，不消费普通 RGV 的列号、前后工位 command 或 conveyor 的 task 订阅链路。
+
+- `working_mode=1`：首条健康快照把载货台放在 B 端上下货位；光电有货且当前无货时刷出货物，`movement_x` 非零后向 A 端 stacker 对接位移动。只有到位后 stacker 才能从内置站台取货；取走后空台返回 B 端。光电明确归零时立即清理台上残留货物并返回 B 端，不等待 stacker 事件；光电未先恢复无货时不会重复刷货。
+- `working_mode=2`：首条健康快照把空载货台放在 A 端等待 stacker；只有到位且本机无货时才接受 stacker 放货。接货后返回 B 端，到位且光电明确消失后销毁货物，再回 A 端等待下一托。
+- 光电缺省兼容 `front_has_goods`、`back_has_goods`、`has_goods`，可由 `cargo.hasGoodsFields` 覆盖。故障帧冻结状态与运动；断流时仅继续已确定的端点运动，不凭空创建或销毁货物。
+- A/B 端中心行程由整机投影范围、载货台自身包络和 `aEndInset/bEndInset` 共同计算。站台声明 `builtInSlotLayout.parentNodeName` 后，Locator 直接挂在载货台节点下，布局坐标取台面节点局部空间；未声明该字段的旧模型仍挂模型根。
+- stacker 通过 `isRgvNlPlatformLocator` 识别其站台，并由运行时门面调用 `RgvNlTelemetryDriver` 取放；`isConveyorPlatformLocator` 仍只认 conveyor，多穿小车逻辑不变。
 
 stacker 的 `dataDriven` 则声明 `motion.travel/lift/fork` 的节点、速度、行程与限位，详见 `Assets/Models/Stacker/stacker.model.ts`；rgv 另以顶层 `cargo.frontNodes/backNodes` 声明载货台面节点、`fixedNodes` 声明固定轨道。
 

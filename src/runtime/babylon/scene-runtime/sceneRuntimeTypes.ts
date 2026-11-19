@@ -29,7 +29,7 @@ import { EnvironmentAssetContainerCache } from '../environmentAssetContainerCach
 import { SharedModelAssetCache } from '../SharedModelAssetCache';
 import type { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
-import type { ConveyorModelTelemetryState, HcliftModelTelemetryState, LiftModelTelemetryState, RgvModelTelemetryState, ShuttleModelTelemetryState, StackerModelTelemetryState } from '../telemetry/specialized/types';
+import type { ConveyorModelTelemetryState, HcliftModelTelemetryState, LiftModelTelemetryState, RgvModelTelemetryState, RgvNlModelTelemetryState, ShuttleModelTelemetryState, StackerModelTelemetryState } from '../telemetry/specialized/types';
 
 
 export const SELECTED_MATERIAL_COLOR = '#f0a500';
@@ -159,6 +159,7 @@ export type ModelRuntimeEntry = {
   stackerTelemetry: StackerModelTelemetryState;
   conveyorTelemetry: ConveyorModelTelemetryState;
   rgvTelemetry: RgvModelTelemetryState;
+  rgvNlTelemetry: RgvNlModelTelemetryState;
   shuttleTelemetry: ShuttleModelTelemetryState;
   liftTelemetry: LiftModelTelemetryState;
   hcliftTelemetry: HcliftModelTelemetryState;
@@ -346,6 +347,8 @@ export type BuiltInSlotLayoutInfo = {
   columnSpacing: number;
   layerStepY: number;
   depthCenterZ: number;
+  /** 可选运动父节点名；布局坐标改用该节点局部空间，货格随节点一起运动。 */
+  parentNodeName?: string;
   /** 多排布局；缺省表示单排（等价于用 depthCenterZ 与货格自身宽度）。 */
   rows?: BuiltInSlotRowLayoutInfo[];
 };

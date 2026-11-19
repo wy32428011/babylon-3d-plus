@@ -10,7 +10,7 @@ import type { TelemetryBindingComponent } from '../../../editor/model/telemetryB
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { resolveModelAssetSharedInstancingPolicy } from '../SharedModelAssetCache';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
-import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset } from '../telemetry/specialized/specializedModelAssets';
+import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
@@ -243,6 +243,7 @@ export class ModelArrayRuntimeController {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      rgvNlTelemetry: createRgvNlTelemetryState(),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
       hcliftTelemetry: createHcliftTelemetryState(root),

@@ -886,9 +886,9 @@ export class StackerTelemetryDriver {
         if (boundForSlide && placeTarget && (!slideExists || slidingOut || Math.abs(offsetNow) < 0.02)) {
           this.setupStackerCargoClampSlide(model, side, placeTarget.supportPosition);
         }
-        // 输送线内置站台是设备交接缓冲，不是货架格口：不得为它解析 fetch 排号，
-        // 否则落货会走 fetch 单排同步路径而跳过 placeCargoIntoConveyorPlatform（货物交不到输送线）。
-        if (this.context.isConveyorPlatformLocator?.(targetLocator.entityId) === true) {
+        // 设备内置站台不是货架格口：不得解析 fetch 排号，否则会跳过站台货物交接。
+        if (this.context.isConveyorPlatformLocator?.(targetLocator.entityId) === true
+          || this.context.isRgvNlPlatformLocator?.(targetLocator.entityId) === true) {
           if (side === 'front') state.frontCargoFetchRow = null;
           else state.backCargoFetchRow = null;
         } else {

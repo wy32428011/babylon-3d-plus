@@ -13,7 +13,7 @@ import { LiftMotionArrowRenderer } from '../effects/LiftMotionArrowRenderer';
 import { type ExternalModelScriptRuntimeMode, type ExternalModelScriptTelemetrySnapshot } from '../ExternalModelScriptRuntime';
 import { captureModelTelemetryPreviewBaseline, restoreModelTelemetryPreviewBaseline } from '../telemetry/telemetryPreviewBaseline';
 import { type DeviceTelemetrySnapshot } from '../../mqtt/deviceTelemetry';
-import { resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
+import { resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetRgvNlTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../telemetry/specialized/SpecializedTelemetryRuntime';
 import type { SpecializedTelemetryHost } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
@@ -298,6 +298,7 @@ export class SceneTelemetryController {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetRgvNlTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
       resetHcliftTelemetryState(model);
@@ -312,6 +313,7 @@ export class SceneTelemetryController {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetRgvNlTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
       resetHcliftTelemetryState(model);
@@ -321,6 +323,7 @@ export class SceneTelemetryController {
       resetStackerTelemetryState(variant.model);
       resetConveyorTelemetryState(variant.model);
       resetRgvTelemetryState(variant.model);
+      resetRgvNlTelemetryState(variant.model);
       resetShuttleTelemetryState(variant.model);
       resetLiftTelemetryState(variant.model);
       resetHcliftTelemetryState(variant.model);

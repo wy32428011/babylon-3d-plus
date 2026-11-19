@@ -10,16 +10,16 @@
 MQTT broker ──topic 路由──┐
                           ├→ deviceTelemetryStore (快照键 sourceId:deviceType:assetCode)
                           │     └→ SpecializedTelemetryRuntime.applyFrame (每帧)
-参数化 (modelParameters / telemetryBinding / dataDriven) ─┐        ├→ conveyorDriver / rgvDriver / stackerDriver / shuttleDriver / liftDriver
+参数化 (modelParameters / telemetryBinding / dataDriven) ─┐        ├→ conveyorDriver / rgvDriver / rgvNlDriver / stackerDriver / shuttleDriver / liftDriver
                                                         ├→ 各 driver 的 applyToModel
-fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ──────────┘        └→ 货物表 stacker/conveyor/rgv/shuttle/liftCargoMeshes (全局共享)
+fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ──────────┘        └→ 货物表 stacker/conveyor/rgv/rgvNl/shuttle/liftCargoMeshes (全局共享)
                                                                           └→ 门面仲裁交接 adoptGlobalCargoByTask / placeCargoIntoConveyorPlatform / deliverRgvCargoToConveyorColumn / deliverLiftCargoToConveyorLayer
 ```
 
 ### 设备类型识别
 
 - 模型包签名：`specializedModelAssets.ts` 中 `isConveyorModelAsset`(:23)、`isStackerModelAsset`(:41)、`isRgvModelAsset`(:54)、`isShuttleModelAsset`、`isLiftModelAsset`，按 assetCode/sourcePath/脚本 metadata 匹配关键字。
-- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→hclift→shuttle→rgv→lift。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`；**hclift 必须排在 shuttle 前**：提升机同帧先发布载货台高度，小车当帧跟随。
+- 运行时判定：`resolveSpecializedTelemetryDeviceType`（SpecializedTelemetryRuntime.ts）— 实例 `telemetryBinding.deviceType` 优先，否则按注册顺序 stacker→conveyor→hclift→shuttle→rgv_nl→rgv→lift。**shuttle 必须排在 rgv 前**：多穿小车脚本 metadata 含「穿梭车」会误中 `isRgvModelAsset`；**rgv_nl 必须排在 rgv 前**：诺力模型路径含 RGV，但使用独立协议；**hclift 必须排在 shuttle 前**：提升机同帧先发布载货台高度，小车当帧跟随。
 - shuttle 的 `isShuttleRuntimeModel` 仅按脚本 `dataDriven.device.devType==='shuttle'` 判定（该模型必有脚本，不加 ModelRuntimeEntry.capable 标志位）。hclift 同此策略（`devType==='hclift'`）。
 - lift 双保险：`isLiftRuntimeModel` 仅按脚本 `devType==='lift'` 判定（同 shuttle 策略），`ModelRuntimeEntry.liftCapable`（资产签名）仅用于编辑态解锁绑定 UI；「提升机」中文签名不进运行时判定，防止误接管。
 - **shelf 无专用 driver**：是参数化脚本宿主模型 + Locator 组件（`builtInSlotBinding`），由 SceneRuntime 直接驱动渲染。
@@ -55,7 +55,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### 共享状态与交接门面
 
-- `SpecializedTelemetrySharedState`（types.ts）：五张全局货物表 `stacker/conveyor/rgv/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。另有 hclift 交接状态：`hcliftPlatformSurfaces`（key=hclift entityId，发布 `supportY` 与载货台水平中心 `deckCenter`）与 `hcliftDeckOccupancies`（小车上台占位：entering/loaded + 报文时间，供提升机升降门控）。
+- `SpecializedTelemetrySharedState`（types.ts）：六张全局货物表 `stacker/conveyor/rgv/rgvNl/shuttle/liftCargoMeshes`，即全局货物注册表。货物条目 `GeneratedCargoRuntimeEntry`，`task` 为全局唯一身份。另有 hclift 交接状态：`hcliftPlatformSurfaces`（key=hclift entityId，发布 `supportY` 与载货台水平中心 `deckCenter`）与 `hcliftDeckOccupancies`（小车上台占位：entering/loaded + 报文时间，供提升机升降门控）。
 - 交接插值统一 `resolveCargoHandoffPose`（types.ts），时长 `CARGO_HANDOFF_SECONDS=1.0`。
 
 ### 点击事件高亮与固定轨道
@@ -65,7 +65,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 - 点击事件绑定的「高亮选中」效果支持「忽略固定轨道」参数（`ClickEventBindingEvent.highlight.excludeFixedTrack`）：命中 stacker/RGV 时轨道子树网格不参与描边，只描设备本体。
 - 轨道识别与遥测驱动同一套语义（`fixedTrackHighlightNodes.ts`）：`dataDriven.fixedNodes` 声明优先，缺失按 capable 标志回退（stacker 固定名 / RGV A37~A46 正则）。modelArrayBatch 薄实例批次路径无法按实体剔除网格，该参数不生效。
 - 交接只平移不旋转：`cargo.lockedWorldRotation` 全生命周期锁定，在 `setGeneratedCargoRootPose`（SceneRuntime.ts）首次**稳定**位姿写入时建立——handoff 插值期间不锁定，插值完结帧返回精确目标朝向时才 `??=` 落锁，避免把 slerp 中间角（大 dt 帧下可达 30°~60°）永久锁定。
-- 刷出初始朝向：恒为货物模板自身朝向（世界恒等，统一 `createCargoSpawnWorldRotation`，types.ts），不继承载体机体/货格旋转——五类司机的 `lockedWorldRotation ?? …` 回退与 stacker/shuttle fresh 刷出的 `holdRotation` 都走该回退，随后由首次稳定位姿落锁。载货面主动旋转货物朝向的设备后续另行建模，当前不存在。
+- 刷出初始朝向：恒为货物模板自身朝向（世界恒等，统一 `createCargoSpawnWorldRotation`，types.ts），不继承载体机体/货格旋转——各专用驱动的 `lockedWorldRotation ?? …` 回退与 stacker/shuttle fresh 刷出的 `holdRotation` 都走该回退，随后由首次稳定位姿落锁。载货面主动旋转货物朝向的设备后续另行建模，当前不存在。
 - `createCargoHandoffState` 对从未写过位姿的新货物（`root.rotationQuaternion == null`）返回 null 不建插值：新货直接在目标位姿落位，避免从世界原点飞入 / 从 Identity 自旋，同时保证首次写入即稳定位姿。
 - 门面方法：`adoptGlobalCargoByTask`(:366)、`placeCargoIntoConveyorPlatform`(:424)、`deliverRgvCargoToConveyorColumn`(:463)、`adoptConveyorCargoForLift` / `deliverLiftCargoToConveyorLayer` / `resolveConveyorDeckSurfacePoint`（SpecializedTelemetryRuntime.ts）。
 
@@ -138,6 +138,16 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 - **设备识别**：meta.json `dataDriven.device.devType='conveyor'` + `defaultAssetCode='VirtualConveyor'`（assetCode 含 "conveyor" 命中 `isConveyorModelAsset`）→ 自动解锁 Inspector 绑定区（TelemetryBindingInspector / CargoGeneratorInspector / ModelParametersInspector）。
 - **参数**：`length`（x 向长度，默认 2 m）、`width`（z 向宽度，默认 1 m）、`color`（材质色，默认 #8a97a5）；厚度固定 0.05 m。参数化脚本绕底面中心原点缩放 + 乘色（rememberBaseMaterial 快照基线）。
 - **与真实 conveyor 的差异**：`cargo.travel.nodes` 留空 → 行程回退整机包围盒（板面即行程区）；支撑面走包围盒顶面兜底（板顶 0.05 m 精确）；无专属滚筒/链条动画（虚拟输送线本无动画节点），仅货物运动。
+
+---
+
+## 独立设备类型：诺力定制 RGV（rgv_nl）
+
+- **识别与隔离**：模型包声明 `devType='rgv_nl'`，由 `rgvNlDriver.ts` 注册到 `rgv_nl` 专用驱动；不是 conveyor 变体，也不复用普通 RGV 状态机。独立 `rgvNlTelemetry` 保存首载、端点和持货状态，独立 `rgvNlCargoMeshes` 保存货物。
+- **本体运动**：仅 `载货台主体` 沿模型 Z 轴移动；A/B 端由整机几何、载货台包络及 `aEndInset/bEndInset` 限制。模式 1 首载在 B 端，光电刷货、`movement_x` 非零去 A 端，stacker 取货后返回；模式 2 首载在 A 端，接 stacker 来货后回 B 端，到位且光电消失销货，再回 A 端。行走速度取模型参数 `travelSpeed`。
+- **载货面与站台**：货物落 `载货台主体` 下的 `01` 子节点包围盒顶面中心。模型参数“启用内置站台”默认开启；`builtInSlotLayout.parentNodeName` 让货格真实挂载载货台并随动。stacker 只有在正确模式、载货台到位且占用状态允许时才能取放。
+- **交接分流**：stacker 使用 `isRgvNlPlatformLocator` 识别站台，运行时门面调用 `RgvNlTelemetryDriver.adoptPlatformCargoForStacker/canAcceptPlatformPlacedCargo/acceptPlatformPlacedCargo`。`isConveyorPlatformLocator` 与 shuttle 的 conveyor 交接保持原义。
+- **状态与故障**：首条健康快照决定初始端点；故障帧冻结，stale 仅完成当前端点目标。模式 1 光电明确归零时立即清理残留货物并返回 B 端，未清零前不重复刷货；模式 2 回程途中不提前销货。
 
 ---
 

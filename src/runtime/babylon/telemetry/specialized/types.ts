@@ -173,7 +173,7 @@ export type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'shuttle' | 'lift';
+export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'rgv_nl' | 'shuttle' | 'lift';
 
 export type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
@@ -440,6 +440,21 @@ export type RgvTravelConstraint = {
   movingMin: number;
   movingMax: number;
 };
+
+export type RgvNlModelTelemetryState = {
+  initialized: boolean;
+  workingMode: 1 | 2 | null;
+  currentOffset: number;
+  targetOffset: number | null;
+  homeOffset: number;
+  stackerOffset: number;
+  sensorSpawnBlocked: boolean;
+  cargoKey: string | null;
+  currentTask: string | null;
+  lastTask: string | null;
+};
+
+export type RgvNlCargoRuntimeEntry = GeneratedCargoRuntimeEntry;
 
 export type RgvModelTelemetryState = {
   rootBasePosition: Vector3;
@@ -766,6 +781,7 @@ export type SpecializedTelemetrySharedState = {
   stackerCargoMeshes: Map<string, StackerCargoRuntimeEntry>;
   conveyorCargoMeshes: Map<string, ConveyorCargoRuntimeEntry>;
   rgvCargoMeshes: Map<string, RgvCargoRuntimeEntry>;
+  rgvNlCargoMeshes: Map<string, RgvNlCargoRuntimeEntry>;
   shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
   liftCargoMeshes: Map<string, LiftCargoRuntimeEntry>;
   /** hclift 载货台状态（key=hclift entityId）：每帧发布供多穿小车 x=-2 上台/换层跟随（巷道号匹配优先，其次 assetCode 命中站台 deviceAssetCode）；updatedAtMs 供跟随方丢弃失联设备的滞留值。 */
@@ -788,6 +804,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     stackerCargoMeshes: new Map(),
     conveyorCargoMeshes: new Map(),
     rgvCargoMeshes: new Map(),
+    rgvNlCargoMeshes: new Map(),
     shuttleCargoMeshes: new Map(),
     liftCargoMeshes: new Map(),
     hcliftPlatformSurfaces: new Map(),
@@ -885,16 +902,17 @@ export interface SpecializedTelemetryDriverContext {
    * 未找到返回 null。输送线探测点推送用。
    */
   detachClaimedCargoByReference(cargo: GeneratedCargoRuntimeEntry): GeneratedCargoRuntimeEntry | null;
-  /** stacker 从 conveyor 站台取货：无视 task 接管该 conveyor 当前持货（无货或非站台货格返回 null）。 */
+  /** stacker 从 conveyor/rgv_nl 内置站台取货：按宿主类型分流，无货或非站台货格返回 null。 */
   adoptConveyorPlatformCargo(locatorEntityId: string, stackerAssetCode: string): GeneratedCargoRuntimeEntry | null;
-  /** stacker 落货到 conveyor 站台时交接货物给该 conveyor；conveyor 已有货或非站台货格返回 false，此时不拆除原持货引用。 */
+  /** stacker 落货到 conveyor/rgv_nl 内置站台时按宿主类型交接；目标已有货、未到位或非站台货格返回 false。 */
   placeCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /**
    * 目标货格是否为「输送线内置站台」（宿主是 conveyor）。站台是设备交接缓冲而不是货架格口：
-   * 返回 true 时堆垛机不得把它当作 fetch 库位解析排号，否则会跳过 placeCargoIntoConveyorPlatform，
-   * 货物永远交不到输送线上。未实现时按 false 处理（旧运行时行为不变）。
+   * 返回 true 时堆垛机/多穿小车不得把它当作 fetch 库位解析排号。
    */
   isConveyorPlatformLocator?(locatorEntityId: string): boolean;
+  /** stacker 专用：目标货格是否为 rgv_nl 内置站台，语义同 conveyor 站台但由独立驱动交接。 */
+  isRgvNlPlatformLocator?(locatorEntityId: string): boolean;
   /** shuttle 落货到 conveyor 站台时交接货物给该 conveyor；语义同 placeCargoIntoConveyorPlatform，货物来源为 shuttleCargoMeshes。 */
   placeShuttleCargoIntoConveyorPlatform(locatorEntityId: string, cargoKey: string): boolean;
   /** RGV 列接驳对齐用：列绑定实体为 conveyor 时返回其载货面中心（cargo.travel.nodes 包围盒中心）；非 conveyor 或实体不存在返回 null。 */

@@ -2,7 +2,7 @@
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { Entity } from '../../../editor/model/Entity';
 import type { ModelAssetComponent } from '../../../editor/model/components';
-import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
+import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { SceneMeshPresentationController } from './SceneMeshPresentationController';
@@ -183,6 +183,7 @@ export class ParameterVariantHostPool {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      rgvNlTelemetry: createRgvNlTelemetryState(),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
       hcliftTelemetry: createHcliftTelemetryState(root),

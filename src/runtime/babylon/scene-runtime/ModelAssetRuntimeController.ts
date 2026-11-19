@@ -17,7 +17,7 @@ import { AssetLoadScheduler } from '../AssetLoadScheduler';
 import { SceneShaderWarmup } from '../SceneShaderWarmup';
 import { resolveModelAssetSharedInstancingPolicy, SharedModelAssetCache, createModelAssetTemplateKey, type SharedModelTemplateLease } from '../SharedModelAssetCache';
 import { repairInstancedMeshBufferContainers } from '../instancedSelectionBuffers';
-import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset, resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
+import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset, resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetRgvNlTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { ScenePickingAndSelectionController } from './ScenePickingAndSelectionController';
 import type { ModelArrayRuntimeController } from './ModelArrayRuntimeController';
@@ -161,6 +161,7 @@ export class ModelAssetRuntimeController {
         resetStackerTelemetryState(current);
         resetConveyorTelemetryState(current);
         resetRgvTelemetryState(current);
+        resetRgvNlTelemetryState(current);
         resetShuttleTelemetryState(current);
         resetLiftTelemetryState(current);
         resetHcliftTelemetryState(current);
@@ -227,6 +228,7 @@ export class ModelAssetRuntimeController {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      rgvNlTelemetry: createRgvNlTelemetryState(),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
       hcliftTelemetry: createHcliftTelemetryState(root),
@@ -640,6 +642,7 @@ export class ModelAssetRuntimeController {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetRgvNlTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
       resetHcliftTelemetryState(model);
@@ -699,6 +702,7 @@ export class ModelAssetRuntimeController {
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
           resetRgvTelemetryState(current);
+          resetRgvNlTelemetryState(current);
           resetShuttleTelemetryState(current);
           resetLiftTelemetryState(current);
           resetHcliftTelemetryState(current);
@@ -715,6 +719,7 @@ export class ModelAssetRuntimeController {
           resetStackerTelemetryState(current);
           resetConveyorTelemetryState(current);
           resetRgvTelemetryState(current);
+          resetRgvNlTelemetryState(current);
           resetShuttleTelemetryState(current);
           resetLiftTelemetryState(current);
           resetHcliftTelemetryState(current);
@@ -738,6 +743,7 @@ export class ModelAssetRuntimeController {
       resetStackerTelemetryState(model);
       resetConveyorTelemetryState(model);
       resetRgvTelemetryState(model);
+      resetRgvNlTelemetryState(model);
       resetShuttleTelemetryState(model);
       resetLiftTelemetryState(model);
       resetHcliftTelemetryState(model);

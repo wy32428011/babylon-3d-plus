@@ -21,7 +21,7 @@ import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
 import { createModelAssetTemplateKey, resolveModelAssetSharedInstancingPolicy } from '../SharedModelAssetCache';
 import { GeneratedCargoInstancePool, type GeneratedCargoPoolEntry } from './GeneratedCargoInstancePool';
-import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
+import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceKey, type DeviceSpawnerConfig, type SpawnedDeviceKey } from '../telemetry/spawner/DeviceSpawnerRuntime';
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
 import type { GeneratedCargoKind, GeneratedCargoRuntimeEntry } from '../telemetry/specialized/types';
@@ -385,6 +385,7 @@ export class GeneratedModelOutputController {
       stackerTelemetry: createStackerTelemetryState(modelRoot),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(modelRoot),
+      rgvNlTelemetry: createRgvNlTelemetryState(),
       shuttleTelemetry: createShuttleTelemetryState(modelRoot),
       liftTelemetry: createLiftTelemetryState(modelRoot),
       hcliftTelemetry: createHcliftTelemetryState(modelRoot),
@@ -753,7 +754,7 @@ export class GeneratedModelOutputController {
     if (kind === 'stacker') {
       return { size: STACKER_CARGO_SIZE, color: STACKER_CARGO_COLOR, emissiveColor: STACKER_CARGO_EMISSIVE_COLOR };
     }
-    if (kind === 'rgv') {
+    if (kind === 'rgv' || kind === 'rgv_nl') {
       return { size: RGV_CARGO_SIZE, color: RGV_CARGO_COLOR, emissiveColor: RGV_CARGO_EMISSIVE_COLOR };
     }
     if (kind === 'shuttle') {
@@ -1322,6 +1323,7 @@ export class GeneratedModelOutputController {
       stackerTelemetry: createStackerTelemetryState(root),
       conveyorTelemetry: createConveyorTelemetryState(),
       rgvTelemetry: createRgvTelemetryState(root),
+      rgvNlTelemetry: createRgvNlTelemetryState(),
       shuttleTelemetry: createShuttleTelemetryState(root),
       liftTelemetry: createLiftTelemetryState(root),
       hcliftTelemetry: createHcliftTelemetryState(root),

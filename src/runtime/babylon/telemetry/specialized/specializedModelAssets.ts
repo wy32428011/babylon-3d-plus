@@ -10,6 +10,7 @@ import {
   type HcliftModelTelemetryState,
   type LiftModelTelemetryState,
   type RgvModelTelemetryState,
+  type RgvNlModelTelemetryState,
   type ShuttleModelTelemetryState,
   type StackerModelTelemetryState,
 } from './types';
@@ -300,6 +301,27 @@ export function isRgvRuntimeModel(model: ModelRuntimeEntry): boolean {
     if (devType === 'rgv') return true;
   }
   return false;
+}
+
+/** 创建诺力定制 RGV 的独立遥测状态，不与普通 RGV 或 conveyor 共用。 */
+export function createRgvNlTelemetryState(): RgvNlModelTelemetryState {
+  return {
+    initialized: false,
+    workingMode: null,
+    currentOffset: 0,
+    targetOffset: null,
+    homeOffset: 0,
+    stackerOffset: 0,
+    sensorSpawnBlocked: false,
+    cargoKey: null,
+    currentTask: null,
+    lastTask: null,
+  };
+}
+
+/** 重置诺力定制 RGV 的全部运行状态，几何缓存以新状态对象为会话边界。 */
+export function resetRgvNlTelemetryState(model: ModelRuntimeEntry): void {
+  model.rgvNlTelemetry = createRgvNlTelemetryState();
 }
 
 /** 创建 RGV 遥测运行态，所有偏移和货物占位只保存在内存中。 */

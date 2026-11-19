@@ -447,9 +447,9 @@ function normalizeStackerCompatibleFields(deviceType: string, fields: DeviceTele
   }
 }
 
-/** 按输送机协议把光电位掩码归一为可直接用于规则和状态机的布尔字段。 */
+/** 把输送机及诺力定制 RGV 的光电位掩码归一为可直接用于状态机的布尔字段。 */
 function normalizeConveyorCompatibleFields(deviceType: string, fields: DeviceTelemetryFields): void {
-  if (deviceType !== 'conveyor') return;
+  if (deviceType !== 'conveyor' && deviceType !== 'rgv_nl') return;
 
   const signalBits = readIntegerField(fields, 'signalBits');
   const frontSignal = readBooleanField(fields, 'front_signalBits');
