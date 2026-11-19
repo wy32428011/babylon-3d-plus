@@ -587,22 +587,38 @@ export class EnvironmentAndSkyboxController {
       getSources: () => {
         const document = this.dependencies.document.shadowDocument;
         if (!document) return [];
-        const models: Array<[string, ModelRuntimeEntry]> = [...this.dependencies.assets.models];
-        for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) models.push([variant.representativeEntityId, variant.model]);
-        for (const entry of this.dependencies.outputs.spawnedDeviceModels) models.push(entry);
-        const primitiveMeshes = new Map<string, AbstractMesh>(this.dependencies.presentation.meshes);
-        const batches = new Set(this.dependencies.arrays.modelArrayBatchByMeshUniqueId.values());
-        const sourceOwners = new Map<string, LightingSourceOwner>();
-        const batchOwners = new Map<EntityArrayThinInstanceBatch, LightingBatchOwner>();
-        appendGeneratedLightingSources(document, this.dependencies.outputs.generatedOutputOwners, { models, primitiveMeshes, batches, sourceOwners, batchOwners });
-        return collectLightingRuntimeSources({ scene: this.context.scene, document, models, primitiveMeshes,
-          environment: this.environmentRuntime.getLightingSurfaces(), environmentSource: this.environmentRuntime.getLightingSourceReference(),
-          batches, sourceOwners, batchOwners,
-          resolveBatchSource: (batch, id, source) => this.dependencies.telemetry.motionStaticBatchRuntime.getSourceMeshForEntity(batch, id) ?? source,
-          isModelMeshRenderSuppressed: mesh => this.dependencies.telemetry.motionStaticBatchRuntime.isSuspended(mesh),
-          getMotionTargets: model => this.dependencies.telemetry.specializedTelemetryRuntime.getLightingMotionNodes(model),
-          readEntityId: mesh => this.dependencies.selection.readEntityIdFromMesh(mesh),
-        }, { contextAssembly: this.lightingContextAssemblyMode });
+        let token: ProjectOpenSpanToken | null = null;
+        try {
+          const diagnostics = this.dependencies.readiness.loadDiagnostics;
+          const scope = diagnostics.captureTrace();
+          if (scope?.recorder.context.detail === 'assets') {
+            token = diagnostics.beginTraceTask('lightingClassificationSources', undefined, scope);
+          }
+        } catch { /* 诊断失败时继续分类取源。 */ }
+        let failed = true;
+        try {
+          const models: Array<[string, ModelRuntimeEntry]> = [...this.dependencies.assets.models];
+          for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) models.push([variant.representativeEntityId, variant.model]);
+          for (const entry of this.dependencies.outputs.spawnedDeviceModels) models.push(entry);
+          const primitiveMeshes = new Map<string, AbstractMesh>(this.dependencies.presentation.meshes);
+          const batches = new Set(this.dependencies.arrays.modelArrayBatchByMeshUniqueId.values());
+          const sourceOwners = new Map<string, LightingSourceOwner>();
+          const batchOwners = new Map<EntityArrayThinInstanceBatch, LightingBatchOwner>();
+          appendGeneratedLightingSources(document, this.dependencies.outputs.generatedOutputOwners, { models, primitiveMeshes, batches, sourceOwners, batchOwners });
+          const sources = collectLightingRuntimeSources({ scene: this.context.scene, document, models, primitiveMeshes,
+            environment: this.environmentRuntime.getLightingSurfaces(), environmentSource: this.environmentRuntime.getLightingSourceReference(),
+            batches, sourceOwners, batchOwners,
+            resolveBatchSource: (batch, id, source) => this.dependencies.telemetry.motionStaticBatchRuntime.getSourceMeshForEntity(batch, id) ?? source,
+            isModelMeshRenderSuppressed: mesh => this.dependencies.telemetry.motionStaticBatchRuntime.isSuspended(mesh),
+            getMotionTargets: model => this.dependencies.telemetry.specializedTelemetryRuntime.getLightingMotionNodes(model),
+            readEntityId: mesh => this.dependencies.selection.readEntityIdFromMesh(mesh),
+          }, { contextAssembly: this.lightingContextAssemblyMode });
+          failed = false;
+          return sources;
+        } finally {
+          try { token?.end(failed ? 'error' : 'ok', failed ? 'operation-failed' : undefined); }
+          catch { /* 保留分类取源的原始结果或异常。 */ }
+        }
       },
       setShadowRoles: (roles, settings) => this.shadowRuntime.setHybridMeshRoles(roles, settings),
       onBindingsChanged: () => this.dependencies.selection.rebuildModelSelectionOutline(),

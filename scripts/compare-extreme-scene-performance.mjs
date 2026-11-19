@@ -7,6 +7,8 @@ assert.ok(beforePath && afterPath && outputPath,
   '用法：node scripts/compare-extreme-scene-performance.mjs <原版 result.json> <优化版 result.json> <对比.json>');
 const [before, after] = await Promise.all([beforePath, afterPath].map(async file => JSON.parse(await readFile(file, 'utf8'))));
 for (const report of [before, after]) {
+  assert.ok(report.experiment !== 'hardware-scaling-baab' && report.equalImageQuality !== false,
+    '硬件缩放诊断的 A/B 渲染分辨率不同，不能用于等画质性能比较');
   assert.equal(report.passed, true, '失败或未完成的报告不能计入配对结果');
   assert.equal(report.sourceUnchanged, true);
   assert.equal(report.lifecycleSoak, false, '生命周期浸泡不能当作稳定帧率');
@@ -25,6 +27,28 @@ const median = values => {
   const sorted = [...values].sort((a, b) => a - b), middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
+function gpuReadingsForRun(run) {
+  let previousCount = null;
+  const readings = [];
+  for (const sample of run.samples) {
+    const { gpuFrameMs, gpuTimingStatus, gpuFrameSamples } = sample;
+    const available = Number.isFinite(gpuFrameMs) && gpuFrameMs >= 0;
+    if (!Object.hasOwn(sample, 'gpuFrameSamples') && !Object.hasOwn(sample, 'gpuTimingStatus')) {
+      // 原版报告没有有效查询计数，保留其历史读取口径。
+      if (available) readings.push(gpuFrameMs);
+      continue;
+    }
+    if (!Number.isSafeInteger(gpuFrameSamples) || gpuFrameSamples < 0) continue;
+    // 第一次或计数回退仅建立基线；不能证明其中的结果来自当前窗口。
+    const fresh = previousCount !== null && gpuFrameSamples > previousCount;
+    previousCount = gpuFrameSamples;
+    if (fresh && available && (gpuTimingStatus === 'valid' || gpuTimingStatus === 'legacy-counter')) {
+      readings.push(gpuFrameMs);
+    }
+  }
+  return readings;
+}
+
 const rows = before.modes.map(mode => {
   const groups = [before, after].map(report => report.runs.filter(run => run.mode === mode));
   for (let index = 0; index < groups[0].length; index += 1) {
@@ -43,7 +67,7 @@ const rows = before.modes.map(mode => {
     p95Ms: median(runs.map(run => run.p95Ms)),
     p99Ms: median(runs.map(run => run.p99Ms)),
     cpuFrameMs: median(runs.flatMap(run => run.samples.map(sample => sample.cpuFrameMs).filter(Number.isFinite))),
-    gpuFrameMs: median(runs.flatMap(run => run.samples.map(sample => sample.gpuFrameMs).filter(Number.isFinite))),
+    gpuFrameMs: median(runs.flatMap(gpuReadingsForRun)),
     runs: runs.map(run => ({ repeat: run.repeat, fps: run.effectiveFps, p95Ms: run.p95Ms,
       intervalCount: run.intervalCount, measuredDurationMs: run.measuredDurationMs })),
   }));
@@ -55,7 +79,7 @@ const comparison = { conditionsMatched: true, conditionScope: 'recorded-inputs-a
   before: path.resolve(beforePath), after: path.resolve(afterPath),
   renderer: before.initial.renderer, width: before.initial.width, height: before.initial.height, dpr: before.initial.dpr,
   sourceSha256: before.sourceSha256, inventorySha256: before.inventorySha256, replaySha256: before.replaySha256,
-  semantics: 'FPS 为三轮有效 FPS 中位数；P95/P99 为三轮逐帧分位数的中位数，不能当作合并总体分位数。CPU/GPU 来自 1 Hz 计数器，空数据保持 null。',
+  semantics: 'FPS 为各轮有效 FPS 中位数；P95/P99 为各轮逐帧分位数的中位数，不能当作合并总体分位数。CPU 使用 1 Hz 样本；GPU 有计数时仅使用各轮新增的有效查询，无计数的旧报告保持历史口径。缺测保持 null。',
   rows };
 await writeFile(outputPath, JSON.stringify(comparison, null, 2));
 console.log(JSON.stringify({ conditionsMatched: true, rows: rows.map(({ mode, before, after, fpsChangePercent }) => (

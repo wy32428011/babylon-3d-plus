@@ -1498,6 +1498,7 @@ export function PlayerApp() {
         }),
         collectDetailedGpuWorkloads: false,
         captureFrameTimings: true,
+        captureGpuFrameTime: true,
       }), setPerformanceSnapshot, Date.now, () => runtime.getTelemetryPerformanceMetrics()));
       performanceSessionRef.current = session;
     } catch (error) {

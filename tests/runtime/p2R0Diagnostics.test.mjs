@@ -74,7 +74,7 @@ test('实际 Viewer 指标 JSX 对缺失 CPU/Draw 不调用 toFixed 或渲染空
   const ast = ts.createSourceFile(file.pathname, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const paragraphs = [];
   const visit = node => { if (ts.isJsxElement(node) && node.openingElement.tagName.getText(ast) === 'p'
-    && /CPU 帧|绘制.*GPU|活动网格评估|Draw Call/.test(node.getText(ast))) paragraphs.push(node); ts.forEachChild(node, visit); };
+    && /CPU 帧|绘制.*GPU|活动网格评估|performanceSnapshot\.drawCalls/.test(node.getText(ast))) paragraphs.push(node); ts.forEachChild(node, visit); };
   visit(ast);
   assert.equal(paragraphs.length, 4);
   for (const paragraph of paragraphs) {

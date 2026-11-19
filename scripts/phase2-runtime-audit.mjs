@@ -191,9 +191,11 @@ function installReferences() {
 
 function readRuntimeState() {
   const { runtime, monitor } = window.__phase2Audit, engine = runtime.scene.getEngine();
-  const counter = monitor.engineInstrumentation.gpuFrameTimeCounter;
+  const frameWorkTiming = monitor.getFrameWorkTiming?.() ?? null;
+  const counter = frameWorkTiming ? null : monitor.engineInstrumentation.gpuFrameTimeCounter;
   return { renderer: engine.getGlInfo(), buffer: [engine.getRenderWidth(), engine.getRenderHeight()],
-    visible: document.visibilityState, focused: document.hasFocus(), gpuCapture: monitor.gpuFrameTimeCaptureEnabled,
+    visible: document.visibilityState, focused: document.hasFocus(), frameWorkTiming,
+    gpuCapture: frameWorkTiming ? frameWorkTiming.gpuTimingStatus !== 'disabled' : monitor.gpuFrameTimeCaptureEnabled,
     engineCapture: engine._captureGPUFrameTime, beginObservers: engine.onBeginFrameObservable.observers.length,
     counter: counter ? { count: counter.count, current: counter.current, average: counter.lastSecAverage } : null,
     loading: runtime.getPerformanceMetrics().loading,
@@ -206,18 +208,26 @@ function captureGpuWindow(durationMs) {
     const { runtime, monitor } = window.__phase2Audit, engine = runtime.scene.getEngine(), gl = engine._gl;
     const ext = gl.getExtension('EXT_disjoint_timer_query_webgl2'), start = performance.now();
     const size = [engine.getRenderWidth(), engine.getRenderHeight()], samples = [], invalidReasons = [];
-    let previousCount = monitor.engineInstrumentation.gpuFrameTimeCounter?.count ?? 0, disjointFrames = 0, frames = 0;
+    const sampled = typeof monitor.getFrameWorkTiming === 'function';
+    let previousCount = sampled ? monitor.getFrameWorkTiming().gpuFrameSamples
+      : monitor.engineInstrumentation.gpuFrameTimeCounter?.count ?? 0;
+    let disjointFrames = 0, frames = 0;
     const observer = engine.onEndFrameObservable.add(() => {
       frames++;
       if (document.visibilityState !== 'visible' || !document.hasFocus()) invalidReasons.push('not-visible-or-focused');
       if (engine.getRenderWidth() !== size[0] || engine.getRenderHeight() !== size[1]) invalidReasons.push('buffer-changed');
-      const disjoint = ext ? gl.getParameter(ext.GPU_DISJOINT_EXT) : false;
+      const timing = sampled ? monitor.getFrameWorkTiming() : null;
+      // GPU_DISJOINT_EXT 是读取后复位的标记；不可与新采样器争用。
+      const disjoint = timing ? timing.gpuTimingStatus === 'disjoint' : ext && gl.getParameter(ext.GPU_DISJOINT_EXT);
       if (disjoint) disjointFrames++;
-      const counter = monitor.engineInstrumentation.gpuFrameTimeCounter;
-      if (counter && counter.count > previousCount) {
-        if (!disjoint) samples.push({ atMs: performance.now() - start, milliseconds: counter.current / 1e6, count: counter.count });
-        previousCount = counter.count;
+      const counter = timing ? null : monitor.engineInstrumentation.gpuFrameTimeCounter;
+      const count = timing?.gpuFrameSamples ?? counter?.count ?? 0;
+      const milliseconds = timing ? timing.gpuFrameMs : counter ? counter.current / 1e6 : null;
+      if (count < previousCount || timing?.gpuTimingStatus === 'context-lost') invalidReasons.push('gpu-capture-reset');
+      if (count > previousCount && !disjoint && Number.isFinite(milliseconds) && milliseconds >= 0) {
+        samples.push({ atMs: performance.now() - start, milliseconds, count });
       }
+      previousCount = count;
     });
     setTimeout(() => {
       engine.onEndFrameObservable.remove(observer);

@@ -1,4 +1,5 @@
 import type { ScenePerformanceSnapshot } from '../../runtime/babylon/ScenePerformanceMonitor';
+import { copyFrameWorkTiming, FRAME_WORK_TIMING_SEMANTICS } from '../../runtime/babylon/GpuFrameTimeSampler.ts';
 import type { FrameTimingReport } from '../../runtime/babylon/FrameTimingWindow';
 import { copySceneRenderPassSnapshot } from '../../runtime/babylon/SceneRenderPassDiagnostics.ts';
 import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
@@ -11,7 +12,8 @@ const WARMUP_WINDOW_MS = 2_000;
 
 export type EditorPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
   'sampledAt' | 'fps' | 'frameTimeMs' | 'renderTimeMs' | 'activeMeshesEvaluationMs'
-  | 'gpuFrameTimeMs' | 'renderPasses' | 'gpuParticles' | 'renderSurface' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
+  | 'gpuFrameTimeMs' | 'cpuFrameMs' | 'gpuFrameMs' | 'gpuTimingStatus' | 'gpuFrameSamples'
+  | 'renderPasses' | 'gpuParticles' | 'renderSurface' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
   | 'totalMeshes' | 'totalVertices' | 'thinInstances' | 'activeThinInstances'
   | 'estimatedActiveVertexInvocations' | 'estimatedActiveTriangleInvocations'
   | 'longTaskCount' | 'longTaskDurationMs'>;
@@ -64,6 +66,7 @@ function selectSample(snapshot: EditorPerformanceSourceSnapshot, sampledAt: numb
     renderTimeMs: nullableMetric(snapshot.renderTimeMs),
     activeMeshesEvaluationMs: nullableMetric(snapshot.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(snapshot.gpuFrameTimeMs),
+    ...copyFrameWorkTiming(snapshot),
     ...(snapshot.renderPasses !== undefined ? { renderPasses: copySceneRenderPassSnapshot(snapshot.renderPasses) } : {}),
     ...(snapshot.gpuParticles ? { gpuParticles: {
       requested: snapshot.gpuParticles.requested, backend: snapshot.gpuParticles.backend, ready: snapshot.gpuParticles.ready,
@@ -179,7 +182,8 @@ export function createEditorPerformanceRunSession(
         warmupWindowMs: WARMUP_WINDOW_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
         recordedSampleCount,
-        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe 1 Hz samples, not individual frames. frameTiming separately reports completed-render-frame intervals. The first two seconds are excluded. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
+        frameWorkTimingSemantics: FRAME_WORK_TIMING_SEMANTICS,
+        counterSemantics: 'Legacy CPU/draw Babylon counters use the last-second mean when available; summary percentiles describe 1 Hz samples, not individual frames. frameTiming separately reports completed-render-frame intervals. The first two seconds are excluded. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
         telemetrySemantics: 'Counter deltas and telemetry timing cover this performance run, including warmup. stages are exclusive subspans of the last telemetry frame and must not be added to its total. Callbacks outside the telemetry frame require a CPU profile. Scene timing samples retain the latest minute of this run; a stopped report stays frozen.',
         telemetry,
         summary: summarize(samples),

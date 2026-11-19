@@ -2,6 +2,9 @@ import { PROJECT_OPEN_TRACE_LIMIT, ProjectOpenTraceRecorder, readProjectOpenTrac
   projectOpenIpcResidual, joinProjectOpenTraces, type ProjectOpenTraceSnapshot, type ProjectOpenTraceContext,
   type ProjectOpenSpanToken, type ProjectOpenSpanOutcome, type ProjectOpenTraceStatus, type ProjectOpenTask } from '../../../electron/shared/projectOpenTrace.ts';
 import type { ProjectOpenIpcTiming } from '../../../electron/types';
+import {
+  ProjectOpenLongTaskObserver, readProjectOpenLongTasks, type ProjectOpenLongTaskCapture,
+} from './projectOpenLongTasks.ts';
 
 type Entry = { recorder: ProjectOpenTraceRecorder; sceneSessionId: string | null };
 const SESSION = /^[A-Za-z\d][A-Za-z\d_.:-]{0,127}$/;
@@ -64,11 +67,15 @@ export class RendererProjectOpenTraceStore {
 
 type BridgePair = { openId: string; operation: 'openProject' | 'sceneResources'; spanId: string | null;
   rendererStartMs: number | null; rendererEndMs: number | null; mainStartMs: number | null; mainEndMs: number | null };
-type OpenEntry = { recorder: ProjectOpenTraceRecorder; phase5?: ProjectOpenSpanToken; issues: boolean; pairs: BridgePair[] };
+type OpenEntry = {
+  recorder: ProjectOpenTraceRecorder; phase5?: ProjectOpenSpanToken; issues: boolean; pairs: BridgePair[];
+  longTasks?: ProjectOpenLongTaskCapture;
+};
 export type ProjectOpenRequestToken = Readonly<{ context: ProjectOpenTraceContext; finish: (outcome: ProjectOpenSpanOutcome,
   result?: { trace?: ProjectOpenTraceSnapshot; traceIpc?: ProjectOpenIpcTiming }) => void }>;
 const rendererTraces = new RendererProjectOpenTraceStore();
 const openEntries = new Map<string, OpenEntry>();
+const longTaskObserver = new ProjectOpenLongTaskObserver(traceNow);
 let nextDetail: 'phases' | 'assets' = 'phases';
 
 /** 仅下一次被Home接受的打开消费；不持久化，不生成ID，也不注册采样器。 */
@@ -87,8 +94,14 @@ export function beginHomeProjectOpenTrace(openId: string): ProjectOpenTraceConte
   return safely(undefined, () => {
     const recorder = rendererTraces.start({ version: 1, openId, detail }); if (!recorder) return undefined;
     // 与8项主归属表一致淘汰，不能额外无限保存已完成请求包络。
-    for (const id of openEntries.keys()) if (!rendererTraces.forOpen(id)) openEntries.delete(id);
-    openEntries.set(openId, { recorder, issues: false, pairs: [] }); return recorder.context;
+    for (const [id, entry] of openEntries) {
+      if (rendererTraces.forOpen(id)) continue;
+      if (entry.longTasks) longTaskObserver.stop(entry.longTasks);
+      openEntries.delete(id);
+    }
+    const longTasks = safely(undefined, () => longTaskObserver.start(recorder.getRootStartMs()));
+    openEntries.set(openId, { recorder, issues: false, pairs: [], longTasks });
+    return recorder.context;
   });
 }
 
@@ -130,7 +143,13 @@ export function getSceneProjectOpenRecorder(sceneSessionId: string): ProjectOpen
   return safely(undefined, () => { const recorder = rendererTraces.forScene(sceneSessionId); return recorder?.getStatus() === 'active' ? recorder : undefined; });
 }
 /** 未提交/失败/取消的Home动作也可按明确ID读取；不查“最近一次”来替换调用方ID。 */
-export function readProjectOpenTrace(openId: string) { return safely(openEntries.get(openId), () => rendererTraces.read(openId)) ?? null; }
+export function readProjectOpenTrace(openId: string) {
+  const entry = openEntries.get(openId);
+  const snapshot = safely(entry, () => rendererTraces.read(openId));
+  if (!snapshot) return null;
+  const longTasks = safely(undefined, () => readProjectOpenLongTasks(entry?.longTasks, snapshot));
+  return { ...snapshot, ...(longTasks ? { longTasks } : {}) };
+}
 export function beginProjectOpenTask(context: ProjectOpenTraceContext | undefined, stage: ProjectOpenTask): ProjectOpenSpanToken | undefined {
   const entry = entryFor(context); return entry?.recorder.getStatus() === 'active' ? safely(entry, () => entry.recorder.beginTask(stage, 'sceneCommitResourceSync', { parent: entry.phase5?.ref ?? entry.recorder.rootRef })) : undefined;
 }
@@ -143,7 +162,9 @@ export function completeProjectOpenResources(context: ProjectOpenTraceContext | 
     entry.phase5?.end(outcome, outcome === 'skipped' ? 'not-applicable' : outcome === 'ok' ? undefined : 'diagnostic-incomplete'); });
 }
 export function finishProjectOpenTrace(context: ProjectOpenTraceContext | undefined, status: Exclude<ProjectOpenTraceStatus, 'active'>): void {
-  const entry = entryFor(context); if (!entry || entry.recorder.getStatus() !== 'active') return;
+  const entry = entryFor(context); if (!entry) return;
+  if (entry.longTasks) longTaskObserver.stop(entry.longTasks);
+  if (entry.recorder.getStatus() !== 'active') return;
   safely(entry, () => { if (status !== 'ready') entry.issues = true;
     if (status !== 'ready') entry.phase5?.end(status === 'cancelled' ? 'cancelled' : status === 'stale' ? 'stale' : 'error', 'diagnostic-incomplete');
     entry.recorder.finish(status === 'ready' && entry.issues ? 'partial' : status); });
@@ -166,6 +187,7 @@ export async function readSceneProjectOpenReport(sceneSessionId: string,
   let stale = getSceneProjectOpenContext(sceneSessionId)?.openId !== context.openId;
   if (isCurrent) { try { stale ||= !isCurrent(); } catch { entry.recorder.noteDiagnosticFailure(); stale = true; } }
   const renderer = entry.recorder.snapshot();
+  const longTasks = safely(undefined, () => readProjectOpenLongTasks(entry.longTasks, renderer));
   const pairs = entry.pairs.map(pair => {
     const actual = main?.spans.find(span => span.kind === 'bridge' && span.ipcOperation === pair.operation
       && span.parent?.openId === pair.openId && span.parent?.spanId === pair.spanId);
@@ -176,6 +198,6 @@ export async function readSceneProjectOpenReport(sceneSessionId: string,
   const initial = pairs.find(pair => pair.operation === 'openProject');
   const joint = joinProjectOpenTraces(renderer, main, { openId: context.openId, rendererStartMs: initial?.rendererStartMs ?? null,
     rendererEndMs: initial?.rendererEndMs ?? null, mainStartMs: initial?.mainStartMs ?? null, mainEndMs: initial?.mainEndMs ?? null });
-  return { ...joint, sceneSessionId, stale, bridges: pairs,
+  return { ...joint, sceneSessionId, stale, bridges: pairs, ...(longTasks ? { longTasks } : {}),
     criticalPathComplete: joint.criticalPathComplete && !stale && !entry.issues && pairs.every(pair => pair.packetMatches && pair.residual.valid) };
 }

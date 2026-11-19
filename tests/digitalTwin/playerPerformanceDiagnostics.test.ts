@@ -11,6 +11,7 @@ function snapshot(fps = 60): PlayerPerformanceSourceSnapshot {
   return {
     sampledAt: '2026-09-08T00:00:00.000Z', fps, frameTimeMs: 6, renderTimeMs: 4,
     activeMeshesEvaluationMs: 1, gpuFrameTimeMs: null, shaderCompilationMs: 0,
+    cpuFrameMs: 6, gpuFrameMs: null, gpuTimingStatus: 'unsupported', gpuFrameSamples: 0,
     drawCalls: 12, activeMeshes: 8, totalMeshes: 16, totalVertices: 1000,
     thinInstances: 0, longTaskCount: 0, longTaskDurationMs: 0,
   };
@@ -50,6 +51,10 @@ test('诊断按一秒采样，报告仅保留性能白名单且 GPU 不可用保
   assert.equal(source.interval, 1000);
   assert.equal(updates, 1);
   assert.equal(report.samples[0].gpuFrameTimeMs, null);
+  assert.equal(report.samples[0].gpuFrameMs, null);
+  assert.equal(report.samples[0].gpuTimingStatus, 'unsupported');
+  assert.equal(report.samples[0].gpuFrameSamples, 0);
+  assert.equal(report.samples[0].cpuFrameMs, 6);
   assert.equal(report.summary.maximumGpuFrameTimeMs, null);
   assert.equal(report.summary.averageFps, 60);
   assert.equal(report.summary.p95SampleFrameTimeMs, 6);

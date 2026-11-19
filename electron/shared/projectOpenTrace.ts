@@ -7,6 +7,7 @@ export const PROJECT_OPEN_TASKS = ['ipcInvoke', 'previousTaskDrain', 'sourceDete
   'assetQueue', 'assetReadDecode', 'environmentQueue', 'environmentReadDecode', 'environmentClone', 'environmentRenderReady',
   'templateWait', 'modelAcquire', 'modelClone', 'modelInitialize', 'modelScriptRefresh', 'scriptInitialize', 'scriptConstructor',
   'scriptOnStart', 'presentationRefresh', 'entrancePrepare', 'modelArrayBatch', 'cargoReady', 'skyboxReady',
+  'lightingClassificationSources',
   'gpuCapabilityProbe', 'shaderWarmup', 'firstFrameValidation', 'rawCacheRead', 'networkRequest', 'networkBodyRead',
   'integrityCheck', 'cacheWrite'] as const;
 export const PROJECT_OPEN_TRACE_LIMIT = 8;
@@ -137,6 +138,7 @@ export class ProjectOpenTraceRecorder {
   /** 异常只影响诊断完整性，不替换原业务返回值或错误。 */
   noteDiagnosticFailure(): void { this.diagnosticErrors++; }
   getStatus(): ProjectOpenTraceStatus { return this.status; }
+  getRootStartMs(): number | null { return this.startedAt; }
 
   private metadata(options?: ProjectOpenSpanOptions): ProjectOpenSpanOptions {
     if (!options) return {};

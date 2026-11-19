@@ -7,7 +7,8 @@ export type SceneLoadStage = 'assetQueue' | 'assetReadDecode' | 'environmentQueu
   | 'modelClone' | 'scriptInitialize' | 'scriptConstructor' | 'scriptOnStart' | 'entrancePrepare' | 'firstFrameValidation'
   | 'gpuCapabilityProbe' | 'shaderWarmup'
   | 'rawCacheRead' | 'networkRequest' | 'networkBodyRead' | 'integrityCheck' | 'cacheWrite'
-  | 'modelAcquire' | 'templateWait' | 'modelArrayBatch' | 'cargoReady' | 'skyboxReady';
+  | 'modelAcquire' | 'templateWait' | 'modelArrayBatch' | 'cargoReady' | 'skyboxReady'
+  | 'lightingClassificationSources';
 
 /** 只含诊断纯数据；异步入口捕获此对象，切换场景不会改写其 openId。 */
 export type SceneLoadTraceScope = {

@@ -1493,18 +1493,15 @@
     },
     {
       "file": "scripts/smoke-extreme-scene-performance.mjs",
-      "sha256": "42e0b6beb90680d22bc23c9d68de6bcd450dfe726ebdcd9d36826a8f831b08a6",
+      "sha256": "7341702ba3f8edba27492b00a4c5330fb93a85c926ee874aa8fae121330d8025",
       "disposition": "performance",
       "domain": null,
       "command": "node scripts/smoke-extreme-scene-performance.mjs --scene <scene.json> --workspace <工作区> --output <报告目录>",
-      "purpose": "browser / WebGL 候选；包含文件/源码断言候选；按原脚本独立执行和检查前置",
+      "purpose": "真实 Electron 运动场景性能采样，另提供离线单变量 B–A–A–B 归因",
       "prerequisites": [
-        "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
-        "先执行 npm run build:electron，产物必须对应当前源码",
-        "包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程",
-        "本机 Playwright 兼容 Chrome/Edge 或 CHROME_PATH；实际窗口/WebGL/IndexedDB 条件按文件保持；串行运行 GPU 样本",
-        "本机 Electron 二进制；保留临时 userData、TEST_ROOT 与 IPC 初始化；不能用普通 node 代替 Electron",
-        "独占采样；记录真实输入、机器/GPU和配置；CPU/IO 微基准与工厂 FPS 分开报告；不并发构建/测试"
+        "当前源码执行 npm run build；安装 lockfile 对应依赖及 Electron 二进制",
+        "独立 userData、本机回放 Broker 和真实硬件 WebGL；采样期间不并发构建或 GPU 测试",
+        "旧入口按场景和 workspace 条件运行；--baab 使用离线工程副本和覆盖预热及采样的匹配录制"
       ],
       "evidence": [
         {
@@ -1528,20 +1525,24 @@
           "text": "import path from 'node:path';"
         },
         {
-          "line": 6,
+          "line": 7,
           "text": "import { parseArgs } from 'node:util';"
         },
         {
-          "line": 7,
+          "line": 8,
           "text": "import { _electron } from 'playwright';"
         },
         {
-          "line": 8,
+          "line": 9,
           "text": "import { createPerformanceMqttReplay } from './lib/performanceMqttReplay.mjs';"
         },
         {
-          "line": 37,
+          "line": 53,
           "text": "const sourcePath = path.resolve(values.scene), workspace = path.resolve(values.workspace);"
+        },
+        {
+          "line": 13,
+          "text": "if (args.includes('--baab')) {"
         }
       ]
     },
@@ -8114,7 +8115,7 @@
     },
     {
       "file": "tests/editor/editorPerformanceRunSession.test.ts",
-      "sha256": "27fc24276fb1eee936a484524458af213a587b476bb21d9d58d21bbff5be58bd",
+      "sha256": "4e3a8f84b22fd15ec7734034d81e5b8060c6f7554b4f9074c1ccb49473f2fa5f",
       "disposition": "node-contract",
       "domain": "observability",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/editorPerformanceRunSession.test.ts",
@@ -8124,27 +8125,27 @@
       ],
       "evidence": [
         {
-          "line": 83,
+          "line": 84,
           "text": "test('遥测使用本次运行增量，复制快照且报告不含业务字段', () => {"
         },
         {
-          "line": 102,
+          "line": 106,
           "text": "test('停止后报告冻结保留，晚到采样和普通运行数据不会污染，下次运行独立重置', () => {"
         },
         {
-          "line": 125,
+          "line": 129,
           "text": "test('采样历史有界且仅保留运行中最近一分钟，停止后不会因稍后复制而过期', () => {"
         },
         {
-          "line": 146,
+          "line": 150,
           "text": "test('无效计时和 Draw 保留不可用，兼容计数不会产生负增量', () => {"
         },
         {
-          "line": 156,
+          "line": 160,
           "text": "assert.equal(report.samples[0].frameTimeMs, null);"
         },
         {
-          "line": 165,
+          "line": 169,
           "text": "test('报告区分秒级样本分位数与逐帧统计，提前停止有明确空样本结果', () => {"
         }
       ]
@@ -10298,6 +10299,31 @@
       ]
     },
     {
+      "file": "tests/runtime/compareExtremeScenePerformance.test.mjs",
+      "sha256": "2a9244408ff71c1a964d60a9c2c97e79cc76932b152933815da18d77c4f7656a",
+      "disposition": "node-contract",
+      "domain": "observability",
+      "command": "node --test --test-concurrency=1 tests/runtime/compareExtremeScenePerformance.test.mjs",
+      "purpose": "等画质报告兼容旧采样，GPU 计数去重并拒绝硬件缩放报告",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖；独立 Node 进程；使用隔离夹具，无需真实 GPU"
+      ],
+      "evidence": [
+        {
+          "line": 54,
+          "text": "test('等画质比较兼容旧报告，CPU 的有效零和缺测均保留原语义', async (t) => {"
+        },
+        {
+          "line": 70,
+          "text": "test('带 GPU 计数的比较每轮只统计新增有效查询，不重复读取或使用不可用样本', async (t) => {"
+        },
+        {
+          "line": 99,
+          "text": "test('等画质入口拒绝硬件缩放诊断，即使报告其他字段都能配对', async (t) => {"
+        }
+      ]
+    },
+    {
       "file": "tests/runtime/conveyorArrowEffect.test.mjs",
       "sha256": "17e1183c0f8a801cfa9266b8e2d54350d74e6159a1c4da241cb5f8463cb0bf3d",
       "disposition": "node-contract",
@@ -10677,6 +10703,35 @@
         [
           "/src/runtime/babylon/SceneEnvironmentRuntime.ts"
         ]
+      ]
+    },
+    {
+      "file": "tests/runtime/extremeSceneBaab.test.mjs",
+      "sha256": "d510636754a3200597c5ce152663a9dda48a146bc82e81c682be6bff2c2e6024",
+      "disposition": "node-contract",
+      "domain": "observability",
+      "command": "node --test --test-concurrency=1 tests/runtime/extremeSceneBaab.test.mjs",
+      "purpose": "验证 BAAB 探针、计量窗口、回放覆盖、输入一致性和 CPU/GPU 判读边界",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖；独立 Node 进程；使用隔离夹具，无需真实 GPU"
+      ],
+      "evidence": [
+        {
+          "line": 140,
+          "text": "test('诊断探针可读取拆分后的资源清单，遥测帧方法保持原样', () => {"
+        },
+        {
+          "line": 181,
+          "text": "test('采样观察器只在约定墙钟窗口内计量，且核验中途 DPR 变化', () => {"
+        },
+        {
+          "line": 219,
+          "text": "test('尾部断流、只有故障值变化、未绑定设备和敏感 EPV 点位均不能作为运动输入', () => {"
+        },
+        {
+          "line": 231,
+          "text": "test('完整 B-A-A-B 按真实 60 秒FPS 判定；两对均须同向过线，GPU 不可用仍是 null', () => {"
+        }
       ]
     },
     {

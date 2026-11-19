@@ -170,8 +170,13 @@ try {
   throw error;
 } finally {
   try {
-    await launched?.close();
+    if (launched) {
+      // 此实例仅打开本次测试的空场景；避免新建立方体触发未保存确认拖住验收。
+      try { await launched.evaluate(({ app }) => setImmediate(() => app.exit())); }
+      catch { /* 连接已关闭时由 Playwright 收尾。 */ }
+      await launched.close();
+    }
   } finally {
-    rmSync(userDataRoot, { recursive: true, force: true });
+    rmSync(userDataRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }

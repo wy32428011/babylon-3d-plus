@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { initialChunkNames, buildAnalysisPlugins } from '../scripts/build-analysis-plugin.ts';
 import { captureBuildInputs } from '../scripts/lib/build-provenance.mjs';
+import { checkInitialJsBudget } from '../scripts/lib/build-size-budget.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -71,4 +72,21 @@ test('normal builds have no analysis hooks and enabled reports stay outside bund
     if (previous === undefined) delete process.env.ANALYZE;
     else process.env.ANALYZE = previous;
   }
+});
+
+test('首屏 JS 以原始字节计量，超过基线 5% 时失败', () => {
+  const baseline = { initialJsBytes: { editor: 1000, viewer: 2003 } };
+  const summary = (target: string, bytes: number) => ({
+    target,
+    totals: { initial: { bytes, gzipBytes: 1 }, all: { bytes: 99999 } },
+  });
+  assert.deepEqual(checkInitialJsBudget('editor', summary('editor', 1050), baseline), {
+    actualBytes: 1050, baselineBytes: 1000, limitBytes: 1050, withinBudget: true,
+  });
+  assert.equal(checkInitialJsBudget('editor', summary('editor', 1051), baseline).withinBudget, false);
+  assert.equal(checkInitialJsBudget('viewer', summary('viewer', 2103), baseline).withinBudget, true);
+  assert.equal(checkInitialJsBudget('viewer', summary('viewer', 2104), baseline).withinBudget, false);
+  assert.throws(() => checkInitialJsBudget('editor', summary('viewer', 1), baseline), /缺少有效/);
+  assert.throws(() => checkInitialJsBudget('viewer', summary('viewer', 0), baseline), /缺少有效/);
+  assert.throws(() => checkInitialJsBudget('viewer', summary('viewer', 1), null), /缺少有效/);
 });

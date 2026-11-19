@@ -7,13 +7,13 @@ import { EngineInstrumentation } from '@babylonjs/core/Instrumentation/engineIns
 import { SceneInstrumentation } from '@babylonjs/core/Instrumentation/sceneInstrumentation';
 import type { SceneRuntimePerformanceMetrics } from './SceneRuntime';
 import { getGpuCapabilityProfile } from './gpuCapabilityProfile';
+import { GpuFrameTimeSampler, FRAME_WORK_TIMING_SEMANTICS, type FrameWorkTiming } from './GpuFrameTimeSampler.ts';
 import { FrameTimingWindow, type FrameTimingReport, type FrameTimingWallClockReport } from './FrameTimingWindow';
 import { SceneRenderPassDiagnostics, type SceneRenderPassSnapshot } from './SceneRenderPassDiagnostics.ts';
 import { getGpuParticleRuntimeSnapshot, type GpuParticleRuntimeSnapshot } from './gpuParticleRuntime.ts';
 
 const DEFAULT_SAMPLE_INTERVAL_MS = 1_000;
 const MAX_HISTORY_SAMPLES = 60;
-const GPU_NANOSECONDS_TO_MILLISECONDS = 0.000001;
 const MAX_GPU_WORKLOAD_ENTRIES = 12;
 
 export type EditModeThinInstancePlanPerformanceMetrics = {
@@ -106,7 +106,7 @@ export type ScenePerformanceGpuMaterialTotals = {
   pbrVertexInvocations: number;
 };
 
-export type ScenePerformanceSnapshot = {
+export type ScenePerformanceSnapshot = FrameWorkTiming & {
   sampledAt: string;
   fps: number;
   frameTimeMs: number | null;
@@ -166,7 +166,7 @@ type ScenePerformanceMonitorOptions = {
   /** 发布诊断可省略材质、包围盒与资源名称明细；基础 CPU/GPU 计数和几何总量仍正常采集。 */
   collectDetailedGpuWorkloads?: boolean | (() => boolean);
   captureFrameTimings?: boolean;
-  /** 编辑器仅在诊断可见/运行时启用GPU查询，普通渲染不承担查询成本。 */
+  /** 显式开启时才在支持的 WebGL2 设备上低频查询，默认关闭。 */
   captureGpuFrameTime?: boolean | (() => boolean);
   /** 默认跟随诊断 GPU 开关；允许单独关闭阶段观察，不影响原有帧计数器。 */
   captureRenderPasses?: boolean | (() => boolean);
@@ -204,7 +204,7 @@ function readEngineInfo(engine: AbstractEngine): { vendor: string; renderer: str
 
 function readRenderSurface(engine: AbstractEngine): ScenePerformanceSnapshot['renderSurface'] {
   try {
-    const width = engine.getRenderWidth(), height = engine.getRenderHeight(), hardwareScalingLevel = engine.getHardwareScalingLevel();
+    const width = engine.getRenderWidth(true), height = engine.getRenderHeight(true), hardwareScalingLevel = engine.getHardwareScalingLevel();
     return [width, height, hardwareScalingLevel].every(value => Number.isFinite(value) && value > 0)
       ? { width, height, hardwareScalingLevel } : null;
   } catch { return null; }
@@ -508,9 +508,9 @@ export class ScenePerformanceMonitor {
   private longTaskObserver: PerformanceObserver | null = null;
   private pendingLongTaskCount = 0;
   private pendingLongTaskDurationMs = 0;
-  private gpuFrameTimeCaptureEnabled = false;
+  private readonly gpuFrameSampler: GpuFrameTimeSampler;
   private renderPassCaptureEnabled = false;
-  private gpuCaptureStartCount = 0;
+  private cpuCaptureStartCount = 0;
   private disposed = false;
   private frameTimings: FrameTimingWindow | null = null;
   private frameTimingObserver: Observer<Scene> | null = null;
@@ -532,8 +532,8 @@ export class ScenePerformanceMonitor {
       const counter = this.sceneInstrumentation.drawCallsCounter;
       return counter && counter.count > 0 && isAvailableMetric(counter.current) ? counter.current : null;
     });
-    this.syncGpuFrameTimeCapture();
-    this.syncRenderPassCapture();
+    this.gpuFrameSampler = new GpuFrameTimeSampler(engine, () => this.sceneInstrumentation.frameTimeCounter?.count ?? 0);
+    this.refreshDiagnostics();
 
     this.glInfo = readEngineInfo(engine);
     this.observeLongTasks();
@@ -603,10 +603,8 @@ export class ScenePerformanceMonitor {
 
   /** 返回最近一次实时快照并把它加入有界历史。 */
   sample(): ScenePerformanceSnapshot {
-    this.syncGpuFrameTimeCapture();
-    this.syncRenderPassCapture();
-    const gpuCounter = this.gpuFrameTimeCaptureEnabled ? this.engineInstrumentation.gpuFrameTimeCounter : null;
-    const gpuFrameTimeNanoseconds = gpuCounter && gpuCounter.count > this.gpuCaptureStartCount ? readCounterValue(gpuCounter) : null;
+    this.refreshDiagnostics();
+    const frameWorkTiming = this.getFrameWorkTiming();
     // installed Babylon 的公开 getter 委托到 engine._drawCalls；缺少此来源时保持不可用，不造替代 counter。
     const drawCalls = readCounterValue(this.sceneInstrumentation.drawCallsCounter);
     const details = this.options.collectDetailedGpuWorkloads;
@@ -617,9 +615,8 @@ export class ScenePerformanceMonitor {
       frameTimeMs: readCounterValue(this.sceneInstrumentation.frameTimeCounter),
       renderTimeMs: readCounterValue(this.sceneInstrumentation.renderTimeCounter),
       activeMeshesEvaluationMs: readCounterValue(this.sceneInstrumentation.activeMeshesEvaluationTimeCounter),
-      gpuFrameTimeMs: gpuFrameTimeNanoseconds !== null
-        ? gpuFrameTimeNanoseconds * GPU_NANOSECONDS_TO_MILLISECONDS
-        : null,
+      ...frameWorkTiming,
+      gpuFrameTimeMs: frameWorkTiming.gpuFrameMs,
       renderPasses: this.renderPassDiagnostics.sample(),
       gpuParticles: getGpuParticleRuntimeSnapshot(this.scene),
       renderSurface: readRenderSurface(this.engine),
@@ -658,18 +655,29 @@ export class ScenePerformanceMonitor {
     this.renderPassCaptureEnabled = enabled;
   }
 
-  /** 低频同步诊断开关；重新启用后必须取得新样本，不能把停用前残留计数当成本次测量。 */
-  private syncGpuFrameTimeCapture(): void {
+  /** 诊断入口变化时立即同步；低频 HUD 采样也可重新读取动态选项。 */
+  refreshDiagnostics(): void {
+    if (this.disposed) return;
     const option = this.options.captureGpuFrameTime;
-    const enabled = typeof option === 'function' ? option() : option !== false;
-    if (enabled === this.gpuFrameTimeCaptureEnabled) return;
-    try {
-      if (enabled) this.gpuCaptureStartCount = this.engineInstrumentation.gpuFrameTimeCounter?.count ?? 0;
-      this.engineInstrumentation.captureGPUFrameTime = enabled;
-      this.gpuFrameTimeCaptureEnabled = enabled && this.engineInstrumentation.captureGPUFrameTime;
-    } catch (error) {
-      console.warn('Scene View GPU frame time 采集不可用，HUD 将继续显示 CPU 与场景指标。', error);
-    }
+    this.gpuFrameSampler.setEnabled(typeof option === 'function' ? option() : option === true);
+    this.syncRenderPassCapture();
+  }
+
+  /** CPU 是最近完成的 Babylon 场景帧，不是两帧之间的墙钟间隔。 */
+  getFrameWorkTiming(): FrameWorkTiming {
+    const gpu = this.gpuFrameSampler.read();
+    const counter = this.sceneInstrumentation.frameTimeCounter;
+    const cpuFrameMs = !this.disposed && gpu.gpuTimingStatus !== 'context-lost' && counter &&
+      counter.count > this.cpuCaptureStartCount && isAvailableMetric(counter.current)
+      ? counter.current : null;
+    return { cpuFrameMs, ...gpu };
+  }
+
+  /** Editor 的 WebGL 引擎可跨文档复用；丢弃上一文档待决查询及报告历史。 */
+  resetSceneTiming(): void {
+    this.history.length = 0;
+    this.cpuCaptureStartCount = this.sceneInstrumentation.frameTimeCounter?.count ?? 0;
+    this.gpuFrameSampler.reset();
   }
 
   /** 生成包含 renderer、最近一分钟采样和摘要的 JSON 报告。 */
@@ -679,6 +687,7 @@ export class ScenePerformanceMonitor {
       renderer: this.glInfo,
       gpuCapabilityProfile: getGpuCapabilityProfile(this.engine),
       summary: summarizeScenePerformance(this.history),
+      frameWorkTimingSemantics: FRAME_WORK_TIMING_SEMANTICS,
       frameTiming: this.getFrameTimingReport(),
       wallClockFrameTiming: this.getWallClockFrameTimingReport(),
       samples: this.history,
@@ -696,13 +705,7 @@ export class ScenePerformanceMonitor {
     }
     this.longTaskObserver?.disconnect();
     this.longTaskObserver = null;
-    if (this.gpuFrameTimeCaptureEnabled) {
-      try {
-        this.engineInstrumentation.captureGPUFrameTime = false;
-      } catch {
-        // Engine 正在释放时只需继续清理 instrumentation observer。
-      }
-    }
+    this.gpuFrameSampler.setEnabled(false);
     this.renderPassDiagnostics.dispose();
     this.engineInstrumentation.dispose();
     this.sceneInstrumentation.dispose();

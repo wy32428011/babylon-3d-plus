@@ -1,4 +1,5 @@
 import type { ScenePerformanceSnapshot } from '../runtime/babylon/ScenePerformanceMonitor';
+import { copyFrameWorkTiming, FRAME_WORK_TIMING_SEMANTICS } from '../runtime/babylon/GpuFrameTimeSampler.ts';
 import type { FrameTimingReport } from '../runtime/babylon/FrameTimingWindow';
 import { copySceneRenderPassSnapshot } from '../runtime/babylon/SceneRenderPassDiagnostics.ts';
 import { copyTelemetryPerformanceStages, type TelemetryPerformanceStages } from '../runtime/babylon/telemetry/telemetryPerformanceStages.ts';
@@ -9,7 +10,8 @@ const MAX_SAMPLES = 60;
 
 export type PlayerPerformanceSourceSnapshot = Pick<ScenePerformanceSnapshot,
   'sampledAt' | 'fps' | 'frameTimeMs' | 'renderTimeMs' | 'activeMeshesEvaluationMs'
-  | 'gpuFrameTimeMs' | 'renderPasses' | 'gpuParticles' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
+  | 'gpuFrameTimeMs' | 'cpuFrameMs' | 'gpuFrameMs' | 'gpuTimingStatus' | 'gpuFrameSamples'
+  | 'renderSurface' | 'renderPasses' | 'gpuParticles' | 'shaderCompilationMs' | 'drawCalls' | 'activeMeshes'
   | 'totalMeshes' | 'totalVertices' | 'thinInstances' | 'longTaskCount' | 'longTaskDurationMs'>;
 
 export type PlayerPerformanceMonitor = {
@@ -43,6 +45,10 @@ export function isPlayerPerformanceEnabled(search: string): boolean {
 
 /** 使用固定白名单，避免把运行配置、资源名称或业务数据带入可复制报告。 */
 function selectPerformanceMetrics(sample: PlayerPerformanceSourceSnapshot): PlayerPerformanceSourceSnapshot {
+  const surface = sample.renderSurface;
+  const renderSurface = surface && [surface.width, surface.height, surface.hardwareScalingLevel]
+    .every(value => Number.isFinite(value) && value > 0)
+    ? { width: surface.width, height: surface.height, hardwareScalingLevel: surface.hardwareScalingLevel } : null;
   return {
     sampledAt: sample.sampledAt,
     fps: sample.fps,
@@ -50,6 +56,8 @@ function selectPerformanceMetrics(sample: PlayerPerformanceSourceSnapshot): Play
     renderTimeMs: nullableMetric(sample.renderTimeMs),
     activeMeshesEvaluationMs: nullableMetric(sample.activeMeshesEvaluationMs),
     gpuFrameTimeMs: nullableMetric(sample.gpuFrameTimeMs),
+    ...copyFrameWorkTiming(sample),
+    ...(surface !== undefined ? { renderSurface } : {}),
     ...(sample.renderPasses !== undefined ? { renderPasses: copySceneRenderPassSnapshot(sample.renderPasses) } : {}),
     ...(sample.gpuParticles ? { gpuParticles: {
       requested: sample.gpuParticles.requested, backend: sample.gpuParticles.backend, ready: sample.gpuParticles.ready,
@@ -147,7 +155,8 @@ export function startPlayerPerformanceSession(
         generatedAt: new Date(now()).toISOString(),
         sampleIntervalMs: SAMPLE_INTERVAL_MS,
         historyWindowMs: HISTORY_WINDOW_MS,
-        counterSemantics: 'Babylon counters use the last-second mean; summary percentiles describe samples, not individual frames. frameTiming separately reports completed-render-frame intervals. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
+        frameWorkTimingSemantics: FRAME_WORK_TIMING_SEMANTICS,
+        counterSemantics: 'Legacy CPU/draw Babylon counters use the last-second mean when available; summary percentiles describe samples, not individual frames. frameTiming separately reports completed-render-frame intervals. Null counters mean unavailable and are excluded from summaries; measured zero remains zero.',
         telemetrySemantics: 'Counters cover the runtime lifetime; lastFrameTimeMs times the last telemetry frame and maxFrameTimeMs covers this diagnostic session. stages are exclusive subspans and must not be added to the total. Callbacks outside this frame require a CPU profile. Null timing means unavailable.',
         summary: summarize(samples),
         frameTiming: monitor.getFrameTimingReport?.() ?? null,

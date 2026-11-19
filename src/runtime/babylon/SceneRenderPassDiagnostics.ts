@@ -1,5 +1,8 @@
-import type { Observable } from '@babylonjs/core/Misc/observable.js';
+import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
 import type { RenderTargetTexture } from '@babylonjs/core/Materials/Textures/renderTargetTexture.js';
+import type { Observable } from '@babylonjs/core/Misc/observable.js';
+import { PerfCounter } from '@babylonjs/core/Misc/perfCounter.js';
+import type { ObjectRenderer } from '@babylonjs/core/Rendering/objectRenderer.js';
 import type { Scene } from '@babylonjs/core/scene.js';
 
 const PHASES = ['animations', 'activeMeshes', 'renderTargets', 'draw', 'particles', 'camera'] as const;
@@ -9,16 +12,21 @@ type ShadowMeasurement = {
   lightId: number;
   targetId: number;
   face: number;
-  startedAt: number | null;
-  startedDraws: number | null;
   currentMs: number;
-  currentDraws: number;
+  currentDraws: number | null;
   currentPasses: number;
   totalMs: number;
-  totalDraws: number;
+  totalDraws: number | null;
   totalPasses: number;
-  drawsAvailable: boolean;
 };
+type PendingShadowPass = {
+  measure: ShadowMeasurement;
+  passId: number;
+  startedAt: number;
+  startedDraws: number | null;
+};
+type DrawCounterGeneration = { counter: PerfCounter; generation: number };
+type FrameDrawCounter = DrawCounterGeneration & { lastDraws: number };
 
 export type SceneRenderPassSnapshot = {
   /** 各阶段为包含式 CPU 墙钟时间，不能相加，也不是 GPU 执行时间。 */
@@ -62,27 +70,37 @@ export class SceneRenderPassDiagnostics {
   private readonly phases = Object.fromEntries(PHASES.map(phase => [phase, {
     startedAt: null, current: 0, total: 0,
   }])) as Record<Phase, Measurement>;
-  private readonly targets = new Map<RenderTargetTexture, { reset: () => void; release: () => void }>();
+  private readonly engine: AbstractEngine;
+  private readonly targets = new Map<RenderTargetTexture, () => void>();
+  private readonly pendingShadowPasses: PendingShadowPass[] = [];
   private readonly shadows = new Map<string, ShadowMeasurement>();
   private releases: Array<() => void> = [];
   private enabled = false;
-  private frameActive = false;
+  private frameId: number | null = null;
+  private frameDrawCounter: FrameDrawCounter | null = null;
+  private lastDrawCounterGeneration: DrawCounterGeneration | null = null;
   private completedFrames = 0;
   private discardedFrames = 0;
-  private totalDraws = 0;
-  private drawsAvailable = true;
+  private totalDraws: number | null = 0;
+  private totalShadowDraws: number | null = 0;
 
-  constructor(private readonly scene: Scene, private readonly readDrawCalls: () => number | null) {}
+  constructor(private readonly scene: Scene, private readonly readDrawCalls: () => number | null) {
+    this.engine = scene.getEngine();
+  }
 
   setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
     this.resetWindow();
+    this.lastDrawCounterGeneration = enabled ? this.getDrawCounterGeneration() : null;
     if (!enabled) {
       for (const release of this.releases) release();
       this.releases = [];
-      for (const target of this.targets.values()) target.release();
-      this.targets.clear(); this.shadows.clear(); this.frameActive = false;
+      for (const release of this.targets.values()) release();
+      this.targets.clear();
+      this.shadows.clear();
+      this.pendingShadowPasses.length = 0;
+      this.frameId = this.frameDrawCounter = null;
       return;
     }
     this.watch(this.scene.onBeforeAnimationsObservable, () => this.beginFrame());
@@ -94,6 +112,7 @@ export class SceneRenderPassDiagnostics {
     this.watchPhase('particles', this.scene.onBeforeParticlesRenderingObservable, this.scene.onAfterParticlesRenderingObservable);
     this.watchPhase('camera', this.scene.onBeforeCameraRenderObservable, this.scene.onAfterCameraRenderObservable);
     this.watch(this.scene.onAfterRenderObservable, () => this.endFrame());
+    this.syncShadowTargets();
   }
 
   /** 返回从上次采样以来完整帧的均值；未完成首帧时仍为不可用。 */
@@ -101,19 +120,18 @@ export class SceneRenderPassDiagnostics {
     if (!this.enabled || this.completedFrames === 0) return null;
     const frames = this.completedFrames;
     const passes = [...this.shadows.values()].filter(value => value.totalPasses > 0);
-    const shadowDraws = passes.every(value => value.drawsAvailable)
-      ? passes.reduce((sum, value) => sum + value.totalDraws, 0) / frames : null;
-    const totalDraws = this.drawsAvailable ? this.totalDraws / frames : null;
+    const shadowDraws = this.totalShadowDraws === null ? null : this.totalShadowDraws / frames;
+    const totalDraws = this.totalDraws === null ? null : this.totalDraws / frames;
     const snapshot: SceneRenderPassSnapshot = {
       timing: 'inclusive-cpu-wall-ms', completedFrames: frames, discardedFrames: this.discardedFrames,
       cpuMs: Object.fromEntries(PHASES.map(phase => [phase, this.phases[phase].total / frames])) as Record<Phase, number>,
       drawCallsPerFrame: totalDraws,
       shadowDrawCallsPerFrame: shadowDraws,
-      // 嵌套或外部重置计数器时不把负差伪装为零；其余绘制包括主通道和后处理。
+      // 其余绘制包括主通道和后处理，两类计数都有效时才相减。
       otherDrawCallsPerFrame: totalDraws !== null && shadowDraws !== null && totalDraws >= shadowDraws ? totalDraws - shadowDraws : null,
       shadowPasses: passes.map(value => ({ lightId: value.lightId, targetId: value.targetId, face: value.face,
         passes: value.totalPasses, cpuMsPerFrame: value.totalMs / frames,
-        drawCallsPerFrame: value.drawsAvailable ? value.totalDraws / frames : null })),
+        drawCallsPerFrame: value.totalDraws === null ? null : value.totalDraws / frames })),
     };
     this.resetWindow();
     return snapshot;
@@ -121,95 +139,166 @@ export class SceneRenderPassDiagnostics {
 
   dispose(): void { this.setEnabled(false); }
 
-  private watch<T>(observable: Observable<T>, callback: (value: T) => void, releases = this.releases): void {
-    const observer = observable.add(callback);
+  private watch<T>(
+    observable: Observable<T>, callback: (value: T) => void, releases = this.releases, insertFirst = false,
+  ): void {
+    const observer = observable.add(callback, -1, insertFirst);
     releases.push(() => observable.remove(observer));
   }
 
   private watchPhase<T, U>(phase: Phase, before: Observable<T>, after: Observable<U>): void {
     const measure = this.phases[phase];
-    this.watch(before, () => { if (this.frameActive) measure.startedAt = performance.now(); });
+    this.watch(before, () => { if (this.isCurrentFrame()) measure.startedAt = performance.now(); });
     this.watch(after, () => {
-      if (this.frameActive && measure.startedAt !== null) measure.current += Math.max(0, performance.now() - measure.startedAt);
+      if (this.isCurrentFrame() && measure.startedAt !== null) {
+        measure.current += Math.max(0, performance.now() - measure.startedAt);
+      }
       measure.startedAt = null;
     });
   }
 
+  private isCurrentFrame(): boolean {
+    return this.frameId === this.scene.getFrameId();
+  }
+
   private beginFrame(): void {
-    if (this.frameActive) this.discardedFrames++;
-    this.frameActive = true;
-    for (const target of this.targets.values()) target.reset();
+    if (this.frameId !== null) this.discardedFrames++;
+    this.frameId = this.scene.getFrameId();
+    this.pendingShadowPasses.length = 0;
     for (const phase of PHASES) { this.phases[phase].startedAt = null; this.phases[phase].current = 0; }
-    for (const value of this.shadows.values()) {
-      value.startedAt = null; value.startedDraws = null;
-      value.currentMs = value.currentDraws = value.currentPasses = 0;
+    for (const value of this.shadows.values()) value.currentMs = value.currentDraws = value.currentPasses = 0;
+
+    // SceneInstrumentation 在同一个 beforeAnimations 事件中先重置原生计数器。
+    const previous = this.lastDrawCounterGeneration;
+    const current = this.getDrawCounterGeneration();
+    this.lastDrawCounterGeneration = current;
+    this.frameDrawCounter = current && current.generation > 0
+      && (current.counter !== previous?.counter || current.generation > previous.generation)
+      ? { ...current, lastDraws: 0 } : null;
+    this.readFrameDraws();
+  }
+
+  private getDrawCounterGeneration(): DrawCounterGeneration | null {
+    const counter = this.engine._drawCalls;
+    const generation = counter?.count;
+    return Number.isSafeInteger(generation) && generation >= 0 ? { counter, generation } : null;
+  }
+
+  private readFrameDraws(): number | null {
+    const frame = this.frameDrawCounter;
+    if (!frame) return null;
+    const draws = this.readDrawCalls();
+    if (!PerfCounter.Enabled || this.engine._drawCalls !== frame.counter || frame.counter.count !== frame.generation
+      || draws === null || !Number.isSafeInteger(draws) || draws < frame.lastDraws) {
+      this.frameDrawCounter = null;
+      return null;
     }
+    frame.lastDraws = draws;
+    return draws;
   }
 
   private endFrame(): void {
-    if (!this.frameActive) return;
-    this.frameActive = false;
+    if (this.frameId === null) return;
+    const paired = this.isCurrentFrame();
+    const draws = paired ? this.readFrameDraws() : null;
+    this.lastDrawCounterGeneration = this.getDrawCounterGeneration();
+    this.frameId = this.frameDrawCounter = null;
+    for (const { measure } of this.pendingShadowPasses) measure.currentDraws = null;
+    this.pendingShadowPasses.length = 0;
+    if (!paired) { this.discardedFrames++; return; }
+
     this.completedFrames++;
     for (const phase of PHASES) this.phases[phase].total += this.phases[phase].current;
-    const draws = this.readDrawCalls();
-    if (draws === null) this.drawsAvailable = false; else this.totalDraws += draws;
+    if (draws === null) this.totalDraws = this.totalShadowDraws = null;
+    else if (this.totalDraws !== null) this.totalDraws += draws;
     for (const value of this.shadows.values()) {
-      value.totalMs += value.currentMs; value.totalDraws += value.currentDraws; value.totalPasses += value.currentPasses;
+      value.totalMs += value.currentMs;
+      value.totalPasses += value.currentPasses;
+      if (value.currentDraws === null || (draws === null && value.currentPasses > 0)) {
+        value.totalDraws = this.totalShadowDraws = null;
+      } else {
+        if (value.totalDraws !== null) value.totalDraws += value.currentDraws;
+        if (this.totalShadowDraws !== null) this.totalShadowDraws += value.currentDraws;
+      }
     }
   }
 
   private resetWindow(): void {
-    this.completedFrames = this.discardedFrames = this.totalDraws = 0;
-    this.drawsAvailable = true;
+    this.completedFrames = this.discardedFrames = this.totalDraws = this.totalShadowDraws = 0;
     for (const phase of PHASES) this.phases[phase].total = 0;
-    const activeTargets = new Set([...this.targets.keys()].map(target => target.uniqueId));
+    const activeTargets = this.frameId === null ? new Set([...this.targets.keys()].map(target => target.uniqueId)) : null;
     for (const [key, value] of this.shadows) {
-      value.totalMs = value.totalDraws = value.totalPasses = 0; value.drawsAvailable = true;
-      if (!activeTargets.has(value.targetId)) this.shadows.delete(key);
+      value.totalMs = value.totalDraws = value.totalPasses = 0;
+      if (activeTargets && !activeTargets.has(value.targetId)) this.shadows.delete(key);
     }
   }
 
   private syncShadowTargets(): void {
     const current = new Set<RenderTargetTexture>();
+    // Babylon 9.12 的 RTT 与其 ObjectRenderer 返回同一份 renderPassIds 数组。
+    const renderers = new Map(this.scene.objectRenderers.map(renderer => [renderer.renderPassIds, renderer]));
     for (const light of this.scene.lights) for (const generator of light.getShadowGenerators()?.values() ?? []) {
       const target = generator.getShadowMap();
-      if (!target || current.has(target)) continue;
+      if (!target || current.has(target) || !target.renderPassIds.length) continue;
+      const renderer = renderers.get(target.renderPassIds);
+      if (!renderer) continue;
       current.add(target);
-      if (this.targets.has(target)) continue;
-      const releases: Array<() => void> = [];
-      let bound = false;
-      let activePass: ShadowMeasurement | null = null;
-      const reset = () => { bound = false; activePass = null; };
-      this.watch(target.onBeforeBindObservable, () => { bound = true; }, releases);
-      this.watch(target.onAfterUnbindObservable, reset, releases);
-      this.watch(target.onBeforeRenderObservable, face => {
-        // 原生 readiness 检查也发出 before/after，但没有实际绑定和绘制，不计入渲染 pass。
-        if (!this.frameActive || !bound) return;
-        const key = `${target.uniqueId}:${face}`;
-        let value = this.shadows.get(key);
-        if (!value) {
-          value = { lightId: light.uniqueId, targetId: target.uniqueId, face, startedAt: null, startedDraws: null,
-            currentMs: 0, currentDraws: 0, currentPasses: 0, totalMs: 0, totalDraws: 0, totalPasses: 0, drawsAvailable: true };
-          this.shadows.set(key, value);
-        }
-        activePass = value;
-        value.startedAt = performance.now(); value.startedDraws = this.readDrawCalls();
-      }, releases);
-      this.watch(target.onAfterRenderObservable, () => {
-        // Babylon 9.12 的 CSM before 携带 layer，而 unbind 后的 after 仍携带 faceIndex=0。
-        const value = activePass;
-        activePass = null;
-        if (!this.frameActive || !bound || !value || value.startedAt === null) return;
-        value.currentMs += Math.max(0, performance.now() - value.startedAt); value.currentPasses++;
-        const draws = this.readDrawCalls();
-        if (draws === null || value.startedDraws === null || draws < value.startedDraws) value.drawsAvailable = false;
-        else value.currentDraws += draws - value.startedDraws;
-        value.startedAt = value.startedDraws = null;
-      }, releases);
-      this.targets.set(target, { reset, release: () => { for (const release of releases) release(); } });
+      if (!this.targets.has(target)) this.watchShadowTarget(target, renderer, light.uniqueId);
     }
-    for (const [target, value] of this.targets) if (!current.has(target)) {
-      value.release(); this.targets.delete(target);
+    for (const [target, release] of this.targets) if (!current.has(target)) {
+      release();
+      this.targets.delete(target);
     }
+  }
+
+  private watchShadowTarget(target: RenderTargetTexture, renderer: ObjectRenderer, lightId: number): void {
+    const releases: Array<() => void> = [];
+    // 此处的 passIndex 是 RTT 的 face 或 layer。Readiness 只发普通渲染通知。
+    this.watch(renderer.onBeforeRenderingManagerRenderObservable, face => {
+      if (!this.isCurrentFrame()) return;
+      const measure = this.getShadowMeasurement(lightId, target.uniqueId, face);
+      const passId = renderer.renderPassIds[face];
+      if (passId === undefined || passId !== this.engine.currentRenderPassId) {
+        measure.currentDraws = null;
+        return;
+      }
+      const enclosing = this.pendingShadowPasses.at(-1);
+      if (enclosing) {
+        // 嵌套区间的包含式差值会重复归属提交。
+        enclosing.measure.currentDraws = measure.currentDraws = null;
+      }
+      const startedDraws = this.readFrameDraws();
+      this.pendingShadowPasses.push({ measure, passId, startedAt: performance.now(), startedDraws });
+    }, releases);
+    // 优先于 RTT 的 after 回调，结束计数不包含目标后处理。
+    this.watch(renderer.onAfterRenderingManagerRenderObservable, face => {
+      if (!this.isCurrentFrame()) return;
+      const measure = this.getShadowMeasurement(lightId, target.uniqueId, face);
+      const pending = this.pendingShadowPasses.at(-1);
+      const passId = renderer.renderPassIds[face];
+      if (!pending || pending.measure !== measure || pending.passId !== passId || passId !== this.engine.currentRenderPassId) {
+        if (pending) pending.measure.currentDraws = null;
+        measure.currentDraws = null;
+        return;
+      }
+      this.pendingShadowPasses.pop();
+      measure.currentMs += Math.max(0, performance.now() - pending.startedAt);
+      measure.currentPasses++;
+      const draws = this.readFrameDraws();
+      if (draws === null || pending.startedDraws === null) measure.currentDraws = null;
+      else if (measure.currentDraws !== null) measure.currentDraws += draws - pending.startedDraws;
+    }, releases, true);
+    this.targets.set(target, () => { for (const release of releases) release(); });
+  }
+
+  private getShadowMeasurement(lightId: number, targetId: number, face: number): ShadowMeasurement {
+    const key = `${lightId}:${targetId}:${face}`;
+    let measure = this.shadows.get(key);
+    if (!measure) {
+      measure = { lightId, targetId, face, currentMs: 0, currentDraws: 0, currentPasses: 0,
+        totalMs: 0, totalDraws: 0, totalPasses: 0 };
+      this.shadows.set(key, measure);
+    }
+    return measure;
   }
 }

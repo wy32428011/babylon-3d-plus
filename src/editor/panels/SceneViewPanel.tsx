@@ -490,7 +490,8 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const isPerformanceRun = isRuntimePreview && runtimePerformanceEnabled;
   const isPerformanceHudExpanded = isPerformanceRun ? performanceRunHudExpanded : performanceHudExpanded;
   const showPerformanceHud = Boolean(performanceSnapshot && (props.performanceHudVisible || isPerformanceRun));
-  detailedGpuWorkloadsEnabledRef.current = showPerformanceHud && isPerformanceHudExpanded;
+  const detailedGpuWorkloadsEnabled = showPerformanceHud && isPerformanceHudExpanded;
+  detailedGpuWorkloadsEnabledRef.current = detailedGpuWorkloadsEnabled;
   adaptiveResolutionEnabledRef.current = adaptiveResolutionEnabled;
   const handleAdaptiveResolutionChange = useCallback((enabled: boolean) => {
     try {
@@ -1478,7 +1479,10 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
       performanceMonitor = new ScenePerformanceMonitor(viewport.engine, viewport.scene, {
         withControlledSceneObservers: initialize => initializedRuntime.withControlledSceneObservers(initialize),
         collectDetailedGpuWorkloads: () => detailedGpuWorkloadsEnabledRef.current,
-        captureGpuFrameTime: () => detailedGpuWorkloadsEnabledRef.current || performanceRunSessionRef.current !== null,
+        captureGpuFrameTime: () => {
+          const state = useEditorStore.getState();
+          return detailedGpuWorkloadsEnabledRef.current || (state.runtimeMode === 'preview' && state.runtimePerformanceEnabled);
+        },
         getRuntimeMetrics: () => runtimeRef.current?.getPerformanceMetrics() ?? initializedRuntime.getPerformanceMetrics(),
         getEditThinInstancePlanMetrics: () => editModeThinInstancePlanPerformanceRef.current,
         getSceneFocusMetrics: () => sceneFocusPerformanceRef.current,
@@ -1513,7 +1517,13 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     teardown = () => {
       // WebGL 引擎可能先后显示多个文档；视角和统计都属于它最后同步的会话。
       const closingSessionId = statisticsSceneSessionRef.current ?? initialSceneSessionId;
-      preservedViewportViewRef.current = { sceneSessionId: closingSessionId, view: initializedViewport.getCameraView() };
+      try {
+        preservedViewportViewRef.current = { sceneSessionId: closingSessionId, view: initializedViewport.getCameraView() };
+      } catch (error) {
+        // 切场/卸载可能先于相机过渡结束；不能因此跳过 GPU 查询、观察器和引擎清理。
+        preservedViewportViewRef.current = null;
+        console.warn('释放 Scene View 时相机视图不可保存。', error);
+      }
       skyboxStatus.dispose();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
@@ -2167,9 +2177,14 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   }, [runtimeReady, runtimeReadyGeneration, sceneRuntimeStartupDeferred, attachCurrentSelectionGizmo, runtimeMode, isRuntimePreview, mqttConfig, publishSelectedInspectorSpatialInfo, pushLog, stopRuntimePreview]);
 
   useEffect(() => {
+    performanceMonitorRef.current?.refreshDiagnostics();
+  }, [detailedGpuWorkloadsEnabled, isPerformanceRun]);
+
+  useEffect(() => {
     const runtime = runtimeRef.current;
     const state = useEditorStore.getState();
     if (performanceRunSceneSessionIdRef.current !== sceneSessionId) {
+      performanceMonitorRef.current?.resetSceneTiming();
       performanceRunSceneSessionIdRef.current = sceneSessionId;
       performanceRunSessionRef.current = null;
       setPerformanceRunSnapshot(null);

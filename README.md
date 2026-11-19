@@ -26,6 +26,7 @@ ZENDING 3D EDITOR 是一个基于 Electron、Vite、React、TypeScript 与 Babyl
 - [烘焙性能与大场景稳定性评估及处理方案](docs/数字孪生编辑器烘焙性能与大场景稳定性评估.md)
 - [最近完成与变更记录](docs/changelog.md)
 - [极致性能实施说明](docs/extreme-performance-implementation.md)
+- [v0.4.17 性能复核、体积门禁与归因实验](docs/performance-baseline-review-2026-11-18.md)
 - [性能指南检测与无损优化](docs/babylon-perf-guide-audit.md)
 - [Babylon 只读几何声明与稀疏矩阵上传](docs/babylon-model-runtime-optimization.md)（旧模型策略不变；局部上传实验默认关闭）
 - [测试入口、平台与隔离要求清单](docs/test-inventory.md)

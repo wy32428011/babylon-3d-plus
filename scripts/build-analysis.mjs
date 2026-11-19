@@ -6,10 +6,18 @@ import os from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { captureBuildInputs } from './lib/build-provenance.mjs';
+import { checkInitialJsBudget } from './lib/build-size-budget.mjs';
 
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const selected = process.argv[2];
-if (selected && !['editor', 'viewer'].includes(selected)) throw new Error('用法: node scripts/build-analysis.mjs [editor|viewer]');
+const options = process.argv.slice(2);
+const checkBudget = options.includes('--check-budget');
+const [selected, ...extra] = options.filter((option) => option !== '--check-budget');
+if (extra.length || (selected && !['editor', 'viewer'].includes(selected))) {
+  throw new Error('用法：node scripts/build-analysis.mjs [editor|viewer] [--check-budget]');
+}
+const baseline = checkBudget
+  ? JSON.parse(await fs.readFile(path.join(workspace, 'scripts/build-size-baseline.json'), 'utf8'))
+  : null;
 const runRoot = path.resolve(workspace, 'output/bundle-analysis', new Date().toISOString().replaceAll(/[:.]/g, '-'));
 await fs.mkdir(runRoot, { recursive: true });
 const results = [];
@@ -37,7 +45,25 @@ for (const target of selected ? [selected] : ['editor', 'viewer']) {
     child.on('close', resolve);
   });
   await fs.writeFile(path.join(runRoot, target + '.log'), Buffer.concat(log));
-  results.push({ target, exitCode: code, wallMs: performance.now() - started, cache: 'unique empty cache directory; OS filesystem cache not cleared' });
+  const result = {
+    target,
+    exitCode: code,
+    wallMs: performance.now() - started,
+    cache: 'unique empty cache directory; OS filesystem cache not cleared',
+  };
+  if (checkBudget && code === 0) {
+    const summary = JSON.parse(await fs.readFile(path.join(runRoot, target, 'summary.json'), 'utf8'));
+    const budget = checkInitialJsBudget(target, summary, baseline);
+    result.initialJsBudget = budget;
+    const message = `${target} 首屏 JS ${budget.actualBytes} 字节，基线 ${budget.baselineBytes} 字节，+5% 上限 ${budget.limitBytes} 字节`;
+    if (budget.withinBudget) {
+      console.log(message);
+    } else {
+      console.error(`${message}，超出体积门禁。`);
+      process.exitCode = 1;
+    }
+  }
+  results.push(result);
   await fs.writeFile(path.join(runRoot, 'run.json'), JSON.stringify({ runRoot, provenance, results }, null, 2) + '\n');
   if (code !== 0) { process.exitCode = 1; break; }
 }

@@ -3,10 +3,26 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { _electron } from 'playwright';
 import { createPerformanceMqttReplay } from './lib/performanceMqttReplay.mjs';
 
+if (process.argv[1] && path.relative(fileURLToPath(import.meta.url), path.resolve(process.argv[1])) === '') {
+  const args = process.argv.slice(2);
+  if (args.includes('--baab')) {
+    const { runHardwareScalingDiagnosis } = await import('./diagnose-extreme-scene-baab.mjs');
+    await runHardwareScalingDiagnosis(args, {
+      launch: (options) => _electron.launch(options),
+      createPerformanceMqttReplay, configureWindow, selectProjectDirectory, openRecentScene,
+      waitForStableCanvas, installCapture, startCpuProfile,
+    });
+  } else {
+    await runLegacy();
+  }
+}
+
+async function runLegacy() {
 const { values } = parseArgs({ options: {
   scene: { type: 'string' }, workspace: { type: 'string' }, output: { type: 'string' },
   url: { type: 'string' },
@@ -101,50 +117,18 @@ try {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__performanceReactProbe?.renderers.size > 0);
   }
-  await app.evaluate(({ BrowserWindow }, fullscreen) => {
-    const window = BrowserWindow.getAllWindows()[0];
-    if (fullscreen) window.setFullScreen(true);
-    else {
-      window.setSize(1440, 900);
-      window.setResizable(false);
-      window.setMaximizable(false);
-      window.setMovable(false);
-    }
-  }, values.fullscreen);
+  await configureWindow(app, values.fullscreen);
   page.setDefaultTimeout(30000);
   page.on('pageerror', error => report.errors.push(redact(error.message)));
   page.on('dialog', dialog => dialog.accept()); // 仅本脚本创建的场景副本，无用户编辑。
   await page.bringToFront();
   if (values['project-root']) {
-    // SOURCE 工程副本沿用正常项目选择 IPC 建立资源授权，不把 Viewer 文件当成已打开工程。
-    const projectRoot = path.resolve(values['project-root']);
-    await app.evaluate(({ dialog }, root) => {
-      globalThis.__performanceOriginalDirectoryDialog = dialog.showOpenDialog;
-      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] });
-    }, projectRoot);
-    try {
-      const selected = await page.evaluate(() => window.editorApi.selectProjectDirectory());
-      assert.equal(selected.canceled, false);
-      assert.equal(path.resolve(selected.projectRoot), projectRoot);
-    } finally {
-      await app.evaluate(({ dialog }) => {
-        dialog.showOpenDialog = globalThis.__performanceOriginalDirectoryDialog;
-        delete globalThis.__performanceOriginalDirectoryDialog;
-      });
-    }
+    await selectProjectDirectory(app, page, path.resolve(values['project-root']));
   }
   if (values.fullscreen) await page.waitForFunction(() => Math.round(innerWidth * devicePixelRatio) === 3840
     && Math.round(innerHeight * devicePixelRatio) === 2160, null, { timeout: 15000 });
   const firstOpenStarted = performance.now();
-  await page.locator('.home-recent-card').filter({ hasText: path.basename(fixture) })
-    .getByRole('button', { name: '打开', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('canvas.scene-canvas')
-    && (!document.querySelector('[data-scene-preparation-phase]')
-      || document.querySelector('[data-scene-preparation-phase]')?.textContent?.includes('场景资源加载失败')),
-  null, { timeout });
-  assert.equal(await page.locator('[data-scene-preparation-phase]').count(), 0,
-    '资源准备失败，不能将不完整场景计为性能样本：'
-      + (await page.locator('[data-scene-preparation-phase]').allTextContents()).join('\n'));
+  await openRecentScene(page, fixture, timeout);
   report.loading = {
     diagnosticOnly: values['react-probe'],
     cold: { harnessToReadyMs: performance.now() - harnessStarted,
@@ -218,12 +202,7 @@ try {
       await waitForStableCanvas(page);
       broker.setMode(['motion', 'input-only', 'motion-roam'].includes(mode) ? 'motion' : mode === 'static' ? 'static' : 'silent');
       await page.waitForTimeout(3000);
-      let profiler;
-      if (values.profile) {
-        profiler = await page.context().newCDPSession(page);
-        await profiler.send('Profiler.enable');
-        await profiler.send('Profiler.start');
-      }
+      const profiler = values.profile ? await startCpuProfile(page) : null;
       await page.evaluate(({ timing, movingCamera }) => window.__extremeCapture.start(timing, movingCamera), {
         timing: !values['no-timing'], movingCamera: mode.startsWith('roam-') || mode === 'motion-roam',
       });
@@ -316,15 +295,73 @@ try {
   }
   console.log(JSON.stringify({ passed: report.passed, output, errors: report.errors }));
 }
+}
+
+async function configureWindow(app, fullscreen) {
+  await app.evaluate(({ BrowserWindow }, fullscreen) => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (fullscreen) window.setFullScreen(true);
+    else {
+      window.setSize(1440, 900);
+      window.setResizable(false);
+      window.setMaximizable(false);
+      window.setMovable(false);
+    }
+  }, fullscreen);
+}
+
+async function selectProjectDirectory(app, page, projectRoot) {
+  // SOURCE 工程副本沿用正常项目选择 IPC 建立资源授权，不把 Viewer 文件当成已打开工程。
+  await app.evaluate(({ dialog }, root) => {
+    globalThis.__performanceOriginalDirectoryDialog = dialog.showOpenDialog;
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [root] });
+  }, projectRoot);
+  try {
+    const selected = await page.evaluate(() => window.editorApi.selectProjectDirectory());
+    assert.ok(!selected.canceled && path.resolve(selected.projectRoot) === projectRoot, '未能打开指定的本地工程');
+  } finally {
+    await app.evaluate(({ dialog }) => {
+      dialog.showOpenDialog = globalThis.__performanceOriginalDirectoryDialog;
+      delete globalThis.__performanceOriginalDirectoryDialog;
+    });
+  }
+}
+
+async function openRecentScene(page, fixture, timeout, diagnostic = false) {
+  await page.locator('.home-recent-card').filter({ hasText: path.basename(fixture) })
+    .getByRole('button', { name: '打开', exact: true }).click();
+  const phase = page.locator('[data-scene-preparation-phase]');
+  await page.waitForFunction(() => document.querySelector('canvas.scene-canvas')
+    && (!document.querySelector('[data-scene-preparation-phase]')
+      || document.querySelector('[data-scene-preparation-phase]')?.textContent?.includes('场景资源加载失败')),
+  null, { timeout });
+  if (await phase.count() !== 0) {
+    const detail = diagnostic ? '' : `：${(await phase.allTextContents()).join('\n')}`;
+    throw new Error(`资源准备失败，不能将不完整场景计为性能样本${detail}`);
+  }
+}
+
+async function startCpuProfile(page) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send('Profiler.enable');
+    await session.send('Profiler.start');
+    return session;
+  } catch (error) {
+    await session.detach().catch(() => {});
+    throw error;
+  }
+}
 
 /** 探针只读现有运行时；动作隔离只在此测试实例中包装帧入口，退出时恢复原方法。 */
-function installCapture() {
+export function installCapture(diagnostic = false) {
   const element = document.getElementById('root');
   const key = Object.keys(element ?? {}).find(key => key.startsWith('__reactContainer$'));
   const first = element?.[key];
   const stack = first ? [first.stateNode?.current ?? first] : [];
   const seen = new Set();
-  let runtime, roam, monitor;
+  let runtime, roam;
+  const monitors = [];
   let reactCommitsAtStart = null;
   const visit = value => {
     if (!value || typeof value !== 'object') return;
@@ -332,7 +369,8 @@ function installCapture() {
     if (current.scene?.meshes && !current.scene.isDisposed && typeof current.getPerformanceMetrics === 'function'
       && typeof current.getTelemetryPerformanceMetrics === 'function') runtime = current;
     if (current.options?.scene && typeof current.setVirtualMovement === 'function' && typeof current.getSnapshot === 'function') roam = current;
-    if (current.engineInstrumentation && current.sceneInstrumentation && !current.disposed) monitor = current;
+    if (!current.disposed && (typeof current.getFrameWorkTiming === 'function'
+      || (current.engineInstrumentation && current.sceneInstrumentation))) monitors.push(current);
   };
   while (stack.length && seen.size < 30000) {
     const fiber = stack.pop(); if (!fiber || seen.has(fiber)) continue; seen.add(fiber);
@@ -343,16 +381,77 @@ function installCapture() {
   }
   if (!runtime) throw new Error('未找到实际 SceneRuntime。');
   const scene = runtime.scene, engine = scene.getEngine(), camera = scene.activeCamera;
+  const monitor = monitors.find(candidate => candidate.scene === scene)
+    ?? monitors.find(candidate => !candidate.scene && candidate.engine === engine);
+  const canvas = engine.getRenderingCanvas();
   const pose = { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() };
-  const specialized = runtime.specializedTelemetryRuntime;
-  const originalApply = specialized.applyFrame;
+  const specialized = diagnostic ? null
+    : runtime.telemetry?.specializedTelemetryRuntime ?? runtime.specializedTelemetryRuntime;
+  const originalApply = specialized?.applyFrame;
+  if (!diagnostic && typeof originalApply !== 'function') throw new Error('未找到遥测动作帧入口。');
+  const viewport = () => ({
+    width: engine.getRenderWidth(true), height: engine.getRenderHeight(true),
+    cssWidth: canvas.clientWidth, cssHeight: canvas.clientHeight, dpr: window.devicePixelRatio,
+    windowWidth: innerWidth, windowHeight: innerHeight, displayWidth: screen.width, displayHeight: screen.height,
+    scale: engine.getHardwareScalingLevel(),
+    frameRateLimit: Number.isFinite(engine.maxFPS) && engine.maxFPS > 0 ? engine.maxFPS : null,
+  });
+  const projectionFields = ['mode', 'fov', 'fovMode', 'minZ', 'maxZ', 'orthoLeft', 'orthoRight', 'orthoTop', 'orthoBottom'];
+  const cameraState = () => ({ alpha: camera.alpha, beta: camera.beta, radius: camera.radius,
+    x: camera.target.x, y: camera.target.y, z: camera.target.z,
+    ...Object.fromEntries(projectionFields.map(key => [key, camera[key] ?? null])) });
+  const glInfo = () => {
+    const { vendor, renderer, version } = engine.getGlInfo();
+    return { vendor, renderer, version, isWebGPU: engine.isWebGPU };
+  };
+  const frameWorkTiming = () => {
+    const validTime = value => Number.isFinite(value) && value >= 0 ? value : null;
+    // 新接口显式报告不可用；不得用旧计数覆盖 null 或把停用前的残留结果计为本轮 GPU 样本。
+    if (typeof monitor?.getFrameWorkTiming === 'function') {
+      const timing = monitor.getFrameWorkTiming();
+      const gpuTimingStatus = typeof timing?.gpuTimingStatus === 'string' ? timing.gpuTimingStatus : null;
+      const gpuFrameSamples = Number.isSafeInteger(timing?.gpuFrameSamples) && timing.gpuFrameSamples >= 0
+        ? timing.gpuFrameSamples : null;
+      return {
+        cpuFrameMs: validTime(timing?.cpuFrameMs),
+        gpuFrameMs: gpuTimingStatus === 'valid' && gpuFrameSamples > 0 ? validTime(timing.gpuFrameMs) : null,
+        gpuTimingStatus, gpuFrameSamples,
+      };
+    }
+    const counterMs = counter => counter?.count > 0
+      ? validTime(counter.lastSecAverage > 0 ? counter.lastSecAverage : counter.current) : null;
+    const instrumentation = monitor?.engineInstrumentation;
+    const gpuCounter = instrumentation?.gpuFrameTimeCounter;
+    const gpuSamples = instrumentation?.captureGPUFrameTime && gpuCounter?.count > (monitor.gpuCaptureStartCount ?? 0)
+      ? gpuCounter.count - (monitor.gpuCaptureStartCount ?? 0) : 0;
+    const gpuNs = gpuSamples > 0 ? counterMs(gpuCounter) : null;
+    return { cpuFrameMs: counterMs(monitor?.sceneInstrumentation?.frameTimeCounter),
+      gpuFrameMs: gpuNs > 0 ? gpuNs / 1e6 : null, gpuTimingStatus: gpuNs > 0 ? 'legacy-counter' : 'legacy-unavailable',
+      gpuFrameSamples: gpuSamples };
+  };
+  const diagnosticSnapshot = () => {
+    const { loading } = runtime.getPerformanceMetrics();
+    const { frames, contextSignatureBuilds } = runtime.getTelemetryPerformanceMetrics();
+    return { ...viewport(), camera: cameraState(), renderer: glInfo(), ...frameWorkTiming(),
+      telemetryFrames: Number.isSafeInteger(frames) ? frames : null,
+      motionContexts: Number.isSafeInteger(contextSignatureBuilds) ? contextSignatureBuilds : null,
+      ready: loading.pendingModelCount === 0 && loading.failedModelAcquisitions === 0
+        && ['ready', 'idle'].includes(loading.environmentPhase) && ['ready', 'idle'].includes(loading.skybox.phase) };
+  };
   let actionsDisabled = false, recording = false, previous = null, nextSample = 0, samples = [], intervals = [];
-  let violation = null, conditions = null;
+  let violation = null, conditions = null, wallEnd = null, firstFrame = null;
   let longTasks = [], longTaskOverflow = false, captureStarted = 0;
+  const invalidate = reason => { violation = reason; recording = false; };
+  const onVisibilityChange = () => { if (recording && document.hidden) invalidate('采样窗口出现在后台'); };
+  const onContextLost = () => { if (recording) invalidate('采样期间 WebGL 上下文丢失'); };
+  if (diagnostic) {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    canvas.addEventListener('webglcontextlost', onContextLost);
+  }
   const collectLongTasks = entries => {
     if (!recording) return;
     for (const entry of entries) {
-      if (entry.startTime < captureStarted) continue;
+      if (entry.startTime < captureStarted || (wallEnd !== null && entry.startTime >= wallEnd)) continue;
       if (longTasks.length < 10000) longTasks.push({ startTime: entry.startTime, duration: entry.duration });
       else longTaskOverflow = true;
     }
@@ -360,18 +459,17 @@ function installCapture() {
   const longTaskObserver = globalThis.PerformanceObserver?.supportedEntryTypes?.includes('longtask')
     ? new PerformanceObserver(list => collectLongTasks(list.getEntries())) : null;
   longTaskObserver?.observe({ type: 'longtask' });
-  specialized.applyFrame = function (...args) { if (!actionsDisabled) return originalApply.apply(this, args); };
+  if (!diagnostic) specialized.applyFrame = function (...args) { if (!actionsDisabled) return originalApply.apply(this, args); };
   const snapshot = () => {
+    if (diagnostic) return diagnosticSnapshot();
     const metrics = runtime.getPerformanceMetrics();
     const counter = value => value ? (value.lastSecAverage > 0 ? value.lastSecAverage : value.current) : null;
-    const gpuNs = counter(monitor?.engineInstrumentation.gpuFrameTimeCounter);
     return { frame: scene.getFrameId(), fps: engine.getFps(), renderer: engine.getGlInfo(),
-      cpuFrameMs: counter(monitor?.sceneInstrumentation.frameTimeCounter),
-      activeMeshEvaluationMs: counter(monitor?.sceneInstrumentation.activeMeshesEvaluationTimeCounter),
-      gpuFrameMs: gpuNs > 0 ? gpuNs / 1e6 : null,
+      ...frameWorkTiming(),
+      activeMeshEvaluationMs: counter(monitor?.sceneInstrumentation?.activeMeshesEvaluationTimeCounter),
       jsHeapBytes: performance.memory?.usedJSHeapSize ?? null,
       drawCalls: engine._drawCalls?.current ?? null,
-      width: engine.getRenderWidth(), height: engine.getRenderHeight(), dpr: window.devicePixelRatio,
+      width: engine.getRenderWidth(true), height: engine.getRenderHeight(true), dpr: window.devicePixelRatio,
       camera: { alpha: camera.alpha, beta: camera.beta, radius: camera.radius, mode: camera.mode,
         target: { x: camera.target.x, y: camera.target.y, z: camera.target.z } },
       meshes: scene.meshes.length, activeMeshes: scene.getActiveMeshes().length,
@@ -387,54 +485,93 @@ function installCapture() {
       roamPosition: roam ? { x: roam.collider.position.x, y: roam.collider.position.y, z: roam.collider.position.z } : null,
       roamMetrics: roam?.localTriangleCollider?.getPerformanceMetrics?.() ?? null };
   };
-  const observer = scene.onAfterRenderObservable.add(() => {
+  const addRenderObserver = () => scene.onAfterRenderObservable.add(() => {
     if (!recording) return;
-    if (engine.getRenderWidth() !== conditions.width || engine.getRenderHeight() !== conditions.height) {
-      violation = `采样期间 Canvas 尺寸发生变化：${conditions.width}x${conditions.height} -> ${engine.getRenderWidth()}x${engine.getRenderHeight()}，本窗口无效`; recording = false; return;
+    const now = performance.now();
+    if (wallEnd !== null && (now < captureStarted || now >= wallEnd)) return;
+    const width = engine.getRenderWidth(true), height = engine.getRenderHeight(true);
+    if (width !== conditions.width || height !== conditions.height) {
+      invalidate(`采样期间 Canvas 尺寸发生变化：${conditions.width}x${conditions.height} -> ${width}x${height}，本窗口无效`);
+      return;
     }
     if (!conditions.movingCamera && (Math.abs(camera.alpha - conditions.alpha) > 1e-6
       || Math.abs(camera.beta - conditions.beta) > 1e-6 || Math.abs(camera.radius - conditions.radius) > 1e-6
       || !camera.target.equalsWithEpsilon(conditions.target, 1e-6))) {
-      violation = '采样期间固定相机发生变化，本窗口无效'; recording = false; return;
+      invalidate('采样期间固定相机发生变化，本窗口无效');
+      return;
     }
-    const now = performance.now();
+    if (diagnostic && (scene.activeCamera !== camera || document.hidden || !canvas.isConnected
+      || engine.getHardwareScalingLevel() !== conditions.scale || window.devicePixelRatio !== conditions.dpr
+      || projectionFields.some(key => (camera[key] ?? null) !== conditions.camera[key]))) {
+      invalidate('采样期间视口、硬件缩放或相机投影发生变化');
+      return;
+    }
     if (document.hidden) { previous = null; return; }
+    firstFrame ??= now;
+    if (diagnostic && intervals.length >= 200000) { invalidate('逐帧采样超出窗口预算'); return; }
     if (previous !== null && intervals.length < 200000) intervals.push(now - previous);
     previous = now;
     if (now >= nextSample) { samples.push(snapshot()); nextSample = now + 1000; }
   });
+  const observer = diagnostic && typeof runtime.withControlledSceneObservers === 'function'
+    ? runtime.withControlledSceneObservers(addRenderObserver) : addRenderObserver();
   window.__extremeCapture = {
     snapshot,
-    inventory: () => ({ models: [...runtime.syncedEntities.values()].filter(entity => entity.components.modelAsset)
-      .map(entity => ({ id: entity.id, sourceUrl: entity.components.modelAsset.sourceUrl,
-        revision: entity.components.modelAsset.assetRevision, parameters: entity.components.modelAsset.parameterValues })),
-      environment: runtime.environmentRuntime.getSnapshot().sourceUrl, skybox: runtime.getSkyboxReadiness().sourceUrl }),
+    inventory() {
+      const entities = runtime.document?.syncedEntities ?? runtime.syncedEntities;
+      const environment = runtime.environment?.environmentRuntime ?? runtime.environmentRuntime;
+      return {
+        models: [...entities.values()].filter(entity => entity.components.modelAsset)
+          .map(entity => ({ id: entity.id, sourceUrl: entity.components.modelAsset.sourceUrl,
+            revision: entity.components.modelAsset.assetRevision, parameters: entity.components.modelAsset.parameterValues })),
+        environment: environment.getSnapshot().sourceUrl, skybox: runtime.getSkyboxReadiness().sourceUrl,
+      };
+    },
     resetCamera() { camera.setTarget(pose.target); camera.alpha = pose.alpha; camera.beta = pose.beta; camera.radius = pose.radius; },
     disableActions(disabled) { actionsDisabled = disabled; },
     getViolation: () => violation,
-    start(timing = true, movingCamera = false) {
-      previous = null; samples = []; intervals = []; nextSample = 0; violation = null;
+    setDiagnosticScale(level) {
+      if (!diagnostic || recording || ![1, 2].includes(level)) throw new Error('仅允许在独立诊断窗口外切换缩放');
+      engine.setHardwareScalingLevel(level);
+    },
+    start(timing = true, movingCamera = false, wallWindow = null) {
+      previous = null; firstFrame = null; samples = []; intervals = []; nextSample = 0; violation = null;
       reactCommitsAtStart = window.__performanceReactProbe?.commits ?? null;
-      longTasks = []; longTaskOverflow = false; captureStarted = performance.now();
+      longTasks = []; longTaskOverflow = false;
+      captureStarted = wallWindow === null ? performance.now() : wallWindow.startEpochMs - performance.timeOrigin;
+      wallEnd = wallWindow === null ? null : captureStarted + wallWindow.durationMs;
+      if (diagnostic && (wallWindow === null || captureStarted <= performance.now() || document.hidden)) {
+        throw new Error('未能在墙钟起点之前启用前台逐帧采集');
+      }
       longTaskObserver?.takeRecords();
-      conditions = { width: engine.getRenderWidth(), height: engine.getRenderHeight(), movingCamera,
+      conditions = { ...viewport(), movingCamera, ...(diagnostic ? { camera: cameraState() } : {}),
         alpha: camera.alpha, beta: camera.beta, radius: camera.radius, target: camera.target.clone() };
-      recording = true; runtime.setTelemetryPerformanceTimingEnabled(timing);
+      recording = true;
+      if (!diagnostic) runtime.setTelemetryPerformanceTimingEnabled(timing);
     },
     stop() {
       collectLongTasks(longTaskObserver?.takeRecords() ?? []);
-      recording = false; runtime.setTelemetryPerformanceTimingEnabled(false);
+      recording = false;
+      if (!diagnostic) runtime.setTelemetryPerformanceTimingEnabled(false);
       const sorted = [...intervals].sort((a, b) => a - b), duration = intervals.reduce((a, b) => a + b, 0);
-      return { reactCommits: reactCommitsAtStart === null ? null : window.__performanceReactProbe.commits - reactCommitsAtStart,
+      const frameStats = {
         intervalCount: intervals.length, measuredDurationMs: duration,
-        effectiveFps: duration ? intervals.length * 1000 / duration : null,
         p50Ms: sorted[Math.ceil(sorted.length * 0.5) - 1] ?? null,
         p95Ms: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? null,
         p99Ms: sorted[Math.ceil(sorted.length * 0.99) - 1] ?? null,
         over50MsCount: intervals.filter(ms => ms > 50).length, intervalsMs: intervals,
         longTasks: longTaskObserver ? { entries: longTasks, count: longTasks.length,
           totalDurationMs: longTasks.reduce((sum, entry) => sum + entry.duration, 0), overflow: longTaskOverflow } : null,
-        samples, last: snapshot(), cargo: ['stacker', 'conveyor', 'rgv'].flatMap(kind => (
+        samples, last: snapshot(),
+      };
+      if (diagnostic) return { ...frameStats, violation, windowMs: wallEnd - captureStarted,
+        elapsedMs: performance.now() - captureStarted, startEpochMs: captureStarted + performance.timeOrigin,
+        firstFrameOffsetMs: firstFrame === null ? null : firstFrame - captureStarted,
+        lastFrameOffsetMs: previous === null ? null : previous - captureStarted,
+        frameCount: firstFrame === null ? 0 : intervals.length + 1 };
+      return { ...frameStats, reactCommits: reactCommitsAtStart === null ? null : window.__performanceReactProbe.commits - reactCommitsAtStart,
+        effectiveFps: duration ? intervals.length * 1000 / duration : null,
+        cargo: ['stacker', 'conveyor', 'rgv'].flatMap(kind => (
           [...specialized.state[`${kind}CargoMeshes`].entries()].map(([key, cargo]) => ({
             kind, key, task: cargo.task, assetCode: cargo.assetCode, generatorEntityId: cargo.generatorEntityId,
             outputKind: cargo.outputOwner?.output?.kind ?? null, enabled: cargo.root.isEnabled(),
@@ -442,8 +579,17 @@ function installCapture() {
           }))
         )) };
     },
-    dispose() { recording = false; longTaskObserver?.disconnect(); scene.onAfterRenderObservable.remove(observer); specialized.applyFrame = originalApply;
-      runtime.setTelemetryPerformanceTimingEnabled(false); delete window.__extremeCapture; },
+    dispose() {
+      recording = false; longTaskObserver?.disconnect(); scene.onAfterRenderObservable.remove(observer);
+      if (diagnostic) {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        canvas.removeEventListener('webglcontextlost', onContextLost);
+      } else {
+        specialized.applyFrame = originalApply;
+        runtime.setTelemetryPerformanceTimingEnabled(false);
+      }
+      delete window.__extremeCapture;
+    },
   };
 }
 

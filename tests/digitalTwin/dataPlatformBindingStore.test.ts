@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -190,7 +191,7 @@ test('定向更新发布项目绑定不会污染后来切换的当前项目', as
   }
 });
 
-test('绑定目标异常为目录时拒绝覆盖并保留原目录', async () => {
+test('绑定目标异常为目录时拒绝覆盖并保留原目录', async (context) => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'zending-binding-directory-'));
   const projectRoot = resolveDataPlatformProjectRoot(workspace, '303');
   const binding = createDataPlatformBinding({
@@ -207,8 +208,28 @@ test('绑定目标异常为目录时拒绝覆盖并保留原目录', async () =>
   const bindingPath = getDataPlatformBindingPath(projectRoot);
   try {
     await mkdir(bindingPath, { recursive: true });
+    const protectedFile = path.join(bindingPath, 'keep.txt');
+    await writeFile(protectedFile, 'keep');
+    const entriesBeforeWrite = await readdir(path.dirname(bindingPath));
+    const assertIntact = async () => {
+      assert.equal((await lstat(bindingPath)).isDirectory(), true);
+      assert.equal(await readFile(protectedFile, 'utf8'), 'keep');
+      assert.deepEqual(await readdir(path.dirname(bindingPath)), entriesBeforeWrite);
+    };
     await assert.rejects(writeDataPlatformBinding(projectRoot, binding), /目标路径不是安全普通文件/);
-    assert.equal((await lstat(bindingPath)).isDirectory(), true);
+    await assertIntact();
+
+    // Windows 通常返回 EPERM；注入 Linux 的 EISDIR，验证同一保护分支保留原因。
+    const rename = fs.rename;
+    const eisdir = Object.assign(new Error('EISDIR: target is a directory'), { code: 'EISDIR' });
+    context.mock.method(fs, 'rename', async (...args: Parameters<typeof fs.rename>) => {
+      if (args[1] === bindingPath) throw eisdir;
+      return rename(...args);
+    });
+    await assert.rejects(writeDataPlatformBinding(projectRoot, binding), (error: Error) => {
+      return /目标路径不是安全普通文件/.test(error.message) && error.cause === eisdir;
+    });
+    await assertIntact();
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

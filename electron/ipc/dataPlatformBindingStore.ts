@@ -385,7 +385,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
     await fs.rename(sourcePath, targetPath);
     return;
   } catch (error) {
-    if (!isNodeError(error) || !['EEXIST', 'EPERM', 'EACCES'].includes(error.code ?? '')) throw error;
+    if (!isNodeError(error) || !['EEXIST', 'EPERM', 'EACCES', 'EISDIR'].includes(error.code ?? '')) throw error;
     initialError = error;
   }
 
@@ -397,7 +397,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
     throw error;
   }
   if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
-    throw new Error(`目标路径不是安全普通文件，拒绝替换：${targetPath}`);
+    throw new Error(`目标路径不是安全普通文件，拒绝替换：${targetPath}`, { cause: initialError });
   }
 
   const backupPath = `${targetPath}.backup-${randomUUID()}`;

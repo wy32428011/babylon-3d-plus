@@ -63,7 +63,7 @@ test('真实readiness方法在首个await前捕获scope；后续cargo/GPU/首帧
   const gate = deferred(), diagnostics = new SceneLoadDiagnostics(), first = recorder(), second = recorder(nextId);
   const Harness = runInNewContext(readinessCode, { DOMException, prepareGpuCapabilityProfile: async () => {}, waitForSceneRenderReady: async () => {} });
   const harness = new Harness();
-  Object.assign(harness, { loadDiagnostics: diagnostics, context: { scene: { getEngine: () => ({}) } }, dependencies: {
+  Object.assign(harness, { lifetime: new AbortController(), loadDiagnostics: diagnostics, context: { scene: { getEngine: () => ({}) } }, dependencies: {
     outputs: { generatorAssetPreloader: { waitForReady: () => gate.promise, getMetrics: () => ({ pendingCount: 0 }) } },
     document: { disposed: false }, assets: { shaderWarmup: { getMetrics: () => ({ enabled: false }) } },
   } });
@@ -113,6 +113,63 @@ test('runtime仅依赖shared trace，公共facade保留一参兼容且dispose结
   }
 });
 
+test('真实分类取源通过已有运行时开场归属记录同步跨度，保留原结果和异常', async () => {
+  const path = new URL('../../src/runtime/babylon/scene-runtime/EnvironmentAndSkyboxController.ts', import.meta.url);
+  const ast = ts.createSourceFile('environment.ts', await readFile(path, 'utf8'), ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find(ts.isClassDeclaration)!;
+  const method = declaration.members.find(node => ts.isMethodDeclaration(node)
+    && node.name.getText(ast) === 'initializeLightingRuntime')!;
+  const code = ts.transpileModule('class Harness { ' + method.getText(ast) + ' } Harness;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  let now = 100;
+  const sources = Object.freeze([]);
+  const failure = new Error('original classification failure');
+  let collect = () => { now = 180; return sources; };
+  const diagnostics = new SceneLoadDiagnostics(() => now);
+  const trace = recorder(openId, 'assets', () => now);
+  diagnostics.beginProjectOpenTrace(trace);
+  const Harness = runInNewContext(code, {
+    SceneLightingRuntime: class {
+      constructor(_scene: unknown, readonly options: { getSources: () => unknown }) {}
+    },
+    appendGeneratedLightingSources: () => {},
+    collectLightingRuntimeSources: () => collect(),
+  });
+  const harness = new Harness();
+  Object.assign(harness, {
+    lightingOptimizationOptions: {}, context: { scene: {} },
+    environmentRuntime: { getLightingSurfaces: () => [], getLightingSourceReference: () => null },
+    dependencies: {
+      document: { shadowDocument: {} }, readiness: { loadDiagnostics: diagnostics },
+      assets: { models: new Map() }, variants: { modelArrayParameterVariants: new Map() },
+      outputs: { spawnedDeviceModels: new Map() }, presentation: { meshes: new Map() },
+      arrays: { modelArrayBatchByMeshUniqueId: new Map() },
+    },
+  });
+  harness.initializeLightingRuntime();
+  const { getSources } = harness.lightingRuntime.options;
+  now = 110; assert.equal(getSources(), sources);
+  collect = () => { now = 260; throw failure; };
+  now = 200; assert.throws(getSources, error => error === failure);
+  const spans = trace.snapshot().spans.filter(span => span.stage === 'lightingClassificationSources');
+  assert.deepEqual(spans.map(span => [span.startMs, span.endMs, span.phase, span.status]), [
+    [110, 180, 'runtimeAcquireInitialize', 'ok'], [200, 260, 'runtimeAcquireInitialize', 'error'],
+  ]);
+  assert.ok(spans.every(span => span.parent?.openId === openId));
+  const originalBeginTraceTask = diagnostics.beginTraceTask;
+  diagnostics.beginTraceTask = () => { throw new Error('diagnostic start'); };
+  collect = () => sources; assert.equal(getSources(), sources);
+  diagnostics.beginTraceTask = () => ({ ref: null, end() { throw new Error('diagnostic finish'); } });
+  assert.equal(getSources(), sources);
+  diagnostics.beginTraceTask = originalBeginTraceTask;
+  const phases = recorder(nextId, 'phases', () => now);
+  diagnostics.beginProjectOpenTrace(phases);
+  assert.equal(getSources(), sources);
+  assert.equal(phases.snapshot().recording.suppressedTasks, 0);
+  assert.equal(phases.snapshot().spans.some(span => span.stage === 'lightingClassificationSources'), false);
+});
+
 test('真实skybox观察方法只绑定sync入口；切换current不抢旧异步任务，取消无事件时也结算wait（CPU依赖桩）', async () => {
   const source = await readFile(new URL('../../src/runtime/babylon/scene-runtime/EnvironmentAndSkyboxController.ts', import.meta.url), 'utf8');
   const ast = ts.createSourceFile('environment.ts', source, ts.ScriptTarget.Latest, true), declaration = ast.statements.find(ts.isClassDeclaration)!;
@@ -145,16 +202,16 @@ function selectedClassMethods(source: string, names: string[]): string[] {
   return names.map(name => declaration.members.find(node => ts.isMethodDeclaration(node) && node.name.getText(ast) === name)!.getText(ast));
 }
 const acquireMethods = [
-  ...selectedClassMethods(assetControllerSource, ['loadModelRuntimeAssets']),
+  ...selectedClassMethods(assetControllerSource, ['assertUpdatesActive', 'loadModelRuntimeAssets']),
   ...selectedClassMethods(runtimeFacadeSource, ['beginSceneSession', 'getProjectOpenModelAcquisitionFailures', 'completeProjectOpenRuntime']),
 ];
 const acquisitionCode = ts.transpileModule(`class Harness { ${acquireMethods.join('\n')} }\nHarness;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function acquisitionFixture() {
-  const Harness = runInNewContext(acquisitionCode, { Error, resolveModelAssetSharedInstancingPolicy: () => ({ mode: 'shared-instance' }), createModelAssetTemplateKey: () => 'key' });
+  const Harness = runInNewContext(acquisitionCode, { DOMException, Error, resolveModelAssetSharedInstancingPolicy: () => ({ mode: 'shared-instance' }), createModelAssetTemplateKey: () => 'key' });
   const runtime = new Harness(), diagnostics = new SceneLoadDiagnostics();
   const readiness = { loadDiagnostics: diagnostics, failedModelAcquisitions: 0, beginModelLoadProgressUnit: () => 1, settleModelLoadProgressUnit() {} };
   let acquire = async (): Promise<unknown> => ({ entries: { animationGroups: [], rootNodes: [] }, dispose() {} });
-  Object.assign(runtime, { readiness, dependencies: { readiness }, environment: { endProjectOpenSkyboxTrace() {} }, telemetry: { beginSceneSession() {} },
+  Object.assign(runtime, { document: { disposed: false }, readiness, dependencies: { readiness }, environment: { endProjectOpenSkyboxTrace() {} }, telemetry: { beginSceneSession() {} },
     resolveVersionedRuntimeAssetUrl: (source: string) => source, splitAssetUrl: () => ({ rootUrl: '', fileName: 'model.glb' }),
     sharedModelAssetCache: { instantiate: () => acquire() } });
   return { runtime, diagnostics, readiness, setAcquire: (next: typeof acquire) => { acquire = next; },

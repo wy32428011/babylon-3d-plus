@@ -55,6 +55,7 @@ test('已经采集的真实PerfCounter零值保持，缺失或非法counter不�
     counter.fetchNewFrame(); counter.addCount(0, true);
   }
   const zero = monitor.sample();
+  assert.equal(zero.cpuFrameMs, 0);
   for (const key of ['frameTimeMs', 'renderTimeMs', 'activeMeshesEvaluationMs', 'shaderCompilationMs', 'drawCalls']) assert.equal(zero[key], 0, key);
   Object.defineProperty(instrumentation, 'frameTimeCounter', { value: undefined });
   Object.defineProperty(instrumentation, 'renderTimeCounter', { value: { count: 1, current: Number.NaN, lastSecAverage: Number.NaN } });
@@ -79,30 +80,151 @@ test('摘要忽略未采样的CPU/draw而保留合法0，不把缺失样本混�
   assert.equal(unavailable.maximumDrawCalls, null);
 });
 
-test('真实已采集PerfCounter的GPU合法零保留，关闭采集不能把残留counter当测量', context => {
-  let enabled = true;
-  const { monitor } = fixture(context, { captureGpuFrameTime: () => enabled });
-  const counter = monitor.engineInstrumentation.shaderCompilationTimeCounter;
-  counter.fetchNewFrame(); counter.addCount(0, true);
-  // 仅验证counter数值合同；NullEngine本身不提供GPU测量，不能据此宣称真实GPU为0ms。
-  Object.defineProperty(monitor.engineInstrumentation, 'gpuFrameTimeCounter', { value: counter });
+/** Node 只验证查询状态机；不把 NullEngine 冒充为真实 GPU。 */
+function timerFixture(context) {
+  let enabled = false;
+  let now = 0;
+  context.mock.method(performance, 'now', () => now);
+  const { engine, scene, monitor } = fixture(context, { captureGpuFrameTime: () => enabled });
+  const ext = { TIME_ELAPSED_EXT: 0x88bf, GPU_DISJOINT_EXT: 0x8fbb, QUERY_COUNTER_BITS_EXT: 0x8864 };
+  const deleted = [];
+  const calls = { queries: 0, reads: 0, probes: 0, ends: 0 };
+  const gl = {
+    CURRENT_QUERY: 0x8865, QUERY_RESULT_AVAILABLE: 0x8867, QUERY_RESULT: 0x8866,
+    active: null, ready: false, disjoint: false, lost: false, bits: 64, nanoseconds: 0,
+    getExtension(name) {
+      if (name !== 'EXT_disjoint_timer_query_webgl2') return null;
+      calls.probes++;
+      return ext;
+    },
+    getQuery(_target, parameter) { return parameter === gl.CURRENT_QUERY ? gl.active : gl.bits; },
+    getParameter() { const value = gl.disjoint; gl.disjoint = false; return value; },
+    getQueryParameter(_query, parameter) {
+      if (parameter === gl.QUERY_RESULT_AVAILABLE) return gl.ready;
+      calls.reads++;
+      return gl.nanoseconds;
+    },
+    isContextLost: () => gl.lost,
+    createQuery: () => ({ id: ++calls.queries }),
+    beginQuery(_target, query) {
+      assert.equal(gl.active, null, '不能覆盖其他计时查询');
+      gl.active = query;
+    },
+    endQuery() { calls.ends++; gl.active = null; },
+    deleteQuery: (query) => deleted.push(query.id),
+  };
+  Object.defineProperties(engine, { _gl: { value: gl }, webGLVersion: { value: 2 } });
+  new FreeCamera('timer-camera', new Vector3(0, 0, -5), scene);
+  return {
+    engine, monitor, gl, calls, deleted,
+    enable(value = true) { enabled = value; monitor.refreshDiagnostics(); },
+    frame(at, render = true) {
+      now = at;
+      engine.beginFrame();
+      if (render) scene.render();
+      engine.endFrame();
+    },
+  };
+}
+
+test('按需低频 WebGL2 查询只在结果就绪时读取，合法零和 CPU 帧工作耗时保留', context => {
+  const timer = timerFixture(context);
+  const { monitor, gl, calls, deleted } = timer;
+  timer.frame(0);
+  assert.equal(monitor.sample().gpuTimingStatus, 'disabled');
+  assert.deepEqual(calls, { queries: 0, reads: 0, probes: 0, ends: 0 });
+  timer.enable();
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'pending');
+  timer.frame(16);
+  timer.frame(32);
+  assert.equal(calls.reads, 0, '异步查询未就绪时不能同步读取结果');
+  gl.ready = true;
+  timer.frame(83);
+  assert.deepEqual(deleted, [1]);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameSamples, 1);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameMs, 0);
   assert.equal(monitor.sample().gpuFrameTimeMs, 0);
-  enabled = false;
-  assert.equal(monitor.sample().gpuFrameTimeMs, null);
-  enabled = true;
-  assert.equal(monitor.sample().gpuFrameTimeMs, null, '重新启用不能复用前一代计数');
-  counter.fetchNewFrame(); counter.addCount(1_500_000, true);
-  assert.equal(monitor.sample().gpuFrameTimeMs, 1.5);
+  assert.ok(Number.isFinite(monitor.sample().cpuFrameMs));
+  timer.frame(100);
+  timer.frame(200);
+  assert.equal(calls.queries, 1);
+  timer.frame(216);
+  gl.nanoseconds = 1_500_000;
+  timer.frame(232);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameMs, 1.5);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameSamples, 2);
+  assert.equal(monitor.engineInstrumentation.captureGPUFrameTime, false);
 });
 
-test('关闭诊断时不启用GPU查询，低频开关只在状态转换调用SDK', context => {
-  const { monitor } = fixture(context, { captureGpuFrameTime: false });
-  assert.equal(monitor.gpuFrameTimeCaptureEnabled, false);
-  const counter = monitor.engineInstrumentation.shaderCompilationTimeCounter;
-  counter.fetchNewFrame(); counter.addCount(123, true);
-  Object.defineProperty(monitor.engineInstrumentation, 'gpuFrameTimeCounter', { value: counter });
-  assert.equal(monitor.sample().gpuFrameTimeMs, null);
-  assert.equal(monitor.engineInstrumentation.captureGPUFrameTime, false);
+test('结束、切场与释放会删除本会话查询，跳过未提交的引擎帧', context => {
+  const timer = timerFixture(context);
+  const { monitor, engine, gl, deleted } = timer;
+  timer.enable();
+  timer.frame(0, false);
+  assert.deepEqual(deleted, [1]);
+  timer.frame(250);
+  monitor.resetSceneTiming();
+  assert.deepEqual(deleted, [1, 2]);
+  assert.equal(monitor.getFrameWorkTiming().cpuFrameMs, null);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameSamples, 0);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameMs, null);
+  engine.beginFrame();
+  assert.ok(gl.active);
+  timer.enable(false);
+  assert.equal(gl.active, null);
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'disabled');
+  assert.deepEqual(deleted, [1, 2, 3]);
+  timer.enable();
+  timer.frame(500);
+  monitor.dispose();
+  assert.deepEqual(deleted, [1, 2, 3, 4]);
+  timer.frame(750);
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'disabled');
+});
+
+test('WebGL2 上下文恢复后重新探测，丢弃 disjoint 和超时结果且不终止外部查询', context => {
+  const timer = timerFixture(context);
+  const { monitor, engine, gl, calls, deleted } = timer;
+  timer.enable();
+  gl.active = { id: 'foreign' };
+  timer.frame(0);
+  assert.equal(calls.queries, 0);
+  assert.equal(gl.active.id, 'foreign');
+  assert.equal(calls.ends, 0);
+  gl.active = null;
+  timer.frame(250);
+  gl.disjoint = true;
+  timer.frame(300);
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'disjoint');
+  assert.deepEqual(deleted, [1]);
+  timer.frame(500);
+  timer.frame(2600);
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'unavailable');
+  assert.deepEqual(deleted, [1, 2]);
+  timer.frame(2800);
+  gl.lost = true;
+  engine.onContextLostObservable.notifyObservers(engine);
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'context-lost');
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameMs, null);
+  gl.lost = false;
+  engine.onContextRestoredObservable.notifyObservers(engine);
+  assert.equal(calls.probes, 2);
+  assert.deepEqual(deleted, [1, 2], '恢复时不得操作失效查询句柄');
+  assert.equal(monitor.getFrameWorkTiming().gpuTimingStatus, 'pending');
+  gl.ready = true;
+  timer.frame(3000);
+  timer.frame(3016);
+  assert.equal(monitor.getFrameWorkTiming().gpuFrameSamples, 1);
+});
+
+test('设备未提供可用计时位数时不创建查询或伪造结果', context => {
+  const timer = timerFixture(context);
+  timer.gl.bits = 0;
+  timer.enable();
+  timer.frame(0);
+  assert.equal(timer.monitor.getFrameWorkTiming().gpuTimingStatus, 'unsupported');
+  assert.equal(timer.monitor.getFrameWorkTiming().gpuFrameMs, null);
+  assert.equal(timer.calls.queries, 0);
 });
 
 test('真实afterRender观察器按显式墙钟窗计量，停止后保留报告及旧interval口径', context => {

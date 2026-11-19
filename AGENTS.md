@@ -69,7 +69,7 @@
 | 场景加载 | `npm run test:scene-loading` |
 | 参数化模型 | `npm run test:model-parameters`，并按尺寸变更运行 `npm run smoke:units` |
 
-提交前的 CI 门禁依次包括：
+CI 运行以下质量门禁；提交前可在本机按此顺序复核：
 
 ```bash
 npm run typecheck
@@ -78,6 +78,7 @@ npm run test:entries
 npm run lint
 npm run format:check
 node scripts/generate-test-inventory.mjs --check
+npm run analyze -- --check-budget
 npm test
 ```
 

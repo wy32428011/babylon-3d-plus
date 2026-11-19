@@ -19,6 +19,7 @@ function sample(at: number, fps = 60): EditorPerformanceSourceSnapshot {
   return {
     sampledAt: new Date(at).toISOString(), fps, frameTimeMs: 8, renderTimeMs: 5,
     activeMeshesEvaluationMs: 1, gpuFrameTimeMs: null, shaderCompilationMs: 0,
+    cpuFrameMs: 6, gpuFrameMs: null, gpuTimingStatus: 'unsupported', gpuFrameSamples: 0,
     drawCalls: 30, activeMeshes: 15, totalMeshes: 20, totalVertices: 1000,
     thinInstances: 0, activeThinInstances: 0, estimatedActiveVertexInvocations: 1000,
     estimatedActiveTriangleInvocations: 300, longTaskCount: 0, longTaskDurationMs: 0,
@@ -96,6 +97,9 @@ test('遥测使用本次运行增量，复制快照且报告不含业务字段',
   });
   assert.equal(/hidden|secret|private/.test(session.createReport()), false);
   assert.match(report.counterSemantics, /not individual frames/);
+  assert.match(report.frameWorkTimingSemantics, /latest valid sampled WebGL2/);
+  assert.equal(report.samples[0].cpuFrameMs, 6);
+  assert.equal(report.samples[0].gpuTimingStatus, 'unsupported');
   assert.match(report.telemetrySemantics, /this performance run/);
 });
 

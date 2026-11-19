@@ -132,7 +132,7 @@ test('独立完整pixel契约：只有跨A/B允许RGB1，alpha与自然AA/同tre
   const two = compareShadowCachePixels(original, Buffer.from([12, 20, 30, 255]), true); assert.equal(two.maxRgbDelta, 2); assert.equal(two.rgbOverOnePixels, 1);
 });
 
-test('S2之外默认N1函数体/协议逐AST保持，protected helper/test完整SHA保持；原56行为另独立回归', () => {
+test('S2之外默认N1函数体/协议逐AST保持，protected helper/test规范行尾后完整SHA保持', () => {
   const source = readFileSync(new URL('../../scripts/phase2-lighting-classification-abba.mjs', import.meta.url), 'utf8');
   const tree = ts.createSourceFile('driver.mjs', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS);
   const mode = node => ts.isIdentifier(node) && node.text === 'shadowCacheMode';
@@ -145,5 +145,9 @@ test('S2之外默认N1函数体/协议逐AST保持，protected helper/test完整
   const digest = node => createHash('sha256').update(JSON.stringify(canonical(node))).digest('hex');
   for (const name of ['preparePlan', 'bindings', 'runCase', 'execute']) { const node = tree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name); assert.equal(digest(node.body), N1_BEFORE_S2_AST[name], name); }
   const protocol = tree.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(node => node.name.getText(tree) === 'protocol')); assert.equal(digest(protocol), N1_BEFORE_S2_AST.protocol);
-  for (const name of ['scripts/lib/phase2LightingClassificationAudit.mjs', 'tests/runtime/phase2LightingClassificationAudit.test.mjs']) assert.equal(createHash('sha256').update(readFileSync(new URL('../../' + name, import.meta.url))).digest('hex'), N1_BEFORE_S2_AST[name]);
+  for (const name of ['scripts/lib/phase2LightingClassificationAudit.mjs', 'tests/runtime/phase2LightingClassificationAudit.test.mjs']) {
+    // 基线使用 Git 中的 LF；Windows 检出转换行尾不代表受保护源码发生变化。
+    const text = readFileSync(new URL('../../' + name, import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+    assert.equal(createHash('sha256').update(text).digest('hex'), N1_BEFORE_S2_AST[name], name);
+  }
 });
