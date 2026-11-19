@@ -4,6 +4,9 @@ import type {
   CadReferenceComponent,
   CadReferenceLayerStat,
 } from '../model/components';
+import type { AgvMapDefinition } from '../model/agvMap';
+import type { CadReferenceAnnotation } from './cadReferenceAnnotations';
+import type { CadReferenceFillCircle } from './cadReferenceDrawingStyle';
 import { createLegacyCadReferenceUnitInfo, resolveDxfUnitInfo } from './cadUnits';
 export { CAD_REFERENCE_FALLBACK_UNIT_SCALE_TO_METERS } from './cadUnits';
 
@@ -69,6 +72,11 @@ export type CadReferenceParseResult = {
   pointCount: number;
   layers: CadReferenceGeometryLayer[];
   budgetLimited: boolean;
+  annotations?: CadReferenceAnnotation[];
+  fillCircles?: CadReferenceFillCircle[];
+  layerColors?: Map<string, string>;
+  agvMapOrigin?: CadReferencePoint2D;
+  agvMap?: AgvMapDefinition;
   /** 按 CPU/GPU 缓冲区与批次开销估算，不等于进程总内存。 */
   estimatedMemoryBytes?: number;
 };
@@ -340,7 +348,7 @@ function sampleCadPolyline(points: CadReferencePoint2D[], maxPointCount: number)
 
 /** 暂存刚导入的 CAD 几何，供同一轮 runtime 同步复用，避免大文件马上二次解析。 */
 export function rememberCadReferenceParseResult(sourceUrl: string, result: CadReferenceParseResult): void {
-  const key = createCadReferenceParseResultCacheKey(sourceUrl, result.unitScaleToMeters);
+  const key = createCadReferenceParseResultCacheKey(sourceUrl, result.unitScaleToMeters, Boolean(result.annotations));
   const previous = cadReferenceParseResultCache.get(key);
   if (previous?.timeoutId !== null && previous?.timeoutId !== undefined) clearTimeout(previous.timeoutId);
 
@@ -355,8 +363,9 @@ export function rememberCadReferenceParseResult(sourceUrl: string, result: CadRe
 export function consumeCadReferenceParseResult(
   sourceUrl: string,
   unitScaleToMeters: number,
+  includeAnnotations = false,
 ): CadReferenceParseResult | null {
-  const key = createCadReferenceParseResultCacheKey(sourceUrl, unitScaleToMeters);
+  const key = createCadReferenceParseResultCacheKey(sourceUrl, unitScaleToMeters, includeAnnotations);
   const entry = cadReferenceParseResultCache.get(key);
   if (!entry) return null;
 
@@ -378,6 +387,7 @@ export function createCadReferenceComponentMetadata(
     unitDetection: result.unitDetection,
     unitScaleToMeters: result.unitScaleToMeters,
     originMode: 'center',
+    ...(result.agvMapOrigin ? { agvMapOrigin: result.agvMapOrigin } : {}),
     lineColor: CAD_REFERENCE_DEFAULT_LINE_COLOR,
     opacity: CAD_REFERENCE_DEFAULT_OPACITY,
     layerStats: result.layerStats,
@@ -400,8 +410,8 @@ export function sanitizeCadReferenceDisplayPatch(
 }
 
 /** 组合缓存键，单位换算不同的同一文件必须视为不同几何。 */
-function createCadReferenceParseResultCacheKey(sourceUrl: string, unitScaleToMeters: number): string {
-  return `${sourceUrl}\n${unitScaleToMeters}`;
+function createCadReferenceParseResultCacheKey(sourceUrl: string, unitScaleToMeters: number, includeAnnotations: boolean): string {
+  return JSON.stringify([sourceUrl, unitScaleToMeters, includeAnnotations]);
 }
 
 /** 用显式栈迭代展开 INSERT 块引用，避免复杂图纸递归展开时栈溢出。 */

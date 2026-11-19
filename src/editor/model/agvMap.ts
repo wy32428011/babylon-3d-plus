@@ -2,6 +2,9 @@ import type { AgvMapComponent } from './components';
 import type { Vector3Data } from './math';
 
 export const AGV_MAP_SCHEMA_VERSION = 1;
+export const AGV_MAP_MAX_NODES = 4_096;
+export const AGV_MAP_MAX_TRACKS = 8_192;
+export const AGV_MAP_MAX_TRACK_POINTS = 2_048;
 export const AGV_MAP_SCALE_MIN = 0.001;
 export const AGV_MAP_SCALE_MAX = 1000;
 export const AGV_MAP_SCALE_DEFAULT = 1;
@@ -70,8 +73,12 @@ export function sanitizeAgvMapComponent(value: unknown): AgvMapComponent | null 
     ? record.scale
     : AGV_MAP_SCALE_DEFAULT;
 
+  const importedMap = record.importedMap === undefined ? null : sanitizeAgvMapDefinition(record.importedMap);
+  if (record.importedMap !== undefined && !importedMap) return null;
+
   return {
     mapId,
+    ...(importedMap ? { importedMap } : {}),
     showTrajectories: typeof record.showTrajectories === 'boolean' ? record.showTrajectories : true,
     ...axes,
     scale: Math.min(AGV_MAP_SCALE_MAX, Math.max(AGV_MAP_SCALE_MIN, rawScale)),
@@ -92,12 +99,12 @@ function normalizePoint(value: unknown): AgvMapPoint | null {
   return { x: point.x, y: point.y };
 }
 
-/** 校验 CAD 转换模块需要输出的地图 JSON；任一引用或坐标非法时整份地图不可用。 */
+/** 校验 AGV 地图 JSON；任一引用或坐标非法时整份地图不可用。 */
 export function sanitizeAgvMapDefinition(value: unknown): AgvMapDefinition | null {
   if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) return null;
   const record = value as Record<string, unknown>;
   if (record.schemaVersion !== AGV_MAP_SCHEMA_VERSION || !Array.isArray(record.nodes) || !Array.isArray(record.tracks)) return null;
-  if (record.nodes.length < 1 || record.nodes.length > 4096 || record.tracks.length > 8192) return null;
+  if (record.nodes.length < 1 || record.nodes.length > AGV_MAP_MAX_NODES || record.tracks.length > AGV_MAP_MAX_TRACKS) return null;
   const id = normalizeIdentifier(record.id);
   const name = normalizeIdentifier(record.name);
   if (!id || !name) return null;
@@ -129,7 +136,7 @@ export function sanitizeAgvMapDefinition(value: unknown): AgvMapDefinition | nul
     if (!nodeIds.has(fromNodeId) || !nodeIds.has(toNodeId)) return null;
     let points: AgvMapPoint[] | undefined;
     if (source.points !== undefined) {
-      if (!Array.isArray(source.points) || source.points.length < 2 || source.points.length > 2048) return null;
+      if (!Array.isArray(source.points) || source.points.length < 2 || source.points.length > AGV_MAP_MAX_TRACK_POINTS) return null;
       const normalizedPoints = source.points.map(normalizePoint);
       if (!normalizedPoints.every((point): point is AgvMapPoint => point !== null)) return null;
       points = normalizedPoints;

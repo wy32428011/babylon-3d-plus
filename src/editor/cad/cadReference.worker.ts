@@ -28,6 +28,8 @@ async function parseCadDxfInWorker(request: CadReferenceDxfWorkerRequest): Promi
     () => fetch(request.sourceUrl),
     {
       unitScaleToMeters: request.unitScaleToMeters,
+      includeAnnotations: request.includeAnnotations,
+      agvMap: request.agvMap,
       maxGeometryBytes: request.maxGeometryBytes ?? CAD_REFERENCE_MAX_GEOMETRY_BYTES,
       onProgress: ({ percent, detail }) => {
         const now = performance.now();

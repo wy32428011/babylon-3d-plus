@@ -1137,7 +1137,7 @@ export class GeneratedModelOutputController {
   // ===== 设备产生器（deviceSpawner）=====
 
   /** 同步设备产生器编辑态标记；实例产生逻辑仅在运行预览时由 DeviceSpawnerRuntime 驱动。 */
-  public syncDeviceSpawnerEntity(entity: Entity, selected: boolean): void {
+  public syncDeviceSpawnerEntity(entity: Entity, selected: boolean, cadRoot?: TransformNode): void {
     if (this.updatesStopped) return;
     if (!entity.components.deviceSpawner) return;
 
@@ -1159,7 +1159,15 @@ export class GeneratedModelOutputController {
       this.deviceSpawnerMarkers.set(entity.id, marker);
     }
 
-    this.dependencies.presentation.applyTransform(marker.root, entity.components.transform);
+    marker.root.parent = cadRoot ?? null;
+    if (cadRoot) {
+      marker.root.position.setAll(0);
+      marker.root.rotationQuaternion = null;
+      marker.root.rotation.setAll(0);
+      marker.root.scaling.setAll(1);
+    } else {
+      this.dependencies.presentation.applyTransform(marker.root, entity.components.transform);
+    }
     const visible = this.dependencies.document.isEntityVisible(entity.id);
     const showMarker = visible && !this.dependencies.telemetry.telemetryPreviewActive;
     marker.root.setEnabled(visible);

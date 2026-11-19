@@ -715,7 +715,8 @@ export class SceneDocumentController {
     }
 
     if (entity.components.deviceSpawner) {
-      this.dependencies.outputs.syncDeviceSpawnerEntity(entity, selected);
+      this.dependencies.outputs.syncDeviceSpawnerEntity(entity, selected,
+        entity.components.cadReference?.agvMapOrigin ? this.dependencies.cad.cadReferences.get(entity.id)?.root : undefined);
     }
 
     if (entity.components.poiEffect) {
@@ -809,7 +810,8 @@ export class SceneDocumentController {
     }
 
     if (entity.components.deviceSpawner) {
-      this.dependencies.outputs.syncDeviceSpawnerEntity(entity, selected);
+      this.dependencies.outputs.syncDeviceSpawnerEntity(entity, selected,
+        entity.components.cadReference?.agvMapOrigin ? this.dependencies.cad.cadReferences.get(entity.id)?.root : undefined);
     }
 
     if (entity.components.poiEffect) {

@@ -447,7 +447,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         </fieldset>
       ) : null}
       {deviceSpawner && agvMap ? (
-        <AgvSpawnerInspector spawner={deviceSpawner} map={agvMap} disabled={isLocked} />
+        <AgvSpawnerInspector entityId={selectedEntity.id} spawner={deviceSpawner} map={agvMap} disabled={isLocked} />
       ) : deviceSpawner ? (
         <DeviceSpawnerInspector component={deviceSpawner} disabled={isLocked} />
       ) : null}

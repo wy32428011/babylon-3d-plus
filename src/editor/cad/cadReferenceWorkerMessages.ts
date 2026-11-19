@@ -1,5 +1,7 @@
 import type { CadReferenceGeometryBudget, CadReferenceParseResult } from './cadReferenceCore';
 
+export type CadReferenceAgvMapImport = { id: string; name: string };
+
 export type CadReferenceDxfWorkerRequest = {
   id: string;
   sourceUrl: string;
@@ -7,6 +9,8 @@ export type CadReferenceDxfWorkerRequest = {
   geometryBudget?: CadReferenceGeometryBudget;
   maxGeometryBytes?: number;
   unitScaleToMeters?: number;
+  includeAnnotations?: boolean;
+  agvMap?: CadReferenceAgvMapImport;
 };
 
 export type CadReferenceDxfWorkerProgressMessage = {

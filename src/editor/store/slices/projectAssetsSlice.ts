@@ -1,8 +1,8 @@
 import { createModelTypeIdentityFromAsset } from '../../../../electron/shared/modelTypeIdentity';
 import { executeCommand } from '../../commands/CommandHistory';
-import { createEntityCommand, updateSceneDocumentCommand, updateSceneEnvironmentCommand } from '../../commands/entityCommands';
+import { createEntityCommand, importAgvCadMapCommand, updateSceneDocumentCommand, updateSceneEnvironmentCommand } from '../../commands/entityCommands';
 import { createId } from '../../../shared/ids';
-import type { Entity } from '../../model/Entity';
+import { AGV_MAP_SCALE_DEFAULT } from '../../model/agvMap';
 import { createDefaultSceneEnvironmentTransform, createCadReferenceEntity, createModelEntity, createSkyboxComponent, getSceneSkyboxSettings, sanitizeSceneEnvironment, sanitizeSceneSkybox } from '../../model/SceneDocument';
 import { createIdleEnvironmentRuntimeSnapshot, hasManagedEnvironmentCacheReference, resolveEnvironmentRuntimeSettings, type EnvironmentApplyRequest } from '../../model/environmentRuntime';
 import { normalizeModelParameterConfig } from '../../model/modelParameters';
@@ -11,7 +11,7 @@ import { deserializeScene } from '../../project/SceneSerializer';
 import { CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES, createCadReferenceComponentMetadata, rememberCadReferenceParseResult, consumeCadReferenceParseResult } from '../../cad/cadReferenceCore';
 import { formatCadReferenceUnitSummary } from '../../cad/cadUnits';
 import { parseCadReferenceDxfForImport } from '../../cad/cadReferenceWorkerClient';
-import { cancelCadReferenceLoad, waitForCadReferenceReady, selectCadReferenceRuntimeProgress, type CadReferenceLoadStatus } from '../../cad/cadReferenceLoadStatus';
+import { cancelCadReferenceLoad, getCadReferenceLoadStatus, waitForCadReferenceReady, selectCadReferenceRuntimeProgress, type CadReferenceLoadStatus } from '../../cad/cadReferenceLoadStatus';
 import { isRuntimePreviewState, guardRuntimePreviewMutation, prependLog } from './editorMutationGuard';
 import { isSceneEnvironmentEqual, sanitizeVector3 } from './entityValueOperations';
 import { isSceneSkyboxEqual, upsertSkyboxEntityInScene, removeSkyboxEntitiesFromScene } from './sceneEnvironmentOperations';
@@ -544,8 +544,6 @@ export const createProjectAssetsSlice: EditorSlice<
   cancelCadImport: () => {
     if (activeCadImport) {
       activeCadImport.controller.abort();
-      const progress = get().cadImportProgress;
-      if (progress?.entityId) cancelCadReferenceLoad(progress.entityId);
     } else {
       for (const status of [...cadRuntimeLoads.values()]) {
         if (status.state === 'loading' || status.state === 'rendering') cancelCadReferenceLoad(status.entityId);
@@ -555,7 +553,7 @@ export const createProjectAssetsSlice: EditorSlice<
   dismissCadImportProgress: () => {
     if (!get().cadImportProgress?.active) { cadRuntimeLoads.clear(); set({ cadImportProgress: null }); }
   },
-  importCadReference: async () => {
+  importCadReference: async (agvSpawnerId) => {
     if (get().runtimeMode === 'preview') {
       set(state => guardRuntimePreviewMutation(state, '导入 CAD'));
       return;
@@ -568,15 +566,21 @@ export const createProjectAssetsSlice: EditorSlice<
       set(state => ({ logs: prependLog(state.logs, '导入 CAD 需要 Electron 桌面环境。') }));
       return;
     }
+    const initialState = get();
+    const spawner = agvSpawnerId ? initialState.scene.entities[agvSpawnerId] : null;
+    if (agvSpawnerId && (!isRuntimeEntityEditable(initialState.scene, spawner) || !spawner.components.agvMap)) return;
     const id = crypto.randomUUID();
-    const sessionId = get().sceneSessionId;
+    const sessionId = initialState.sceneSessionId;
     const controller = new AbortController();
     activeCadImport = { id, controller };
-    let importedEntity: Entity | null = null;
+    let importedEntityId: string | null = null;
     let importCommand: ReturnType<typeof createEntityCommand> | null = null;
-    let cachedSource: { url: string; scale: number } | null = null;
+    let cachedSource: { url: string; scale: number; annotations: boolean } | null = null;
     const unsubscribe = api.subscribe(state => {
-      if (state.sceneSessionId !== sessionId) controller.abort();
+      if (state.sceneSessionId !== sessionId || (importedEntityId && cachedSource
+        && state.scene.entities[importedEntityId]?.components.cadReference?.sourceUrl !== cachedSource.url)) {
+        controller.abort();
+      }
     });
     const assertCurrent = (): void => {
       if (controller.signal.aborted || get().sceneSessionId !== sessionId) {
@@ -596,6 +600,7 @@ export const createProjectAssetsSlice: EditorSlice<
       set({ cadImportProgress: createCadImportProgress(id, 5, '准备读取 CAD', '正在打开 ' + displayName + '...', displayName) });
       const parseResult = await parseCadReferenceDxfForImport({
         sourceUrl, fileSizeBytes: result.fileSizeBytes, signal: controller.signal,
+        ...(agvSpawnerId ? { agvMap: { id: 'cad-' + id, name: displayName } } : {}),
         readSmallFileText: async onProgress => {
           const response = await fetch(sourceUrl, { signal: controller.signal });
           if (!response.ok) throw new Error('读取 CAD 文件失败：HTTP ' + response.status);
@@ -607,41 +612,68 @@ export const createProjectAssetsSlice: EditorSlice<
         },
       });
       assertCurrent();
+      const metadata = createCadReferenceComponentMetadata(parseResult, {
+        sourceFileSizeBytes: result.fileSizeBytes,
+        importMode: result.fileSizeBytes >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES ? 'large-preview' : 'exact',
+      });
+      let entityId: string;
+      let command: ReturnType<typeof createEntityCommand>;
+      const map = parseResult.agvMap;
+      if (agvSpawnerId) {
+        const state = get();
+        const target = state.scene.entities[agvSpawnerId];
+        const currentMap = target?.components.agvMap;
+        if (state.runtimeMode === 'preview' || !isRuntimeEntityEditable(state.scene, target) || !currentMap) {
+          throw new Error('目标 AGV 产生器已移除或不可编辑。');
+        }
+        if (!map || !metadata.agvMapOrigin) throw new Error('DXF 未生成有效的 AGV 路网。');
+        entityId = agvSpawnerId;
+        command = importAgvCadMapCommand(agvSpawnerId, { agvMap: currentMap, cadReference: target.components.cadReference }, {
+          agvMap: { ...currentMap, mapId: map.id, importedMap: map, scale: AGV_MAP_SCALE_DEFAULT },
+          cadReference: { sourcePath: result.filePath, sourceUrl, ...metadata },
+        });
+      } else {
+        const entity = createCadReferenceEntity(result.filePath, sourceUrl, displayName, metadata);
+        entityId = entity.id;
+        command = createEntityCommand(entity);
+      }
       rememberCadReferenceParseResult(sourceUrl, parseResult);
-      cachedSource = { url: sourceUrl, scale: parseResult.unitScaleToMeters };
-      const entity = createCadReferenceEntity(result.filePath, sourceUrl, displayName,
-        createCadReferenceComponentMetadata(parseResult, { sourceFileSizeBytes: result.fileSizeBytes,
-          importMode: result.fileSizeBytes >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES ? 'large-preview' : 'exact' }));
-      importedEntity = entity;
-      const command = createEntityCommand(entity);
+      cachedSource = { url: sourceUrl, scale: parseResult.unitScaleToMeters, annotations: Boolean(parseResult.annotations) };
+      importedEntityId = entityId;
       importCommand = command;
       set(state => {
         const commandResult = executeCommand(state.scene, state.history, command);
-        const hierarchySelectionIds = [entity.id];
+        const hierarchySelectionIds = agvSpawnerId ? state.hierarchySelectionIds : [entityId];
         return { ...commandResult, hierarchySelectionIds,
           ...resolveSelectionTransformMode(state, commandResult.scene, hierarchySelectionIds),
-          cadImportProgress: { ...createCadImportProgress(id, 90, '构建 CAD 线稿', '正在分批创建参考层...', displayName), entityId: entity.id } };
+          cadImportProgress: { ...createCadImportProgress(id, 90, '构建 CAD 图纸', '正在分批创建参考层...', displayName), entityId } };
       });
-      await waitForCadReferenceReady(entity.id, { signal: controller.signal, onProgress: status => {
+      await waitForCadReferenceReady(entityId, sourceUrl, { signal: controller.signal, onProgress: status => {
         if (controller.signal.aborted || get().sceneSessionId !== sessionId) return;
-        set({ cadImportProgress: { ...createCadImportProgress(id, Math.max(90, status.percent), '构建 CAD 线稿', status.detail, displayName), entityId: entity.id } });
+        set({ cadImportProgress: { ...createCadImportProgress(id, Math.max(90, status.percent), '构建 CAD 图纸', status.detail, displayName), entityId } });
       } });
       assertCurrent();
+      const summary = map
+        ? 'AGV 地图已导入，包含 ' + map.nodes.length + ' 个节点和 ' + map.tracks.length + ' 条路线。'
+        : 'CAD 参考图已显示。';
       set(state => ({
-        cadImportProgress: { ...createCadImportProgress(id, 100, '导入完成', 'CAD 参考图已显示。', displayName, 'success'), entityId: entity.id },
-        logs: prependLog(state.logs, '导入CAD参考图：' + displayName + '，' + formatCadReferenceUnitSummary(parseResult)
-          + '，' + parseResult.polylineCount + ' 条折线，' + parseResult.pointCount + ' 个点'),
+        cadImportProgress: { ...createCadImportProgress(id, 100, '导入完成', summary, displayName, 'success'), entityId },
+        logs: prependLog(state.logs, (map ? '导入AGV地图：' : '导入CAD参考图：') + displayName + '，' + formatCadReferenceUnitSummary(parseResult)
+          + '，' + parseResult.polylineCount + ' 条折线，' + parseResult.pointCount + ' 个点' + (map ? '；' + summary : '')),
       }));
+      if (map && get().scene.selectedEntityId === entityId) get().requestSceneFocusForSelection([entityId]);
     } catch (error) {
-      if (cachedSource) consumeCadReferenceParseResult(cachedSource.url, cachedSource.scale);
-      if (importedEntity) cancelCadReferenceLoad(importedEntity.id);
       if (get().sceneSessionId !== sessionId) return;
+      if (importedEntityId && cachedSource && getCadReferenceLoadStatus(importedEntityId)?.sourceUrl === cachedSource.url) {
+        cancelCadReferenceLoad(importedEntityId);
+      }
       const canceled = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
       const message = canceled ? 'CAD 导入已取消。' : error instanceof Error ? error.message : String(error);
-      const entity = importedEntity, command = importCommand;
+      const entityId = importedEntityId, command = importCommand;
       set(state => {
-        const scene = entity && command && state.scene.entities[entity.id] ? command.undo(state.scene) : state.scene;
-        const hierarchySelectionIds = state.hierarchySelectionIds.filter(entityId => entityId !== entity?.id && Boolean(scene.entities[entityId]));
+        const ownsDrawing = entityId && state.scene.entities[entityId]?.components.cadReference?.sourceUrl === cachedSource?.url;
+        const scene = ownsDrawing && command ? command.undo(state.scene) : state.scene;
+        const hierarchySelectionIds = sanitizeHierarchySelection(scene, state.hierarchySelectionIds);
         return { scene, hierarchySelectionIds,
           history: command ? { undoStack: state.history.undoStack.filter(item => item !== command), redoStack: state.history.redoStack.filter(item => item !== command) } : state.history,
           cadImportProgress: createCadImportProgress(id, state.cadImportProgress?.percent ?? 0, canceled ? '导入已取消' : '导入失败', message, state.cadImportProgress?.fileName ?? null, canceled ? 'canceled' : 'error'),
@@ -649,6 +681,7 @@ export const createProjectAssetsSlice: EditorSlice<
         };
       });
     } finally {
+      if (cachedSource) consumeCadReferenceParseResult(cachedSource.url, cachedSource.scale, cachedSource.annotations);
       unsubscribe();
       if (activeCadImport?.id === id) activeCadImport = null;
     }

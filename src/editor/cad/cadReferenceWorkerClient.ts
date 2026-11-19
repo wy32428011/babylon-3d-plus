@@ -3,15 +3,20 @@ import {
   CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES,
   type CadReferenceParseResult,
 } from './cadReferenceCore';
-import type { CadReferenceDxfWorkerMessage, CadReferenceDxfWorkerRequest } from './cadReferenceWorkerMessages';
+import type { CadReferenceAgvMapImport, CadReferenceDxfWorkerMessage, CadReferenceDxfWorkerRequest } from './cadReferenceWorkerMessages';
 
 export type CadReferenceLargeDxfProgress = { percent: number; detail: string };
 export type CadReferenceDxfLoadOptions = {
   importMode?: string;
   contentLengthBytes?: number;
   preferSafeUnknownSize?: boolean;
+  includeAnnotations?: boolean;
+  agvMap?: CadReferenceAgvMapImport;
 };
-export type CadReferenceDxfWorkerOptions = { signal?: AbortSignal; maxGeometryBytes?: number };
+export type CadReferenceDxfWorkerOptions = Pick<CadReferenceDxfLoadOptions, 'includeAnnotations' | 'agvMap'> & {
+  signal?: AbortSignal;
+  maxGeometryBytes?: number;
+};
 
 export type ParseCadReferenceDxfForImportOptions = CadReferenceDxfLoadOptions & CadReferenceDxfWorkerOptions & {
   sourceUrl: string;
@@ -22,7 +27,7 @@ export type ParseCadReferenceDxfForImportOptions = CadReferenceDxfLoadOptions & 
 };
 
 function requiresCadWorker(fileSizeBytes: number | undefined, options: CadReferenceDxfLoadOptions): boolean {
-  if (options.importMode === 'large-preview') return true;
+  if (options.includeAnnotations || options.agvMap || options.importMode === 'large-preview') return true;
   const sizes = [fileSizeBytes, options.contentLengthBytes];
   if (sizes.some((size) => typeof size === 'number' && size >= CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES)) return true;
   const hasKnownSize = sizes.some((size) => typeof size === 'number' && Number.isFinite(size) && size > 0);
@@ -112,6 +117,8 @@ export function createCadReferenceDxfWorkerTask(
   if (!settled) {
     const request: CadReferenceDxfWorkerRequest = {
       id, sourceUrl, unitScaleToMeters,
+      ...(options.includeAnnotations ? { includeAnnotations: true } : {}),
+      ...(options.agvMap ? { agvMap: options.agvMap } : {}),
       maxGeometryBytes: options.maxGeometryBytes ?? CAD_REFERENCE_MAX_GEOMETRY_BYTES,
     };
     try {

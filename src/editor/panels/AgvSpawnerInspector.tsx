@@ -6,7 +6,7 @@ import {
   getAgvMapSceneAxisBase,
   type AgvMapSceneAxis,
 } from '../model/agvMap';
-import { BUILT_IN_AGV_MAPS, getBuiltInAgvMap } from '../model/agvMapLibrary';
+import { BUILT_IN_AGV_MAPS, getAgvMapDefinition } from '../model/agvMapLibrary';
 import { useEditorStore } from '../store/editorStore';
 import { DeviceSpawnerInspector } from './DeviceSpawnerInspector';
 
@@ -20,18 +20,33 @@ const AXIS_LABELS: Record<AgvMapSceneAxis, string> = {
 };
 
 type AgvSpawnerInspectorProps = {
+  entityId: string;
   spawner: DeviceSpawnerComponent;
   map: AgvMapComponent;
   disabled?: boolean;
 };
 
-export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawnerInspectorProps) {
+export function AgvSpawnerInspector({ entityId, spawner, map, disabled = false }: AgvSpawnerInspectorProps) {
   const updateSelectedAgvMap = useEditorStore(state => state.updateSelectedAgvMap);
-  const selectedMap = getBuiltInAgvMap(map.mapId);
+  const importCadReference = useEditorStore(state => state.importCadReference);
+  const importingCad = useEditorStore(state => Boolean(state.cadImportProgress?.active));
+  const selectedMap = getAgvMapDefinition(map);
+  const mapEditingDisabled = disabled || importingCad;
 
   function commitMap(patch: Partial<AgvMapComponent>, label: string): void {
-    if (disabled) return;
+    if (mapEditingDisabled) return;
     updateSelectedAgvMap({ ...map, ...patch }, label);
+  }
+
+  function exportMap(): void {
+    if (!selectedMap) return;
+    const json = JSON.stringify(selectedMap, null, 2) + '\n';
+    const url = URL.createObjectURL(new Blob([json], { type: 'application/json;charset=utf-8' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${selectedMap.name.replace(/[<>:"/\\|?*]/g, '-')}.agv-map.json`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   function renderAxisOptions(otherAxis: AgvMapSceneAxis) {
@@ -51,7 +66,7 @@ export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawn
         <label className="inspector-row">
           <span>地图选择</span>
           <select
-            disabled={disabled}
+            disabled={mapEditingDisabled}
             value={map.mapId ?? ''}
             onChange={event => commitMap({ mapId: event.target.value || null }, '选择AGV地图')}
           >
@@ -59,15 +74,19 @@ export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawn
             {BUILT_IN_AGV_MAPS.map(definition => (
               <option key={definition.id} value={definition.id}>{definition.name}</option>
             ))}
+            {map.importedMap ? <option value={map.importedMap.id}>{map.importedMap.name}</option> : null}
           </select>
         </label>
-        <button type="button" disabled title="CAD 地图上传与转换将在后续版本提供">地图上传（后续版本）</button>
+        <button type="button" disabled={mapEditingDisabled} onClick={() => void importCadReference(entityId)}>
+          地图上传（DXF）
+        </button>
+        <button type="button" disabled={!selectedMap || importingCad} onClick={exportMap}>导出地图 JSON</button>
         {map.mapId && !selectedMap ? <p className="telemetry-runtime-error">所选地图不存在，请重新选择。</p> : null}
         <label className="inspector-row">
           <span>地图轨迹展示</span>
           <input
             type="checkbox"
-            disabled={disabled || !selectedMap}
+            disabled={mapEditingDisabled || !selectedMap}
             checked={map.showTrajectories}
             onChange={event => commitMap({ showTrajectories: event.target.checked }, '切换AGV地图轨迹')}
           />
@@ -75,7 +94,7 @@ export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawn
         <label className="inspector-row">
           <span>地图X轴映射</span>
           <select
-            disabled={disabled}
+            disabled={mapEditingDisabled}
             value={map.xAxis}
             onChange={event => commitMap({ xAxis: event.target.value as AgvMapSceneAxis }, '更新AGV地图X轴映射')}
           >
@@ -85,7 +104,7 @@ export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawn
         <label className="inspector-row">
           <span>地图Y轴映射</span>
           <select
-            disabled={disabled}
+            disabled={mapEditingDisabled}
             value={map.yAxis}
             onChange={event => commitMap({ yAxis: event.target.value as AgvMapSceneAxis }, '更新AGV地图Y轴映射')}
           >
@@ -96,7 +115,7 @@ export function AgvSpawnerInspector({ spawner, map, disabled = false }: AgvSpawn
           <span>比例尺</span>
           <input
             type="number"
-            disabled={disabled}
+            disabled={mapEditingDisabled}
             min={AGV_MAP_SCALE_MIN}
             max={AGV_MAP_SCALE_MAX}
             step="0.1"

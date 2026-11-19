@@ -51,6 +51,7 @@ function createCadAbortError(): Error {
 /** 等待运行时完成包含 CAD 的真实渲染帧；创建 Mesh 本身不代表完成。 */
 export function waitForCadReferenceReady(
   entityId: string,
+  sourceUrl: string,
   options: { signal?: AbortSignal; onProgress?: (status: CadReferenceLoadStatus) => void } = {},
 ): Promise<void> {
   if (options.signal?.aborted) return Promise.reject(createCadAbortError());
@@ -65,7 +66,7 @@ export function waitForCadReferenceReady(
     };
     const abort = (): void => finish(createCadAbortError());
     const receive = (status: CadReferenceLoadStatus): void => {
-      if (status.entityId !== entityId || settled) return;
+      if (settled || status.entityId !== entityId || status.sourceUrl !== sourceUrl) return;
       options.onProgress?.(status);
       if (status.state === 'ready') finish();
       else if (status.state === 'error') finish(new Error(status.detail));
