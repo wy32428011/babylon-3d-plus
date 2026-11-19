@@ -23,6 +23,7 @@ import { createModelAssetTemplateKey, resolveModelAssetSharedInstancingPolicy } 
 import { GeneratedCargoInstancePool, type GeneratedCargoPoolEntry } from './GeneratedCargoInstancePool';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceKey, type DeviceSpawnerConfig, type SpawnedDeviceKey } from '../telemetry/spawner/DeviceSpawnerRuntime';
+import { AgvMapRuntime } from '../agv/AgvMapRuntime';
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
 import type { GeneratedCargoKind, GeneratedCargoRuntimeEntry } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
@@ -1154,7 +1155,7 @@ export class GeneratedModelOutputController {
       mesh.position.y = 0.4;
       mesh.material = material;
       mesh.metadata = { ...(mesh.metadata ?? {}), [EDITOR_ENTITY_ID_METADATA_KEY]: entity.id };
-      marker = { root, mesh, material };
+      marker = { root, mesh, material, agvMap: null };
       this.deviceSpawnerMarkers.set(entity.id, marker);
     }
 
@@ -1165,12 +1166,23 @@ export class GeneratedModelOutputController {
     marker.mesh.isVisible = showMarker;
     marker.mesh.isPickable = showMarker && this.dependencies.document.isEntityScenePickable(entity.id);
     marker.material.alpha = selected ? 1 : MODEL_GENERATOR_MARKER_ALPHA;
+
+    const agvComponent = entity.components.agvMap;
+    if (agvComponent && !marker.agvMap) {
+      marker.agvMap = new AgvMapRuntime(this.context.scene, entity.id);
+      marker.agvMap.root.parent = marker.root;
+    } else if (!agvComponent && marker.agvMap) {
+      marker.agvMap.dispose();
+      marker.agvMap = null;
+    }
+    marker.agvMap?.sync(agvComponent!, visible);
   }
 
   /** 释放设备产生器编辑态标记。 */
   public disposeDeviceSpawnerMarker(entityId: string): void {
     const marker = this.deviceSpawnerMarkers.get(entityId);
     if (!marker) return;
+    marker.agvMap?.dispose();
     marker.material.dispose();
     marker.mesh.dispose();
     marker.root.dispose();
@@ -1185,6 +1197,8 @@ export class GeneratedModelOutputController {
       marker.root.setEnabled(visible);
       marker.mesh.isVisible = showMarker;
       marker.mesh.isPickable = showMarker && this.dependencies.document.isEntityScenePickable(entityId);
+      const agvComponent = this.dependencies.document.shadowDocument?.entities[entityId]?.components.agvMap;
+      if (agvComponent) marker.agvMap?.sync(agvComponent, visible);
     }
   }
 

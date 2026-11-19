@@ -12,6 +12,7 @@ import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
 import type { CompositeDeviceFolderComponent, DevicePartBindingComponent } from './devicePartBinding';
 import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
+import type { AgvMapSceneAxis } from './agvMap';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -256,6 +257,15 @@ export type DeviceSpawnerComponent = {
   templateEntityId: string | null;
   /** 无消息自动销毁超时（秒）。 */
   timeoutSeconds: number;
+};
+
+/** AGV 产生器的地图显示配置；实体位置是地图 (0,0)，比例尺单位为米/地图单位。 */
+export type AgvMapComponent = {
+  mapId: string | null;
+  showTrajectories: boolean;
+  xAxis: AgvMapSceneAxis;
+  yAxis: AgvMapSceneAxis;
+  scale: number;
 };
 
 export type CameraComponent = {
@@ -564,6 +574,8 @@ export type EntityComponents = {
   modelGenerator?: ModelGeneratorComponent;
   /** 设备产生器：MQTT 消息驱动动态克隆模板实例（AGV/穿梭车等编辑期数量不确定的设备）。 */
   deviceSpawner?: DeviceSpawnerComponent;
+  /** AGV 产生器附加地图；与 deviceSpawner 同实体使用。 */
+  agvMap?: AgvMapComponent;
   /** 复合设备文件夹的组织元数据，不创建运行时几何。 */
   compositeDevice?: CompositeDeviceFolderComponent;
   /** 共享宿主模型几何的独立逻辑设备。 */

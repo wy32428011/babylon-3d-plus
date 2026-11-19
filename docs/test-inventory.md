@@ -4,8 +4,8 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：1001；测试/runner/smoke 候选：878；fixture/helper/治理工具：123。
-- npm 测试/smoke 入口：152；有静态入口的候选：712；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：1004；测试/runner/smoke 候选：881；fixture/helper/治理工具：123。
+- npm 测试/smoke 入口：153；有静态入口的候选：715；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
 - CI 静态可达候选：164。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
@@ -411,6 +411,8 @@
 | tests/digitalTwin/viewerCapabilitiesBuild.test.mjs | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/digitalTwin/viewerModelClick.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含服务/端口；复核端口与关闭流程 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/viewerTemplateCapabilities.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
+| tests/editor/agvMap.test.ts | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/agvSpawnerScene.test.mjs | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/alarmCustomProperty.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/alarmManager.test.mjs | NullEngine；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/alarmReference.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
@@ -621,6 +623,7 @@
 | tests/roam/manualRoamSpawnContract.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamTurnState.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/proceduralAvatarAnimation.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/runtime/agvMapRuntime.test.ts | NullEngine | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/alarmReferenceEffects.test.mjs | NullEngine；包含文件/源码断言候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；模块加载 hook；保留进程隔离 | 否 / 未确认 |
 | tests/runtime/autoPatrolInspectionRecordStore.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/runtime/autoPatrolInspectionReplayController.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |

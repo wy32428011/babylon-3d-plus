@@ -102,6 +102,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const createDeviceSpawner = useEditorStore((state) => state.createDeviceSpawner);
+  const createAgvSpawner = useEditorStore((state) => state.createAgvSpawner);
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
@@ -1785,6 +1786,11 @@ export function ProjectPanel(props: ProjectPanelProps) {
 
       if (item.builtIn.kind === 'device-spawner') {
         createDeviceSpawner();
+        return;
+      }
+
+      if (item.builtIn.kind === 'agv-spawner') {
+        createAgvSpawner();
         return;
       }
 

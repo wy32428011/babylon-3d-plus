@@ -12,7 +12,7 @@ import { type CommandHistory } from '../../commands/CommandHistory';
 import { type FolderGroupRotationInput, type FolderGroupTranslationInput, type HierarchyGroupRotationInput, type HierarchyGroupTranslationInput } from '../../commands/entityCommands';
 import { type CameraOrientation, type CameraProjection, type StandardCameraOrientation, type EditorGridCellSize, type EditorGridSettings } from '../../../runtime/babylon/createEngine';
 import type { AssetEntry } from '../../assets/AssetDatabase';
-import type { AutoPatrolComponent, CadReferenceComponent, ClickEventBindingComponent, ChartMarkerComponent, DataPlatformScreenComponent, DeviceSpawnerComponent, LightComponent, LightKind, LocatorComponent, MeshKind, ModelGeneratorComponent, PoiEffectComponent, PoiEffectKind, SkyboxComponent, TransformComponent } from '../../model/components';
+import type { AgvMapComponent, AutoPatrolComponent, CadReferenceComponent, ClickEventBindingComponent, ChartMarkerComponent, DataPlatformScreenComponent, DeviceSpawnerComponent, LightComponent, LightKind, LocatorComponent, MeshKind, ModelGeneratorComponent, PoiEffectComponent, PoiEffectKind, SkyboxComponent, TransformComponent } from '../../model/components';
 import type { Entity } from '../../model/Entity';
 import type { DataPlatformChartAssetEntry } from '../../assets/dataPlatformChartLibrary';
 import { type SceneCameraPose, type FetchConfig, type MqttConfig, type SceneEnvironmentSettings, type SceneEnvironmentTransform, type SceneSkyboxSettings, type SceneSensitivitySettings, type SceneDocument } from '../../model/SceneDocument';
@@ -396,6 +396,7 @@ export type EditorState = {
   createLight: (lightKind: LightKind, placementPosition?: Vector3Data) => void;
   createModelGenerator: (placementPosition?: Vector3Data) => void;
   createDeviceSpawner: (placementPosition?: Vector3Data) => void;
+  createAgvSpawner: (placementPosition?: Vector3Data) => void;
   createAutoPatrol: (placementPosition?: Vector3Data) => void;
   createManualRoamSpawn: (placementPosition?: Vector3Data) => void;
   setManualRoamAvatar: (entityId: string, avatar: ManualRoamAvatar | null) => void;
@@ -453,6 +454,7 @@ export type EditorState = {
   updateSelectedInspectionBinding: (binding: InspectionBinding | null) => void;
   updateSelectedModelGenerator: (component: ModelGeneratorComponent, label?: string) => void;
   updateSelectedDeviceSpawner: (component: DeviceSpawnerComponent, label?: string) => void;
+  updateSelectedAgvMap: (component: AgvMapComponent, label?: string) => void;
   updateSelectedClickEventBinding: (component: ClickEventBindingComponent, label?: string) => void;
   updateSelectedPoiEffect: (component: PoiEffectComponent, label?: string) => void;
   updateSelectedAutoPatrol: (component: AutoPatrolComponent, label?: string) => void;

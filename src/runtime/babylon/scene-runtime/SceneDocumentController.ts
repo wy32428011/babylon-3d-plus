@@ -649,6 +649,7 @@ export class SceneDocumentController {
       if (!entity.components.modelArrayInstance && !this.dependencies.assets.models.has(entity.id)) return false;
     }
     if (entity.components.modelGenerator && !this.dependencies.outputs.modelGenerators.has(entity.id)) return false;
+    if (entity.components.deviceSpawner && !this.dependencies.outputs.deviceSpawnerMarkers.has(entity.id)) return false;
     if (entity.components.poiEffect && !this.dependencies.effects.poiEffectRuntime.has(entity.id)) return false;
     if (entity.components.light && !this.dependencies.presentation.lights.has(entity.id)) return false;
     if (entity.components.light && !this.dependencies.presentation.lightMarkerRuntime.isComplete(entity)) return false;
@@ -711,6 +712,10 @@ export class SceneDocumentController {
     if (modelGenerator) {
       modelGenerator.selected = selected;
       this.dependencies.outputs.applyModelGeneratorPresentation(modelGenerator);
+    }
+
+    if (entity.components.deviceSpawner) {
+      this.dependencies.outputs.syncDeviceSpawnerEntity(entity, selected);
     }
 
     if (entity.components.poiEffect) {

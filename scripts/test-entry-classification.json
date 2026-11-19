@@ -4359,7 +4359,7 @@
     },
     {
       "file": "scripts/test-entry-manifest.json",
-      "sha256": "89a65c52f902c88e5f1f53a1b2af2c7ed6731ee4df48a563b5c7d9b3465ebaa2",
+      "sha256": "d13d998409d4b997618563632b3c7f336c750580083cbec6c442502b5634baa3",
       "disposition": "metadata",
       "domain": null,
       "command": "npm run test:entries",
@@ -4378,7 +4378,7 @@
           "line": 2
         }
       ],
-      "reviewNote": "保留既有登记；2026-10-26仅追加六个原生天空入口，逐一核对命令与GPU/Electron/Blender前置，不把登记视为运行通过。同日Babylon专项追加两个定向入口，Electron入口须构建并显式提供已有开发服务，非GI夹具不证明工厂或GI性能。2026-11-11追加详情绑定、表单浏览器、硬件WebGL和跨仓桥接独立入口；图形检查须串行，跨仓检查需显式指定中台源码，夹具不代表真实业务资源。2026-11-11在原test:inspection入口增加平台固定版本协议及自包含资源校验；保持独立进程和GPU分离。"
+      "reviewNote": "保留既有登记；2026-10-26仅追加六个原生天空入口，逐一核对命令与GPU/Electron/Blender前置，不把登记视为运行通过。同日Babylon专项追加两个定向入口，Electron入口须构建并显式提供已有开发服务，非GI夹具不证明工厂或GI性能。2026-11-11追加详情绑定、表单浏览器、硬件WebGL和跨仓桥接独立入口；图形检查须串行，跨仓检查需显式指定中台源码，夹具不代表真实业务资源。2026-11-11在原test:inspection入口增加平台固定版本协议及自包含资源校验；保持独立进程和GPU分离。2026-11-19追加AGV地图定向入口，使用Node原生strip-types、Vite SSR和NullEngine，不替代真实GPU/Electron验收。"
     },
     {
       "file": "scripts/test-groups.mjs",

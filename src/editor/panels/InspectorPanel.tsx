@@ -26,6 +26,7 @@ import { getDevicePartDeclaration } from '../model/devicePartBinding';
 import { useEditorStore } from '../store/editorStore';
 import { ModelGeneratorInspector } from './ModelGeneratorInspector';
 import { DeviceSpawnerInspector } from './DeviceSpawnerInspector';
+import { AgvSpawnerInspector } from './AgvSpawnerInspector';
 import { ClickEventBindingInspector } from './ClickEventBindingInspector';
 import { LocatorInspector } from './LocatorInspector';
 import { PoiEffectInspector } from './PoiEffectInspector';
@@ -357,6 +358,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const modelAsset = selectedEntity.components.modelAsset;
   const modelGenerator = selectedEntity.components.modelGenerator;
   const deviceSpawner = selectedEntity.components.deviceSpawner;
+  const agvMap = selectedEntity.components.agvMap;
   const clickEventBinding = selectedEntity.components.clickEventBinding;
   const poiEffect = selectedEntity.components.poiEffect;
   const autoPatrol = selectedEntity.components.autoPatrol;
@@ -369,7 +371,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     fixedNodes: devicePartDeclaration.fixedNodes,
   } : null;
   const isCompactModelInspector = Boolean(
-    modelAsset || devicePart || meshRenderer || skybox || modelGenerator || deviceSpawner || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
+    modelAsset || devicePart || meshRenderer || skybox || modelGenerator || deviceSpawner || agvMap || clickEventBinding || poiEffect || autoPatrol || manualRoamSpawn || locator,
   );
   const isGeneratorEntity = Boolean(modelGenerator || deviceSpawner);
   const isBuiltInBound = Boolean(locator?.builtInBinding);
@@ -384,7 +386,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
   return (
     <section className={isCompactModelInspector ? 'panel inspector-panel inspector-panel-compact-model' : 'panel inspector-panel'}>
-      <h2>{modelGenerator ? '模型生成器' : deviceSpawner ? '设备产生器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
+      <h2>{modelGenerator ? '模型生成器' : agvMap ? 'AGV产生器' : deviceSpawner ? '设备产生器' : clickEventBinding ? '点击事件绑定' : poiEffect ? 'EFF 特效' : autoPatrol ? '自动巡检' : manualRoamSpawn ? '手动漫游' : 'Inspector'}</h2>
       <label className="inspector-row">
         <span>{selectedEntity.components.alarmManager ? 'POI名称' : poiEffect ? '特效名称' : modelGenerator || clickEventBinding || autoPatrol || selectedEntity.components.chartMarker ? 'POI名称' : '名称'}</span>
         <input
@@ -438,11 +440,15 @@ export function InspectorPanel(props: InspectorPanelProps) {
         <fieldset className="transform-fieldset" aria-label="设备产生器标记提示">
           <legend>重要提示</legend>
           <p className="muted model-generator-global-note">
-            注意：此标记位置仅用于编辑设备产生器配置；动态实例的初始位置取模板实体位置。
+            {agvMap
+              ? 'AGV产生器的位置就是地图原点；动态实例的初始位置仍取模板实体位置。'
+              : '注意：此标记位置仅用于编辑设备产生器配置；动态实例的初始位置取模板实体位置。'}
           </p>
         </fieldset>
       ) : null}
-      {deviceSpawner ? (
+      {deviceSpawner && agvMap ? (
+        <AgvSpawnerInspector spawner={deviceSpawner} map={agvMap} disabled={isLocked} />
+      ) : deviceSpawner ? (
         <DeviceSpawnerInspector component={deviceSpawner} disabled={isLocked} />
       ) : null}
       {/* 生成器自带的绑定作用域是它的产物，不参与全场设备类型匹配，因此不与 POI 标记共用说明与渲染分支。 */}

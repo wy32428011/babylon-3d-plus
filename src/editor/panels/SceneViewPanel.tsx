@@ -450,6 +450,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   const createLight = useEditorStore((state) => state.createLight);
   const createModelGenerator = useEditorStore((state) => state.createModelGenerator);
   const createDeviceSpawner = useEditorStore((state) => state.createDeviceSpawner);
+  const createAgvSpawner = useEditorStore((state) => state.createAgvSpawner);
   const createAutoPatrol = useEditorStore((state) => state.createAutoPatrol);
   const createManualRoamSpawn = useEditorStore((state) => state.createManualRoamSpawn);
   const createPoiEffect = useEditorStore((state) => state.createPoiEffect);
@@ -942,7 +943,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
   });
 
   const { handleCanvasDragOver, handleCanvasDrop } = useSceneAssetDropHandler({
-    isRuntimePreview, runtimeRef, clickSnapshotRef, sceneDocument, placeSkybox, importModelAsset, createAutoPatrol, createManualRoamSpawn, createModelGenerator, createDeviceSpawner, createClickEventBinding, createChartMarker, createPoiEffect, createMesh, createLocator, createLight, pushLog,
+    isRuntimePreview, runtimeRef, clickSnapshotRef, sceneDocument, placeSkybox, importModelAsset, createAutoPatrol, createManualRoamSpawn, createModelGenerator, createDeviceSpawner, createAgvSpawner, createClickEventBinding, createChartMarker, createPoiEffect, createMesh, createLocator, createLight, pushLog,
   });
 
   useEffect(() => {

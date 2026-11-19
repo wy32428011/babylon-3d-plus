@@ -17,6 +17,7 @@ import type { Vector3Data } from './math';
 import type { ModelParameterConfig } from './modelParameters';
 import { createDefaultModelGeneratorComponent } from './modelGenerator';
 import { createDefaultDeviceSpawner } from './deviceSpawner';
+import { createDefaultAgvMapComponent } from './agvMap';
 import { createDefaultPoiEffectComponent, getPoiEffectDefinition } from './poiEffect';
 import { createDefaultAutoPatrolComponent } from './autoPatrolInspection';
 import { createDefaultClickEventBindingComponent, createGeneratorClickEventBindingComponent } from './clickEventBinding';
@@ -1332,6 +1333,19 @@ export function createDeviceSpawnerEntity(position: Vector3Data = vector3()): En
       },
       deviceSpawner: createDefaultDeviceSpawner(),
       clickEventBinding: createGeneratorClickEventBindingComponent(),
+    },
+  };
+}
+
+/** 创建 AGV 产生器；复用设备生成能力，实体位置同时作为所选地图的二维原点。 */
+export function createAgvSpawnerEntity(position: Vector3Data = vector3()): Entity {
+  const entity = createDeviceSpawnerEntity(position);
+  return {
+    ...entity,
+    name: 'AGV产生器',
+    components: {
+      ...entity.components,
+      agvMap: createDefaultAgvMapComponent(),
     },
   };
 }

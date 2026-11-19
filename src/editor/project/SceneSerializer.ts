@@ -58,6 +58,7 @@ import {
 } from '../model/modelGenerator';
 import { sanitizeClickEventBindingComponent } from '../model/clickEventBinding';
 import { sanitizeDeviceSpawnerComponent } from '../model/deviceSpawner';
+import { sanitizeAgvMapComponent } from '../model/agvMap';
 import { normalizeCompositeDeviceFolder, normalizeDevicePartBinding, reconcileCompositeDevices } from '../model/devicePartBinding';
 import type { Vector3Data } from '../model/math';
 import { ENTITY_NAME_MAX_LENGTH, MODEL_ARRAY_ITEM_COUNT_MAX } from '../model/modelArray';
@@ -662,6 +663,13 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     const deviceSpawner = sanitizeDeviceSpawnerComponent(components.deviceSpawner);
     if (!deviceSpawner) throwUnsupportedSceneFileError();
     normalized.deviceSpawner = deviceSpawner;
+  }
+
+  if ('agvMap' in components && components.agvMap !== undefined) {
+    if (!normalized.deviceSpawner) throwUnsupportedSceneFileError();
+    const agvMap = sanitizeAgvMapComponent(components.agvMap);
+    if (!agvMap) throwUnsupportedSceneFileError();
+    normalized.agvMap = agvMap;
   }
 
   if (components.compositeDevice !== undefined) {
@@ -1493,6 +1501,8 @@ function hasRuntimeComponent(components: EntityComponents): boolean {
     components.cadReference ||
     components.modelAsset ||
     components.modelGenerator ||
+    components.deviceSpawner ||
+    components.agvMap ||
     components.devicePartBinding ||
     components.poiEffect ||
     components.autoPatrol ||

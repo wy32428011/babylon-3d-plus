@@ -28,6 +28,7 @@ import type { PublishedAssetCache } from '../../assets/publishedAssetCache';
 import { EnvironmentAssetContainerCache } from '../environmentAssetContainerCache';
 import { SharedModelAssetCache } from '../SharedModelAssetCache';
 import type { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
+import type { AgvMapRuntime } from '../agv/AgvMapRuntime';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import type { ConveyorModelTelemetryState, HcliftModelTelemetryState, LiftModelTelemetryState, RgvModelTelemetryState, RgvNlModelTelemetryState, ShuttleModelTelemetryState, StackerModelTelemetryState } from '../telemetry/specialized/types';
 
@@ -193,6 +194,7 @@ export type DeviceSpawnerMarkerRuntimeEntry = {
   root: TransformNode;
   mesh: Mesh;
   material: StandardMaterial;
+  agvMap: AgvMapRuntime | null;
 };
 
 export type ModelGeneratorMeshOutputRuntimeEntry = {

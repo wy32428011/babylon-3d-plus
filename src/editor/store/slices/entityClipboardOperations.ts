@@ -55,6 +55,7 @@ function cloneEntityComponents(entity: Entity): Entity['components'] {
     ...(entity.components.alarmManager ? { alarmManager: cloneJsonValue(entity.components.alarmManager) } : {}),
     ...(entity.components.modelGenerator ? { modelGenerator: cloneModelGeneratorComponent(entity.components.modelGenerator) } : {}),
     ...(entity.components.deviceSpawner ? { deviceSpawner: cloneJsonValue(entity.components.deviceSpawner) } : {}),
+    ...(entity.components.agvMap ? { agvMap: cloneJsonValue(entity.components.agvMap) } : {}),
     ...(entity.components.clickEventBinding ? { clickEventBinding: cloneClickEventBindingComponent(entity.components.clickEventBinding) } : {}),
     ...(entity.components.telemetryBinding ? { telemetryBinding: cloneJsonValue(entity.components.telemetryBinding) } : {}),
     ...(entity.components.poiEffect ? { poiEffect: cloneJsonValue(entity.components.poiEffect) } : {}),

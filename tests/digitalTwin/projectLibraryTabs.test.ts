@@ -103,7 +103,7 @@ test('模型库空状态只由普通模型资产决定', () => {
   );
 });
 
-test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库包含设备产生器等八个指定入口', () => {
+test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库包含设备与 AGV 产生器等九个指定入口', () => {
   const source = readFileSync(PROJECT_LIBRARY_PATH, 'utf8');
   const poiLibrary = readProjectLibraryDefinition(source, 'poi');
   const effectLibrary = readProjectLibraryDefinition(source, 'effect');
@@ -114,7 +114,7 @@ test('特效库紧跟 POI 库并承载全部内置 EFF，POI 库包含设备产�
   assert.ok(poiIndex < effectIndex && effectIndex < themeIndex, '特效库应位于 POI 库与主题库之间');
   assert.deepEqual(
     [...poiLibrary.matchAll(/id: '(poi-[^']+)'/g)].map((match) => match[1]),
-    ['poi-auto-patrol', 'poi-model-generator', 'poi-device-spawner', 'poi-click-event-binding', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
+    ['poi-auto-patrol', 'poi-model-generator', 'poi-device-spawner', 'poi-agv-spawner', 'poi-click-event-binding', 'poi-chart-marker', 'poi-panel', 'poi-alarm', 'poi-roam'],
   );
   assert.ok(!poiLibrary.includes('createPoiEffectLibraryItems()'));
   assert.ok(effectLibrary.includes("label: '特效库'"));

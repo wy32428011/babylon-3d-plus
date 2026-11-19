@@ -26,6 +26,7 @@ type Options = {
   createManualRoamSpawn: EditorState['createManualRoamSpawn'];
   createModelGenerator: EditorState['createModelGenerator'];
   createDeviceSpawner: EditorState['createDeviceSpawner'];
+  createAgvSpawner: EditorState['createAgvSpawner'];
   createClickEventBinding: EditorState['createClickEventBinding'];
   createChartMarker: EditorState['createChartMarker'];
   createPoiEffect: EditorState['createPoiEffect'];
@@ -37,7 +38,7 @@ type Options = {
 
 /** 保留视口原有执行顺序和依赖，集中管理资源拖放。 */
 export function useSceneAssetDropHandler({
-  isRuntimePreview, runtimeRef, clickSnapshotRef, sceneDocument, placeSkybox, importModelAsset, createAutoPatrol, createManualRoamSpawn, createModelGenerator, createDeviceSpawner, createClickEventBinding, createChartMarker, createPoiEffect, createMesh, createLocator, createLight, pushLog,
+  isRuntimePreview, runtimeRef, clickSnapshotRef, sceneDocument, placeSkybox, importModelAsset, createAutoPatrol, createManualRoamSpawn, createModelGenerator, createDeviceSpawner, createAgvSpawner, createClickEventBinding, createChartMarker, createPoiEffect, createMesh, createLocator, createLight, pushLog,
 }: Options) {
   /** 仅当拖拽数据是可创建场景实体的资源时允许浏览器在 Scene 画布触发 drop。 */
   function handleCanvasDragOver(event: DragEvent<HTMLCanvasElement>): void {
@@ -167,6 +168,11 @@ export function useSceneAssetDropHandler({
 
     if (builtInAsset.kind === 'device-spawner') {
       createDeviceSpawner(placementPosition);
+      return;
+    }
+
+    if (builtInAsset.kind === 'agv-spawner') {
+      createAgvSpawner(placementPosition);
       return;
     }
 

@@ -3,6 +3,7 @@ import type { Command } from './Command';
 import { executeCommand, type CommandHistory } from './CommandHistory';
 import { createSceneUndoRecorder } from './scenePatch';
 import type {
+  AgvMapComponent,
   AutoPatrolComponent,
   CadReferenceComponent,
   ClickEventBindingComponent,
@@ -620,6 +621,31 @@ export function updateModelGeneratorCommand(
     label,
     execute: (scene) => updateModelGenerator(scene, entityId, after),
     undo: (scene) => updateModelGenerator(scene, entityId, before),
+  };
+}
+
+/** 更新 AGV 地图完整配置，通过独立快照支持撤销和重做。 */
+export function updateAgvMapCommand(
+  entityId: string,
+  before: AgvMapComponent,
+  after: AgvMapComponent,
+  label = '更新AGV地图',
+): Command {
+  const replace = (scene: SceneDocument, agvMap: AgvMapComponent): SceneDocument => {
+    const entity = scene.entities[entityId];
+    if (!entity?.components.agvMap) return scene;
+    return {
+      ...scene,
+      entities: {
+        ...scene.entities,
+        [entityId]: { ...entity, components: { ...entity.components, agvMap } },
+      },
+    };
+  };
+  return {
+    label,
+    execute: scene => replace(scene, after),
+    undo: scene => replace(scene, before),
   };
 }
 

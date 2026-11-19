@@ -7,7 +7,7 @@ import { updateSceneOpeningAnimationCommand } from '../../commands/sceneOpeningA
 import { compositionDescendants } from '../../composition/composition';
 import { createAlarmManagerEntity, normalizeAlarmManager, type AlarmManagerComponent } from '../../model/alarmManager';
 import { createCommandHistory, executeCommand, redoCommand, undoCommand } from '../../commands/CommandHistory';
-import { commitFolderGroupRotation as commitFolderGroupRotationState, commitFolderGroupTranslation as commitFolderGroupTranslationState, commitHierarchyGroupRotation as commitHierarchyGroupRotationState, commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState, updateAutoPatrolCommand, createEntityCommand, createFolderCommand, moveEntitiesToFolderCommand, renameEntityCommand, updateCadReferenceCommand, updateSceneDocumentCommand, updateSceneDefaultCargoGeneratorCommand, updateEntityLockCommand, updateEntityVisibilityCommand, updateLightCommand, updateLocatorCommand, updateMeshRendererCommand, updateModelAssetCodeCommand, updateInspectionBindingCommand, updateModelGeneratorCommand, updateDeviceSpawnerCommand, updateClickEventBindingCommand, updatePoiEffectCommand, updateModelParameterValuesCommand, updateTelemetryBindingCommand, updateTransformCommand } from '../../commands/entityCommands';
+import { commitFolderGroupRotation as commitFolderGroupRotationState, commitFolderGroupTranslation as commitFolderGroupTranslationState, commitHierarchyGroupRotation as commitHierarchyGroupRotationState, commitHierarchyGroupTranslation as commitHierarchyGroupTranslationState, updateAutoPatrolCommand, createEntityCommand, createFolderCommand, moveEntitiesToFolderCommand, renameEntityCommand, updateCadReferenceCommand, updateSceneDocumentCommand, updateSceneDefaultCargoGeneratorCommand, updateEntityLockCommand, updateEntityVisibilityCommand, updateLightCommand, updateLocatorCommand, updateMeshRendererCommand, updateModelAssetCodeCommand, updateInspectionBindingCommand, updateModelGeneratorCommand, updateDeviceSpawnerCommand, updateAgvMapCommand, updateClickEventBindingCommand, updatePoiEffectCommand, updateModelParameterValuesCommand, updateTelemetryBindingCommand, updateTransformCommand } from '../../commands/entityCommands';
 import { createId } from '../../../shared/ids';
 import type { ChartMarkerComponent, DeviceSpawnerComponent, LocatorComponent } from '../../model/components';
 import { normalizeLightSettings } from '../../model/lightSettings';
@@ -17,7 +17,7 @@ import { getEntityArrayIdentifierError, getCompositionArrayInfo, getEntityArrayP
 import { createChartMarkerEntity, normalizeChartMarker } from '../../model/chartMarker';
 import { createDataPlatformScreenComponent } from '../../model/dataPlatformScreen';
 import { normalizeChartMarkerScreenSource } from '../../assets/dataPlatformScreenDrag';
-import { createEmptySceneDocument, createAutoPatrolEntity, createClickEventBindingEntity, createFolderEntity, createLightEntity, createLocatorEntity, createManualRoamSpawnEntity, createMeshEntity, createModelGeneratorEntity, createDeviceSpawnerEntity, createPoiEffectEntity, type SceneDocument } from '../../model/SceneDocument';
+import { createEmptySceneDocument, createAutoPatrolEntity, createClickEventBindingEntity, createFolderEntity, createLightEntity, createLocatorEntity, createManualRoamSpawnEntity, createMeshEntity, createModelGeneratorEntity, createDeviceSpawnerEntity, createAgvSpawnerEntity, createPoiEffectEntity, type SceneDocument } from '../../model/SceneDocument';
 import { findManualRoamSpawnEntity } from '../../model/manualRoamSpawn';
 import { cloneAutoPatrolComponent, sanitizeAutoPatrolComponent, updateAutoPatrolWaypointView } from '../../model/autoPatrolInspection';
 import { getBuiltInSlotBindingConfig, getLayerChangePlatformBindingConfig, patchBuiltInSlotDimensions, patchLayerChangePlatformDimensions } from '../../model/builtInSlotBinding';
@@ -25,6 +25,7 @@ import { areModelParameterValuesEqual, restoreModelParameterValues, sanitizeEdit
 import { cloneModelGeneratorComponent, sanitizeModelGeneratorComponent } from '../../model/modelGenerator';
 import { inspectionConfigurationMatches, normalizeInspectionBinding } from '../../model/inspectionBinding';
 import { sanitizeDeviceSpawnerComponent } from '../../model/deviceSpawner';
+import { sanitizeAgvMapComponent } from '../../model/agvMap';
 import { cloneClickEventBindingComponent, sanitizeClickEventBindingComponent } from '../../model/clickEventBinding';
 import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../../model/telemetryBinding';
 import { getDevicePartDeclaration } from '../../model/devicePartBinding';
@@ -72,6 +73,7 @@ export const createSceneDocumentSlice: EditorSlice<
   "createModelGenerator" |
   "createClickEventBinding" |
   "createDeviceSpawner" |
+  "createAgvSpawner" |
   "createAlarmManager" |
   "updateAlarmManager" |
   "createChartMarker" |
@@ -108,6 +110,7 @@ export const createSceneDocumentSlice: EditorSlice<
   "updateSelectedInspectionBinding" |
   "updateSelectedModelGenerator" |
   "updateSelectedDeviceSpawner" |
+  "updateSelectedAgvMap" |
   "updateSelectedClickEventBinding" |
   "updateSelectedPoiEffect" |
   "setManualRoamAvatar" |
@@ -378,6 +381,23 @@ export const createSceneDocumentSlice: EditorSlice<
 
       const baseEntity = createDeviceSpawnerEntity(sanitizeVector3(placementPosition));
       const entity = { ...baseEntity, name: createNextEntityName(state.scene, '设备产生器') };
+      const command = createEntityCommand(entity);
+      const result = executeCommand(state.scene, state.history, command);
+      const hierarchySelectionIds = [entity.id];
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        logs: prependLog(state.logs, command.label),
+      };
+    });
+  },
+  createAgvSpawner: (placementPosition) => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '创建AGV产生器');
+
+      const baseEntity = createAgvSpawnerEntity(sanitizeVector3(placementPosition));
+      const entity = { ...baseEntity, name: createNextEntityName(state.scene, 'AGV产生器') };
       const command = createEntityCommand(entity);
       const result = executeCommand(state.scene, state.history, command);
       const hierarchySelectionIds = [entity.id];
@@ -1234,6 +1254,23 @@ export const createSceneDocumentSlice: EditorSlice<
       if (areJsonValuesEqual(before, after)) return state;
 
       const command = updateDeviceSpawnerCommand(entity.id, before, after, label);
+      const result = executeCommand(state.scene, state.history, command);
+      return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
+    });
+  },
+  updateSelectedAgvMap: (component, label = '更新AGV地图') => {
+    set((state) => {
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, label);
+      const entity = getSelectedEntity(state);
+      const current = entity?.components.agvMap;
+      if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
+      const normalized = sanitizeAgvMapComponent(component);
+      if (!normalized) return state;
+      const before = { ...current };
+      const after = { ...normalized };
+      if (areJsonValuesEqual(before, after)) return state;
+
+      const command = updateAgvMapCommand(entity.id, before, after, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });

@@ -44,6 +44,12 @@
       "reason": "兼容细分入口；未计入默认 core 实际执行结果。"
     },
     {
+      "name": "test:agv-spawner",
+      "command": "node --experimental-strip-types --test --test-concurrency=1 tests/editor/agvMap.test.ts tests/editor/agvSpawnerScene.test.mjs tests/runtime/agvMapRuntime.test.ts",
+      "category": "legacy",
+      "reason": "AGV地图数据、场景持久化、轴映射和比例尺的Node/NullEngine定向回归；不替代真实GPU与Electron交互验收。"
+    },
+    {
       "name": "test:auto-patrol",
       "command": "node --experimental-strip-types --test tests/editor/autoPatrol.test.ts tests/editor/autoPatrolPlayback.test.ts",
       "category": "legacy",
