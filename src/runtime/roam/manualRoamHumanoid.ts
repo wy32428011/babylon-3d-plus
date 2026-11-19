@@ -14,7 +14,11 @@ export type ManualRoamRigBinding={
   footReferenceUp?:ReadonlyMap<string,Vector3>;
 };
 const endpoint:Record<string,string>={Hips:'Spine',Spine:'Spine1',Spine1:'Spine2',Spine2:'Neck',Neck:'Head'};
-for(const side of ['Left','Right'])for(const [part,child] of Object.entries({Shoulder:'Arm',Arm:'ForeArm',ForeArm:'Hand',UpLeg:'Leg',Leg:'Foot',Foot:'ToeBase'}))endpoint[side+part]=side+child;
+const limbEndpoint:Record<string,string>={};
+for(const side of ['Left','Right'])for(const [part,child] of Object.entries({Shoulder:'Arm',Arm:'ForeArm',ForeArm:'Hand',UpLeg:'Leg',Leg:'Foot',Foot:'ToeBase'})){
+  endpoint[side+part]=side+child;
+  if(part==='Arm'||part==='ForeArm'||part==='Foot')limbEndpoint[side+part]=side+child;
+}
 
 export function humanoidLegLength(nodes:ReadonlyMap<string,TransformNode>):number {
   return ['Left','Right'].reduce((sum,side)=>sum+Vector3.Distance(position(nodes.get(side+'UpLeg')!),position(nodes.get(side+'Leg')!))+Vector3.Distance(position(nodes.get(side+'Leg')!),position(nodes.get(side+'Foot')!)),0)/2;
@@ -97,7 +101,8 @@ export function prepareHumanoidReference(container:AssetContainer,binding:Manual
   // 出生点/漫游朝向由外层节点拥有，不能在自动朝向补偿中抵消它。
   const assetYaw=Math.atan2(assetForward.x,assetForward.z);
   const alignment=Matrix.RotationY(yaw);
-  for(const [name,child] of Object.entries(endpoint)) {
+  // 躯干、头颈、锁骨和腿部保持原始站立姿态，避免把生理曲率与自然站距误矫正为仰头、挺胸、撅臀或并腿；只将手臂校准到源T姿态并恢复鞋底水平。
+  for(const [name,child] of Object.entries(limbEndpoint)) {
     const node=binding.joints.get(name)!,tip=binding.joints.get(child)!;
     const footUp=binding.footReferenceUp?.get(name);
     // 脚踝到脚趾常常斜向下，不代表鞋底法线；直立参考只恢复原鞋底水平，不能套用源人物的脚骨轴。
@@ -119,7 +124,7 @@ type Pose={position:Vector3;scaling:Vector3;rotation:Quaternion};
 function pose(node:TransformNode):Pose{return{position:node.position.clone(),scaling:node.scaling.clone(),rotation:node.rotationQuaternion?.clone()??Quaternion.FromEulerVector(node.rotation)};}
 function matrix(value:Pose):Matrix{return Matrix.Compose(value.scaling,value.rotation,value.position);}
 
-/** 源动作的Idle承载默认鞋的静态补偿；相对这套中立姿态传递脚掌/脚趾运动，避免把鞋型偏角传给新人物。 */
+/** 源动作的Idle承载默认下肢站姿与鞋型静态补偿；相对这套中立姿态传递骨盆与下肢运动，避免把源站姿偏角传给新人物。 */
 export function sampleHumanoidFootReference(source:ReadonlyMap<string,TransformNode>,idle:AnimationGroup):ReadonlyMap<string,Matrix> {
   const tracks=new Map(idle.targetedAnimations.map(track=>[`${track.target.name}:${track.animation.targetProperty}`,track.animation]));
   const worlds=new Map<string,Matrix>();
@@ -131,7 +136,7 @@ export function sampleHumanoidFootReference(source:ReadonlyMap<string,TransformN
     const parent=MANUAL_ROAM_HUMANOID_PARENTS[name];
     worlds.set(name,Matrix.Compose(node.scaling,rotation,translation).multiply(parent?worlds.get(parent)!:node.parent?.getWorldMatrix()??Matrix.IdentityReadOnly));
   }
-  return new Map([...worlds].filter(([name])=>name.endsWith('Foot')||name.endsWith('ToeBase')));
+  return new Map([...worlds].filter(([name])=>name==='Hips'||name.endsWith('UpLeg')||name.endsWith('Leg')||name.endsWith('Foot')||name.endsWith('ToeBase')));
 }
 
 /** 在加载时烘焙世界姿态，再按目标真实父链求局部旋转；额外辅助骨不要求伪造源层级。 */
@@ -142,6 +147,7 @@ export function retargetHumanoidGroup(original:AnimationGroup,source:ReadonlyMap
   const targetWorld=new Map([...target].map(([semantic,node])=>[semantic,node.computeWorldMatrix(true).clone()]));
   const alignment=Matrix.RotationY(binding.referenceYaw??-binding.facingYaw);
   const corrections=new Map([...target].map(([semantic])=>[semantic,targetWorld.get(semantic)!.multiply(Matrix.Invert((footReference?.get(semantic)??sourceWorld.get(semantic)!).multiply(alignment)))]));
+  const sourceHipsReferenceY=(footReference?.get('Hips')??sourceWorld.get('Hips')!).getTranslation().y;
   const byNode=new Map([...source].map(([semantic,node])=>[node,semantic]));
   const rotations=new Map(original.targetedAnimations.filter(track=>track.animation.targetProperty==='rotationQuaternion').map(track=>[byNode.get(track.target)!,track.animation]));
   const sourceHips=source.get('Hips')!,targetHips=target.get('Hips')!,hipsBase=targetHips.position.clone();
@@ -182,7 +188,7 @@ export function retargetHumanoidGroup(original:AnimationGroup,source:ReadonlyMap
         keys.get(semantic)!.push({frame,value:rotation});
         let translation=rest.position;
         if(semantic==='Hips'){
-          const deltaY=(animatedSource.get('Hips')!.getTranslation().y-sourceWorld.get('Hips')!.getTranslation().y)*legRatio;
+          const deltaY=(animatedSource.get('Hips')!.getTranslation().y-sourceHipsReferenceY)*legRatio;
           translation=hipsBase.add(Vector3.TransformNormal(new Vector3(0,deltaY,0),Matrix.Invert(parentWorld)));hipKeys.push({frame,value:translation});
         }
         const world=Matrix.Compose(rest.scaling,rotation,translation).multiply(parentWorld);animatedTarget.set(node,world);return world;

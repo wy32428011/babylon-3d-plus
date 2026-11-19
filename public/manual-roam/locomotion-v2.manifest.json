@@ -17,10 +17,10 @@
     "WalkForward": {
       "name": "WalkForward",
       "loop": true,
-      "referenceSpeed": 1.6724137931034484,
-      "duration": 0.87,
+      "referenceSpeed": 1.6420454545454546,
+      "duration": 0.88,
       "fps": 30,
-      "cycleDistanceMeters": 1.455,
+      "cycleDistanceMeters": 1.445,
       "phaseOffset": 0,
       "contacts": {
         "left": [
@@ -86,31 +86,44 @@
       "source": {
         "kind": "original-authored-commute-walk",
         "author": "project manual-roam asset pipeline",
-        "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, flat foot, ball roll) with analytic two-bone leg IK; not motion capture",
+        "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, loading response, flat foot, ball roll, smooth swing fold) with analytic two-bone leg IK and multi-joint upper-body inertia; not motion capture",
         "parameters": {
-          "duration": 0.87,
-          "stride": 1.455,
+          "duration": 0.88,
+          "stride": 1.445,
           "lead": "auto",
           "stanceFraction": 0.56,
-          "trackHalfWidth": 0.06,
-          "toeOut": 0.1,
-          "heelStrikePitch": 0.3,
-          "heelRiseStart": 0.55,
-          "toeOffPitch": 0.5,
-          "swingClearance": 0.035,
-          "reach": 0.997,
-          "midstanceSlack": 0.008,
-          "swingTangent": 0.15,
-          "pelvisRoll": 0.03,
-          "pelvisYaw": 0.05,
-          "pelvisTilt": 0.02,
-          "chestCounterYaw": 0.07,
-          "forwardLean": 0.05,
-          "armSwing": 0.3,
-          "armHang": 0.16,
+          "trackHalfWidth": 0.056,
+          "toeOut": 0.095,
+          "heelStrikePitch": 0.25,
+          "heelRiseStart": 0.58,
+          "toeOffPitch": 0.46,
+          "swingClearance": 0.072,
+          "swingPeak": 0.3,
+          "reach": 0.996,
+          "midstanceSlack": 0.007,
+          "swingTangent": 0.32,
+          "pelvisRoll": 0.042,
+          "pelvisYaw": 0.056,
+          "pelvisTilt": 0.025,
+          "pelvisPitchSwing": 0.014,
+          "chestCounterYaw": 0.075,
+          "chestCounterRoll": 0.022,
+          "chestPitchSwing": 0.01,
+          "forwardLean": 0.045,
+          "shoulderYaw": 0.032,
+          "shoulderRoll": 0.015,
+          "armSwing": 0.34,
+          "armBias": 0.04,
+          "armAdduct": 0.042,
+          "armHang": 0.15,
           "armLag": 0.04,
-          "elbowBase": 0.26,
-          "elbowSwing": 0.16
+          "elbowBase": 0.24,
+          "elbowSwing": 0.28,
+          "elbowLag": 0.07,
+          "wristSwing": 0.055,
+          "wristLag": 0.09,
+          "headYawKeep": 0.18,
+          "headNod": 0.012
         }
       }
     },
@@ -205,7 +218,7 @@
         "upperBody": {
           "kind": "original-authored-commute-walk",
           "author": "project manual-roam asset pipeline",
-          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, flat foot, ball roll) with analytic two-bone leg IK; not motion capture",
+          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, loading response, flat foot, ball roll, smooth swing fold) with analytic two-bone leg IK and multi-joint upper-body inertia; not motion capture",
           "clip": "WalkForward"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
@@ -304,7 +317,7 @@
         "upperBody": {
           "kind": "original-authored-commute-walk",
           "author": "project manual-roam asset pipeline",
-          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, flat foot, ball roll) with analytic two-bone leg IK; not motion capture",
+          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, loading response, flat foot, ball roll, smooth swing fold) with analytic two-bone leg IK and multi-joint upper-body inertia; not motion capture",
           "clip": "WalkForward"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
@@ -403,7 +416,7 @@
         "upperBody": {
           "kind": "original-authored-commute-walk",
           "author": "project manual-roam asset pipeline",
-          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, flat foot, ball roll) with analytic two-bone leg IK; not motion capture",
+          "description": "Male commuter walk solved offline from world-space foot trajectories (heel strike, loading response, flat foot, ball roll, smooth swing fold) with analytic two-bone leg IK and multi-joint upper-body inertia; not motion capture",
           "clip": "WalkForward"
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
@@ -412,21 +425,14 @@
     "RunForward": {
       "name": "RunForward",
       "loop": true,
-      "referenceSpeed": 1.9463674155074155,
-      "duration": 0.8,
+      "referenceSpeed": 3.2424242424242427,
+      "duration": 0.66,
       "fps": 30,
-      "cycleDistanceMeters": 1.5570939324059327,
-      "phaseOffset": 0.041666666666666664,
+      "cycleDistanceMeters": 2.14,
+      "phaseOffset": 0,
       "contacts": {
         "left": [
-          0.25,
           0.75,
-          1,
-          1,
-          1,
-          1,
-          1,
-          1,
           1,
           1,
           1,
@@ -438,24 +444,25 @@
           0,
           0,
           0,
-          0.25,
-          0.5,
-          0.25,
           0,
           0,
-          0.25
+          0,
+          0,
+          0,
+          0,
+          0,
+          0.25,
+          0.75
         ],
         "right": [
-          1,
-          0.75,
-          0.25,
           0,
           0,
           0,
           0,
-          0.25,
-          0.5,
-          0.25,
+          0,
+          0,
+          0,
+          0,
           0,
           0.25,
           0.75,
@@ -464,40 +471,65 @@
           1,
           1,
           1,
-          1,
-          1,
-          1,
-          1,
-          1,
-          1,
-          1
+          0.75,
+          0.25,
+          0,
+          0,
+          0
         ]
       },
-      "calibration": "cyclic-ankle-toe-rearward-events-full-support-displacement-median-v1",
+      "calibration": "authored-commute-run-exact-v1",
       "source": {
-        "author": "Kay Lousberg",
-        "kind": "KayKit Character Animations 1.1",
-        "url": "https://kaylousberg.itch.io/kaykit-character-animations",
-        "sha256": "11422afd50abf7e8c92ea107e2e0bc94abd38023d6d15f55ad580347efbfa29e",
-        "license": "CC0-1.0",
-        "clip": "Running_B",
-        "derivation": "world-rest-retarget-reduced-leg-swing-and-pelvis-motion",
-        "upperBody": {
-          "kind": "original-authored-run-upper-body",
-          "phaseAlignment": "left-support",
-          "armSwing": 0.55,
-          "elbowBase": 0.45,
-          "elbowSwing": 0.18,
-          "forwardLean": 0.09
+        "kind": "original-authored-commute-run",
+        "author": "project manual-roam asset pipeline",
+        "description": "Male natural jog/run solved offline from world-space foot trajectories with true flight phase, ballistic pelvis arc, analytic two-bone leg IK and bent-arm athletic upper body; not motion capture",
+        "parameters": {
+          "duration": 0.66,
+          "stride": 2.14,
+          "lead": "auto",
+          "stanceFraction": 0.31,
+          "trackHalfWidth": 0.042,
+          "toeOut": 0.06,
+          "heelStrikePitch": 0.12,
+          "heelRiseStart": 0.4,
+          "toeOffPitch": 0.56,
+          "swingClearance": 0.155,
+          "swingPeak": 0.42,
+          "reach": 0.994,
+          "midstanceDip": 0.044,
+          "flightLift": 0.018,
+          "swingTangent": 0.38,
+          "pelvisRoll": 0.055,
+          "pelvisYaw": 0.095,
+          "pelvisTilt": 0.105,
+          "pelvisPitchSwing": 0.022,
+          "chestCounterYaw": 0.11,
+          "chestCounterRoll": 0.028,
+          "chestPitchSwing": 0.016,
+          "forwardLean": 0.145,
+          "shoulderYaw": 0.055,
+          "shoulderRoll": 0.022,
+          "armSwing": 0.56,
+          "armBias": 0.06,
+          "armAdduct": 0.075,
+          "armHang": 0.14,
+          "armLag": 0.03,
+          "elbowBase": 1.18,
+          "elbowSwing": 0.32,
+          "elbowLag": 0.06,
+          "wristSwing": 0.07,
+          "wristLag": 0.08,
+          "headYawKeep": 0.14,
+          "headNod": 0.016
         }
       },
       "upperBody": {
         "kind": "original-authored-run-upper-body",
         "phaseAlignment": "left-support",
-        "armSwing": 0.55,
-        "elbowBase": 0.45,
-        "elbowSwing": 0.18,
-        "forwardLean": 0.09
+        "armSwing": 0.56,
+        "elbowBase": 1.18,
+        "elbowSwing": 0.32,
+        "forwardLean": 0.145
       }
     },
     "RunBackward": {
@@ -573,20 +605,20 @@
         "upperBody": {
           "kind": "original-authored-run-upper-body",
           "phaseAlignment": "left-support",
-          "armSwing": 0.55,
-          "elbowBase": 0.45,
-          "elbowSwing": 0.18,
-          "forwardLean": 0.09
+          "armSwing": 0.56,
+          "elbowBase": 1.18,
+          "elbowSwing": 0.32,
+          "forwardLean": 0.145
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
       "upperBody": {
         "kind": "original-authored-run-upper-body",
         "phaseAlignment": "left-support",
-        "armSwing": 0.55,
-        "elbowBase": 0.45,
-        "elbowSwing": 0.18,
-        "forwardLean": 0.09
+        "armSwing": 0.56,
+        "elbowBase": 1.18,
+        "elbowSwing": 0.32,
+        "forwardLean": 0.145
       }
     },
     "RunLeft": {
@@ -664,20 +696,20 @@
         "upperBody": {
           "kind": "original-authored-run-upper-body",
           "phaseAlignment": "left-support",
-          "armSwing": 0.55,
-          "elbowBase": 0.45,
-          "elbowSwing": 0.18,
-          "forwardLean": 0.09
+          "armSwing": 0.56,
+          "elbowBase": 1.18,
+          "elbowSwing": 0.32,
+          "forwardLean": 0.145
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
       "upperBody": {
         "kind": "original-authored-run-upper-body",
         "phaseAlignment": "left-support",
-        "armSwing": 0.55,
-        "elbowBase": 0.45,
-        "elbowSwing": 0.18,
-        "forwardLean": 0.09
+        "armSwing": 0.56,
+        "elbowBase": 1.18,
+        "elbowSwing": 0.32,
+        "forwardLean": 0.145
       }
     },
     "RunRight": {
@@ -755,20 +787,20 @@
         "upperBody": {
           "kind": "original-authored-run-upper-body",
           "phaseAlignment": "left-support",
-          "armSwing": 0.55,
-          "elbowBase": 0.45,
-          "elbowSwing": 0.18,
-          "forwardLean": 0.09
+          "armSwing": 0.56,
+          "elbowBase": 1.18,
+          "elbowSwing": 0.32,
+          "forwardLean": 0.145
         },
         "derivation": "native-direction-phase-aligned-complete-upper-body"
       },
       "upperBody": {
         "kind": "original-authored-run-upper-body",
         "phaseAlignment": "left-support",
-        "armSwing": 0.55,
-        "elbowBase": 0.45,
-        "elbowSwing": 0.18,
-        "forwardLean": 0.09
+        "armSwing": 0.56,
+        "elbowBase": 1.18,
+        "elbowSwing": 0.32,
+        "forwardLean": 0.145
       }
     },
     "JumpStart": {
@@ -1039,7 +1071,7 @@
     },
     "animation": {
       "path": "manual-roam/locomotion-v2.glb",
-      "sha256": "483d75811df586c6244b9e0b14204716ab1b5cc651ff78d5559ab8060535dc09"
+      "sha256": "2030a94fb8558d3f181d9a29370e7ae70157b5174e779c8785faa94c6fc83061"
     }
   },
   "sources": [

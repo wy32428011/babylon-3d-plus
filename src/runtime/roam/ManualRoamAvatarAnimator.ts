@@ -130,7 +130,7 @@ export class ManualRoamAvatarAnimator {
       this.transition=null;
     } else this.updateWeights(delta, previousKind);
     const frequency = resolveManualRoamGaitFrequency(scaledFrame, this.timing, Object.fromEntries(this.weights));
-    this.state.phase = (previousPhase + delta * Math.min(4, frequency / this.state.strideScale)) % 1;
+    this.state.phase = !this.hasGaitPose() && this.state.kind === 'ground' && !turn ? 0 : (previousPhase + delta * Math.min(4, frequency / this.state.strideScale)) % 1;
     for (const clip of this.clips) {
       const group = this.groups.get(clip)!;
       const weight = this.weights.get(clip) ?? 0;
@@ -160,7 +160,12 @@ export class ManualRoamAvatarAnimator {
       : this.state.kind;
     const differs = this.clips.some(clip => Math.abs((this.weights.get(clip) ?? 0) - (desired[clip] ?? 0)) > 1e-8);
     if ((!this.transition && differs) || (this.transition && this.transition.family !== family)) {
-      this.transition = { from: new Map(this.weights), elapsed: 0, duration: this.state.kind === 'ground' && previousKind === 'ground' ? 0.18 : 0.10, family };
+      const hasWalk = this.clips.some(clip => clip.startsWith('Walk') && (this.weights.get(clip) ?? 0) > 1e-3);
+      const hasRun = this.clips.some(clip => clip.startsWith('Run') && (this.weights.get(clip) ?? 0) > 1e-3);
+      const wantsWalk = Object.keys(desired).some(clip => clip.startsWith('Walk') && (desired[clip as ManualRoamClip] ?? 0) > 1e-3);
+      const wantsRun = Object.keys(desired).some(clip => clip.startsWith('Run') && (desired[clip as ManualRoamClip] ?? 0) > 1e-3);
+      const gaitShift = (hasWalk && wantsRun) || (hasRun && wantsWalk);
+      this.transition = { from: new Map(this.weights), elapsed: 0, duration: this.state.kind === 'ground' && previousKind === 'ground' ? (gaitShift ? 0.26 : 0.18) : 0.10, family };
     }
     if (!this.transition) return;
     // 同一运动族内连续改变方向只更新终点，保留过渡时钟，避免每帧重开导致永远追不上输入。
