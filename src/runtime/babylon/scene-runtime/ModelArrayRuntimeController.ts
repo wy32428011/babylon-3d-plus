@@ -171,6 +171,19 @@ export class ModelArrayRuntimeController {
       if (variant) {
         // 变体代表机的位姿与身份由变体宿主模型直接承载；LED 文字仍需逐实例独立绘制。
         if (devType !== 'led' && variant.representativeEntityId === instanceEntity.id) continue;
+        if (devType === 'led') {
+          const sourceModel = this.dependencies.assets.models.get(variant.sourceEntityId);
+          const sourceEntity = sourceModel?.entitySnapshot;
+          const sourceModelAsset = sourceEntity?.components.modelAsset;
+          if (sourceModel && sourceEntity && sourceModelAsset) {
+            desired.set(variant.sourceEntityId, { entity: sourceEntity, host: sourceModel });
+            if (this.createModelArrayRenderSignature(modelAsset, binding)
+              === this.createModelArrayRenderSignature(sourceModelAsset, sourceEntity.components.telemetryBinding)) {
+              desired.set(instanceEntity.id, { entity: instanceEntity, host: sourceModel });
+              continue;
+            }
+          }
+        }
         desired.set(instanceEntity.id, { entity: instanceEntity, host: variant.model });
         continue;
       }
@@ -554,7 +567,7 @@ export class ModelArrayRuntimeController {
     this.dependencies.presentation.syncConveyorTrajectoriesForArrayInstances(entity.id);
   }
 
-  /** 编辑态资产编号不影响外观；运行态仅对启用遥测的真实阵列按设备身份隔离宿主。 */
+  /** 编辑态按完整参数组合分组；运行态 LED 忽略默认文案，由逐设备文字层显示实时内容。 */
   public createModelArrayRenderSignature(
     modelAsset: ModelAssetComponent,
     telemetryBinding: TelemetryBindingComponent | null | undefined = null,
@@ -568,7 +581,7 @@ export class ModelArrayRuntimeController {
           binding: this.createModelArrayJsonSignature(telemetryBinding),
         }
       : null;
-    const parameterValues = ledOverlayOnly && modelAsset.parameterValues
+    const parameterValues = ledOverlayOnly && this.dependencies.telemetry.telemetryPreviewActive && modelAsset.parameterValues
       ? Object.fromEntries(Object.entries(modelAsset.parameterValues).filter(([key]) => key !== 'displayText'))
       : modelAsset.parameterValues;
     return JSON.stringify({
@@ -719,7 +732,7 @@ export class ModelArrayRuntimeController {
 
   /**
    * 运行态脚本/遥测可能改变 Transform、显隐、材质或增删 Mesh；重新收集宿主并更新当前参数组，
-   * Geometry/网格集合未变时仅改写矩阵和材质，不重复创建批次。
+   * Geometry、网格集合和材质身份未变时仅改写矩阵，不重复创建批次。
    */
   public refreshModelArrayRuntimeRepresentation(model: ModelRuntimeEntry): void {
     if (this.updatesStopped) return;
@@ -824,8 +837,9 @@ export class ModelArrayRuntimeController {
       !mesh.isDisposed() && mesh.getTotalVertices() > 0
     ));
     // 批次 Geometry 与脚本宿主隔离；参数或脚本输入变化时必须重建，才能复制最新顶点数据。
+    // 文案等脚本可能释放并替换材质，材质身份也必须失效旧批次，避免宿主隐藏后渲染已释放资源。
     const sourceSignature = `${options.renderSignature}|representation:original-geometry|${sourceMeshes
-      .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
+      .map((mesh) => `${mesh.uniqueId}:${mesh.geometry?.uniqueId ?? 0}:${mesh.material?.uniqueId ?? 0}:${mesh instanceof Mesh ? mesh.thinInstanceCount : 0}`)
       .join('|')}`;
     const failureSignature = `${options.variantKey ?? 'base'}:${sourceSignature}:${totalInstanceCount}`;
 

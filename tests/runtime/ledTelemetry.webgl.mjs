@@ -14,7 +14,7 @@ const workspace = process.cwd();
 const output = await mkdtemp(path.join(tmpdir(), 'zending-led-webgl-'));
 const modelRoot = path.resolve('Assets/Models/Model-2080102163768123393-LED');
 const digest = value => createHash('sha256').update(value).digest('hex');
-const scriptSource = await readFile(path.join(modelRoot, 'led.model.ts'), 'utf8');
+const scriptSource = (await readFile(path.join(modelRoot, 'led.model.ts'), 'utf8')).replace(/^\uFEFF/, '');
 const preparedScript = prepareModelScriptCompilation(scriptSource);
 const compiledCode = ts.transpileModule(preparedScript.sourceText, {
   compilerOptions: {
@@ -98,6 +98,15 @@ try {
 
   const editing = await page.evaluate(() => window.ledTelemetryHarness.prepare());
   await page.locator('canvas').screenshot({ path: path.join(output, '01-editing.png') });
+  const edited = await page.evaluate(() => window.ledTelemetryHarness.editDisplayText('编辑态展示内容已更新'));
+  assert.equal(edited.batchUsesScriptMaterial, true, '编辑态批次必须使用更新后的文字材质');
+  assert.equal(edited.diagnostics?.paint, undefined);
+  await page.locator('canvas').screenshot({ path: path.join(output, '02-editing-text-updated.png') });
+  const editedCopy = await page.evaluate(() => window.ledTelemetryHarness.editDisplayText('阵列副本独立展示内容', 'led-copy'));
+  assert.equal(editedCopy.entityId, 'led-copy');
+  assert.equal(editedCopy.batchUsesScriptMaterial, true, '阵列副本必须使用自己的编辑态文字材质');
+  assert.equal(editedCopy.diagnostics?.paint, undefined);
+  await page.locator('canvas').screenshot({ path: path.join(output, '03-editing-copy-text-updated.png') });
   runningResult = await page.evaluate(() => window.ledTelemetryHarness.start());
   const running = runningResult.settled;
   assert.equal(runningResult.immediate.length, 2);
@@ -128,12 +137,12 @@ try {
   assert.equal(interruptedSource.text, interruption.longText, '断流时未完成长文案必须保留');
   assert.equal(interruptedSource.runtimeContext.telemetry, null);
   const completedSource = interruption.completed.find(row => row.entityId === 'led-source');
-  assert.equal(completedSource.text, '欢迎光临，新年快乐！', '完整滚动一遍后才回退模型参数');
+  assert.equal(completedSource.text, edited.text, '完整滚动一遍后才回退最新模型参数');
   const stopped = await page.evaluate(() => window.ledTelemetryHarness.stop());
   assert.deepEqual(stopped, []);
   await page.locator('canvas').screenshot({ path: path.join(output, '04-editing-restored.png') });
   assert.deepEqual(errors, []);
-  const report = { status: 'PASS', renderer, editing, running: runningResult, moved, picks, interruption, stopped, consoleMessages };
+  const report = { status: 'PASS', renderer, editing, edited, editedCopy, running: runningResult, moved, picks, interruption, stopped, consoleMessages };
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ status: report.status, output, renderer: renderer.renderer, texts: running.map(row => row.text) }, null, 2));
 } catch (error) {

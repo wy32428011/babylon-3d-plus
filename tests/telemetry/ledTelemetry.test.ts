@@ -271,7 +271,12 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
   const controller = new ModelArrayRuntimeController({ scene } as never, {
     presentation: { applyTransform: () => {} },
     telemetry,
-    variants: { modelArrayParameterVariantByEntityId: new Map(), modelArrayParameterVariants: new Map() },
+    variants: {
+      modelArrayParameterVariantByEntityId: new Map([[entity.id, {
+        model: host, sourceEntityId: 'source', representativeEntityId: entity.id,
+      }]]),
+      modelArrayParameterVariants: new Map(),
+    },
     assets: { models: new Map([['source', host]]) },
   } as never);
   controller.modelArrayInstanceEntities.set(entity.id, entity);
@@ -331,8 +336,9 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
 });
 
 
-test('LED 展示内容和 MQTT 身份不参与静态批量分组', () => {
-  const controller = new ModelArrayRuntimeController({} as never, {} as never);
+test('LED 运行态展示内容和 MQTT 身份不分组，编辑态按展示内容创建参数变体', () => {
+  const telemetry = { telemetryPreviewActive: true };
+  const controller = new ModelArrayRuntimeController({} as never, { telemetry } as never);
   const asset = {
     assetCode: 'led01',
     deviceType: 'led',
@@ -356,6 +362,15 @@ test('LED 展示内容和 MQTT 身份不参与静态批量分组', () => {
 
   assert.equal(changedTextAndDevice, first);
   assert.notEqual(changedGeometry, first);
+
+  telemetry.telemetryPreviewActive = false;
+  const editingText = controller.createModelArrayRenderSignature(asset, createDefaultTelemetryBinding('led'));
+  const editingChangedText = controller.createModelArrayRenderSignature({
+    ...asset,
+    parameterValues: { ...asset.parameterValues, displayText: '文字 B' },
+  }, createDefaultTelemetryBinding('led'));
+  assert.equal(controller.createModelArrayRenderSignature(asset, createDefaultTelemetryBinding('led')), editingText);
+  assert.notEqual(editingChangedText, editingText, '编辑态副本修改展示内容后必须拥有独立参数宿主');
 });
 
 
@@ -416,6 +431,81 @@ test('LED 编辑态保留电子屏，运行态批量仅排除动态文字屏幕'
     });
     assert.equal(model.modelArrayBatch!.meshes.length, 1);
     assert.equal(model.modelArrayBatch!.meshes.some(mesh => mesh.name.includes('Box010')), false);
+  } finally {
+    model.modelArrayBatch?.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+
+test('LED 编辑态更换文字材质后刷新批次，避免继续渲染已释放材质', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const root = new TransformNode('led-root', scene);
+  const contentRoot = new TransformNode('LED2', scene);
+  contentRoot.parent = root;
+  const frame = CreateBox('Box009', { size: 1 }, scene);
+  const screen = CreateBox('Box010', { size: 2 }, scene);
+  frame.parent = contentRoot;
+  screen.parent = contentRoot;
+  frame.material = new StandardMaterial('frame-material', scene);
+  const previousMaterial = new StandardMaterial('previous-text-material', scene);
+  screen.material = previousMaterial;
+  const model = {
+    root,
+    contentRoot,
+    assetHandle: {},
+    measurementReady: true,
+    meshes: [frame, screen],
+    externalScriptRuntime: { getDataDrivenConfigs: () => [{ device: { devType: 'led' } }] },
+    modelArrayBatch: null,
+    modelArraySourceSignature: '',
+    modelArrayFailureSignature: '',
+  } as unknown as ModelRuntimeEntry;
+  const entity = {
+    id: 'led-source',
+    components: {
+      modelAsset: { deviceType: 'led' },
+      transform: {
+        position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+      },
+    },
+  } as unknown as Entity;
+  const controller = new ModelArrayRuntimeController({ scene } as never, {
+    telemetry: { motionStaticBatchRuntime: { markModelDirty: () => {} }, telemetryPreviewActive: false },
+    bounds: { isModelBoundsMesh: () => true },
+    assets: { suspendModelArrayHost: () => {}, applyModelInteractivity: () => {} },
+    document: { isEntityVisible: () => true, isEntityScenePickable: () => true },
+    transforms: { refreshGroupTransformPreviewTargets: () => {} },
+    readiness: { loadDiagnostics: { beginTraceTask: () => ({ end: () => {} }) } },
+    selection: { outlinedModelArrayBatches: new Set() },
+  } as never);
+  const syncBatch = (parameterOnlyChangedEntityId?: string) => controller.syncModelArrayBatchForEntities(
+    entity,
+    model,
+    [entity],
+    [],
+    {
+      sourceEntityId: entity.id,
+      namePrefix: '__led_text_edit_test',
+      renderSignature: 'led-signature',
+      parameterOnlyChangedEntityId,
+    },
+  );
+  try {
+    syncBatch();
+    const previousBatch = model.modelArrayBatch;
+    assert.ok(previousBatch?.meshes.some(mesh => mesh.material === previousMaterial));
+
+    const nextMaterial = new StandardMaterial('next-text-material', scene);
+    screen.material = nextMaterial;
+    previousMaterial.dispose(false, false);
+    syncBatch(entity.id);
+
+    assert.notEqual(model.modelArrayBatch, previousBatch, '材质身份变化必须重建批次');
+    assert.ok(model.modelArrayBatch?.meshes.some(mesh => mesh.material === nextMaterial));
+    assert.equal(model.modelArrayBatch?.meshes.some(mesh => mesh.material === previousMaterial), false);
   } finally {
     model.modelArrayBatch?.dispose();
     scene.dispose();

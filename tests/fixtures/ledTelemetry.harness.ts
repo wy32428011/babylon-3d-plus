@@ -5,8 +5,10 @@ import type { Entity } from '../../src/editor/model/Entity';
 import { installDeploymentAssetManifest } from '../../src/runtime/assets/editorAssetUrl';
 import { deviceTelemetryStore } from '../../src/runtime/mqtt/deviceTelemetry';
 import { createClickEventBindingEvent, resolveClickEventBindingClick } from '../../src/editor/model/clickEventBinding';
+import { createDefaultTelemetryBinding } from '../../src/editor/model/telemetryBinding';
 import type { ModelArrayRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelArrayRuntimeController';
 import type { ModelAssetRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelAssetRuntimeController';
+import type { ParameterVariantHostPool } from '../../src/runtime/babylon/scene-runtime/ParameterVariantHostPool';
 import metadata from '../../Assets/Models/Model-2080102163768123393-LED/meta.json';
 
 const canvas = document.createElement('canvas');
@@ -23,6 +25,7 @@ const runtime = new SceneRuntime(scene, message => console.log('[SceneRuntime]',
 const access = runtime as unknown as {
   assets: ModelAssetRuntimeController;
   arrays: ModelArrayRuntimeController;
+  variants: ParameterVariantHostPool;
 };
 const sourcePath = 'C:/led-webgl/LED.glb';
 const sourceUrl = 'editor-asset://local/' + encodeURIComponent(sourcePath);
@@ -45,7 +48,7 @@ function createLed(id: string, assetCode: string, x: number, sourceEntityId?: st
     metadata.animationScripts,
     undefined,
     'led-webgl-v1',
-    metadata.dataDriven,
+    metadata.dataDriven ?? { device: { devType: 'led' }, fixedNodes: [] },
     undefined,
     undefined,
     undefined,
@@ -53,8 +56,9 @@ function createLed(id: string, assetCode: string, x: number, sourceEntityId?: st
   );
   entity.id = id;
   entity.components.modelAsset!.assetCode = assetCode;
-  entity.components.telemetryBinding!.assetCode = assetCode;
-  entity.components.telemetryBinding!.staleAfterMs = 60_000;
+  entity.components.telemetryBinding = createDefaultTelemetryBinding('led');
+  entity.components.telemetryBinding.assetCode = assetCode;
+  entity.components.telemetryBinding.staleAfterMs = 60_000;
   const clickEvent = createClickEventBindingEvent();
   clickEvent.id = `click-${id}`;
   entity.components.clickEventBinding = {
@@ -68,8 +72,8 @@ function createLed(id: string, assetCode: string, x: number, sourceEntityId?: st
   return entity;
 }
 
-const source = createLed('led-source', 'led01', -0.75);
-const copy = createLed('led-copy', 'led02', 0.75, source.id);
+let source = createLed('led-source', 'led01', -0.75);
+let copy = createLed('led-copy', 'led02', 0.75, source.id);
 const documentModel = createEmptySceneDocument('LED MQTT 真实 WebGL 验收');
 documentModel.sceneSettings.lighting.shadows.enabled = false;
 documentModel.sceneSettings.modelEntrance.enabled = false;
@@ -155,6 +159,54 @@ async function prepare() {
   return { models: runtime.getPerformanceMetrics().models, state: state() };
 }
 
+async function editDisplayText(text: string, entityId = source.id) {
+  const resolveHost = () => access.assets.models.get(entityId)
+    ?? [...access.variants.modelArrayParameterVariants.values()].find(variant => (
+      variant.entities.some(entity => entity.id === entityId)
+    ))?.model;
+  const host = resolveHost()!;
+  const previousBatch = host.modelArrayBatch;
+  const previousMaterial = host.meshes.find(mesh => /^Box010/.test(mesh.name))?.material;
+  const current = documentModel.entities[entityId]!;
+  const next = {
+    ...current,
+    components: {
+      ...current.components,
+      modelAsset: {
+        ...current.components.modelAsset!,
+        parameterValues: {
+          ...current.components.modelAsset!.parameterValues,
+          displayText: text,
+        },
+      },
+    },
+  };
+  if (entityId === source.id) source = next;
+  if (entityId === copy.id) copy = next;
+  documentModel.entities[entityId] = next;
+  runtime.syncModelParameters(documentModel, entityId);
+  await until(() => {
+    const currentHost = resolveHost();
+    const screen = currentHost?.meshes.find(mesh => /^Box010/.test(mesh.name));
+    const stored = screen?.metadata?.meshCanvasLabelEmissiveOverlay;
+    return currentHost?.modelArrayBatch
+      && currentHost.modelArrayBatch !== previousBatch
+      && screen?.material !== previousMaterial
+      && currentHost.modelArrayBatch.meshes.some(mesh => mesh.material === screen?.material)
+      && stored && JSON.parse(stored.atlasSignature)[0] === text;
+  }, `编辑态文字材质同步到 ${entityId} 批次`);
+  await new Promise(resolve => setTimeout(resolve, 4500));
+  await renderFrames(3);
+  const currentHost = resolveHost()!;
+  const screen = currentHost.meshes.find(mesh => /^Box010/.test(mesh.name));
+  return {
+    entityId,
+    text,
+    batchUsesScriptMaterial: currentHost.modelArrayBatch?.meshes.some(mesh => mesh.material === screen?.material) ?? false,
+    diagnostics: currentHost.contentRoot.metadata?.parametricLedDisplayDiagnostics ?? null,
+  };
+}
+
 async function start() {
   runtime.beginTelemetryPreview();
   await until(() => access.arrays.modelArrayTelemetryProxies.size === 2, '两个 LED 运行代理');
@@ -236,6 +288,7 @@ async function stop() {
 Object.assign(window, {
   ledTelemetryHarness: {
     prepare,
+    editDisplayText,
     start,
     moveCamera,
     pickScreen,
