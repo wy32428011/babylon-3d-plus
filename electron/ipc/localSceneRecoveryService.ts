@@ -54,11 +54,11 @@ export async function recoverLocalSceneResourceTransaction(options: Options): Pr
   let restoredCount = result.restoredReferenceCount;
   for (const file of result.resolvedFiles) allowed.add(pathKey(file));
   const networkErrors: LocalSceneResourceSyncResult['issues'] = [];
-  const missingModels = new Map<string, MissingLocalSceneResource>();
-  for (const item of result.missing) if (item.required && (item.resourceKind === 'model' || item.resourceKind === 'combo') && item.resourceId) {
-    missingModels.set(`${item.resourceKind}:${item.resourceId}:${item.expectedRevision ?? ''}`, item);
-  }
-  if (sourceKey) {
+  if (sourceKey && !request.skipModelDownloads) {
+    const missingModels = new Map<string, MissingLocalSceneResource>();
+    for (const item of result.missing) if (item.required && (item.resourceKind === 'model' || item.resourceKind === 'combo') && item.resourceId) {
+      missingModels.set(`${item.resourceKind}:${item.resourceId}:${item.expectedRevision ?? ''}`, item);
+    }
     const queue = [...missingModels.values()]; let cursor = 0;
     await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
       for (;;) {

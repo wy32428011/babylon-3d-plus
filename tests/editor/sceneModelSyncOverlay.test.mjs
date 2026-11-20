@@ -23,6 +23,7 @@ function render(policy, { explicit = true, issues = ['模型123参数冲突'], t
       isScenePreparationSettled: value => value.completed, allowScenePreparationEditing() {} },
     './environmentPreparationProgress': { environmentPreparationStore: { getSnapshot: () => environment,
       subscribe: () => () => {}, retry() {} } },
+    './skyboxRuntimeStatus': { skyboxRuntimeStatus: require('../../src/editor/loading/skyboxRuntimeStatus.ts').skyboxRuntimeStatus },
     './sceneRemoteDownloadProgress': { sceneRemoteDownloadStore: { getSnapshot: () => ({}), subscribe: () => () => {} } },
     '../../shared/ui/SceneLoadingMask.module.css': {},
     '../../shared/ui/SceneLoadingMask': { SceneLoadingMask: props => React.createElement('div', { 'data-loading-mask': true }, props.label) },

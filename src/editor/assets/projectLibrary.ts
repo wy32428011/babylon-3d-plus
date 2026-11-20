@@ -390,7 +390,10 @@ export function getResourceCardSubtitle(item: ProjectLibraryItem, library: Proje
 
 /** 获取资源卡片缩略图地址，内置对象没有缩略图时由图标占位。 */
 export function getResourceCardThumbnailUrl(item: ProjectLibraryItem): string | undefined {
-  return isImportedProjectLibraryItem(item)
-    ? item.asset.kind === 'skybox' ? undefined : item.asset.thumbnailUrl
-    : item.thumbnailUrl;
+  if (!isImportedProjectLibraryItem(item)) return item.thumbnailUrl;
+  if (item.asset.kind === 'skybox') return undefined;
+  const { thumbnailUrl, thumbnailRevision } = item.asset;
+  if (!thumbnailUrl || !thumbnailRevision) return thumbnailUrl;
+  const separator = thumbnailUrl.includes('?') ? '&' : '?';
+  return `${thumbnailUrl}${separator}v=${encodeURIComponent(thumbnailRevision)}`;
 }

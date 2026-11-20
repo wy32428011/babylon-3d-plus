@@ -17,12 +17,20 @@ import {
   buildDataPlatformEnvironmentPlan,
   ensureTrustedEnvironmentDirectory,
   getDataPlatformEnvironmentIndexPath,
+  getEnvironmentThumbnailRelativePath,
   hashFileSha256,
   readDataPlatformEnvironmentIndex,
   resolveEnvironmentIndexEntryPath,
   writeDataPlatformEnvironmentIndexFile,
   type DataPlatformEnvironmentDownloadPlan,
+  type DataPlatformEnvironmentIndexEntry,
 } from './dataPlatformEnvironmentIndex.js';
+import {
+  needsEnvironmentThumbnailSync,
+  queryEnvironmentThumbnailCatalog,
+  stageEnvironmentThumbnail,
+  type EnvironmentThumbnailSyncContext,
+} from './dataPlatformEnvironmentThumbnail.js';
 import { inspectGlbModelFile } from './modelPackageScanner.js';
 import {
   assertPathInside,
@@ -84,6 +92,12 @@ export type ExecuteDataPlatformEnvironmentSyncOptions = EnvironmentSyncContext &
 
 type StagedDownload = {
   plan: DataPlatformEnvironmentDownloadPlan;
+  stagedPath: string;
+};
+
+type StagedEnvironmentFile = {
+  label: string;
+  relativePath: string;
   stagedPath: string;
 };
 
@@ -189,7 +203,7 @@ export async function executeDataPlatformEnvironmentSync(
     total = plan.downloads.length;
     await cleanupExpiredEnvironmentPartials(editorRoot);
     const requiredDownloadBytes = await calculateAdditionalDownloadBytes(editorRoot, baseUrl, sourceKey, plan.downloads);
-    await assertCacheCapacity(editorRoot, requiredDownloadBytes);
+    const thumbnailCapacity = await getRemainingCacheCapacity(editorRoot, requiredDownloadBytes);
     stagingRoot = path.join(editorRoot, '.babylon-editor', `data-platform-environment-sync-${runId}`);
     assertPathInside(editorRoot, stagingRoot, '环境模型同步暂存目录');
     await removeTrustedEnvironmentPath(editorRoot, stagingRoot, '环境模型同步暂存目录', true);
@@ -259,12 +273,31 @@ export async function executeDataPlatformEnvironmentSync(
     tracker.close();
 
     if (failedDownloads.size > 0) applyDownloadFailures(plan.nextIndex.entries, current.entries, failedDownloads, syncedAt);
+    let remainingThumbnailBytes = Math.min(thumbnailCapacity, MAX_SYNC_DOWNLOAD_BYTES - downloadedBytes);
+    const thumbnailResult = await prepareEnvironmentThumbnails({
+      baseUrl, editorRoot, stagingRoot, signal,
+      requestJson: dependencies.requestJson,
+      downloadFile: dependencies.downloadFile,
+      remainingBytes: () => remainingThumbnailBytes,
+      consumeBytes: (bytes) => {
+        if (bytes > remainingThumbnailBytes) throw new Error('环境缩略图下载超出本轮预算。');
+        remainingThumbnailBytes -= bytes;
+      },
+    }, manifest.records, plan.nextIndex.entries, requiredIds, options.forceRefresh ?? false, () => {
+      updateEnvironmentSyncProgress({ runId, contextKey, phase: 'downloading', completed, total, message: '正在同步环境模型缩略图…', error: null });
+    });
+    const stagedFiles = [
+      ...successfulDownloads.map(({ plan, stagedPath }) => ({
+        label: `环境模型 ${plan.record.id}`, relativePath: plan.relativePath, stagedPath,
+      })),
+      ...thumbnailResult.files,
+    ];
     const stagedIndexPath = path.join(stagingRoot, 'index', 'data-platform-environment-index.json');
     await ensureTrustedEnvironmentDirectory(editorRoot, path.dirname(stagedIndexPath), '环境模型 staging 索引目录');
     await writeDataPlatformEnvironmentIndexFile(stagedIndexPath, plan.nextIndex);
     await assertTrustedEnvironmentPath(editorRoot, stagedIndexPath, '环境模型 staging 索引');
     updateEnvironmentSyncProgress({ runId, contextKey, phase: 'promoting', completed, total, message: '正在提交环境模型缓存和 Sidecar 索引…', error: null });
-    await promoteEnvironmentBatch({ editorRoot, stagingRoot, stagedDownloads: successfulDownloads, stagedIndexPath, signal });
+    await promoteEnvironmentBatch({ editorRoot, stagingRoot, stagedFiles, stagedIndexPath, signal });
     await removeTrustedEnvironmentPath(editorRoot, stagingRoot, '环境模型同步暂存目录', true);
     stagingRoot = null;
     const requiredFailures = [...failedDownloads].filter(([id]) => requiredIds?.has(id));
@@ -273,7 +306,9 @@ export async function executeDataPlatformEnvironmentSync(
     }
     updateEnvironmentSyncProgress({
       runId, contextKey, phase: 'completed', completed: total, total,
-      message: `环境模型同步完成：清单 ${manifest.records.length} 项，成功下载 ${successfulDownloads.length} 项，下载失败 ${failedDownloads.size} 项，异常缓存 ${plan.nextIndex.entries.filter((entry) => entry.status !== 'active').length} 项。`, error: null,
+      message: `环境模型同步完成：清单 ${manifest.records.length} 项，成功下载 ${successfulDownloads.length} 项，下载失败 ${failedDownloads.size} 项，异常缓存 ${plan.nextIndex.entries.filter((entry) => entry.status !== 'active').length} 项。`
+        + (thumbnailResult.failed ? ` ${thumbnailResult.failed} 个缩略图未更新，下次同步将重试。` : ''),
+      error: null,
     });
     return { matchedResourceId };
   } catch (error) {
@@ -511,19 +546,22 @@ async function readReusablePartialBytes(
   }
 }
 
-async function assertCacheCapacity(editorRoot: string, requiredDownloadBytes: number): Promise<void> {
+async function getRemainingCacheCapacity(editorRoot: string, requiredDownloadBytes: number): Promise<number> {
   if (!Number.isSafeInteger(requiredDownloadBytes) || requiredDownloadBytes < 0) throw new Error('环境模型待下载大小无效。');
   const cacheRoot = path.join(editorRoot, '.babylon-editor', 'data-platform-cache');
   await assertTrustedEnvironmentPath(editorRoot, cacheRoot, '环境模型缓存根目录');
   const cacheBytes = await calculateDirectoryBytes(editorRoot, cacheRoot);
-  if (cacheBytes + requiredDownloadBytes > readCacheLimitBytes()) {
+  const remainingQuota = readCacheLimitBytes() - cacheBytes - requiredDownloadBytes;
+  if (remainingQuota < 0) {
     throw new Error('环境模型缓存将超过 20 GiB 配额，请清理未使用资源或调整 ZENDING_ENV_CACHE_MAX_BYTES。');
   }
   const statfs = await fs.statfs(editorRoot);
   const availableBytes = statfs.bavail * statfs.bsize;
-  if (availableBytes - requiredDownloadBytes < MIN_FREE_DISK_BYTES) {
+  const remainingDisk = availableBytes - requiredDownloadBytes - MIN_FREE_DISK_BYTES;
+  if (remainingDisk < 0) {
     throw new Error('磁盘剩余空间将在下载后低于 2 GiB，已停止环境模型同步。');
   }
+  return Math.min(remainingQuota, remainingDisk);
 }
 
 async function calculateDirectoryBytes(editorRoot: string, root: string): Promise<number> {
@@ -624,8 +662,8 @@ function assertDownloadedMetadata(record: DataPlatformEnvironmentRecord, result:
 }
 
 function applyDownloadFailures(
-  nextEntries: Array<import('./dataPlatformEnvironmentIndex.js').DataPlatformEnvironmentIndexEntry>,
-  currentEntries: readonly import('./dataPlatformEnvironmentIndex.js').DataPlatformEnvironmentIndexEntry[],
+  nextEntries: DataPlatformEnvironmentIndexEntry[],
+  currentEntries: readonly DataPlatformEnvironmentIndexEntry[],
   failures: ReadonlyMap<string, string>,
   syncedAt: string,
 ): void {
@@ -644,19 +682,72 @@ function applyDownloadFailures(
   }
 }
 
+async function prepareEnvironmentThumbnails(
+  context: EnvironmentThumbnailSyncContext,
+  records: readonly DataPlatformEnvironmentRecord[],
+  entries: DataPlatformEnvironmentIndexEntry[],
+  requiredIds: ReadonlySet<string> | undefined,
+  forceRefresh: boolean,
+  onStart: () => void,
+): Promise<{ files: StagedEnvironmentFile[]; failed: number }> {
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const candidates: Array<{ entry: DataPlatformEnvironmentIndexEntry; record: DataPlatformEnvironmentRecord }> = [];
+  await runWithConcurrency(entries, MAX_CONCURRENT_DOWNLOADS, async (entry) => {
+    assertNotAborted(context.signal);
+    if (entry.status !== 'active' || (requiredIds && !requiredIds.has(entry.resourceId))) return;
+    const record = recordsById.get(entry.resourceId);
+    if (!record || (!forceRefresh && !await needsEnvironmentThumbnailSync(context.editorRoot, record, entry))) return;
+    // 强制刷新失败时保留旧图，下一轮仍会重试。
+    if (forceRefresh && entry.thumbnail) entry.thumbnail = { ...entry.thumbnail, updatedAt: null };
+    candidates.push({ entry, record });
+  });
+  if (!candidates.length) return { files: [], failed: 0 };
+
+  onStart();
+  let catalog: Map<string, unknown> | undefined;
+  if (!requiredIds) {
+    try {
+      catalog = await queryEnvironmentThumbnailCatalog(context, new Set(candidates.map(({ record }) => record.id)));
+    } catch {
+      assertNotAborted(context.signal);
+      return { files: [], failed: candidates.length };
+    }
+  }
+
+  const files: StagedEnvironmentFile[] = [];
+  let failed = 0;
+  await runWithConcurrency(candidates, MAX_CONCURRENT_DOWNLOADS, async ({ entry, record }) => {
+    try {
+      const { thumbnail, stagedPath } = await stageEnvironmentThumbnail(context, record, entry, catalog);
+      if (stagedPath && thumbnail.file) {
+        files.push({
+          label: `环境模型 ${entry.resourceId} 缩略图`,
+          relativePath: getEnvironmentThumbnailRelativePath(entry, thumbnail.file),
+          stagedPath,
+        });
+      }
+      entry.thumbnail = thumbnail;
+    } catch {
+      assertNotAborted(context.signal);
+      failed += 1;
+    }
+  });
+  return { files, failed };
+}
+
 async function promoteEnvironmentBatch(options: {
   editorRoot: string;
   stagingRoot: string;
-  stagedDownloads: readonly StagedDownload[];
+  stagedFiles: readonly StagedEnvironmentFile[];
   stagedIndexPath: string;
   signal: AbortSignal;
 }): Promise<void> {
   const backupRoot = path.join(options.stagingRoot, 'backup');
-  const items: PromotionItem[] = options.stagedDownloads.map((download) => ({
-    label: `环境模型 ${download.plan.record.id}`,
-    target: resolveEnvironmentIndexEntryPath(options.editorRoot, download.plan.relativePath),
-    staged: download.stagedPath,
-    backup: path.join(backupRoot, ...download.plan.relativePath.split('/')),
+  const items: PromotionItem[] = options.stagedFiles.map((file) => ({
+    label: file.label,
+    target: resolveEnvironmentIndexEntryPath(options.editorRoot, file.relativePath),
+    staged: file.stagedPath,
+    backup: path.join(backupRoot, ...file.relativePath.split('/')),
   }));
   items.push({
     label: '环境模型 Sidecar 索引',

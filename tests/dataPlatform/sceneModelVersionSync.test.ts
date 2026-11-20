@@ -29,6 +29,7 @@ async function createFixture() {
   const context = {
     root, version: '1', thumbnailBytes: 'thumbnail-1', downloads: [] as string[], queries: 0,
     afterDownload: undefined as (() => void) | undefined,
+    thumbnailContentType: 'application/octet-stream',
     record: {} as Record<string, unknown>,
     dependencies: {
       requestJson: async (options: { endpointPath: string; body?: unknown }) => {
@@ -44,14 +45,16 @@ async function createFixture() {
       },
       downloadFile: async (options: import('../../electron/ipc/dataPlatformTransfer').DownloadRemoteFileOptions) => {
         context.downloads.push(options.remoteUrl);
+        const isThumbnail = options.remoteUrl === context.record.thumbnailUrl;
         const bytes = Buffer.from(options.remoteUrl.endsWith('.gltf')
           ? JSON.stringify({ asset: { version: '2.0' }, meshes: [{ primitives: [{}] }], extras: { revision: context.version } })
-          : /\.(png|jpg)$/.test(options.remoteUrl) ? context.thumbnailBytes
+          : isThumbnail ? context.thumbnailBytes
             : options.remoteUrl.endsWith('.ts') ? 'export default {};' : JSON.stringify({ lengthUnit: 'm' }));
         await fs.mkdir(path.dirname(options.destinationPath), { recursive: true });
         await fs.writeFile(options.destinationPath, bytes);
         context.afterDownload?.();
-        return { bytes: bytes.length, contentType: 'application/octet-stream', finalUrl: options.remoteUrl, etag: null, resumedBytes: 0 };
+        return { bytes: bytes.length, contentType: isThumbnail ? context.thumbnailContentType : 'application/octet-stream',
+          finalUrl: options.remoteUrl, etag: null, resumedBytes: 0 };
       },
       readAssetIndex: async (editorRoot: string): Promise<import('../../electron/types').ProjectAssetIndex> => {
         try { return JSON.parse(await fs.readFile(path.join(editorRoot, '.babylon-editor/asset-index.json'), 'utf8')); }
@@ -85,6 +88,31 @@ test('场景模型同步固定模型与脚本版本，重复打开零下载，�
   assert.notEqual(updated.assetRevision, first.assetRevision);
   assert.deepEqual(await fs.readFile(first.path), oldBytes);
   await assert.rejects(fs.access(path.join(context.root, '.babylon-editor/asset-index.json')));
+}));
+
+test('当前版本 ID 变化且文件地址相同时重新下载，旧接口按最大版本序号只取一版', async () => fixture(async context => {
+  const options = { baseUrl, sharedResourcesRoot: context.root, resources, dependencies: context.dependencies };
+  const version = (versionId: string, versionNumber: number, fileUrl: string) => ({
+    versionId, versionNumber, fileName: 'model.gltf', fileUrl, metaFileUrl: '/current.json', scriptFiles: [],
+  });
+  const first = version('9007199254740993', 8, '/current.gltf');
+  const second = version('9007199254740994', 9, '/current.gltf');
+  const older = version('1', 1, '/historical.gltf');
+  context.record = { revision: 'same', currentVersionId: first.versionId, versions: [first, older] };
+  const [before] = await syncSceneDataPlatformModelAssets(options);
+  assert.deepEqual(context.downloads.toSorted(), ['/current.gltf', '/current.json']);
+  assert.equal(before.scriptPaths?.length ?? 0, 0, '新版空脚本清单应清除旧脚本');
+  context.downloads.length = 0;
+  context.version = '2';
+  context.record = { revision: 'same', currentVersionId: second.versionId, versions: [first, second, older] };
+  const [after] = await syncSceneDataPlatformModelAssets(options);
+  assert.notEqual(after.assetRevision, before.assetRevision);
+  assert.deepEqual(context.downloads.toSorted(), ['/current.gltf', '/current.json']);
+  context.downloads.length = 0;
+  delete context.record.currentVersionId;
+  const [legacy] = await syncSceneDataPlatformModelAssets(options);
+  assert.equal(legacy.path, after.path);
+  assert.deepEqual(context.downloads, []);
 }));
 
 test('服务端快照摘要强制校验同URL原始文件，拒绝旧字节并在新字节到达后统一后续缓存', async () => fixture(async context => {
@@ -325,14 +353,25 @@ test('空引用不查询，非法资源 ID 和超量输入拒绝执行', async (
 }));
 
 test('仅缩略图改扩展名或内容时使用完整新副本，运行时修订和旧文件保持不变', async () => fixture(async (context) => {
-  context.record.thumbnailUrl = '/thumbnail.png';
-  context.record.thumbnailRevision = 'thumb-1';
   const options = { baseUrl, sharedResourcesRoot: context.root, resources, dependencies: context.dependencies };
+  const [withoutThumbnail] = await syncSceneDataPlatformModelAssets(options);
+  assert.equal(withoutThumbnail.thumbnailUrl, undefined);
+  context.downloads.length = 0;
+  context.record.thumbnailUrl = '/api/v1/files/cover';
+  context.record.thumbnailRevision = 'thumb-1';
+  context.thumbnailContentType = 'image/gif';
   const [first] = await syncSceneDataPlatformModelAssets(options);
+  assert.deepEqual(context.downloads, ['/api/v1/files/cover'], '给已有模型补封面只下载图片');
+  assert.equal(first.assetRevision, withoutThumbnail.assetRevision);
+  assert.ok(first.thumbnailUrl?.startsWith('editor-asset://'));
+  assert.equal(path.extname(first.thumbnailPath!), '.gif');
+  context.downloads.length = 0;
   context.record.thumbnailUrl = '/thumbnail.jpg';
   context.record.thumbnailRevision = 'thumb-2';
+  context.thumbnailContentType = 'image/jpeg';
   context.thumbnailBytes = 'thumbnail-2';
   const [second] = await syncSceneDataPlatformModelAssets(options);
+  assert.deepEqual(context.downloads, ['/thumbnail.jpg']);
   assert.equal(first.assetRevision, second.assetRevision);
   assert.notEqual(first.packagePath, second.packagePath);
   assert.equal(path.extname(second.thumbnailPath!), '.jpg');
@@ -349,6 +388,11 @@ test('仅缩略图改扩展名或内容时使用完整新副本，运行时修�
   const [same] = await syncSceneDataPlatformModelAssets(options);
   assert.equal(same.path, third.path);
   assert.equal(context.downloads.length, downloads);
+  context.record.thumbnailUrl = null;
+  const [removed] = await syncSceneDataPlatformModelAssets(options);
+  assert.equal(removed.thumbnailUrl, undefined);
+  assert.equal(removed.assetRevision, third.assetRevision);
+  assert.equal(context.downloads.length, downloads, '中台移除缩略图无需下载文件');
 }));
 
 test('固定缩略图缺失或被修改时不返回不完整的资产描述', async () => fixture(async (context) => {

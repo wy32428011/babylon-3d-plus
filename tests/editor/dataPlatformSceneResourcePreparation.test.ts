@@ -37,6 +37,7 @@ function fixture(failMerge = false, initialEnvironment: unknown = null, modelWar
     setIsPreparingSceneResources(value: boolean) { preparing = value; },
     useEditorStore: { getState: () => state }, serializeScene: JSON.stringify,
     window: { editorApi: { prepareLocalSceneResources: (request: unknown) => { requested = request; events.push('query'); return promise; } } },
+    getSceneProjectOpenContext: () => null,
     getSceneEnvironmentUpdateReference: () => undefined, getRequiredEnvironmentResourceIds: () => [],
     reportSceneModelSyncProgress: (_session: string, progress: any) => events.push(progress.phase),
     beginSceneModelAssetRefresh: () => events.push('refresh'), settleSceneModelAssetRefresh: () => events.push('settled'),
@@ -46,7 +47,11 @@ function fixture(failMerge = false, initialEnvironment: unknown = null, modelWar
     allowScenePreparationEditing(_session: string, allowed: boolean) { if (allowed) events.push('editing-unlocked'); },
     settleSceneRuntimeWithWarning: () => events.push('editable-warning'),
     environmentPreparationStore: { clearError() {}, fail: (_session: string, error: string) => events.push('error:' + error) },
-    loadProjectAssets: () => { throw new Error('禁止按全库候选覆盖场景'); },
+    loadProjectAssets: (options?: { refreshModels?: boolean; refreshEnvironment?: boolean }) => {
+      assert.ok(!options?.refreshModels && !options?.refreshEnvironment);
+      events.push('library');
+      return Promise.resolve({ ok: true });
+    },
     loadEnvironmentFromAsset() {}, pushLog(message: string) { logs.push(message); }, requestEnvironmentApply() { events.push('environment-start'); }, crypto: { randomUUID: () => 'refresh' },
   });
   return { resolve, cleanup, state, original, events, logs, request: () => requested, preparing: () => preparing };
@@ -93,7 +98,7 @@ test('SOURCE 打开携带完整场景，先查询后原子合并，再交给渲�
   assert.equal(f.preparing(), true);
   assert.equal(f.request().mode, 'data-platform-latest'); assert.equal(f.state.scene, f.original);
   f.resolve(result); await tick();
-  assert.deepEqual(f.events, ['querying', 'query', 'completed', 'refresh', 'commit', 'settled']);
+  assert.deepEqual(f.events, ['querying', 'query', 'completed', 'refresh', 'commit', 'settled', 'library']);
   assert.equal(f.preparing(), false, '包括无变化重同步在内，资源准备结束必须解除按钮禁用'); f.cleanup();
 });
 
@@ -128,7 +133,10 @@ test('模型资源身份无效保留原文档并带警告进入编辑，查询�
   assert.ok(!f.events.includes('editable-warning')); assert.equal(f.state.issues.join('\n'), '模型资源身份无效'); f.cleanup();
   const changed = fixture(); await tick(); const edited = { sceneSettings: { environment: null }, userEdit: true };
   changed.state.scene = edited; changed.resolve(result); await tick();
-  assert.equal(changed.state.scene, edited); assert.ok(!changed.events.includes('commit')); changed.cleanup();
+  assert.equal(changed.state.scene, edited);
+  assert.ok(!changed.events.includes('commit'));
+  assert.ok(changed.events.includes('library'), '保留最新编辑的同时仍应更新模型库卡片');
+  changed.cleanup();
 });
 test('取消或切到 B 后，A 的返回值不能提交或解除 B 的蒙版', async () => {
   const f = fixture(); await tick(); f.cleanup(); f.state.sceneSessionId = 'B'; f.resolve(result); await tick();

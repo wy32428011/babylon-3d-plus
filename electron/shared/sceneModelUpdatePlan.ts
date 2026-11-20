@@ -46,11 +46,12 @@ export function findCurrentSceneModelReplacement(item: SceneModelUpdateItem, cat
     catch { continue; }
     const match = /(?:^|\/)(model|combo)-([1-9]\d{0,63})-([^/]+)\//i.exec(decoded);
     if (!match || match[1].toLowerCase() !== item.kind || match[2] !== item.resourceId) continue;
-    // 固定版本目录最后的 12 位是编辑器布局哈希，不属于资源名。
-    const name = /\/scene-model-versions\/[a-f0-9]{64}\/[a-f0-9]{64}\//i.test(decoded)
-      ? match[3].replace(/-[a-f0-9]{12}$/i, '') : match[3];
-    const normalized = normalizeResourceName(name);
-    if (normalized) names.add(normalized);
+    // SOURCE 重定位会去掉固定缓存前缀，但保留包名中的布局哈希。
+    const fixed = /\/scene-model-versions\/[a-f0-9]{64}\/[a-f0-9]{64}\//i.test(decoded);
+    const packaged = /(?:^|\/)Assets\/Models\/(?:ComboModels\/)?$/i.test(decoded.slice(0, match.index + 1));
+    const layoutName = match[3].replace(/-[a-f0-9]{12}$/i, '');
+    if (!fixed) names.add(normalizeResourceName(match[3]));
+    if (fixed || packaged) names.add(normalizeResourceName(layoutName));
   }
   const candidates = catalog.filter(record => record.kind === item.kind
     && record.name.trim() && names.has(normalizeResourceName(sanitizeSceneModelPackageName(record.name)))

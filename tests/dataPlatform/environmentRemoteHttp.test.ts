@@ -25,25 +25,41 @@ test('异机空缓存通过真实 HTTP 下载校验，断线重试续传，缓�
   const editorRoot = await mkdtemp(path.join(os.tmpdir(), 'remote-env-empty-'));
   const bytes = glb();
   const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const thumbnail = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+Ki14AAAAASUVORK5CYII=', 'base64');
+  const resourceId = '2071816469849280514';
+  const updatedAt = '2026-09-07T00:00:00.000Z';
   const requests: Array<{ range?: string; ifRange?: string }> = [];
   let disconnectOnce = true;
   let unrelatedDownloads = 0;
+  let thumbnailDownloads = 0;
   const server = createServer((req, res) => {
     if (req.url?.includes('sync-manifest')) {
       req.resume();
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ success: true, data: {
         protocolVersion: '1', manifestRevision: '1', nextCursorId: null, hasMore: false,
-        records: [{ id: '2071816469849280514', modelName: '异机环境', fileStatus: 'GLB_READY',
+        records: [{ id: resourceId, modelName: '异机环境', fileStatus: 'GLB_READY',
           fileName: 'remote.glb', fileSizeBytes: String(bytes.length), fileSha256: sha256,
           fileRevision: '1', runtimeRevision: '1', lengthUnit: 'meter',
           downloadUrl: '/api/v1/env-models/2071816469849280514/file?fileRevision=1',
-          updatedAt: '2026-09-07T00:00:00.000Z' },
+          updatedAt },
           { id: '2071816469849280515', modelName: '不被当前场景引用的大环境', fileStatus: 'GLB_READY',
             fileName: 'unrelated.glb', fileSizeBytes: String(768 * 1024 * 1024), fileSha256: 'a'.repeat(64),
             fileRevision: '1', runtimeRevision: '1', lengthUnit: 'meter',
             downloadUrl: '/unrelated-large.glb', updatedAt: '2026-09-07T00:00:00.000Z' }],
       } }));
+      return;
+    }
+    if (req.url === '/api/v1/env-models/detail') {
+      req.resume();
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ success: true, data: { id: resourceId, fileRevision: '1', updatedAt, thumbnailUrl: '/assets/cover' } }));
+      return;
+    }
+    if (req.url === '/assets/cover') {
+      thumbnailDownloads += 1;
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': String(thumbnail.length) });
+      res.end(thumbnail);
       return;
     }
     if (req.url === '/unrelated-large.glb') {
@@ -73,7 +89,7 @@ test('异机空缓存通过真实 HTTP 下载校验，断线重试续传，缓�
     requestJson: (options: Parameters<typeof transfer.requestDataPlatformJson>[0]) => transfer.requestDataPlatformJson({ ...options, fetchImpl: fetch }),
     downloadFile: (options: Parameters<typeof transfer.downloadRemoteFile>[0]) => transfer.downloadRemoteFile({ ...options, fetchImpl: fetch }),
   };
-  const run = () => sync.executeDataPlatformEnvironmentSync({ baseUrl, editorRoot, contextKey: 'remote-http:empty', requiredResourceIds: ['2071816469849280514'], dependencies });
+  const run = () => sync.executeDataPlatformEnvironmentSync({ baseUrl, editorRoot, contextKey: 'remote-http:empty', requiredResourceIds: [resourceId], dependencies });
   try {
     // 当前场景必需环境失败必须显式拒绝，不能报全局completed后让异机蒙版一直等待。
     await assert.rejects(run(), /当前场景环境同步失败/);
@@ -84,14 +100,20 @@ test('异机空缓存通过真实 HTTP 下载校验，断线重试续传，缓�
     assert.equal(cached?.entries.length, 1);
     const entry = cached!.entries[0];
     assert.equal(entry.status, 'active');
-    assert.equal(entry.resourceId, '2071816469849280514');
+    assert.equal(entry.resourceId, resourceId);
     const localBytes = await readFile(index.resolveEnvironmentIndexEntryPath(editorRoot, entry.relativePath));
     assert.equal(createHash('sha256').update(localBytes).digest('hex'), sha256);
     assert.equal(requests.length, 2);
     assert.match(requests[1].range ?? '', /^bytes=[1-9]\d*-$/);
     assert.equal(requests[1].ifRange, '"remote-environment-v1"');
+    const { assets: [asset] } = await index.listIndexedDataPlatformEnvironments(editorRoot, cached);
+    assert.match(asset.thumbnailUrl!, /^editor-asset:\/\/local\//);
+    assert.equal(path.extname(asset.thumbnailPath!), '.png', '无扩展名的下载路径按响应图片类型落盘');
+    assert.deepEqual(await readFile(asset.thumbnailPath!), thumbnail);
+    assert.equal(thumbnailDownloads, 1);
     await run();
     assert.equal(requests.length, 2, '热缓存不应再次请求环境 GLB');
+    assert.equal(thumbnailDownloads, 1, '热缓存不应重新下载缩略图');
     assert.equal(unrelatedDownloads, 0, '无关大环境不得阻塞当前场景打开');
     await assert.rejects(sync.executeDataPlatformEnvironmentSync({
       baseUrl, editorRoot, contextKey: 'remote-http:wrong-source', expectedSourceKey: 'f'.repeat(24), dependencies,

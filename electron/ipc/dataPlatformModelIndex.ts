@@ -69,6 +69,11 @@ export function getDataPlatformModelIndexPath(editorRoot: string): string {
   return path.join(editorRoot, '.babylon-editor', INDEX_FILE_NAME);
 }
 
+/** 固定包旁记录 TS 顺序，保持资源包内容和既有运行修订不变。 */
+export function getPinnedModelScriptOrderPath(packageRoot: string): string {
+  return `${packageRoot}.scripts.json`;
+}
+
 export function createDataPlatformModelResourceKey(
   kind: DataPlatformModelKind,
   resourceId: string,
