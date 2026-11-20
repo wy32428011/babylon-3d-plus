@@ -21,14 +21,21 @@ const getGroup = (groups: readonly DxfGroupPair[], code: number) =>
   groups.find((group) => group.code === code)?.value;
 const coordinateKey = ({ x, y }: AgvMapPoint) => `${x},${y}`;
 
-/** NDC8 的模型空间按原导出顺序写入点位符号和编号，并成对写入路线中心线与箭头。 */
+/** 过滤全顶点重合的零长度退化折线（如 NDC8 早期导出的 (0,0) 占位箭头）。 */
+function isDegeneratePolyline(points: readonly AgvMapPoint[]): boolean {
+  if (points.length < 2) return true;
+  const first = points[0];
+  return points.every((point) => point.x === first.x && point.y === first.y);
+}
+
+/**
+ * NDC8 的模型空间按原导出顺序写入点位符号、路线中心线及对应编号。
+ * 路线中心线后可能紧跟 1 条方向箭头或零长度占位折线，也可能在优化保存为 LWPOLYLINE 后省略无箭头占位。
+ */
 export function createNdc8AgvMapExtractor(reserveBytes: (bytes: number) => void) {
   const centers: AgvMapPoint[] = [];
   const nodeIds: string[] = [];
-  const routes = new Map<
-    string,
-    { name: string; centerlines: AgvMapPoint[][]; drawingCount: number }
-  >();
+  const routes = new Map<string, { name: string; drawings: Array<AgvMapPoint[] | null> }>();
   const routeIds = new Map<string, string[]>();
   let drawingCount = 0;
   let routeIdCount = 0;
@@ -81,19 +88,20 @@ export function createNdc8AgvMapExtractor(reserveBytes: (bytes: number) => void)
       throw new Error('NDC8 路线图元数量超过 AGV 地图上限。');
     let route = routes.get(key);
     if (!route) {
-      route = { name: layer, centerlines: [], drawingCount: 0 };
+      route = { name: layer, drawings: [] };
       routes.set(key, route);
     }
-    const isCenterline = route.drawingCount % 2 === 0;
-    route.drawingCount += 1;
-    // 每组的第二条折线是箭头或占位，CAD 底图本身仍绘制它。
-    if (!isCenterline) return;
     const points = entity ? convertDxfEntityToPolylines(entity, { x: 0, y: 0 })[0] : undefined;
-    if (!points || points.length < 2 || points.length > AGV_MAP_MAX_TRACK_POINTS) {
+    if (!points || isDegeneratePolyline(points)) {
+      reserveBytes(32);
+      route.drawings.push(null);
+      return;
+    }
+    if (points.length > AGV_MAP_MAX_TRACK_POINTS) {
       throw new Error(`NDC8 图层「${layer}」含有无法转换的路线中心线。`);
     }
     reserveBytes(256 + points.length * 64);
-    route.centerlines.push(points);
+    route.drawings.push(points);
   }
 
   function finish({
@@ -122,14 +130,41 @@ export function createNdc8AgvMapExtractor(reserveBytes: (bytes: number) => void)
     const tracks: AgvMapTrack[] = [];
     for (const [key, route] of routes) {
       const ids = routeIds.get(key);
-      if (!ids || route.drawingCount !== ids.length * 2) {
-        throw new Error(`NDC8 图层「${route.name}」的路线、箭头与编号数量不一致。`);
+      if (!ids) {
+        throw new Error(`NDC8 图层「${route.name}」缺少对应的路线编号。`);
       }
-      route.centerlines.forEach((points, index) => {
-        const fromNodeId = idsByCoordinate.get(coordinateKey(points[0]));
-        const toNodeId = idsByCoordinate.get(coordinateKey(points[points.length - 1]));
-        if (!fromNodeId || !toNodeId)
-          throw new Error(`NDC8 路线 ${ids[index]} 的端点未对应到图中点位。`);
+      const centerlines: Array<{
+        points: AgvMapPoint[];
+        fromNodeId: string;
+        toNodeId: string;
+      }> = [];
+      let canFollowWithArrow = false;
+      let hasUnexpectedArrow = false;
+      for (const drawing of route.drawings) {
+        const fromNodeId = drawing ? idsByCoordinate.get(coordinateKey(drawing[0])) : undefined;
+        const toNodeId = drawing
+          ? idsByCoordinate.get(coordinateKey(drawing[drawing.length - 1]))
+          : undefined;
+        if (drawing && fromNodeId && toNodeId) {
+          centerlines.push({ points: drawing, fromNodeId, toNodeId });
+          canFollowWithArrow = true;
+          continue;
+        }
+        if (!canFollowWithArrow) {
+          hasUnexpectedArrow = true;
+        } else {
+          canFollowWithArrow = false;
+        }
+      }
+      if (centerlines.length !== ids.length) {
+        throw new Error(
+          `NDC8 图层「${route.name}」的有效路线中心线（${centerlines.length}）与编号数量（${ids.length}）不一致。`,
+        );
+      }
+      if (hasUnexpectedArrow) {
+        throw new Error(`NDC8 图层「${route.name}」存在多余或错位的箭头图元。`);
+      }
+      centerlines.forEach(({ points, fromNodeId, toNodeId }, index) => {
         tracks.push({
           id: ids[index],
           name: route.name,

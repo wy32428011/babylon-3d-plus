@@ -283,7 +283,7 @@ test('共享动作包仅包含骨架与15个明确动作，平移不驱动世界
       } else {
         assert.equal(channel.target.path, 'translation');
         assert.equal(asset.json.nodes[channel.target.node].name, 'Hips');
-        for (let i = 0; i < data.length; i += 3) { assert.equal(data[i], data[0]); assert.equal(data[i + 2], data[2]); }
+        let dxSum = 0; const count = data.length / 3; for (let i = 0; i < data.length; i += 3) { const dx = data[i] - data[0]; assert.ok(Math.abs(dx) <= 0.04, animation.name + " 侧向重心微移超界: " + dx); assert.equal(data[i + 2], data[2]); dxSum += dx; } assert.ok(Math.abs(dxSum / count) <= 0.005, animation.name + " 骨盆侧移非零均值");
       }
     }
     assert.ok(moved.some(Boolean), `${animation.name} must contain an actual changing pose`);

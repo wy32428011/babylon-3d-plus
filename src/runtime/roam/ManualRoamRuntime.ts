@@ -1080,6 +1080,7 @@ export class ManualRoamRuntime {
         grounded: this.kinematicState.grounded, jumped: this.frameJumped,
         fly: this.snapshot.locomotionMode === 'fly', sprint: input.sprint,
         walkSpeed: this.snapshot.config.walkSpeed, runSpeed: this.snapshot.config.runSpeed, worldScale: this.avatarVisualRoot.scaling.y,
+        turnDeltaYaw: this.turnState.deltaYaw,
         turn: this.turnState.turnClip ? {
           clip: this.turnState.turnClip,
           progress: this.turnState.turnProgress,
@@ -1122,7 +1123,9 @@ export class ManualRoamRuntime {
   }
 
   private updateFootIK(): void {
-    if(!this.snapshot.enabled||this.disposed||!this.footIK||!this.skeletalAnimator)return;
+    if(!this.snapshot.enabled||this.disposed||!this.skeletalAnimator)return;
+    this.skeletalAnimator.applyUpperBodyOverlay();
+    if(!this.footIK)return;
     const speed = Math.hypot(this.frameVelocity.x, this.frameVelocity.z);
     this.footIK.update({
       dt: this.options.engine.getDeltaTime() / 1000,

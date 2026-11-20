@@ -147,7 +147,7 @@ export function retargetHumanoidGroup(original:AnimationGroup,source:ReadonlyMap
   const targetWorld=new Map([...target].map(([semantic,node])=>[semantic,node.computeWorldMatrix(true).clone()]));
   const alignment=Matrix.RotationY(binding.referenceYaw??-binding.facingYaw);
   const corrections=new Map([...target].map(([semantic])=>[semantic,targetWorld.get(semantic)!.multiply(Matrix.Invert((footReference?.get(semantic)??sourceWorld.get(semantic)!).multiply(alignment)))]));
-  const sourceHipsReferenceY=(footReference?.get('Hips')??sourceWorld.get('Hips')!).getTranslation().y;
+  const sourceHipsReference=(footReference?.get('Hips')??sourceWorld.get('Hips')!).getTranslation();
   const byNode=new Map([...source].map(([semantic,node])=>[node,semantic]));
   const rotations=new Map(original.targetedAnimations.filter(track=>track.animation.targetProperty==='rotationQuaternion').map(track=>[byNode.get(track.target)!,track.animation]));
   const sourceHips=source.get('Hips')!,targetHips=target.get('Hips')!,hipsBase=targetHips.position.clone();
@@ -188,8 +188,9 @@ export function retargetHumanoidGroup(original:AnimationGroup,source:ReadonlyMap
         keys.get(semantic)!.push({frame,value:rotation});
         let translation=rest.position;
         if(semantic==='Hips'){
-          const deltaY=(animatedSource.get('Hips')!.getTranslation().y-sourceHipsReferenceY)*legRatio;
-          translation=hipsBase.add(Vector3.TransformNormal(new Vector3(0,deltaY,0),Matrix.Invert(parentWorld)));hipKeys.push({frame,value:translation});
+          const rawDelta=animatedSource.get('Hips')!.getTranslation().subtract(sourceHipsReference);
+          const worldDelta=Vector3.TransformNormal(new Vector3(rawDelta.x*legRatio,rawDelta.y*legRatio,0),alignment);
+          translation=hipsBase.add(Vector3.TransformNormal(worldDelta,Matrix.Invert(parentWorld)));hipKeys.push({frame,value:translation});
         }
         const world=Matrix.Compose(rest.scaling,rotation,translation).multiply(parentWorld);animatedTarget.set(node,world);return world;
       };

@@ -95,10 +95,14 @@ test('Store 创建、地图编辑、撤销重做和复制保持完整 AGV 配置
 const dxf = (pairs) => [...pairs.flat(), ''].join('\r\n');
 const circle = (x, y) => [[0, 'CIRCLE'], [8, 'Ndc8_Point'], [10, x], [20, y], [40, 100]];
 const text = (layer, value, x) => [[0, 'TEXT'], [8, layer], [10, x], [20, 50], [40, 190], [1, value]];
-const polyline = (points) => [
-  [0, 'POLYLINE'], [8, 'Ndc8_TestPath'], [66, 1],
+const polyline = (points, layer = 'Ndc8_TestPath') => [
+  [0, 'POLYLINE'], [8, layer], [66, 1],
   ...points.flatMap(([x, y]) => [[0, 'VERTEX'], [10, x], [20, y]]),
   [0, 'SEQEND'],
+];
+const lwpolyline = (points, layer = 'Ndc8_TestPath') => [
+  [0, 'LWPOLYLINE'], [8, layer], [90, points.length],
+  ...points.flatMap(([x, y]) => [[10, x], [20, y]]),
 ];
 function parseRouteFixture(includeArrow = true) {
   const content = dxf([
@@ -145,8 +149,72 @@ test('NDC8 的点位、折线、编号及底图使用同一米制原点，跟随
   assert.deepEqual(command.undo(imported).entities[entity.id], entity);
 });
 
-test('中心线与箭头配对不完整时阻止导入，避免遗漏路段', async () => {
-  await assert.rejects(parseRouteFixture(false), /路线、箭头与编号数量不一致/);
+test('LWPOLYLINE 优化保存省略无箭头占位、或同层混合有无箭头与退化占位时正确提取全部路线', async () => {
+  const noArrowParsed = await parseRouteFixture(false);
+  assert.deepEqual(noArrowParsed.agvMap.tracks, [{
+    id: '88', name: 'Ndc8_TestPath', fromNodeId: '1', toNodeId: '2', points: [{ x: 0, y: 0 }, { x: 0.5, y: 0.25 }, { x: 1, y: 0 }],
+  }]);
+
+  // 路线写在 Ndc8_Point 之前，并混合真实三角箭头、省略箭头、退化 (0,0) 占位和整层无箭头图层。
+  const mixedContent = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...lwpolyline([[0, 0], [1000, 0]], 'Ndc8_Mixed'),
+    ...lwpolyline([[400, -50], [600, 0], [400, 50], [400, -50]], 'Ndc8_Mixed'),
+    ...lwpolyline([[1000, 0], [2000, 0]], 'Ndc8_Mixed'),
+    ...lwpolyline([[2000, 0], [1000, 0]], 'Ndc8_Mixed'),
+    ...lwpolyline([[0, 0], [0, 0]], 'Ndc8_Mixed'),
+    ...lwpolyline([[2000, 0], [0, 0]], 'Ndc8_NoArrowLayer'),
+    ...circle(0, 0), ...circle(1000, 0), ...circle(2000, 0),
+    ...text('Ndc8_PointID', '1', -100), ...text('Ndc8_PointID', '2', 900), ...text('Ndc8_PointID', '3', 1900),
+    ...text('Ndc8_MixedID', '101', 500), ...text('Ndc8_MixedID', '102', 1500), ...text('Ndc8_MixedID', '103', 1500),
+    ...text('Ndc8_NoArrowLayerID', '201', 1000),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  const mixed = await parseCadReferenceDxfStream(async () => new Response(mixedContent), {
+    agvMap: { id: 'cad-mixed', name: '混合箭头地图' },
+  });
+  assert.deepEqual(
+    mixed.agvMap.tracks.map(({ id, name, fromNodeId, toNodeId }) => [id, name, fromNodeId, toNodeId]),
+    [
+      ['101', 'Ndc8_Mixed', '1', '2'],
+      ['102', 'Ndc8_Mixed', '2', '3'],
+      ['103', 'Ndc8_Mixed', '3', '2'],
+      ['201', 'Ndc8_NoArrowLayer', '3', '1'],
+    ],
+  );
+});
+
+test('中心线端点偏离点位、数量与编号不一致或出现多余箭头时阻止导入', async () => {
+  const misalignedEndpoint = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0), ...circle(1000, 0),
+    ...lwpolyline([[0, 0], [999, 0]]),
+    ...text('Ndc8_PointID', '1', -100), ...text('Ndc8_PointID', '2', 900),
+    ...text('Ndc8_TestPathID', '88', 450),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  await assert.rejects(
+    parseCadReferenceDxfStream(async () => new Response(misalignedEndpoint), { agvMap: { id: 'cad-bad-1', name: '错端点' } }),
+    /有效路线中心线（0）与编号数量（1）不一致/,
+  );
+
+  const extraArrow = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0), ...circle(1000, 0),
+    ...lwpolyline([[0, 0], [1000, 0]]),
+    ...lwpolyline([[400, -50], [600, 0], [400, 50]]),
+    ...lwpolyline([[450, -50], [650, 0], [450, 50]]),
+    ...text('Ndc8_PointID', '1', -100), ...text('Ndc8_PointID', '2', 900),
+    ...text('Ndc8_TestPathID', '88', 450),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  await assert.rejects(
+    parseCadReferenceDxfStream(async () => new Response(extraArrow), { agvMap: { id: 'cad-bad-2', name: '多余箭头' } }),
+    /多余或错位的箭头图元/,
+  );
 });
 
 test('重复上传只等待同一产生器的新 CAD 渲染结果', async (t) => {

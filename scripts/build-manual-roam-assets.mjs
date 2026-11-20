@@ -264,41 +264,50 @@ function authoredPose(name,t,duration) {
     pose.local[names.indexOf('Spine')]=rotation([1,0,0],moving?.06:.025);
     for(const side of ['Left','Right']){
       const sign=side==='Left'?1:-1;
-      pose.local[names.indexOf(side+'Arm')]=rotation([0,0,1],-sign*(moving?1.36:1.40));
-      // 参考臂骨沿X，屈肘使用Y轴；绕X只会扭转袖口和手腕。
-      pose.local[names.indexOf(side+'ForeArm')]=rotation([0,1,0],-sign*(moving?.22:.18));
+      pose.local[names.indexOf(side+'Arm')]=rotation([0,0,1],-sign*(moving?1.36:1.40)).multiply(rotation([1,0,0],.14)).normalize();
+      // 参考臂骨沿X，屈肘使用Y轴；绕+X正角在左右下垂臂上互为镜像内旋/旋前。
+      pose.local[names.indexOf(side+'ForeArm')]=rotation([0,1,0],-sign*(moving?.22:.18)).multiply(rotation([1,0,0],.18)).normalize();
       pose.local[names.indexOf(side+'UpLeg')]=rotation([1,0,0],.16+.02*wave);
       pose.local[names.indexOf(side+'Leg')]=rotation([1,0,0],.32+.04*wave);
       pose.local[names.indexOf(side+'Foot')]=rotation([1,0,0],-.16-.02*wave);
     }
-    return {...pose,hipY:.008*wave};
+    return {...pose,hipY:.008*wave,hipX:0};
   }
   set('Spine',crouch*0.22);
   for(const side of ['Left','Right']){
     const sign=side==='Left'?1:-1;
-    set(side+'Arm',-raise*0.8,0,sign*(-1.35+raise*0.7));
-    set(side+'ForeArm',-0.15-raise*0.5);
+    const armPitch=rotation([1,0,0],-raise*0.55);
+    const down=rotation([0,0,1],-sign*(1.38-raise*0.45));
+    q[names.indexOf(side+'Arm')]=armPitch.multiply(down).multiply(rotation([1,0,0],.15)).normalize();
+    q[names.indexOf(side+'ForeArm')]=rotation([0,1,0],-sign*(0.24+raise*0.52)).multiply(rotation([1,0,0],.16)).normalize();
     set(side+'UpLeg',-crouch);
     set(side+'Leg',crouch*1.8);
     set(side+'Foot',-crouch*0.8);
   }
-  return {local:q,hipY:-crouch*0.08};
+  return {local:q,hipY:-crouch*0.08,hipX:0};
 }
 function relaxedIdlePose(t,duration) {
   const local=names.map(identity),wave=Math.sin(t/duration*Math.PI*2);
-  const set=(name,q)=>{local[names.indexOf(name)]=q;};
-  // 巡检待机采用对称窄站距和轻微呼吸，不继承演示角色的偏胯站姿。
-  set('Spine',rotation([1,0,0],.004*wave));
-  set('Neck',rotation([1,0,0],-.004*wave));
+  const set=(name,q)=>{local[names.indexOf(name)]=q.normalize();};
+  // 巡检待机采用对称稳健的微外展站姿、放松手臂对称微内旋/旋前与从容呼吸律动（t=0保持脊柱中立，不偏置自定义人物原生站姿）。
+  set('Spine',rotation([1,0,0],.008*wave));
+  set('Spine1',rotation([1,0,0],.005*wave));
+  set('Spine2',rotation([1,0,0],-.007*wave));
+  set('Neck',rotation([1,0,0],-.005*wave));
+  set('Head',rotation([1,0,0],-.003*wave));
   for(const side of ['Left','Right']) {
     const sign=side==='Left'?1:-1;
-    set(side+'Arm',rotation([0,0,1],-sign*1.40));
-    set(side+'ForeArm',rotation([0,1,0],-sign*.16));
-    set(side+'UpLeg',Quaternion.RotationYawPitchRoll(0,-.035,sign*.035));
-    set(side+'Leg',rotation([1,0,0],.07));
-    set(side+'Foot',rotation([1,0,0],-.035));
+    set(side+'Shoulder',Quaternion.RotationYawPitchRoll(0,0,sign*.007*wave));
+    const down=rotation([0,0,1],-sign*(1.445-.008*wave));
+    set(side+'Arm',rotation([1,0,0],-.025).multiply(down).multiply(rotation([1,0,0],.14)));
+    set(side+'ForeArm',rotation([0,1,0],-sign*(.18+.012*wave)).multiply(rotation([1,0,0],.18)));
+    set(side+'Hand',rotation([0,1,0],-sign*.02));
+    // 膝部自然柔和微屈，脚掌朝向与原地转身片段一致（避免Idle↔Turn混合时支撑脚扭转）。
+    set(side+'UpLeg',Quaternion.RotationYawPitchRoll(0,-.036,sign*.032));
+    set(side+'Leg',rotation([1,0,0],.072));
+    set(side+'Foot',rotation([1,0,0],-.036));
   }
-  return {local,hipY:-.003+.001*wave};
+  return {local,hipY:-.003+.0016*wave,hipX:0};
 }
 /** 在脚骨局部先绕踝部放平鞋底，再叠加动作旋转；脚骨与趾骨的屈伸同为X轴，趾骨无需反向补偿。 */
 function flattenFeet(local,footPitch){
@@ -326,7 +335,7 @@ function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kay
   const commuteWalk=createCommuteWalkSampler(rest,names,parentNames,footGeometry,footPitch);
   const commuteRun=createCommuteRunSampler(rest,names,parentNames,footGeometry,footPitch);
   const manifest={version:2,profile:profile.profile,clips:{},files:{},sources:[sourceInfo,kaykitInfo,{...kaykitInfo,sha256:hash(kaykitBasic.bytes),file:'Rig_Medium_MovementBasic.glb'}]};
-  const configs=[['Idle','idle',2.5,0],...['Walk','Run'].flatMap((kind,i)=>['Forward','Backward','Left','Right'].map(dir=>[kind+dir,i?'run':'walk',i?0.7:29/30,i?3.2:1.6])),...['JumpStart','JumpUp','Fall','Land','FlyIdle','FlyMove'].map(n=>[n,null,{JumpStart:0.3,JumpUp:0.45,Fall:0.8,Land:0.3,FlyIdle:2,FlyMove:1.2}[n],0])];
+  const configs=[['Idle','idle',3.6,0],...['Walk','Run'].flatMap((kind,i)=>['Forward','Backward','Left','Right'].map(dir=>[kind+dir,i?'run':'walk',i?0.7:29/30,i?3.2:1.6])),...['JumpStart','JumpUp','Fall','Land','FlyIdle','FlyMove'].map(n=>[n,null,{JumpStart:0.3,JumpUp:0.45,Fall:0.8,Land:0.3,FlyIdle:2,FlyMove:1.2}[n],0])];
   for(const [name,sourceClip,duration,speed]of configs){
     const direction=/Left|Right|Backward/.test(name);
     const nativeClip=name.endsWith('Backward')?'Walking_Backwards':name.endsWith('Left')?'Running_Strafe_Left':'Running_Strafe_Right';
@@ -357,7 +366,8 @@ function buildAnimation(source,rest,footPitch,footGeometry,sourceInfo,kaykit,kay
         const previous=tracks[i].slice(-4);if(previous.length&&Quaternion.Dot(q,Quaternion.FromArray(previous))<0)q=q.scale(-1);
         tracks[i].push(...q.asArray());
       });
-      hip.push(rest[0].x,loop&&frame===count-1?hip[1]:rest[0].y+pose.hipY,rest[0].z);
+      const hipX=rest[0].x+(pose.hipX??0);
+      hip.push(loop&&frame===count-1?hip[0]:hipX,loop&&frame===count-1?hip[1]:rest[0].y+pose.hipY,rest[0].z);
     });
     const calibration=name==='WalkForward'?commuteWalkCalibration(times):name==='RunForward'?commuteRunCalibration(times):/^(Walk|Run)/.test(name)?calibrateStride(name,rest,tracks,hip,times):{};
     if(direction) {

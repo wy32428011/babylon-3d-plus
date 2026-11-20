@@ -121,3 +121,15 @@ test('步幅平滑30/60/120FPS一致，停止回收，极端速度有界且不�
   }
   assert.ok(Math.max(...results)-Math.min(...results)<1e-9);
 });
+
+
+test('低速行走启用步幅控制时温和缩步，避免半速太空慢动作且不改变全速与旧人物行为', async () => {
+  const manifest = JSON.parse(await readFile('public/manual-roam/locomotion-v2.manifest.json', 'utf8'));
+  const clip = manifest.clips.WalkForward;
+  const timing = { walkSpeed: clip.referenceSpeed, runSpeed: 3.2, walkDuration: clip.duration, runDuration: 0.66, jumpStartDuration: 0.1, landDuration: 0.2, clipCycleDistances: { WalkForward: clip.cycleDistanceMeters }, enableStrideWarp: true };
+  let state = createManualRoamAnimationState();
+  for (let i = 0; i < 90; i++) state = stepManualRoamAnimationState(state, { ...frame, deltaSeconds: 1 / 60, velocityZ: 0.8, worldScale: 0.9567 }, timing);
+  assert.ok(state.strideScale >= 0.62 && state.strideScale < 0.88, '半速应温和缩短步幅: ' + state.strideScale);
+  const cadence = 0.8 / (clip.cycleDistanceMeters * state.strideScale * 0.9567) * 120;
+  assert.ok(cadence >= 85 && cadence <= 115, '半速步频应自然从容而非慢动作: ' + cadence.toFixed(1));
+});

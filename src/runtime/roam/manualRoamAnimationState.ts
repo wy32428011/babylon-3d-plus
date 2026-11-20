@@ -14,6 +14,8 @@ export type ManualRoamAnimationFrame = {
   walkSpeed: number;
   runSpeed?: number;
   worldScale: number;
+  /** 移动中的剩余转向角（弧度，正值表示向右转）；用于脊柱向弯道内侧微倾与头部预判引导。 */
+  turnDeltaYaw?: number;
   turn?: { clip: typeof MANUAL_ROAM_TURN_CLIPS[number]; progress: number; weight: number; angleScale?: number };
 };
 export type ManualRoamAnimationState = {
@@ -27,6 +29,7 @@ export type ManualRoamAnimationState = {
 };
 export type ManualRoamGaitTiming = { walkSpeed: number; runSpeed: number; walkDuration: number; runDuration: number; jumpStartDuration: number; landDuration: number; clipCycleDistances?: Partial<Record<ManualRoamClip, number>>; enableStrideWarp?: boolean };
 /** 源动作步长偏短；允许把步幅放大到该上限以降低默认速度下的步频，腿够不到时由足部IK缩步。 */
+export const MANUAL_ROAM_MIN_STRIDE_SCALE = 0.62;
 export const MANUAL_ROAM_MAX_STRIDE_SCALE = 1.3;
 export const DEFAULT_MANUAL_ROAM_GAIT_TIMING: ManualRoamGaitTiming = { walkSpeed: 1.6, runSpeed: 3.2, walkDuration: 1, runDuration: 1, jumpStartDuration: 0.15, landDuration: 0.2 };
 
@@ -69,9 +72,14 @@ export function stepManualRoamAnimationState(previous: ManualRoamAnimationState,
       if (Math.abs(right) > 1e-6) weights[`${prefix}${right > 0 ? 'Right' : 'Left'}`] = amount * Math.abs(right) / total;
     }
     gaitFrequency = resolveManualRoamGaitFrequency(frame, timing, weights);
-    if(timing.enableStrideWarp)strideTarget=Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,gaitFrequency*(timing.walkDuration*(1-run)+timing.runDuration*run)));
+    if(timing.enableStrideWarp){
+      const ratio=gaitFrequency*(timing.walkDuration*(1-run)+timing.runDuration*run);
+      // 超速时拉伸步幅（上限1.3）；低速（摇杆半推或贴墙降速）按人体速度-步幅幂律温和缩步，避免太空慢动作。
+      const desired=ratio>=1?ratio:Math.pow(Math.max(0.05,ratio),0.45);
+      strideTarget=Math.max(MANUAL_ROAM_MIN_STRIDE_SCALE,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,desired));
+    }
   }
-  const strideScale=timing.enableStrideWarp?smoothStride(Math.max(1,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,finite(previous.strideScale,1))),strideTarget,delta):1;
+  const strideScale=timing.enableStrideWarp?smoothStride(Math.max(MANUAL_ROAM_MIN_STRIDE_SCALE,Math.min(MANUAL_ROAM_MAX_STRIDE_SCALE,finite(previous.strideScale,1))),strideTarget,delta):1;
   // 本帧足部目标使用同一strideScale；世界距离=相位增量×标定周期距离×步幅×人物缩放。
   phase=(phase+delta*Math.min(4,gaitFrequency/strideScale))%1;
   return { kind, elapsed, phase, strideScale, grounded: frame.grounded, flying: frame.fly, weights };

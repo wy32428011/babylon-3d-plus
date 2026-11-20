@@ -163,3 +163,50 @@ test('前进跑步具备真实腾空相、平滑屈膝、前倾躯干与自然�
   const spineForward = poses.map(p => p.position('Spine2').z - p.position('Hips').z);
   assert.ok(Math.min(...spineForward) > 0.015, '跑步躯干应保持自然前倾');
 });
+
+test('v2 走跑摆动期保持自然生理踝角、跑步无深蹲、步行蹬离屈膝平顺且双臂左右镜像对称', { skip: version !== 'v2' }, async () => {
+  const manifest = JSON.parse(await readFile(new URL(`../../public/manual-roam/locomotion-${version}.manifest.json`, import.meta.url), 'utf8'));
+  const footForward = (pose: ReturnType<typeof sampledPoses>[number], side: 'Left' | 'Right') =>
+    pose.position(side + 'ToeBase').subtract(pose.position(side + 'Foot')).normalize();
+  const ankleDF = (pose: ReturnType<typeof sampledPoses>[number], side: 'Left' | 'Right') => {
+    const shin = pose.position(side + 'Leg').subtract(pose.position(side + 'Foot')).normalize();
+    return 90 - Math.acos(Math.min(1, Math.max(-1, Vector3.Dot(shin, footForward(pose, side))))) * 180 / Math.PI;
+  };
+  // 1. WalkForward: 骨盆零均值侧向重心微移、蹬离段屈膝不出现大幅回直抖动、摆动踝无40°级勾踝、双臂镜像对称
+  const walk = sampledPoses('WalkForward'), walkContacts = manifest.clips.WalkForward.contacts.left;
+  const walkHipX = walk.map(p => p.position('Hips').x);
+  const walkSway = Math.max(...walkHipX) - Math.min(...walkHipX);
+  assert.ok(walkSway >= 0.015 && walkSway <= 0.045, `步行骨盆侧移全幅 ${(walkSway * 100).toFixed(2)}cm`);
+  const walkKnees = walk.map(p => {
+    const hip = p.position('LeftUpLeg'), knee = p.position('LeftLeg'), ankle = p.position('LeftFoot');
+    return Math.acos(Math.min(1, Math.max(-1, Vector3.Dot(knee.subtract(hip).normalize(), ankle.subtract(knee).normalize())))) * 180 / Math.PI;
+  });
+  let maxReversal = 0, prePeak = 0;
+  for (let i = Math.floor(walk.length * 0.40); i <= Math.floor(walk.length * 0.68); i++) {
+    prePeak = Math.max(prePeak, walkKnees[i]);
+    maxReversal = Math.max(maxReversal, prePeak - walkKnees[i]);
+  }
+  assert.ok(maxReversal < 6, `步行蹬离至摆动初段出现W形反折膝回直 ${maxReversal.toFixed(1)}°`);
+  const walkSwingDF = walk.filter((_, i) => walkContacts[i] < 0.25).map(p => ankleDF(p, 'Left'));
+  assert.ok(Math.max(...walkSwingDF) < 28, `步行摆动期踝背屈过大（勾踝）${Math.max(...walkSwingDF).toFixed(1)}°`);
+  const lHandX = walk.map(p => p.position('LeftHand').x - p.position('Hips').x);
+  const rHandX = walk.map(p => p.position('RightHand').x - p.position('Hips').x);
+  assert.ok(Math.abs(Math.min(...lHandX) + Math.max(...rHandX)) < 0.015, '步行左右手内收轨迹必须镜像对称');
+
+  // 2. RunForward: 支撑期挺拔无深蹲（<52°）、摆动期无60°勾踝、后摆手回扫至髋侧而非双手堆在胸前
+  const run = sampledPoses('RunForward'), runContacts = manifest.clips.RunForward.contacts.left;
+  const runKnees = run.map(p => {
+    const hip = p.position('LeftUpLeg'), knee = p.position('LeftLeg'), ankle = p.position('LeftFoot');
+    return Math.acos(Math.min(1, Math.max(-1, Vector3.Dot(knee.subtract(hip).normalize(), ankle.subtract(knee).normalize())))) * 180 / Math.PI;
+  });
+  const stanceKnees = runKnees.filter((_, i) => runContacts[i] >= 0.75);
+  assert.ok(Math.max(...stanceKnees) < 52, `跑步支撑中段屈膝过深（蹲跑）${Math.max(...stanceKnees).toFixed(1)}°`);
+  const runSwingDF = run.filter((_, i) => runContacts[i] < 0.25).map(p => ankleDF(p, 'Left'));
+  assert.ok(Math.max(...runSwingDF) < 22, `跑步摆动期踝背屈过大（勾踝）${Math.max(...runSwingDF).toFixed(1)}°`);
+  const runLeftHandZ = run.map(p => p.position('LeftHand').z - p.position('Hips').z);
+  assert.ok(Math.min(...runLeftHandZ) < 0.01, `跑步后摆手未回扫至髋侧：minZ=${Math.min(...runLeftHandZ).toFixed(3)}m`);
+  assert.ok(Math.max(...runLeftHandZ) < 0.38, `跑步前摆手过度前伸：maxZ=${Math.max(...runLeftHandZ).toFixed(3)}m`);
+  const runLHandX = run.map(p => p.position('LeftHand').x - p.position('Hips').x);
+  const runRHandX = run.map(p => p.position('RightHand').x - p.position('Hips').x);
+  assert.ok(Math.abs(Math.min(...runLHandX) + Math.max(...runRHandX)) < 0.015, '跑步左右手内收轨迹必须镜像对称');
+});

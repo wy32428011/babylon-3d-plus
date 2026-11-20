@@ -239,3 +239,65 @@ test('整个权重向量按统一0.18秒过渡到斜行，连续方向更新不�
     assert.ok(Math.abs(group('WalkForward').animatables[0].weight + group('WalkRight').animatables[0].weight - 1) < 1e-6);
   } finally { animator.dispose(); scene.dispose(); engine.dispose(); }
 });
+
+test('允许零均值有界骨盆侧向重心微移，仍严格拒绝前后根位移与非零均值漂移', async t => {
+  const engine = new NullEngine(); const scene = new Scene(engine);
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify(manifest)));
+  try {
+    const avatar = fixture(scene, true);
+    const swaySource = fixture(scene, false);
+    const swayTrack = swaySource.container.animationGroups[1].targetedAnimations.find(tr => tr.animation.targetProperty === 'position')!;
+    swayTrack.animation.setKeys([
+      { frame: 0, value: new Vector3(0, 0.1, 0) },
+      { frame: 10, value: new Vector3(0.015, 0.12, 0) },
+      { frame: 20, value: new Vector3(-0.015, 0.12, 0) },
+      { frame: 30, value: new Vector3(0, 0.1, 0) },
+    ]);
+    const okAnimator = await ManualRoamAvatarAnimator.create(scene, avatar.container, { sourceUrl: 'sway://ok', manifestUrl: 'sway://manifest', loadContainer: async () => swaySource.container });
+    okAnimator.dispose();
+
+    const driftZ = fixture(scene, false);
+    driftZ.container.animationGroups[1].targetedAnimations.find(tr => tr.animation.targetProperty === 'position')!.animation.setKeys([
+      { frame: 0, value: new Vector3(0, 0.1, 0) },
+      { frame: 30, value: new Vector3(0, 0.1, 0.02) },
+    ]);
+    await assert.rejects(ManualRoamAvatarAnimator.create(scene, avatar.container, { sourceUrl: 'sway://driftZ', manifestUrl: 'sway://manifest', loadContainer: async () => driftZ.container }), /水平根位移/);
+
+    const driftX = fixture(scene, false);
+    driftX.container.animationGroups[1].targetedAnimations.find(tr => tr.animation.targetProperty === 'position')!.animation.setKeys([
+      { frame: 0, value: new Vector3(0.02, 0.1, 0) },
+      { frame: 30, value: new Vector3(0.02, 0.1, 0) },
+    ]);
+    await assert.rejects(ManualRoamAvatarAnimator.create(scene, avatar.container, { sourceUrl: 'sway://driftX', manifestUrl: 'sway://manifest', loadContainer: async () => driftX.container }), /水平根位移/);
+    avatar.container.dispose();
+  } finally { scene.dispose(); engine.dispose(); }
+});
+
+test('v2 启用IK步幅控制时由中立并脚相位起步，走切跑步频平滑无尖峰', async t => {
+  const engine = new NullEngine(); const scene = new Scene(engine);
+  const actualManifest = await readFile('public/manual-roam/locomotion-v2.manifest.json', 'utf8');
+  t.mock.method(globalThis, 'fetch', async () => new Response(actualManifest));
+  const loadFile = async (p: string) => LoadAssetContainerAsync(new Uint8Array(await readFile(p)), scene, { pluginExtension: '.glb', pluginOptions: { gltf: { animationStartMode: 0, skipMaterials: true } } });
+  try {
+    const avatar = await loadFile('public/manual-roam/EQ_People_rigged_v2.glb');
+    const animator = await ManualRoamAvatarAnimator.create(scene, avatar, {
+      sourceUrl: 'real://v2-smooth', manifestUrl: 'real://v2-manifest', enableStrideWarp: true,
+      loadContainer: () => loadFile('public/manual-roam/locomotion-v2.glb'),
+    });
+    animator.sampleIdle();
+    const walkFrame = { ...frame, deltaSeconds: 1 / 60, velocityZ: 1.6, walkSpeed: 1.6, runSpeed: 3.2, worldScale: 0.9567 };
+    animator.update(walkFrame);
+    const startPhase = animator.getStatus().phase;
+    assert.ok(startPhase > 0.24 && startPhase < 0.30, `起步首帧应从并脚中立相位0.25进入，实际 ${startPhase.toFixed(3)}`);
+    for (let i = 0; i < 40; i++) animator.update(walkFrame);
+    let maxStepFreq = 0;
+    for (let i = 0; i < 20; i++) {
+      const prev = animator.getStatus().phase;
+      animator.update({ ...walkFrame, velocityZ: 3.2, sprint: true });
+      const freq = ((animator.getStatus().phase - prev + 1) % 1) * 60;
+      maxStepFreq = Math.max(maxStepFreq, freq);
+    }
+    assert.ok(maxStepFreq * 120 < 205, `走切跑出现步频尖峰 ${(maxStepFreq * 120).toFixed(1)} spm`);
+    animator.dispose(); avatar.dispose();
+  } finally { scene.dispose(); engine.dispose(); }
+});

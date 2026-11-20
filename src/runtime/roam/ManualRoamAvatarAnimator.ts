@@ -1,6 +1,7 @@
 import { LoadAssetContainerAsync } from '@babylonjs/core/Loading/sceneLoader.js';
 import type { AssetContainer, Scene, TransformNode, AnimationGroup } from '@babylonjs/core';
 import { AnimatorAvatar } from '@babylonjs/core/Animations/animatorAvatar.js';
+import { Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import '../babylon/babylonGltfLoader.ts';
 import { fetchRuntimeAsset } from '../assets/runtimeAssetFetch.ts';
 import { MANUAL_ROAM_RIG_PROFILE, MANUAL_ROAM_RIG_PROFILE_V2, getManualRoamRigProfile, prepareManualRoamReferencePose, validateManualRoamAvatarRig, validateManualRoamRigNodes, validateManualRoamRestCompatibility } from './manualRoamAvatarRig.ts';
@@ -60,11 +61,17 @@ export class ManualRoamAvatarAnimator {
           : avatar.retargetAnimationGroup(original, { animationGroupName: `manual-roam-${id}-${clip}`, checkHierarchy: true, retargetAnimationKeys: true, fixRootPosition: false, fixGroundReference: false });
         groups.set(clip, group);
         if (group.targetedAnimations.length !== original.targetedAnimations.length || group.targetedAnimations.some(track => ![...target.values()].includes(track.target))) throw new Error(`动作轨道无法完整绑定：${clip}`);
-        // retarget 已保留目标 rest 基高；再按腿长缩放骨盆局部起伏，始终锁定水平根位移。
+        // retarget 已保留目标 rest 基高；再按腿长缩放骨盆竖直起伏与零均值侧向重心微移，始终锁定前后根位移。
         const hips = target.get('Hips')!;
         for (const track of group.targetedAnimations) {
           if (binding.automatic || track.target !== hips || track.animation.targetProperty !== 'position') continue;
-          for (const key of track.animation.getKeys()) key.value.set(hips.position.x, hips.position.y + (key.value.y - hips.position.y) * legScale, hips.position.z);
+          for (const key of track.animation.getKeys()) {
+            key.value.set(
+              hips.position.x + (key.value.x - hips.position.x) * legScale,
+              hips.position.y + (key.value.y - hips.position.y) * legScale,
+              hips.position.z,
+            );
+          }
         }
         group.stop();
       }
@@ -96,6 +103,9 @@ export class ManualRoamAvatarAnimator {
   private readonly sampledProgress = new Map<ManualRoamClip,number>();
   private turnContacts: { clip: ManualRoamTurnClip; weight: number } | null = null;
   private readonly rigBinding: ManualRoamRigBinding;
+  private lastGaitFrequency = 0;
+  private turnLean = 0;
+  private turnHeadYaw = 0;
 
   private constructor(groups: Map<ManualRoamClip, AnimationGroup>, manifest: MotionManifest, release: () => void, legScale: number, enableStrideWarp: boolean, rigBinding: ManualRoamRigBinding) {
     this.rigBinding = rigBinding;
@@ -111,6 +121,7 @@ export class ManualRoamAvatarAnimator {
     if (this.disposed || this.paused) return;
     const previousKind = this.state.kind;
     const previousPhase = this.state.phase;
+    const hadGaitPose = this.hasGaitPose();
     const scaledFrame = { ...frame, worldScale: frame.worldScale * this.legScale };
     this.state = stepManualRoamAnimationState(this.state, scaledFrame, this.timing);
     const turn = frame.turn && this.groups.has(frame.turn.clip) && frame.grounded && !frame.fly
@@ -129,8 +140,56 @@ export class ManualRoamAvatarAnimator {
       for(const clip of this.clips)this.weights.set(clip,this.state.weights[clip]??0);
       this.transition=null;
     } else this.updateWeights(delta, previousKind);
+    const v2Managed = this.manifest.profile === MANUAL_ROAM_RIG_PROFILE_V2 && this.timing.enableStrideWarp === true;
+    const hasGaitNow = this.hasGaitPose();
     const frequency = resolveManualRoamGaitFrequency(scaledFrame, this.timing, Object.fromEntries(this.weights));
-    this.state.phase = !this.hasGaitPose() && this.state.kind === 'ground' && !turn ? 0 : (previousPhase + delta * Math.min(4, frequency / this.state.strideScale)) % 1;
+    if (!hasGaitNow && this.state.kind === 'ground' && !turn) {
+      this.state.phase = 0;
+      this.lastGaitFrequency = 0;
+    } else if (v2Managed && !hadGaitPose && hasGaitNow && this.state.kind === 'ground' && !turn) {
+      // v2 起步从双脚并拢过中线相位（0.25：左脚正下方支撑、右脚迈出）开始，与Idle站姿无缝衔接，避免起步拽断脚锁弹跳。
+      const stepFreq = Math.min(4, frequency / this.state.strideScale);
+      this.state.phase = (0.25 + delta * stepFreq) % 1;
+      this.lastGaitFrequency = stepFreq;
+    } else if (v2Managed && this.state.kind === 'ground' && !turn && frequency === 0 && hasGaitNow) {
+      // 停步淡回Idle期间不硬冻结在大跨步帧，平滑将相位收敛到最近的自然并脚相位（0.25或0.75）。
+      const dist25 = (0.25 - previousPhase + 1) % 1;
+      const dist75 = (0.75 - previousPhase + 1) % 1;
+      const remain = Math.min(dist25, dist75);
+      const settleRate = Math.max(0.55, Math.min(1.25, this.lastGaitFrequency * 0.65));
+      const advance = remain > 1e-4 && remain < 0.34 ? Math.min(remain, delta * settleRate) : 0;
+      this.state.phase = (previousPhase + advance) % 1;
+    } else {
+      let stepFreq = Math.min(4, frequency / this.state.strideScale);
+      if (v2Managed && frequency > 0) {
+        const hasWalk = this.clips.some(clip => clip.startsWith('Walk') && (this.weights.get(clip) ?? 0) > 1e-3);
+        const hasRun = this.clips.some(clip => clip.startsWith('Run') && (this.weights.get(clip) ?? 0) > 1e-3);
+        if (hasWalk && hasRun && this.lastGaitFrequency > 0) {
+          // 走↔跑过渡期间按目标步长平滑过渡步频，防止速度瞬间跳变叠加旧步长引发266spm狂蹬或93spm急刹。
+          const targetFreq = Math.min(4, resolveManualRoamGaitFrequency(scaledFrame, this.timing, this.state.weights) / this.state.strideScale);
+          const blendRate = 1 - Math.exp(-10 * delta);
+          stepFreq = this.lastGaitFrequency + (targetFreq - this.lastGaitFrequency) * blendRate;
+        }
+        this.lastGaitFrequency = stepFreq;
+      }
+      this.state.phase = (previousPhase + delta * stepFreq) % 1;
+    }
+    if (v2Managed) {
+      const speed = Math.hypot(Number.isFinite(frame.velocityX) ? frame.velocityX : 0, Number.isFinite(frame.velocityZ) ? frame.velocityZ : 0);
+      const activeTurn = frame.grounded && !frame.fly && !turn && speed > 0.25 && Number.isFinite(frame.turnDeltaYaw);
+      const clampedDelta = activeTurn ? Math.max(-Math.PI / 2, Math.min(Math.PI / 2, frame.turnDeltaYaw!)) : 0;
+      const speedFactor = activeTurn ? Math.min(1.5, speed / Math.max(0.5, frame.walkSpeed)) : 0;
+      const targetLean = Math.max(-0.14, Math.min(0.14, clampedDelta * 0.08 * speedFactor));
+      const targetHead = Math.max(-0.22, Math.min(0.22, clampedDelta * 0.22 * Math.min(1, speedFactor)));
+      const alpha = 1 - Math.exp(-9 * delta);
+      this.turnLean += (targetLean - this.turnLean) * alpha;
+      this.turnHeadYaw += (targetHead - this.turnHeadYaw) * alpha;
+      if (Math.abs(this.turnLean) < 1e-4) this.turnLean = 0;
+      if (Math.abs(this.turnHeadYaw) < 1e-4) this.turnHeadYaw = 0;
+    } else {
+      this.turnLean = 0;
+      this.turnHeadYaw = 0;
+    }
     for (const clip of this.clips) {
       const group = this.groups.get(clip)!;
       const weight = this.weights.get(clip) ?? 0;
@@ -165,7 +224,11 @@ export class ManualRoamAvatarAnimator {
       const wantsWalk = Object.keys(desired).some(clip => clip.startsWith('Walk') && (desired[clip as ManualRoamClip] ?? 0) > 1e-3);
       const wantsRun = Object.keys(desired).some(clip => clip.startsWith('Run') && (desired[clip as ManualRoamClip] ?? 0) > 1e-3);
       const gaitShift = (hasWalk && wantsRun) || (hasRun && wantsWalk);
-      this.transition = { from: new Map(this.weights), elapsed: 0, duration: this.state.kind === 'ground' && previousKind === 'ground' ? (gaitShift ? 0.26 : 0.18) : 0.10, family };
+      const v2Managed = this.manifest.profile === MANUAL_ROAM_RIG_PROFILE_V2 && this.timing.enableStrideWarp === true;
+      const fromIdle = (this.weights.get('Idle') ?? 0) > 0.5 && family === 'Locomotion';
+      const toIdle = family === 'Idle' && (hasWalk || hasRun);
+      const groundDuration = gaitShift ? 0.20 : v2Managed && fromIdle ? 0.14 : v2Managed && toIdle ? 0.22 : 0.18;
+      this.transition = { from: new Map(this.weights), elapsed: 0, duration: this.state.kind === 'ground' && previousKind === 'ground' ? groundDuration : 0.10, family };
     }
     if (!this.transition) return;
     // 同一运动族内连续改变方向只更新终点，保留过渡时钟，避免每帧重开导致永远追不上输入。
@@ -186,9 +249,34 @@ export class ManualRoamAvatarAnimator {
     this.weights.clear(); this.weights.set('Idle', 1); this.state = createManualRoamAnimationState();
     this.clipTimes.clear(); this.clipTimes.set('Idle', 0); this.transition = null;
     this.sampledProgress.clear(); this.turnContacts = null;
+    this.lastGaitFrequency = 0; this.turnLean = 0; this.turnHeadYaw = 0;
     const idle = this.groups.get('Idle')!;
     idle.start(true, 0); idle.setWeightForAllAnimatables(1); idle.goToFrame(idle.from);
     if (this.paused) idle.pause();
+  }
+
+  /** 在场景动画混合求值之后、足部IK之前叠加移动转向时的脊柱内倾与头部预判引导，不修改碰撞体与下肢。 */
+  applyUpperBodyOverlay(): void {
+    if (this.disposed || this.paused) return;
+    if (Math.abs(this.turnLean) < 1e-4 && Math.abs(this.turnHeadYaw) < 1e-4) return;
+    const joints = this.rigBinding.joints;
+    const apply = (name: string, axis: Vector3, angle: number) => {
+      if (Math.abs(angle) < 1e-5) return;
+      const node = joints.get(name);
+      if (!node) return;
+      const current = node.rotationQuaternion ?? Quaternion.FromEulerVector(node.rotation);
+      node.rotationQuaternion = current.multiply(Quaternion.RotationAxis(axis, angle)).normalize();
+      node.computeWorldMatrix(true);
+    };
+    const axisY = Vector3.Up(), axisZ = new Vector3(0, 0, 1);
+    // 已在实机加载骨架上验证：正deltaYaw(向右转)对应脊柱正Z侧倾向右内倾、颈头负Y向右转头。
+    apply('Spine', axisZ, this.turnLean * 0.42);
+    apply('Spine1', axisZ, this.turnLean * 0.34);
+    apply('Spine2', axisZ, this.turnLean * 0.24);
+    apply('Spine1', axisY, -this.turnHeadYaw * 0.16);
+    apply('Spine2', axisY, -this.turnHeadYaw * 0.20);
+    apply('Neck', axisY, -this.turnHeadYaw * 0.45);
+    apply('Head', axisY, -this.turnHeadYaw * 0.55);
   }
 
   pause(): void {
@@ -249,7 +337,9 @@ export class ManualRoamAvatarAnimator {
     this.disposed = true;
     for (const group of this.groups.values()) group.dispose();
     this.groups.clear(); this.weights.clear(); this.clipTimes.clear(); this.sampledProgress.clear();
-    this.turnContacts = null; this.transition = null; this.release();
+    this.turnContacts = null; this.transition = null;
+    this.lastGaitFrequency = 0; this.turnLean = 0; this.turnHeadYaw = 0;
+    this.release();
   }
 }
 
@@ -345,13 +435,21 @@ function validateTracks(group: AnimationGroup, nodes: Map<string, TransformNode>
     if (property === 'rotationQuaternion') rotations.add(name);
     const keys = track.animation.getKeys();
     let previous = -Infinity;
+    let xOffsetSum = 0;
     for (const key of keys) {
       const values: number[] = key.value?.asArray?.() ?? [];
       if (!Number.isFinite(key.frame) || key.frame <= previous || !values.length || !values.every(Number.isFinite)) throw new Error(`动作轨道关键帧无效：${identity}`);
       previous = key.frame;
       if (property === 'rotationQuaternion' && (values.length !== 4 || Math.abs(Math.hypot(...values) - 1) > 0.01)) throw new Error(`动作旋转四元数无效：${identity}`);
-      if (property === 'position' && (Math.abs(key.value.x - track.target.position.x) > 1e-4 || Math.abs(key.value.z - track.target.position.z) > 1e-4)) throw new Error(`动作轨道包含水平根位移：${group.name}`);
+      if (property === 'position') {
+        const dx = key.value.x - track.target.position.x;
+        const dz = key.value.z - track.target.position.z;
+        // 严禁前后水平根位移，仅允许幅度<=4cm的零均值侧向重心微移。
+        if (Math.abs(dz) > 1e-4 || Math.abs(dx) > 0.04) throw new Error(`动作轨道包含水平根位移：${group.name}`);
+        xOffsetSum += dx;
+      }
     }
+    if (property === 'position' && Math.abs(xOffsetSum / keys.length) > 0.005) throw new Error(`动作轨道包含水平根位移：${group.name}`);
     if (keys.length < 2) throw new Error(`动作轨道关键帧不足：${identity}`);
   }
   if (rotations.size !== nodes.size) throw new Error(`动作轨道缺少必要关节：${group.name}`);
