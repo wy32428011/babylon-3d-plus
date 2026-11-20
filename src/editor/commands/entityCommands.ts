@@ -649,6 +649,27 @@ export function updateAgvMapCommand(
   };
 }
 
+/** AGV 路网与底图作为一次变更撤销，保留产生器其它组件和变换。 */
+export function importAgvCadMapCommand(
+  entityId: string,
+  before: { agvMap: AgvMapComponent; cadReference?: CadReferenceComponent },
+  after: { agvMap: AgvMapComponent; cadReference: CadReferenceComponent },
+): Command {
+  const replace = (scene: SceneDocument, update: typeof before): SceneDocument => {
+    const entity = scene.entities[entityId];
+    if (!entity?.components.agvMap) return scene;
+    const components = { ...entity.components, agvMap: update.agvMap };
+    if (update.cadReference) components.cadReference = update.cadReference;
+    else delete components.cadReference;
+    return { ...scene, entities: { ...scene.entities, [entityId]: { ...entity, components } } };
+  };
+  return {
+    label: '导入AGV地图',
+    execute: scene => replace(scene, after),
+    undo: scene => replace(scene, before),
+  };
+}
+
 /** 更新点击事件绑定完整配置，所有 Inspector 编辑都通过同一条可撤销命令提交。 */
 export function updateClickEventBindingCommand(
   entityId: string,

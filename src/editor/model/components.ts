@@ -12,7 +12,7 @@ import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
 import type { CompositeDeviceFolderComponent, DevicePartBindingComponent } from './devicePartBinding';
 import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
-import type { AgvMapSceneAxis } from './agvMap';
+import type { AgvMapDefinition, AgvMapPoint, AgvMapSceneAxis } from './agvMap';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -122,6 +122,8 @@ export type CadReferenceComponent = {
   unitDetection: CadReferenceUnitDetection;
   unitScaleToMeters: number;
   originMode: CadReferenceOriginMode;
+  /** CAD 线稿居中点在 AGV 原始地图米制坐标中的位置。 */
+  agvMapOrigin?: AgvMapPoint;
   lineColor: string;
   opacity: number;
   layerStats: CadReferenceLayerStat[];
@@ -262,6 +264,7 @@ export type DeviceSpawnerComponent = {
 /** AGV 产生器的地图显示配置；实体位置是地图 (0,0)，比例尺单位为米/地图单位。 */
 export type AgvMapComponent = {
   mapId: string | null;
+  importedMap?: AgvMapDefinition;
   showTrajectories: boolean;
   xAxis: AgvMapSceneAxis;
   yAxis: AgvMapSceneAxis;

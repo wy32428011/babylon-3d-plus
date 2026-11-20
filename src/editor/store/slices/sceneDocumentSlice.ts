@@ -1264,13 +1264,12 @@ export const createSceneDocumentSlice: EditorSlice<
       const entity = getSelectedEntity(state);
       const current = entity?.components.agvMap;
       if (!isRuntimeEntityEditable(state.scene, entity) || !current) return state;
-      const normalized = sanitizeAgvMapComponent(component);
-      if (!normalized) return state;
-      const before = { ...current };
-      const after = { ...normalized };
-      if (areJsonValuesEqual(before, after)) return state;
+      const { importedMap, ...beforeSettings } = current;
+      const settings = sanitizeAgvMapComponent({ ...component, importedMap: undefined });
+      if (!settings || areJsonValuesEqual(beforeSettings, settings)) return state;
+      const updated = importedMap ? { ...settings, importedMap } : settings;
 
-      const command = updateAgvMapCommand(entity.id, before, after, label);
+      const command = updateAgvMapCommand(entity.id, current, updated, label);
       const result = executeCommand(state.scene, state.history, command);
       return { ...result, logs: prependLog(state.logs, command.label + ': ' + entity.name) };
     });

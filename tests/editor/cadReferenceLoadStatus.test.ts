@@ -9,7 +9,7 @@ test('CAD 只有真实首帧就绪才结束等待，渲染批次状态继续保�
   const id = 'cad-ready';
   let completed = false;
   const stages: string[] = [];
-  const promise = waitForCadReferenceReady(id, { onProgress: status => stages.push(status.state) }).then(() => { completed = true; });
+  const promise = waitForCadReferenceReady(id, 'cad://ready', { onProgress: status => stages.push(status.state) }).then(() => { completed = true; });
   publishCadReferenceLoadStatus({ entityId: id, sourceUrl: 'cad://ready', state: 'rendering', percent: 96, detail: '创建线稿' });
   await Promise.resolve();
   assert.equal(completed, false);
@@ -23,7 +23,7 @@ test('CAD 只有真实首帧就绪才结束等待，渲染批次状态继续保�
 test('CAD 错误可见且只终止对应图纸等待，迟到等待也能读到结果', async () => {
   const id = 'cad-error';
   publishCadReferenceLoadStatus({ entityId: id, sourceUrl: 'cad://error', state: 'error', percent: 55, detail: 'CAD 几何内存预算不足' });
-  await assert.rejects(waitForCadReferenceReady(id), /内存预算不足/);
+  await assert.rejects(waitForCadReferenceReady(id, 'cad://error'), /内存预算不足/);
   forgetCadReferenceLoadStatus(id);
 });
 
@@ -32,7 +32,8 @@ test('取消和删除 CAD 结束尚未完成的等待，取消句柄仅释放本
   const controller = new AbortController();
   let canceled = 0;
   const unregister = registerCadReferenceLoadCancellation(id, () => { canceled += 1; });
-  const pending = waitForCadReferenceReady(id, { signal: controller.signal });
+  const sourceUrl = 'cad://cancel';
+  const pending = waitForCadReferenceReady(id, sourceUrl, { signal: controller.signal });
   cancelCadReferenceLoad(id);
   assert.equal(canceled, 1);
   controller.abort();
@@ -40,7 +41,8 @@ test('取消和删除 CAD 结束尚未完成的等待，取消句柄仅释放本
   unregister();
   cancelCadReferenceLoad(id);
   assert.equal(canceled, 1);
-  const deleted = waitForCadReferenceReady(id);
+  publishCadReferenceLoadStatus({ entityId: id, sourceUrl, state: 'loading', percent: 5, detail: '扫描 DXF' });
+  const deleted = waitForCadReferenceReady(id, sourceUrl);
   forgetCadReferenceLoadStatus(id);
   await assert.rejects(deleted, error => error instanceof Error && error.name === 'AbortError');
 });

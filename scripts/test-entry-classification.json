@@ -6670,7 +6670,7 @@
     },
     {
       "file": "tests/editor/cadReferenceLoadStatus.test.ts",
-      "sha256": "292439bbdd0469e20a810579e5af34e2d6c884bcb2b7b4287360fe55afc91bb7",
+      "sha256": "fbbdb73610a2aad6558f0f1e9d6d7413a1b028bee30bb4532ea315dafffa7749",
       "disposition": "node-contract",
       "domain": "resources",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/cadReferenceLoadStatus.test.ts",

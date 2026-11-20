@@ -17,7 +17,11 @@ import {
   CAD_REFERENCE_MAX_BATCH_POLYLINES,
   CAD_REFERENCE_MAX_GEOMETRY_BYTES,
 } from './cadReferenceGeometryPolicy';
+import { createNdc8AgvMapExtractor } from './ndc8AgvMap';
+import { readCadLayerColor, readNdc8PointFill, type CadReferenceFillCircle } from './cadReferenceDrawingStyle';
+import { readCadReferenceAnnotation, type CadReferenceAnnotation } from './cadReferenceAnnotations';
 import { parseScannedDxfEntity, type DxfGroupPair } from './cadReferenceLargeDxf';
+import type { CadReferenceAgvMapImport } from './cadReferenceWorkerMessages';
 import { createCadDxfStreamDecoder } from './cadTextEncoding';
 import { createLegacyCadReferenceUnitInfo, resolveDxfUnitInfo } from './cadUnits';
 
@@ -46,12 +50,15 @@ type BlockDescriptor = BlockHeader & { geometry: GeometryDescriptor; inserts: Dx
 type ScanCallbacks = {
   block(header: BlockHeader): void;
   entity(entity: DxfEntityRecord, owner: BlockHeader | null): void;
+  rawEntity?(type: string, groups: readonly DxfGroupPair[], entity: DxfEntityRecord | null): void;
 };
 type Fingerprint = { bytes: number; hashes: number[]; headers: string[] };
 export type CadReferenceDxfStreamOptions = {
   unitScaleToMeters?: number;
   signal?: AbortSignal;
   maxGeometryBytes?: number;
+  includeAnnotations?: boolean;
+  agvMap?: CadReferenceAgvMapImport;
   onProgress?: (progress: { percent: number; detail: string }) => void;
 };
 
@@ -83,7 +90,32 @@ export async function parseCadReferenceDxfStream(
     metadataBytes += bytes;
     enforceBudget(metadataBytes, maxBytes);
   };
+  const agvExtractor = options.agvMap ? createNdc8AgvMapExtractor(reserveMetadata) : null;
+  const annotations: CadReferenceAnnotation[] | undefined = options.includeAnnotations || agvExtractor ? [] : undefined;
+  const fillCircles: CadReferenceFillCircle[] = [];
+  const layerColors = new Map<string, string>();
   const first = await scanSource(openSource, options, 0, header, {
+    rawEntity: annotations ? (type, groups, entity) => {
+      if (type === 'LAYER') {
+        const layerColor = readCadLayerColor(groups);
+        if (layerColor) {
+          reserveMetadata(128 + layerColor[0].length * 2);
+          layerColors.set(...layerColor);
+        }
+        return;
+      }
+      agvExtractor?.addEntity(type, groups, entity);
+      if (type === 'HATCH') {
+        const circle = readNdc8PointFill(groups);
+        if (circle) { reserveMetadata(128); fillCircles.push(circle); }
+        return;
+      }
+      if (type !== 'TEXT' && type !== 'MTEXT') return;
+      const annotation = readCadReferenceAnnotation(type, groups);
+      if (!annotation) return;
+      reserveMetadata(512 + 2 * annotation.text.length);
+      annotations.push(annotation);
+    } : undefined,
     block(info) {
       reserveMetadata(1024 + info.name.length * 2);
       blocks.set(info.name, { ...info, geometry: createDescriptor(`block:${info.index}`, '__BLOCK__'), inserts: [] });
@@ -110,6 +142,7 @@ export async function parseCadReferenceDxfStream(
   const detected = resolveDxfUnitInfo(header);
   const unit = options.unitScaleToMeters === undefined || options.unitScaleToMeters === detected.unitScaleToMeters
     ? detected : createLegacyCadReferenceUnitInfo(options.unitScaleToMeters);
+  const agvMap = options.agvMap && agvExtractor?.finish({ ...options.agvMap, unitScaleToMeters: unit.unitScaleToMeters });
   collectUses(blocks, rootInserts, options.signal, reserveMetadata);
   const descriptors = [...root.values(), ...[...blocks.values()].filter((block) => block.geometry.uses.size > 0).map((block) => block.geometry)]
     .filter((descriptor) => descriptor.batches.length > 0);
@@ -134,8 +167,22 @@ export async function parseCadReferenceDxfStream(
   const layers = packLayers(descriptors, center, unit.unitScaleToMeters, root, options.signal);
   const summary = summarizeLayers(layers);
   options.onProgress?.({ percent: 90, detail: `线稿生成完成：${summary.polylineCount.toLocaleString()} 条折线` });
-  return { ...unit, ...summary, bounds: createBounds(drawingBounds, unit.unitScaleToMeters), layers,
+  const scale = unit.unitScaleToMeters;
+  const result: CadReferenceParseResult = { ...unit, ...summary, bounds: createBounds(drawingBounds, scale), layers,
     budgetLimited: false, estimatedMemoryBytes };
+  if (annotations) {
+    result.agvMapOrigin = { x: center.x * scale, y: center.y * scale };
+    result.annotations = annotations.map(annotation => ({
+      ...annotation,
+      x: (annotation.x - center.x) * scale,
+      y: (annotation.y - center.y) * scale,
+      height: annotation.height * scale,
+    }));
+    result.fillCircles = fillCircles.map(({ x, y, radius }) => ({ x: (x - center.x) * scale, y: (y - center.y) * scale, radius: radius * scale }));
+    result.layerColors = layerColors;
+  }
+  if (agvMap) result.agvMap = agvMap;
+  return result;
 }
 
 function createDescriptor(key: string, name: string): GeometryDescriptor {
@@ -476,7 +523,9 @@ class StreamingScanner {
     } else {
       const code = this.code;
       this.code = null;
-      this.group(code, line.trim());
+      const isLabelText = (code === 1 && this.type === 'TEXT') ||
+        ((code === 1 || code === 3) && this.type === 'MTEXT');
+      this.group(code, isLabelText ? line.replace(/\r$/u, '') : line.trim());
     }
   }
 
@@ -500,7 +549,9 @@ class StreamingScanner {
         return;
       }
       if (value === 'ENDBLK') { this.blockHeader = null; return; }
-      if ((this.section === 'ENTITIES' || (this.section === 'BLOCKS' && this.blockHeader)) && SUPPORTED_TYPES.has(value)) this.type = value;
+      const readText = this.section === 'ENTITIES' && this.callbacks.rawEntity && (value === 'TEXT' || value === 'MTEXT');
+      const readLayer = this.section === 'TABLES' && this.callbacks.rawEntity && value === 'LAYER';
+      if (readLayer || readText || ((this.section === 'ENTITIES' || (this.section === 'BLOCKS' && this.blockHeader)) && SUPPORTED_TYPES.has(value))) this.type = value;
       return;
     }
     if (this.sectionPending && code === 2) { this.section = value; this.sectionPending = false; return; }
@@ -529,7 +580,8 @@ class StreamingScanner {
 
   private flushEntity(): void {
     if (!this.type) return;
-    const entity = parseScannedDxfEntity(this.type, this.groups);
+    const entity = SUPPORTED_TYPES.has(this.type) ? parseScannedDxfEntity(this.type, this.groups) : null;
+    if (this.section === 'ENTITIES' || this.type === 'LAYER') this.callbacks.rawEntity?.(this.type, this.groups, entity);
     if (entity) this.callbacks.entity(entity, this.blockHeader);
     this.type = '';
     this.groups = [];

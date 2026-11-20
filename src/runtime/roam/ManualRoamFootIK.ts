@@ -162,10 +162,11 @@ export class ManualRoamFootIK {
     for (const side of ['left', 'right'] as const) {
       const leg = this.legs[side];
       const ankle = position(leg.foot);
-      this.steerFoot(leg, moving, frame.footContacts[side], frame);
       leg.solePoints = leg.sole.sample();
       leg.strideOffset = forward.scale(Vector3.Dot(ankle.subtract(center), forward) * (stride - 1));
       this.prepareLeg(leg, frame.footContacts[side], walkingPose, frame.dt);
+      this.steerFoot(leg, moving, frame.footContacts[side], frame);
+      if (Math.abs(leg.yawOffset) > 1e-6) leg.solePoints = leg.sole.sample();
     }
     this.fitPelvis(walkingPose, frame.dt);
     for (const side of ['left', 'right'] as const) {
@@ -232,7 +233,7 @@ export class ManualRoamFootIK {
       if(!this.legs[side].ground||this.legs[side].phase.positionWeight<.5)continue;
       const leg=this.legs[side],hip=position(leg.thigh),knee=position(leg.knee),foot=position(leg.foot);
       const {point:ground,normal}=leg.ground!,target=ground.subtract(this.solePose(leg,normal,moving,leg.phase.rotationWeight).offset);
-      const reach=Vector3.Distance(hip,knee)+Vector3.Distance(knee,foot)-1e-4,horizontal=(target.x-hip.x)**2+(target.z-hip.z)**2;
+      const reach=(Vector3.Distance(hip,knee)+Vector3.Distance(knee,foot))*0.996,horizontal=(target.x-hip.x)**2+(target.z-hip.z)**2;
       if(horizontal>=reach*reach||Vector3.Distance(foot,target)>this.maxCorrection)continue;
       drop=Math.max(drop,hip.y-target.y-Math.sqrt(reach*reach-horizontal));
     }

@@ -1,11 +1,17 @@
 
+import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Quaternion } from '@babylonjs/core/Maths/math.vector.js';
 import { LinesMesh } from '@babylonjs/core/Meshes/linesMesh.js';
 
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { Entity } from '../../../editor/model/Entity';
+import { mapAgvPointToScene } from '../../../editor/model/agvMap';
+import { getAgvMapPlane } from '../agv/agvMapPlane';
+import { createCadReferenceAnnotationMeshes } from './cadReferenceAnnotationMeshes';
+import { createCadReferenceFillMesh } from './cadReferenceFillMesh';
 import type { CadReferenceComponent } from '../../../editor/model/components';
-import { CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET, CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES, consumeCadReferenceParseResult, type CadReferenceParseResult } from '../../../editor/cad/cadReferenceCore';
+import { CAD_REFERENCE_DEFAULT_LINE_COLOR, CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET, CAD_REFERENCE_LARGE_FILE_THRESHOLD_BYTES, consumeCadReferenceParseResult, type CadReferenceParseResult } from '../../../editor/cad/cadReferenceCore';
 import { createCadReferenceDxfWorkerTask, shouldParseCadReferenceDxfInWorker } from '../../../editor/cad/cadReferenceWorkerClient';
 import { publishCadReferenceLoadStatus, forgetCadReferenceLoadStatus, registerCadReferenceLoadCancellation } from '../../../editor/cad/cadReferenceLoadStatus';
 import { CAD_REFERENCE_MAX_BATCH_POINTS, CAD_REFERENCE_MAX_BATCH_POLYLINES } from '../../../editor/cad/cadReferenceGeometryPolicy';
@@ -76,25 +82,31 @@ export class SceneCadReferenceController {
     const reference = entity.components.cadReference;
     if (!reference) return;
     const existing = this.cadReferences.get(entity.id);
-    if (existing && (existing.sourceUrl !== reference.sourceUrl || existing.unitScaleToMeters !== reference.unitScaleToMeters)) {
+    if (existing && (existing.sourceUrl !== reference.sourceUrl || existing.unitScaleToMeters !== reference.unitScaleToMeters
+      || Boolean(existing.drawingRoot) !== Boolean(reference.agvMapOrigin))) {
       this.disposeCadReference(entity.id, existing);
     }
     const current = this.cadReferences.get(entity.id);
     if (current) {
       this.dependencies.presentation.applyTransform(current.root, entity.components.transform);
+      this.syncAgvDrawingPlacement(current, entity);
       this.applyCadReferenceStyle(current, reference);
       this.applyCadReferenceInteractivity(current, entity.id);
       return;
     }
     const root = new TransformNode(entity.id + '_cadReferenceRoot', this.context.scene);
     this.dependencies.presentation.applyTransform(root, entity.components.transform);
+    const drawingRoot = reference.agvMapOrigin ? new TransformNode(entity.id + '_agvCadDrawing', this.context.scene) : undefined;
+    if (drawingRoot) drawingRoot.parent = root;
     const pending: CadReferenceRuntimeEntry = {
+      drawingRoot,
       sourceUrl: reference.sourceUrl, unitScaleToMeters: reference.unitScaleToMeters,
       root, lineMeshes: [], highlighted: false, loadToken: ++this.dependencies.assets.modelLoadSequence,
       lineColor: reference.lineColor, opacity: reference.opacity, geometryReady: false,
       cancelLoad: null, abortController: new AbortController(), unregisterCancellation: () => undefined,
     };
     this.cadReferences.set(entity.id, pending);
+    this.syncAgvDrawingPlacement(pending, entity);
     pending.unregisterCancellation = registerCadReferenceLoadCancellation(entity.id, () => {
       if (!this.isActiveCadReferenceLoad(entity.id, pending)) return;
       this.stopCadReferenceLoad(pending);
@@ -111,20 +123,35 @@ export class SceneCadReferenceController {
     });
   }
 
+  /** CAD 的局部几何以图纸中心为零，AGV 地图以原始坐标系的原点为零。 */
+  private syncAgvDrawingPlacement(entry: CadReferenceRuntimeEntry, entity: Entity): void {
+    const drawing = entry.drawingRoot;
+    const origin = entity.components.cadReference?.agvMapOrigin;
+    const map = entity.components.agvMap;
+    if (!drawing || !origin || !map) return;
+    const position = mapAgvPointToScene(origin, map);
+    const { right, up, forward } = getAgvMapPlane(map);
+    drawing.position.set(position.x, position.y, position.z);
+    drawing.rotationQuaternion = Quaternion.RotationQuaternionFromAxis(right, up, forward);
+    drawing.scaling.setAll(map.scale);
+    drawing.setEnabled(map.mapId === map.importedMap?.id);
+  }
+
   /** 新导入复用缓存；重开同时检查元数据和响应长度，旧场景未知大小走安全后台路径。 */
   public async loadCadReferenceGeometry(entityId: string, pending: CadReferenceRuntimeEntry, reference: CadReferenceComponent): Promise<void> {
     if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
     const signal = pending.abortController.signal;
-    let geometry = consumeCadReferenceParseResult(reference.sourceUrl, reference.unitScaleToMeters);
+    const includeAnnotations = Boolean(reference.agvMapOrigin);
+    let geometry = consumeCadReferenceParseResult(reference.sourceUrl, reference.unitScaleToMeters, includeAnnotations);
     if (!geometry) {
-      const useWorker = shouldParseCadReferenceDxfInWorker(reference.sourceFileSizeBytes, { importMode: reference.importMode, preferSafeUnknownSize: true })
+      const useWorker = shouldParseCadReferenceDxfInWorker(reference.sourceFileSizeBytes, { importMode: reference.importMode, preferSafeUnknownSize: true, includeAnnotations })
         || reference.polylineCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPolylines * 0.5
         || reference.pointCount >= CAD_REFERENCE_LARGE_FILE_GEOMETRY_BUDGET.maxPoints * 0.5;
       const parseInWorker = async (): Promise<CadReferenceParseResult> => {
         const task = createCadReferenceDxfWorkerTask(resolveRuntimeAssetUrl(reference.sourceUrl), progress => {
           if (!this.isActiveCadReferenceLoad(entityId, pending)) return;
           publishCadReferenceLoadStatus({ entityId, sourceUrl: reference.sourceUrl, state: 'loading', ...progress });
-        }, reference.unitScaleToMeters, { signal });
+        }, reference.unitScaleToMeters, { signal, includeAnnotations });
         pending.cancelLoad = task.cancel;
         return task.promise;
       };
@@ -175,6 +202,9 @@ export class SceneCadReferenceController {
     for (const [index, lineMesh] of meshes.entries()) {
       runSceneRuntimeCleanup(this.context, `CAD 线稿 ${cadReference.root.name}/${index}`, () => lineMesh.dispose());
     }
+    for (const mesh of cadReference.surfaces?.splice(0) ?? []) {
+      runSceneRuntimeCleanup(this.context, mesh.name, () => mesh.dispose());
+    }
   }
 
   /** 释放 CAD 参考图的所有线稿 Mesh 与根节点。 */
@@ -184,7 +214,8 @@ export class SceneCadReferenceController {
     if (this.cadReferences.get(entityId) === cadReference) this.cadReferences.delete(entityId);
     runSceneRuntimeCleanup(this.context, `CAD 阵列预览 ${entityId}`, () => this.dependencies.transforms.clearEntityArrayPreviewIfSource(entityId));
     this.stopCadReferenceLoad(cadReference);
-    runSceneRuntimeCleanup(this.context, `CAD 根节点 ${entityId}`, () => cadReference.root.dispose());
+    runSceneRuntimeCleanup(this.context, `CAD 图纸节点 ${entityId}`, () => cadReference.drawingRoot?.dispose());
+    runSceneRuntimeCleanup(this.context, `CAD 根节点 ${entityId}`, () => cadReference.root.dispose(true));
     runSceneRuntimeCleanup(this.context, `CAD 加载状态 ${entityId}`, () => forgetCadReferenceLoadStatus(entityId));
   }
 
@@ -284,6 +315,17 @@ export class SceneCadReferenceController {
 
     if (!this.isActiveCadReferenceLoad(entityId, cadReference)) return;
     if (cadReference.lineMeshes.length === 0) throw new Error('DXF 中没有可显示的线稿图元。');
+    cadReference.layerColors = geometry.layerColors;
+    const drawingRoot = cadReference.drawingRoot;
+    if (drawingRoot) {
+      cadReference.surfaces = [];
+      if (geometry.fillCircles?.length) {
+        cadReference.surfaces.push(createCadReferenceFillMesh(entityId, drawingRoot, geometry.fillCircles));
+      }
+      if (geometry.annotations?.length) {
+        cadReference.surfaces.push(...createCadReferenceAnnotationMeshes(entityId, drawingRoot, geometry.annotations));
+      }
+    }
     this.applyCadReferenceLineMeshStyle(cadReference);
     this.applyCadReferenceInteractivity(cadReference, entityId);
     this.dependencies.transforms.refreshGroupTransformPreviewTargets();
@@ -347,7 +389,7 @@ export class SceneCadReferenceController {
       lineMesh.thinInstanceSetBuffer('matrix', instanceMatrices, 16, true);
       lineMesh.thinInstanceRefreshBoundingInfo(true);
     }
-    lineMesh.parent = cadReference.root;
+    lineMesh.parent = cadReference.drawingRoot ?? cadReference.root;
     lineMesh.isPickable = false;
     lineMesh.metadata = { ...(lineMesh.metadata ?? {}), cadReferenceLayer: layerName };
     cadReference.lineMeshes.push(lineMesh);
@@ -404,9 +446,18 @@ export class SceneCadReferenceController {
     const color = this.dependencies.presentation.readColor(cadReference.lineColor);
     const alpha = Math.min(1, Math.max(0, cadReference.opacity));
 
+    const colorForLayer = (layer: string) => {
+      const sourceColor = cadReference.lineColor === CAD_REFERENCE_DEFAULT_LINE_COLOR && cadReference.layerColors?.get(layer);
+      return sourceColor ? this.dependencies.presentation.readColor(sourceColor) : color;
+    };
     for (const lineMesh of cadReference.lineMeshes) {
-      lineMesh.color = color;
+      lineMesh.color = colorForLayer(lineMesh.metadata?.cadReferenceLayer);
       lineMesh.alpha = alpha;
+    }
+    for (const mesh of cadReference.surfaces ?? []) {
+      if (!(mesh.material instanceof StandardMaterial)) continue;
+      mesh.material.emissiveColor = colorForLayer(mesh.metadata?.cadReferenceLayer);
+      mesh.material.alpha = alpha;
     }
   }
 }

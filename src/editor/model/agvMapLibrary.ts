@@ -1,6 +1,7 @@
 import { AGV_MAP_SCHEMA_VERSION, type AgvMapDefinition } from './agvMap.ts';
+import type { AgvMapComponent } from './components';
 
-/** 本版内置示例；后续 CAD 上传模块转换出的同构地图可追加到该注册表。 */
+/** 内置示例地图按 ID 访问。 */
 export const BUILT_IN_AGV_MAPS: AgvMapDefinition[] = [
   {
     schemaVersion: AGV_MAP_SCHEMA_VERSION,
@@ -55,4 +56,10 @@ export const BUILT_IN_AGV_MAPS: AgvMapDefinition[] = [
 export function getBuiltInAgvMap(mapId: string | null): AgvMapDefinition | null {
   if (!mapId) return null;
   return BUILT_IN_AGV_MAPS.find(map => map.id === mapId) ?? null;
+}
+
+/** 导入地图属于当前产生器，内置地图仍通过固定 ID 读取。 */
+export function getAgvMapDefinition(component: AgvMapComponent): AgvMapDefinition | null {
+  const { mapId, importedMap } = component;
+  return importedMap?.id === mapId ? importedMap : getBuiltInAgvMap(mapId);
 }

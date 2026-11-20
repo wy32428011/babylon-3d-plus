@@ -370,6 +370,9 @@ export type CadReferenceRuntimeEntry = {
   sourceUrl: string;
   unitScaleToMeters: number;
   root: TransformNode;
+  drawingRoot?: TransformNode;
+  surfaces?: Mesh[];
+  layerColors?: Map<string, string>;
   lineMeshes: LinesMesh[];
   highlighted: boolean;
   loadToken: number;

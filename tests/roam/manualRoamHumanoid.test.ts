@@ -239,6 +239,8 @@ for(const variant of ['A-pose','rotated-90','parent-yaw','helper-bone'] as const
       const helperBone=new Bone(helper.name,skeleton,parentBone,Matrix.Compose(helper.scaling,helper.rotationQuaternion,helper.position));helperBone.linkTransformNode(helper);
       const handBone=skeleton.bones.find(bone=>bone.getTransformNode()===hand)!;handBone.setParent(helperBone,false);handBone.setRestMatrix(Matrix.Compose(hand.scaling,hand.rotationQuaternion!,hand.position));
     }
+    const originalWorldPos=new Map([...initial.joints].map(([name,node])=>{node.computeWorldMatrix(true);return[name,node.getAbsolutePosition().clone()];}));
+    const originalWorldRot=new Map([...initial.joints].map(([name,node])=>{const q=Quaternion.Identity();node.computeWorldMatrix(true).decompose(undefined,q);return[name,q.normalize()];}));
     const binds=skeleton.bones.map(bone=>bone.getAbsoluteInverseBindMatrix().clone());
     const geometry=avatar.meshes.map(mesh=>mesh.getVerticesData(VertexBuffer.PositionKind)?.slice()??null);
     const animator=await ManualRoamAvatarAnimator.create(scene,avatar,{sourceUrl:`${variant}://motion`,manifestUrl:`${variant}://manifest`,loadContainer:()=>load('public/manual-roam/locomotion-v2.glb')});
@@ -248,6 +250,23 @@ for(const variant of ['A-pose','rotated-90','parent-yaw','helper-bone'] as const
     for(const side of ['Left','Right']){
       const arm=binding.joints.get(side+'Arm')!,hand=binding.joints.get(side+'Hand')!;arm.computeWorldMatrix(true);hand.computeWorldMatrix(true);
       assert.ok(Math.abs(arm.getAbsolutePosition().y-hand.getAbsolutePosition().y)<binding.legLength*.02,'校准后手臂应接近源T姿态');
+    }
+    const standingJoints=['Hips','Spine','Spine1','Spine2','Neck','Head','LeftShoulder','RightShoulder','LeftUpLeg','LeftLeg','LeftFoot','LeftToeBase','RightUpLeg','RightLeg','RightFoot','RightToeBase'];
+    for(const name of standingJoints){
+      const node=binding.joints.get(name)!;node.computeWorldMatrix(true);
+      const q=Quaternion.Identity();node.getWorldMatrix().decompose(undefined,q);q.normalize();
+      assert.ok(Math.abs(Quaternion.Dot(originalWorldRot.get(name)!,q))>.99999,name+'校准不应把生理曲率与自然站距扭曲为仰头、撅臀或并腿');
+    }
+    animator.sampleIdle();
+    for(const name of standingJoints){
+      const node=binding.joints.get(name)!;node.computeWorldMatrix(true);
+      assert.ok(Vector3.Distance(originalWorldPos.get(name)!,node.getAbsolutePosition())<1e-4,name+'待机站立位置须保持原始模型姿态');
+      const q=Quaternion.Identity();node.getWorldMatrix().decompose(undefined,q);q.normalize();
+      assert.ok(Math.abs(Quaternion.Dot(originalWorldRot.get(name)!,q))>.99999,name+'待机站立旋转须保持原始模型姿态');
+    }
+    for(const side of ['Left','Right']){
+      const arm=binding.joints.get(side+'Arm')!,hand=binding.joints.get(side+'Hand')!;arm.computeWorldMatrix(true);hand.computeWorldMatrix(true);
+      assert.ok(arm.getAbsolutePosition().y-hand.getAbsolutePosition().y>binding.legLength*.45,'待机站立手臂应自然垂于体侧');
     }
     skeleton.bones.forEach((bone,i)=>assert.ok(bone.getAbsoluteInverseBindMatrix().equals(binds[i])));
     avatar.meshes.forEach((mesh,i)=>assert.deepEqual(mesh.getVerticesData(VertexBuffer.PositionKind),geometry[i]));

@@ -1108,6 +1108,7 @@ function normalizeCadReference(value: unknown): EntityComponents['cadReference']
     throwUnsupportedSceneFileError();
   }
 
+  const agvOrigin = cadReference.agvMapOrigin === undefined ? null : assertPlainObject(cadReference.agvMapOrigin);
   return {
     sourcePath,
     sourceUrl,
@@ -1118,6 +1119,7 @@ function normalizeCadReference(value: unknown): EntityComponents['cadReference']
     unitDetection: unitInfo.unitDetection,
     unitScaleToMeters: unitInfo.unitScaleToMeters,
     originMode: 'center',
+    ...(agvOrigin ? { agvMapOrigin: { x: assertFiniteNumber(agvOrigin.x), y: assertFiniteNumber(agvOrigin.y) } } : {}),
     lineColor: assertColorString(cadReference.lineColor),
     opacity: normalizeOpacity(cadReference.opacity),
     layerStats: normalizeCadReferenceLayerStats(cadReference.layerStats),

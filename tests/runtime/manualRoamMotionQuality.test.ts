@@ -128,3 +128,38 @@ test('前进走路两脚各走一条平行线、支撑腿接近伸直，不能�
   for (const side of ['Left', 'Right'] as const) assert.ok(straightest[side] <= 15, `${side}支撑腿最直时仍屈膝${straightest[side].toFixed(1)}°`);
   assert.equal(clip.source.kind, 'original-authored-commute-walk');
 });
+
+test('前进跑步具备真实腾空相、平滑屈膝、前倾躯干与自然曲肘摆臂', { skip: version !== 'v2' }, async () => {
+  const manifest = JSON.parse(await readFile(new URL(`../../public/manual-roam/locomotion-${version}.manifest.json`, import.meta.url), 'utf8'));
+  const clip = manifest.clips.RunForward, poses = sampledPoses('RunForward');
+  assert.equal(clip.source.kind, 'original-authored-commute-run');
+  const n = poses.length;
+  const leftContact = clip.contacts.left.slice(0, n), rightContact = clip.contacts.right.slice(0, n);
+  const doubleSupport = leftContact.filter((v: number, i: number) => v >= 0.5 && rightContact[i] >= 0.5).length;
+  const flight = leftContact.filter((v: number, i: number) => v < 0.5 && rightContact[i] < 0.5).length / n;
+  assert.equal(doubleSupport, 0, '跑步不能出现双支撑');
+  assert.ok(flight >= 0.15, `跑步应具备真实腾空相，当前 ${(flight * 100).toFixed(1)}%`);
+  const hipYs = poses.map(p => p.position('Hips').y);
+  const hipRange = Math.max(...hipYs) - Math.min(...hipYs);
+  assert.ok(hipRange >= 0.04 && hipRange <= 0.10, `跑步骨盆起伏 ${(hipRange * 100).toFixed(2)}cm 超出自然区间`);
+  const roll = poses.map(p => p.rotation('Hips').toEulerAngles().z * 180 / Math.PI);
+  const yaw = poses.map(p => p.rotation('Hips').toEulerAngles().y * 180 / Math.PI);
+  const range = (values: number[]) => Math.max(...values) - Math.min(...values);
+  assert.ok(range(roll) >= 2 && range(roll) <= 10, `跑步骨盆侧倾 ${range(roll).toFixed(1)}°`);
+  assert.ok(range(yaw) >= 4 && range(yaw) <= 16, `跑步骨盆扭转 ${range(yaw).toFixed(1)}°`);
+  const knees = poses.map(p => {
+    const hip = p.position('LeftUpLeg'), knee = p.position('LeftLeg'), ankle = p.position('LeftFoot');
+    return Math.acos(Math.min(1, Math.max(-1, Vector3.Dot(knee.subtract(hip).normalize(), ankle.subtract(knee).normalize())))) * 180 / Math.PI;
+  });
+  let maxKneeStep = 0;
+  for (let i = 0; i < n; i++) maxKneeStep = Math.max(maxKneeStep, Math.abs(knees[(i + 1) % n] - knees[i]));
+  assert.ok(maxKneeStep < 30, `跑步膝关节相邻帧跳变过大 ${maxKneeStep.toFixed(1)}°`);
+  assert.ok(Math.max(...knees) >= 80, `跑步摆动期屈膝折叠不足 ${Math.max(...knees).toFixed(1)}°`);
+  const elbows = poses.map(p => {
+    const s = p.position('LeftArm'), e = p.position('LeftForeArm'), h = p.position('LeftHand');
+    return Math.acos(Math.min(1, Math.max(-1, Vector3.Dot(e.subtract(s).normalize(), h.subtract(e).normalize())))) * 180 / Math.PI;
+  });
+  assert.ok(Math.min(...elbows) >= 55 && Math.max(...elbows) <= 115, `跑步屈肘范围 ${Math.min(...elbows).toFixed(1)}°..${Math.max(...elbows).toFixed(1)}°`);
+  const spineForward = poses.map(p => p.position('Spine2').z - p.position('Hips').z);
+  assert.ok(Math.min(...spineForward) > 0.015, '跑步躯干应保持自然前倾');
+});
