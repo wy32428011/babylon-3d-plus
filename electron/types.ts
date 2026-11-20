@@ -332,11 +332,13 @@ export type DataPlatformModelSyncProgress = {
 
 export type LocalSceneResourceSyncRequest = {
   trace?: ProjectOpenTraceContext;
-  mode?: 'data-platform-latest' | 'scene-latest' | 'local-latest' | 'local-recovery';
+  mode?: 'data-platform-latest' | 'scene-latest' | 'model-library-latest' | 'local-latest' | 'local-recovery';
   /** 同步调用的取消标识，只能取消同一请求。 */
   requestId?: string;
-  /** 主动更新场景时，同时等待整个模型库同步完成。 */
+  /** 首轮同步场景低模、组合模型和环境模型目录。场景编辑导致重试时复用本轮索引。 */
   syncLibrary?: boolean;
+  /** 本地打开已定向同步最新版时，后续恢复仅在磁盘上查找模型。 */
+  skipModelDownloads?: boolean;
   sceneContent?: string;
   sceneFilePath?: string;
   acceptEnvironmentRevision?: { resourceId: string; fileRevision: string; sha256: string };
@@ -490,6 +492,8 @@ export type AssetEntry = {
   assetRevision?: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
+  /** 展示图片的内容摘要，独立于模型运行修订。 */
+  thumbnailRevision?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
   /** 扫描阶段可为空，写入项目索引后必须具备资产库分类。 */
   libraryKind?: ModelAssetLibraryKind;

@@ -41,6 +41,8 @@ import {
   activateProjectRoot,
   ensureProjectDirectories,
   getCurrentProjectRoot,
+  getProjectSessionGeneration,
+  getSharedProjectAssetRoot,
   getProjectAssetIndexPath,
   getProjectEnvironmentsRoot,
   getProjectModelsRoot,
@@ -75,7 +77,9 @@ import {
   executeDataPlatformModelSync,
   syncSceneDataPlatformModelAssets,
   pinCachedSceneModelVersion,
+  publishSceneModelLibraryAssets,
   queryCurrentSceneModelCatalog,
+  type SceneSyncedModelAsset,
   SceneModelResourceMissingError,
 } from './dataPlatformModelIncrementalSync.js';
 import {
@@ -272,7 +276,7 @@ export async function prepareDataPlatformProjectForPublish(
     assertCurrentContext();
     const activeRoot = getCurrentProjectRoot();
     if (!activeRoot || !isSameFilePath(activeRoot, projectRoot)) await activateProjectRoot(projectRoot);
-    setSharedProjectAssetRoot(sharedResourcesRoot);
+    setSharedProjectAssetRoot(sharedResourcesRoot, createDataPlatformSourceKey(baseUrl));
     setSharedProjectEnvironmentRoot(sharedResourcesRoot);
     setSharedProjectSkyboxRoot(sharedResourcesRoot);
     setCurrentDataPlatformBinding(projectRoot, binding);
@@ -356,18 +360,21 @@ export async function prepareLocalSceneResources(
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,100}$/.test(request.requestId))) throw new Error('场景同步请求标识无效。');
   if (request.mode === 'local-recovery') return prepareRecoveredLocalScene(baseUrl, workspaceRoot, request);
   if (request.mode === 'local-latest' && !baseUrl) return prepareRecoveredLocalScene(baseUrl, workspaceRoot, request);
-  const explicit = request.mode === 'scene-latest' || request.mode === 'local-latest';
+  const libraryOnly = request.mode === 'model-library-latest' || request.syncLibrary === true;
+  const explicit = request.mode === 'model-library-latest' || request.mode === 'scene-latest' || request.mode === 'local-latest';
   const latest = request.mode === 'data-platform-latest' || explicit;
   const expectedScope = getScenePublishScope();
   const localFile = request.mode === 'local-latest' || (explicit && expectedScope.kind === 'local-file');
   if (request.syncLibrary !== undefined && (!explicit || typeof request.syncLibrary !== 'boolean')) throw new Error('模型库同步选项无效。');
   const expectedProjectRoot = getCurrentProjectRoot();
+  const expectedProjectSession = getProjectSessionGeneration();
   const expectedGeneration = sceneResourceContextGeneration;
   const expectedBinding = latest ? getCurrentDataPlatformBinding() : null;
   const assertSceneContext = () => {
     if (!latest) return;
     const current = getCurrentDataPlatformBinding();
-    if (openingProjectCount || sceneResourceContextGeneration !== expectedGeneration || getCurrentProjectRoot() !== expectedProjectRoot
+    if (openingProjectCount || sceneResourceContextGeneration !== expectedGeneration
+      || getProjectSessionGeneration() !== expectedProjectSession || getCurrentProjectRoot() !== expectedProjectRoot
       || getScenePublishScope().generation !== expectedScope.generation
       || (!explicit && (!current || !expectedBinding))
       || current?.projectRoot !== expectedBinding?.projectRoot || current?.metadata.baseUrl !== expectedBinding?.metadata.baseUrl
@@ -423,10 +430,11 @@ export async function prepareLocalSceneResources(
     if (!binding && !explicit) await activateProjectRoot(workspaceRoot);
     await ensureProjectDirectories(sharedRoot);
     assertSceneContext();
-    setSharedProjectAssetRoot(sharedRoot);
+    setSharedProjectAssetRoot(sharedRoot, sourceKey);
     setSharedProjectEnvironmentRoot(sharedRoot);
     controller.signal.throwIfAborted();
-    if (latest && scene) {
+    // 场景打开时才恢复固定版本的编辑器组合包。中台组合模型随模型目录更新。
+    if (latest && scene && !libraryOnly) {
       const recovered = await recoverSceneCompositions(scene, sharedRoot, expectedProjectRoot, baseUrl, controller.signal);
       assertSceneContext(); scene = recovered.scene; issues.push(...recovered.issues);
     }
@@ -447,29 +455,37 @@ export async function prepareLocalSceneResources(
       }
     };
     reportLatestProgress = reportModelProgress;
+    const environmentSyncOptions = { baseUrl, editorRoot: sharedRoot, signal: controller.signal,
+      contextKey: createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedRoot) };
     if (latest) {
       const modelReplacements: NonNullable<LocalSceneResourceSyncResult['modelReplacements']> = [];
       const environmentAssets: ProjectModelAssetEntry[] = [];
       const checkCurrent = () => { controller.signal.throwIfAborted(); assertSceneContext(); };
       const libraryErrors: string[] = [];
-      let libraryModelsReady = false;
-      if (explicit && request.syncLibrary) {
-        const libraryResults = await Promise.allSettled([
+      if (libraryOnly && request.syncLibrary !== false) {
+        const results = await Promise.allSettled([
           executeDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, signal: controller.signal }),
-          executeDataPlatformEnvironmentSync({ baseUrl, editorRoot: sharedRoot,
-            contextKey: createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedRoot), signal: controller.signal }),
+          executeDataPlatformEnvironmentSync(environmentSyncOptions),
         ]);
         checkCurrent();
-        libraryModelsReady = libraryResults[0].status === 'fulfilled';
-        libraryResults.forEach((result, index) => {
-          if (result.status === 'rejected') libraryErrors.push(`${index === 0 ? '普通/组合模型库' : '环境模型库'}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+            libraryErrors.push(`${index === 0 ? '低模和组合模型库' : '环境模型库'}：${reason}`);
+          }
         });
+        if (libraryErrors.length) {
+          reportModelProgress(libraryErrors.join('；'), 'failed');
+          return { configured: true, sourceKey, modelAssets: [], modelReplacements, environmentAssets, issues, libraryErrors };
+        }
       }
-      const libraryIndexes = libraryModelsReady ? await Promise.all([
+      // 场景在下载期间被编辑时，从已提交的目录匹配新引用，避免再次下载全库。
+      const libraryIndexes = libraryOnly ? await Promise.all([
         readDataPlatformModelIndex(sharedRoot), readProjectAssetIndex(sharedRoot),
       ]) : undefined;
       checkCurrent();
       const preparedModels = new Map<number, typeof modelReplacements>();
+      const preparedLibraryAssets: SceneSyncedModelAsset[] = [];
       const catalogTasks = new Map<'model' | 'combo', Promise<SceneModelCatalogEntry[]>>();
       const modelWarnings = new Map<number, string[]>();
       const modelIssues = new Map<number, (typeof issues)[number]>();
@@ -481,20 +497,25 @@ export async function prepareLocalSceneResources(
           const item = modelPlan[itemIndex];
           checkCurrent();
           try {
-            let assets: ProjectModelAssetEntry[];
+            let assets: SceneSyncedModelAsset[];
             let resolvedItem = item;
+            let reusedLibraryAsset = false;
             try {
               const entry = libraryIndexes?.[0].sourceKey === sourceKey
                 ? libraryIndexes[0].entries.find(entry => entry.kind === item.kind && entry.resourceId === item.resourceId) : undefined;
+              // 库更新只替换该来源已登记的低模和组合模型。
+              if (libraryOnly && !entry) continue;
               const asset = entry && libraryIndexes?.[1].assets.find(asset => asset.packagePath
                   && isSameFilePath(asset.packagePath, path.resolve(sharedRoot, entry.packageRelativePath)));
+              if (libraryOnly && !asset) throw new Error(`模型 ${item.kind}:${item.resourceId} 缺少已同步的资产记录。`);
               if (entry && asset) {
                 assets = [{ ...await pinCachedSceneModelVersion({ asset, entry, cacheRoot: sharedRoot, sourceKey, signal: controller.signal }),
                   dataPlatformSourceKey: sourceKey, dataPlatformResourceId: item.resourceId }];
+                reusedLibraryAsset = true;
               } else {
                 // 库里缺项不等于远端已删除，先通过原 ID 的详情接口确认。
                 assets = await syncSceneDataPlatformModelAssets({ baseUrl, sharedResourcesRoot: sharedRoot,
-                  resources: [item], signal: controller.signal, onProgress: reportModelProgress });
+                  resources: [item], libraryModelFilesOnly: true, signal: controller.signal, onProgress: reportModelProgress });
               }
             } catch (error) {
               checkCurrent();
@@ -507,7 +528,7 @@ export async function prepareLocalSceneResources(
               resolvedItem = findCurrentSceneModelReplacement(item, await catalog);
               checkCurrent();
               assets = await syncSceneDataPlatformModelAssets({ baseUrl, sharedResourcesRoot: sharedRoot,
-                resources: [resolvedItem], signal: controller.signal, onProgress: reportModelProgress });
+                resources: [resolvedItem], libraryModelFilesOnly: true, signal: controller.signal, onProgress: reportModelProgress });
               if (resolvedItem.resourceId !== item.resourceId) {
                 // 目录只是查找线索；下载详情返回的名称和主文件仍须满足同一匹配条件。
                 const confirmed = findCurrentSceneModelReplacement(item, assets
@@ -516,6 +537,13 @@ export async function prepareLocalSceneResources(
                     name: asset.displayName ?? '', fileName: path.basename(asset.path) })));
                 if (confirmed.resourceId !== resolvedItem.resourceId) throw new Error('当前模型详情与目录匹配结果不一致，请重新同步。', { cause: error });
               }
+            }
+            checkCurrent();
+            // 普通模型详情可能属于巡检高模。只有同步成功的主模型才进入库卡片。
+            if (assets.length === 0) continue;
+            if (!reusedLibraryAsset) {
+              preparedLibraryAssets.push(...assets);
+              for (const asset of assets) if (asset.packagePath) authorizeAssetRoot(asset.packagePath);
             }
             const replacements = matchSceneModelUpdates([resolvedItem], await includeSceneModelPackageVariants(resolvedItem, assets, controller.signal));
             const warnings = await validateSceneModelResourceReferences(scene, replacements, controller.signal);
@@ -541,22 +569,23 @@ export async function prepareLocalSceneResources(
         if (!environment) return;
         checkCurrent();
         try {
-          const result = await executeDataPlatformEnvironmentSync({ baseUrl, editorRoot: sharedRoot,
-            contextKey: createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedRoot),
-            localSceneEnvironment: environment, signal: controller.signal });
+          const matchedResourceId = libraryOnly ? environment.resourceId
+            : (await executeDataPlatformEnvironmentSync({ ...environmentSyncOptions, localSceneEnvironment: environment })).matchedResourceId;
           checkCurrent();
-          if (!result.matchedResourceId) throw new Error('当前中台未找到场景引用的环境模型。');
+          if (!matchedResourceId) throw new Error('当前中台未找到场景引用的环境模型。');
           const index = await readDataPlatformEnvironmentIndex(sharedRoot);
-          const loaded = await listIndexedDataPlatformEnvironments(sharedRoot,
-            { ...index, entries: index.entries.filter(entry => entry.sourceKey === sourceKey && entry.resourceId === result.matchedResourceId) });
+          const entries = index.entries.filter(entry => entry.sourceKey === sourceKey
+            && entry.resourceId === matchedResourceId && entry.status === 'active');
+          if (!entries.length) throw new Error(`当前中台环境库没有场景引用的环境模型 ${matchedResourceId}。`);
+          const loaded = await listIndexedDataPlatformEnvironments(sharedRoot, { ...index, entries });
           checkCurrent();
           if (loaded.errors.length) throw new Error(`环境模型缓存校验失败：${loaded.errors.join('；')}`);
           const matched = loaded.assets.filter(asset => asset.dataPlatformSourceKey === sourceKey
-            && asset.dataPlatformResourceId === result.matchedResourceId);
+            && asset.dataPlatformResourceId === matchedResourceId);
           if (!matched.length) throw new Error('当前中台环境模型资源未完成校验。');
           for (const asset of matched) if (asset.packagePath) authorizeAssetRoot(asset.packagePath);
           environmentAssets.push(...matched);
-          if (environmentSourceMigration) environmentWarnings.push(`环境模型 ${result.matchedResourceId} 已经当前数据中台确认，将替换历史来源和旧工作区引用。`);
+          if (environmentSourceMigration) environmentWarnings.push(`环境模型 ${matchedResourceId} 已经当前数据中台确认，将替换历史来源和旧工作区引用。`);
         } catch (error) {
           checkCurrent();
           environmentIssue = { resourceKind: 'environment', resourceId: environment.resourceId,
@@ -577,6 +606,10 @@ export async function prepareLocalSceneResources(
         if (issue) issues.push(issue);
       }
       if (environmentIssue) issues.push(environmentIssue);
+      const mountedRoot = getSharedProjectAssetRoot();
+      if (mountedRoot && isSameFilePath(mountedRoot, sharedRoot)) {
+        publishSceneModelLibraryAssets(sharedRoot, sourceKey, preparedLibraryAssets);
+      }
       reportModelProgress(issues.length ? `场景资源同步结束，${issues.length} 项需处理，已保留原场景配置。`
         : '场景所需模型资源已校验，正在保留参数并准备渲染。', 'completed');
       return { configured: true, sourceKey, modelAssets: modelReplacements.map(item => item.asset),
@@ -585,9 +618,8 @@ export async function prepareLocalSceneResources(
     }
     const results = await Promise.allSettled([
       executeDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, signal: controller.signal }),
-      environment ? executeDataPlatformEnvironmentSync({ baseUrl, editorRoot: sharedRoot,
-        contextKey: createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedRoot),
-        localSceneEnvironment: environment, signal: controller.signal }) : Promise.resolve({ matchedResourceId: null }),
+      environment ? executeDataPlatformEnvironmentSync({ ...environmentSyncOptions, localSceneEnvironment: environment })
+        : Promise.resolve({ matchedResourceId: null }),
     ]);
     controller.signal.throwIfAborted();
     const errors = results.flatMap((result, index) => result.status === 'rejected'
@@ -651,7 +683,9 @@ async function prepareRecoveredLocalScene(baseUrl: string, workspaceRoot: string
       await ensureWritableEditorRoot(sharedRoot);
       await ensureProjectDirectories(sharedRoot);
       if (!getCurrentProjectRoot()) await activateProjectRoot(workspaceRoot);
-      setSharedProjectAssetRoot(sharedRoot); setSharedProjectEnvironmentRoot(sharedRoot); setSharedProjectSkyboxRoot(sharedRoot);
+      setSharedProjectAssetRoot(sharedRoot, createDataPlatformSourceKey(baseUrl));
+      setSharedProjectEnvironmentRoot(sharedRoot);
+      setSharedProjectSkyboxRoot(sharedRoot);
     }
     const result = await recoverLocalSceneResourceTransaction({ request, baseUrl, workspaceRoot,
       projectRoot: getCurrentProjectRoot(), signal: controller.signal, isOriginalPathAllowed: isAuthorizedAssetFile });
@@ -699,7 +733,7 @@ export async function syncDataPlatformModelsForWorkspace(
     await ensureWritableEditorRoot(sharedResourcesRoot);
     await ensureProjectDirectories(sharedResourcesRoot);
     if (!isCurrent()) return false;
-    setSharedProjectAssetRoot(sharedResourcesRoot);
+    setSharedProjectAssetRoot(sharedResourcesRoot, createDataPlatformSourceKey(baseUrl));
     setSharedProjectEnvironmentRoot(sharedResourcesRoot);
     return startDataPlatformModelSync(baseUrl, sharedResourcesRoot);
   }
@@ -707,7 +741,7 @@ export async function syncDataPlatformModelsForWorkspace(
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
   if (!isCurrent()) return false;
-  setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot, createDataPlatformSourceKey(binding.metadata.baseUrl));
   setSharedProjectEnvironmentRoot(sharedResourcesRoot);
   return startDataPlatformModelSync(binding.metadata.baseUrl, sharedResourcesRoot);
 }
@@ -980,7 +1014,7 @@ async function openDataPlatformProjectInternal(
   await ensureWritableEditorRoot(sharedResourcesRoot);
   await ensureProjectDirectories(projectRoot);
   await ensureProjectDirectories(sharedResourcesRoot);
-  setSharedProjectAssetRoot(sharedResourcesRoot);
+  setSharedProjectAssetRoot(sharedResourcesRoot, createDataPlatformSourceKey(baseUrl));
   setSharedProjectEnvironmentRoot(sharedResourcesRoot);
 
   let source: DataPlatformProjectOpenResult['source'] = 'generated';

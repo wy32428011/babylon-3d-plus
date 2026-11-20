@@ -507,7 +507,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
       }
       return { ok: true, skyboxes: loadedSkyboxes };
     } catch (error) {
-      if (requestId !== projectAssetsLoadRequestRef.current) {
+      if (requestId !== projectAssetsLoadRequestRef.current || useEditorStore.getState().sceneSessionId !== requestSceneSessionId) {
         return { ok: false, error: '项目资源库加载请求已被较新的请求取代。' };
       }
       const message = formatSkyboxSyncError(error);
@@ -586,16 +586,22 @@ export function ProjectPanel(props: ProjectPanelProps) {
     localResourcePreparingRef.current = true;
     setIsPreparingSceneResources(true);
     reportSceneModelSyncProgress(sessionId, { runId, phase: 'querying', completed: 0, total: 0, error: null,
-      message: syncLibrary ? '正在同步模型库，完成后应用新版参数配置并保留同名参数值…' : '正在同步场景模型并采用新版参数配置并保留同名参数值…' });
+      message: syncLibrary ? '正在同步模型库和缩略图…' : '正在同步场景模型并保留同名参数值…' });
     environmentPreparationStore.clearError(sessionId);
+    let libraryPrepared = false;
+    const libraryErrors = new Set<string>();
     try {
       const result = await runSceneModelSyncTransaction({
         sceneSessionId: sessionId, syncLibrary,
         getSnapshot: () => useEditorStore.getState(),
         prepare: async (scene, updateLibrary) => {
           if (!window.editorApi?.prepareLocalSceneResources) throw new Error('当前编辑器不支持场景模型同步，请更新编辑器。');
-          return window.editorApi.prepareLocalSceneResources({ mode: 'scene-latest', syncLibrary: updateLibrary,
+          const resources = await window.editorApi.prepareLocalSceneResources({ mode: syncLibrary ? 'model-library-latest' : 'scene-latest', syncLibrary: updateLibrary,
             requestId: runId, sceneContent: serializeScene(scene) });
+          libraryPrepared ||= resources.configured;
+          for (const error of resources.libraryErrors ?? []) libraryErrors.add(error);
+          if (syncLibrary && libraryErrors.size) throw new Error([...libraryErrors].join('；'));
+          return resources;
         },
         apply: async (before, resources) => {
           const warnings = [...(resources.warnings ?? [])];
@@ -634,15 +640,6 @@ export function ProjectPanel(props: ProjectPanelProps) {
       if (result.issues.length) environmentPreparationStore.fail(sessionId, result.issues.join('\n'));
       settleSceneModelAssetRefresh(sessionId, result.issues.join('\n') || null, refreshId);
       pushLog(`场景模型同步已应用 ${result.updatedCount} 处引用，采用新版参数配置并保留同名参数值；正在验证实际首帧。`);
-      // 目录刷新只更新资源卡片，不能再次用库默认配置覆盖刚提交的场景。
-      const loaded = await loadProjectAssets({ refreshModels: false, refreshEnvironment: false, refreshSkybox: false });
-      if (!isCurrent()) return;
-      const libraryErrors = [...result.libraryErrors, ...(!loaded.ok ? [loaded.error] : [])];
-      if (libraryErrors.length) {
-        const message = `模型库部分资源未同步：${libraryErrors.join('；')}`;
-        setLibraryStatuses(current => ({ ...current, model: { kind: 'error', message } }));
-        pushLog(message);
-      }
     } catch (error) {
       if (!isCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -653,6 +650,16 @@ export function ProjectPanel(props: ProjectPanelProps) {
       environmentPreparationStore.fail(sessionId, message);
       pushLog(`场景模型同步失败，原场景及最新编辑内容已保留：${message}`);
     } finally {
+      // 模型库下载和场景编辑各自完成。场景提交冲突也要展示已校验的新版本。
+      if (libraryPrepared && isCurrent()) {
+        const loaded = await loadProjectAssets();
+        if (!loaded.ok) libraryErrors.add(loaded.error);
+        if (isCurrent() && libraryErrors.size) {
+          const message = `模型库部分资源未同步：${[...libraryErrors].join('；')}`;
+          setLibraryStatuses(current => ({ ...current, model: { kind: 'error', message } }));
+          pushLog(message);
+        }
+      }
       if (isCurrent()) {
         // 主动全库事务已经完成，无需在首帧后立即再启动同一轮后台全库任务。
         if (syncLibrary) autoLibrarySyncSessionRef.current = sessionId;
@@ -814,6 +821,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
     let traceRequest: ProjectOpenRequestToken | undefined;
     let traceOutcome: ProjectOpenSpanOutcome = 'ok';
     let traceRequestStarted = false;
+    let libraryPrepared = false;
     if (sceneResourcePolicy === 'local-refresh') useEditorStore.getState().beginLocalSceneResourceRecovery(sceneSessionId);
     reportSceneModelSyncProgress(sceneSessionId, {
       runId, phase: 'querying', completed: 0, total: 0, error: null,
@@ -878,6 +886,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
         beginSceneModelAssetRefresh(sceneSessionId, refreshId);
         if (sceneResourcePolicy === 'data-platform-refresh' || sceneResourcePolicy === 'local-refresh') {
           if (!result.configured || !result.sourceKey || !result.modelReplacements) throw new Error('数据中台未返回完整的场景模型同步结果。');
+          libraryPrepared = true;
           const describeIssue = (issue: { resourceKind: string; resourceId?: string; message: string }) =>
             `[${issue.resourceKind}${issue.resourceId ? ` ${issue.resourceId}` : ''}] ${issue.message}`;
           const issues = (result.issues ?? []).map(describeIssue);
@@ -908,7 +917,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
             try {
               traceRequest = openTrace ? beginProjectOpenRequest(openTrace, 'sceneResources') : undefined;
               traceRequestStarted ||= !!traceRequest;
-              const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', requestId: runId,
+              const recovered = await window.editorApi.prepareLocalSceneResources({ mode: 'local-recovery', skipModelDownloads: true, requestId: runId,
                 ...(traceRequest ? { trace: traceRequest.context } : {}),
                 sceneContent: serializeScene(finalScene), sceneFilePath: useEditorStore.getState().sceneSourceFilePath ?? undefined });
               traceRequest?.finish('ok', recovered);
@@ -966,6 +975,8 @@ export function ProjectPanel(props: ProjectPanelProps) {
           completeProjectOpenResources(openTrace, isCurrent() ? traceOutcome : 'stale');
         }
         if (isCurrent()) {
+          // 模型库采用本轮 IPC 结果，独立于场景提交和本地依赖恢复。
+          if (libraryPrepared) void loadProjectAssets();
           localResourcePreparingRef.current = false;
           setIsPreparingSceneResources(false);
         }
@@ -1377,6 +1388,17 @@ export function ProjectPanel(props: ProjectPanelProps) {
       pushLog(`重试数据中台模型同步失败：${message}`);
     } finally {
       setIsRetryingModelSync(false);
+    }
+  }
+
+  async function handleSyncEnvironmentLibrary(): Promise<void> {
+    if (props.readOnly) return;
+    const sessionId = sceneSessionIdRef.current;
+    try {
+      const started = await getDataPlatformEnvironmentSyncApi().syncDataPlatformEnvironments?.();
+      if (!started && sessionId === sceneSessionIdRef.current) pushLog('环境库同步未启动，请检查数据中台连接配置。');
+    } catch (error) {
+      if (sessionId === sceneSessionIdRef.current) pushLog(`环境库同步失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -2047,9 +2069,9 @@ export function ProjectPanel(props: ProjectPanelProps) {
           <button className="library-import-button" type="button"
             disabled={props.readOnly || isPreparingSceneResources || Boolean(latestSceneResourceTransaction)
               || !isScenePreparationSettled(preparation) || isStartingLibrarySync || isLibrarySyncActive}
-            title="同步中台全部普通、组合和环境模型，并替换当前场景中的匹配模型，采用新版参数配置并保留同名参数值"
-            onClick={() => void startModelLibrarySync()}>
-            {isPreparingSceneResources ? '同步并替换中…' : isStartingLibrarySync || isLibrarySyncActive ? '模型库同步中…' : '同步模型库'}
+            title={activeLibrary.key === 'model' ? '同步中台模型和缩略图，并更新场景中的匹配实例' : '同步中台环境模型和缩略图'}
+            onClick={() => void (activeLibrary.key === 'model' ? startModelLibrarySync() : handleSyncEnvironmentLibrary())}>
+            {isPreparingSceneResources || isStartingLibrarySync || isLibrarySyncActive ? '同步中…' : activeLibrary.key === 'model' ? '同步模型库' : '同步环境库'}
           </button>
         ) : null}
         {sceneResourcePolicy === 'local-refresh' ? (

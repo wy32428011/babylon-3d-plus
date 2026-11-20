@@ -322,7 +322,7 @@ export function registerDataPlatformIpc(): void {
     let outcome: ProjectOpenSpanOutcome = 'error', response: LocalSceneResourceSyncResult | undefined;
     try {
     const config = await readDataPlatformConfig();
-    if (request?.mode === 'data-platform-latest' || request?.mode === 'scene-latest' || request?.mode === 'local-latest' || request?.mode === 'local-recovery') {
+    if (request?.mode === 'data-platform-latest' || request?.mode === 'scene-latest' || request?.mode === 'model-library-latest' || request?.mode === 'local-latest' || request?.mode === 'local-recovery') {
       response = await prepareLocalSceneResources(config.baseUrl, config.workspaceRoot, request);
     } else {
       response = !config.baseUrl ? { configured: false, sourceKey: null, modelAssets: [], environmentAssets: [] }

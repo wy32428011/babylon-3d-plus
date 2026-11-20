@@ -16,12 +16,15 @@ import { sanitizeSceneModelPackageName, type SceneModelCatalogEntry } from '../s
 import { encodeAssetUrl } from './assetRegistry.js';
 import { assertRecoveryPathInsideRoot } from '../shared/recoveryPathBoundary.js';
 import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContract.js';
+import { MAX_MODEL_RECORDS, queryDataPlatformModelPages } from './dataPlatformModelCatalog.js';
+import { getDataPlatformThumbnailExtension, MAX_THUMBNAIL_FILE_BYTES } from './dataPlatformModelThumbnail.js';
 import {
   buildDataPlatformModelPlan,
   createDataPlatformModelResourceKey,
   createDataPlatformModelRuntimeRevision,
   DATA_PLATFORM_MODEL_INDEX_VERSION,
   getDataPlatformModelIndexPath,
+  getPinnedModelScriptOrderPath,
   readDataPlatformModelIndex,
   writeDataPlatformModelIndexFile,
   type DataPlatformModelIndex,
@@ -44,9 +47,6 @@ import {
 
 const MODEL_QUERY_PATH = 'api/v1/models/query';
 const COMBO_MODEL_QUERY_PATH = 'api/v1/combo-models/query';
-const MODEL_QUERY_PAGE_SIZE = 100;
-const MAX_MODEL_QUERY_PAGES = 1_000;
-const MAX_MODEL_RECORDS = 100_000;
 const MAX_CONCURRENT_DOWNLOADS = 4;
 const MAX_CONCURRENT_PACKAGE_VALIDATIONS = 2;
 const MAX_CONCURRENT_CACHE_CHECKS = 16;
@@ -55,9 +55,7 @@ const FILE_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_MODEL_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_METADATA_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SCRIPT_FILE_BYTES = 10 * 1024 * 1024;
-const MAX_THUMBNAIL_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_SYNC_DOWNLOAD_BYTES = 8 * 1024 * 1024 * 1024;
-const THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1_200, 1_600] as const;
@@ -65,12 +63,6 @@ const WINDOWS_RENAME_RETRY_ERROR_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
 const NO_THUMBNAIL_FINGERPRINT = createHash('sha256')
   .update('data-platform-model-thumbnail:none', 'utf8')
   .digest('hex');
-
-const MIME_THUMBNAIL_EXTENSIONS: Record<string, string> = {
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/webp': '.webp',
-};
 
 type ModelSyncContext = {
   baseUrl: string;
@@ -207,6 +199,8 @@ function isMissingModelCode(code: unknown): boolean {
   return typeof code === 'string' && /^(?:MODEL|COMBO_MODEL|RESOURCE)_NOT_FOUND$/.test(code.trim().toUpperCase());
 }
 export type SyncSceneDataPlatformModelAssetsOptions = RecoverDataPlatformModelAssetsOptions & {
+  /** 场景定向更新采用库目录的低模、组合 GLB 和可选缩略图规则。 */
+  libraryModelFilesOnly?: boolean;
   /** 仅主进程可信snapshot传入，下载原始payload后、元数据格式转换前逐项校验。 */
   expectedFiles?: readonly ModelSnapshotExpectedFile[];
 };
@@ -241,6 +235,36 @@ const DEFAULT_DEPENDENCIES: ModelSyncDependencies = {
   randomId: randomUUID,
 };
 
+// 只展示当前挂载下已校验的主模型；场景的旧固定版本仍留在磁盘上。
+let sceneModelLibrary: {
+  root: string;
+  sourceKey: string;
+  assets: Map<string, SceneSyncedModelAsset>;
+} | null = null;
+
+export function resetSceneModelLibrary(sharedRoot: string | null, sourceKey?: string): void {
+  if (sceneModelLibrary && (!sharedRoot || sceneModelLibrary.root !== comparableModelRoot(sharedRoot)
+    || (sourceKey !== undefined && sceneModelLibrary.sourceKey !== sourceKey))) sceneModelLibrary = null;
+}
+
+export function publishSceneModelLibraryAssets(
+  sharedRoot: string,
+  sourceKey: string,
+  assets: readonly SceneSyncedModelAsset[],
+): void {
+  resetSceneModelLibrary(sharedRoot, sourceKey);
+  if (assets.length === 0) return;
+  sceneModelLibrary ??= { root: comparableModelRoot(sharedRoot), sourceKey, assets: new Map() };
+  for (const asset of assets) {
+    const key = getManagedAssetResourceKey(asset);
+    if (key) sceneModelLibrary.assets.set(key, asset);
+  }
+}
+
+export function getSceneModelLibraryAssets(sharedRoot: string): ProjectModelAssetEntry[] {
+  return sceneModelLibrary?.root === comparableModelRoot(sharedRoot) ? [...sceneModelLibrary.assets.values()] : [];
+}
+
 const modelSyncExecutionQueues = new Map<string, Promise<void>>();
 let activeModelSync: ActiveModelSync | null = null;
 let queuedModelSyncContext: ModelSyncContext | null = null;
@@ -249,7 +273,7 @@ let lastModelSyncContext: ModelSyncContext | null = null;
 let modelSyncShuttingDown = false;
 let browserWindowLoader: (() => Promise<typeof import('electron').BrowserWindow>) | null = null;
 
-/** 启动普通/组合模型后台增量同步；切换工作区时取消旧任务并排队最新上下文。 */
+/** 后台增量同步场景低模和组合模型。切换工作区时取消旧任务并排队最新上下文。 */
 export function startDataPlatformModelSync(baseUrl: string, editorRoot: string, forceRefresh = false): boolean {
   if (modelSyncShuttingDown) return false;
   const context = { ...createModelSyncContext(baseUrl, editorRoot), forceRefresh };
@@ -434,8 +458,10 @@ export async function syncSceneDataPlatformModelAssets(
   assertPathInside(sharedRoot, cacheRoot, '场景模型同步缓存');
   assertPathInside(sharedRoot, versionRoot, '场景模型版本缓存');
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
+  const queryCurrent = () => queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson, options.libraryModelFilesOnly);
   return queueModelSync(async () => {
-    const before = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+    const before = await queryCurrent();
+    if (before.length === 0) return [];
     if (options.expectedFiles !== undefined) {
       // 已有URL/修订字段可能完全不变。可信快照必须重新验证原始下载字节，不能命中旧描述缓存。
       // 更新共享库后renderer再次普通同步也会固定这一版，不会重新选择同描述的旧共享资源。
@@ -443,7 +469,7 @@ export async function syncSceneDataPlatformModelAssets(
         await runDataPlatformModelSync({ baseUrl, editorRoot: sharedRoot, requiredResources, queriedRecords: before,
           signal, dependencies, onProgress: options.onProgress, forceRefresh: true,
           expectedFiles: options.expectedFiles!.filter(file => file.kind === resource.kind && file.resourceId === resource.resourceId) });
-        const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+        const after = await queryCurrent();
         if (hashFingerprint(before) !== hashFingerprint(after)) throw new ModelSnapshotIntegrityError('快照模型在下载期间资源描述发生变化。');
         const [index, loaded] = await Promise.all([readDataPlatformModelIndex(sharedRoot), dependencies.readAssetIndex(sharedRoot)]);
         const entry = index.entries.find(item => resourceKey(item) === resourceKey(resource));
@@ -471,7 +497,7 @@ export async function syncSceneDataPlatformModelAssets(
       return pinSceneModelVersion(asset, { ...entry, deviceType: descriptor.deviceType }, sharedRoot, versionRoot, signal);
     }, signal);
     if (sharedPinned) {
-      const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+      const after = await queryCurrent();
       if (hashFingerprint(before) !== hashFingerprint(after)) throw new Error('数据中台模型在同步期间版本或资源描述发生变化，请重试。');
       assertNotAborted(signal);
       return [{ ...sharedPinned, displayName: before[0].name, dataPlatformSourceKey: sourceKey, dataPlatformResourceId: resource.resourceId }];
@@ -481,10 +507,10 @@ export async function syncSceneDataPlatformModelAssets(
       baseUrl, editorRoot: cacheRoot, requiredResources, queriedRecords: before,
       signal, onProgress: options.onProgress, dependencies,
     });
-    const after = await queryRequiredModels(baseUrl, requiredResources, signal, dependencies.requestJson);
+    const after = await queryCurrent();
     // 包括无修订字段的旧接口：至少拒绝下载期间可观察到的 URL、文件名和脚本定义变化。
     const beforeByKey = new Map(before.map((record) => [resourceKey(record), hashFingerprint(record)]));
-    if (after.some((record) => beforeByKey.get(resourceKey(record)) !== hashFingerprint(record))) {
+    if (after.length !== before.length || after.some((record) => beforeByKey.get(resourceKey(record)) !== hashFingerprint(record))) {
       throw new Error('数据中台模型在同步期间版本或资源描述发生变化，请重试。');
     }
     assertNotAborted(signal);
@@ -515,7 +541,7 @@ export async function listRemoteInspectionModels(options: {
 }): Promise<Array<{ resourceId: string; displayName: string }>> {
   const signal = options.signal ?? new AbortController().signal;
   const requestJson = options.dependencies?.requestJson ?? DEFAULT_DEPENDENCIES.requestJson;
-  const records = await queryAllPages(normalizeDataPlatformSourceUrl(options.baseUrl), MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson);
+  const records = await queryDataPlatformModelPages(normalizeDataPlatformSourceUrl(options.baseUrl), MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson);
   const seen = new Set<string>();
   return records.map((value, index) => {
     const item = requireRecord(value, '普通模型', index);
@@ -694,6 +720,7 @@ async function pinSceneModelVersion(
   await verify(asset);
   if (await pathExists(targetPackage)) {
     await verify(pinned);
+    await persistPinnedModelScriptOrder(pinned, versionRoot, signal);
     return pinned;
   }
   const stagingPackage = `${targetPackage}.pending-${randomUUID()}`;
@@ -712,9 +739,34 @@ async function pinSceneModelVersion(
     await verify(relocateAssetEntry(asset, sourcePackage, stagingPackage, entry));
     assertNotAborted(signal);
     await renamePathWithWindowsRetry(stagingPackage, targetPackage);
+    await persistPinnedModelScriptOrder(pinned, versionRoot, signal);
     return pinned;
   } finally {
     await fs.rm(stagingPackage, { recursive: true, force: true });
+  }
+}
+
+async function persistPinnedModelScriptOrder(
+  asset: ProjectModelAssetEntry,
+  versionRoot: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!asset.scriptPaths?.length) return;
+  const file = getPinnedModelScriptOrderPath(asset.packagePath!);
+  await assertRecoveryPathInsideRoot(versionRoot, file);
+  const content = JSON.stringify(asset.scriptPaths.map(script => path.basename(script)));
+  try {
+    if ((await fs.stat(file)).size === Buffer.byteLength(content) && await fs.readFile(file, 'utf8') === content) return;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+  }
+  assertNotAborted(signal);
+  const staging = `${file}.pending-${randomUUID()}`;
+  try {
+    await fs.writeFile(staging, content, { encoding: 'utf8', flag: 'wx' });
+    await renamePathWithWindowsRetry(staging, file);
+  } finally {
+    await fs.rm(staging, { force: true });
   }
 }
 
@@ -723,6 +775,7 @@ async function queryRequiredModels(
   resources: readonly DataPlatformModelRecoveryResource[],
   signal: AbortSignal,
   requestJson: ModelSyncDependencies['requestJson'],
+  libraryModelFilesOnly = false,
 ): Promise<SyncModelRecord[]> {
   const records: SyncModelRecord[] = [];
   await runWithConcurrency([...resources], MAX_CONCURRENT_DOWNLOADS, async (resource) => {
@@ -746,11 +799,18 @@ async function queryRequiredModels(
     if (!isPlainObject(response) || response.success !== true || !isPlainObject(response.data)) {
       throw new Error('数据中台模型 ' + resourceKey(resource) + ' 详情不可用，无法同步场景引用。');
     }
-    const record = resource.kind === 'model'
-      ? normalizeNormalModelRecord(response.data, records.length)
-      : normalizeComboModelRecord(response.data, records.length);
-    if (record.id !== resource.resourceId) throw new Error('数据中台返回的模型详情 ID 与请求不一致。');
-    records.push(record);
+    if (normalizeRequiredId(response.data.id, '模型详情', records.length) !== resource.resourceId) {
+      throw new Error('数据中台返回的模型详情 ID 与请求不一致。');
+    }
+    if (libraryModelFilesOnly) {
+      const model = normalizeLibraryModel(resource.kind, response.data, records.length);
+      if (model) records.push(model);
+      else if (resource.kind === 'combo') throw new Error(`组合模型 ${resource.resourceId} 缺少可同步的 GLB 主文件。`);
+      return;
+    }
+    records.push(resource.kind === 'model'
+      ? normalizeNormalModelRecord(selectLatestModelFiles(response.data), records.length)
+      : normalizeComboModelRecord(response.data, records.length));
   });
   return records;
 }
@@ -782,7 +842,7 @@ async function runDataPlatformModelSync(
     phase: 'querying',
     completed: 0,
     total: 0,
-    message: '正在查询数据中台普通模型…',
+    message: requiredKeys ? '正在查询场景引用的模型…' : '正在查询数据中台低模和组合模型…',
     error: null,
     libraryChanged: false,
     runtimeChangedResourceKeys: [],
@@ -796,16 +856,13 @@ async function runDataPlatformModelSync(
     } else if (options.requiredResources) {
       records = await queryRequiredModels(baseUrl, options.requiredResources, signal, dependencies.requestJson);
     } else {
-      const queriedNormalModels = await queryAllNormalModels(baseUrl, signal, dependencies.requestJson);
-      reportProgress({
-        runId, phase: 'querying', completed: 0, total: 0,
-        message: `已查询 ${queriedNormalModels.length} 个普通模型，正在查询组合模型…`,
-        error: null, libraryChanged: false, runtimeChangedResourceKeys: [],
-      });
-      records = [...queriedNormalModels, ...await queryAllComboModels(baseUrl, signal, dependencies.requestJson)];
+      const [models, combos] = await Promise.all([
+        queryLibraryModels('model', baseUrl, signal, dependencies.requestJson),
+        queryLibraryModels('combo', baseUrl, signal, dependencies.requestJson),
+      ]);
+      records = [...models, ...combos];
     }
-    const normalModels = records.filter((record) => record.kind === 'model');
-    const comboModels = records.filter((record) => record.kind === 'combo');
+    const scopeLabel = requiredKeys ? '场景引用模型' : '低模和组合模型库';
     assertUniqueModelRecords(records);
     assertNotAborted(signal);
 
@@ -852,7 +909,18 @@ async function runDataPlatformModelSync(
     await fs.mkdir(stagingRoot, { recursive: true });
 
     const prepared = await prepareDownloadPlan(stagingRoot, plan.downloads, recordByKey);
-    const jobs = createDownloadJobs(prepared);
+    const runtimeChanges = new Set(plan.runtimeChangedResourceKeys);
+    const thumbnailOnly = new Set<PreparedPackage>();
+    if (!options.forceRefresh && options.expectedFiles === undefined) {
+      await runWithConcurrency(prepared, MAX_CONCURRENT_PACKAGE_VALIDATIONS, async item => {
+        const key = resourceKey(item.record);
+        const asset = currentAssetByKey.get(key);
+        const entry = currentEntryByKey.get(key);
+        if (!runtimeChanges.has(key) && asset && entry
+          && await stageCachedModelForThumbnail(item, asset, entry, editorRoot, signal)) thumbnailOnly.add(item);
+      });
+    }
+    const jobs = createDownloadJobs(prepared).filter(job => job.kind === 'thumbnail' || !thumbnailOnly.has(job.preparedPackage));
     const expectedByJob = new Map<DownloadJob, ModelSnapshotExpectedFile>();
     if (options.expectedFiles !== undefined) {
       const matched = new Set<ModelSnapshotExpectedFile>();
@@ -1102,6 +1170,9 @@ async function runDataPlatformModelSync(
 
     await fs.rm(stagingRoot, { recursive: true, force: true });
     stagingRoot = null;
+    // 成功的全库目录接管展示。定向下载和发布恢复不能清除其他模型卡片。
+    if (!requiredKeys && sceneModelLibrary?.root === comparableModelRoot(editorRoot)
+      && sceneModelLibrary.sourceKey === sourceKey) sceneModelLibrary = null;
     const summary: DataPlatformModelSyncSummary = {
       libraryChanged,
       runtimeChangedResourceKeys,
@@ -1114,8 +1185,8 @@ async function runDataPlatformModelSync(
       completed: jobs.length,
       total: jobs.length,
       message: libraryChanged
-        ? `模型增量同步完成：普通 ${normalModels.length}、组合 ${comboModels.length}，下载校验 ${prepared.length} 个包，复用 ${summary.reusedPackageCount} 个包。`
-        : `模型缓存无变化：普通 ${normalModels.length}、组合 ${comboModels.length}，场景无需重新加载或合批。`,
+        ? `${scopeLabel}同步完成：共 ${records.length} 个，下载 ${prepared.length} 个包，复用 ${summary.reusedPackageCount} 个包。`
+        : `${scopeLabel}的 ${records.length} 个模型均无变化。`,
       error: null,
       libraryChanged,
       runtimeChangedResourceKeys,
@@ -1154,136 +1225,93 @@ export function createDataPlatformModelSourceKey(baseUrl: string): string {
 function createModelSyncContext(baseUrl: string, editorRoot: string): ModelSyncContext {
   const normalizedBaseUrl = normalizeDataPlatformSourceUrl(baseUrl);
   const normalizedEditorRoot = path.resolve(editorRoot);
-  const comparableRoot = process.platform === 'win32'
-    ? normalizedEditorRoot.toLowerCase()
-    : normalizedEditorRoot;
   return {
     baseUrl: normalizedBaseUrl,
     editorRoot: normalizedEditorRoot,
-    contextKey: `${createDataPlatformModelSourceKey(normalizedBaseUrl)}:${comparableRoot}`,
+    contextKey: `${createDataPlatformModelSourceKey(normalizedBaseUrl)}:${comparableModelRoot(normalizedEditorRoot)}`,
   };
+}
+
+function comparableModelRoot(root: string): string {
+  const resolved = path.resolve(root);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 /** 旧 ID 不存在时读取当前目录；这里只提供候选，命中项仍需详情与实际下载校验。 */
 export async function queryCurrentSceneModelCatalog(baseUrl: string, kind: 'model' | 'combo', signal: AbortSignal): Promise<SceneModelCatalogEntry[]> {
-  const rows = await queryAllPages(baseUrl, kind === 'model' ? MODEL_QUERY_PATH : COMBO_MODEL_QUERY_PATH,
-    kind === 'model' ? '普通模型' : '组合模型', kind === 'model' ? 'modelName' : 'comboModelName', signal, DEFAULT_DEPENDENCIES.requestJson);
-  const ids = new Set<string>();
-  return rows.map((value, index) => {
-    const record = requireRecord(value, '模型目录', index);
-    const resourceId = normalizeRequiredId(record.id, '模型目录', index);
-    if (ids.has(resourceId)) throw new Error(`当前模型目录包含重复资源 ID：${resourceId}`);
-    ids.add(resourceId);
-    return { kind, resourceId, name: normalizeOptionalString(record[kind === 'model' ? 'modelName' : 'comboModelName']) ?? '',
-      fileName: normalizeOptionalString(record.fileName) ?? '' };
+  const models = await queryLibraryModels(kind, baseUrl, signal, DEFAULT_DEPENDENCIES.requestJson);
+  assertUniqueModelRecords(models);
+  return models.map(model => ({ kind, resourceId: model.id, name: model.name,
+    fileName: model.fileName ?? fileNameFromUrl(model.fileUrl) }));
+}
+
+async function queryLibraryModels(
+  kind: SyncModelRecord['kind'],
+  baseUrl: string,
+  signal: AbortSignal,
+  requestJson: ModelSyncDependencies['requestJson'],
+): Promise<SyncModelRecord[]> {
+  const records = kind === 'model'
+    ? await queryDataPlatformModelPages(baseUrl, MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson, { modelPurpose: 'SCENE' })
+    : await queryDataPlatformModelPages(baseUrl, COMBO_MODEL_QUERY_PATH, '组合模型', 'comboModelName', signal, requestJson);
+  return records.flatMap((value, index) => {
+    const model = normalizeLibraryModel(kind, requireRecord(value, modelKindLabel(kind), index), index);
+    return model ? [model] : [];
   });
 }
 
-async function queryAllNormalModels(
-  baseUrl: string,
-  signal: AbortSignal,
-  requestJson: ModelSyncDependencies['requestJson'],
-): Promise<NormalModelRecord[]> {
-  const rawRecords = await queryAllPages(baseUrl, MODEL_QUERY_PATH, '普通模型', 'modelName', signal, requestJson, { modelPurpose: 'SCENE' });
-  // 旧接口未声明用途的普通模型继续兼容；显式详情/恢复路径不经过此筛选。
-  return rawRecords.filter((value) => !isPlainObject(value) || value.modelPurpose == null || value.modelPurpose === 'SCENE')
-    .map((value, index) => normalizeNormalModelRecord(value, index));
+/** 普通模型从最新版本选文件，组合模型记录直接指向当前 GLB。未上传主文件的条目不入库。 */
+function normalizeLibraryModel(kind: SyncModelRecord['kind'], record: Record<string, unknown>, index: number): SyncModelRecord | null {
+  if (kind === 'model') {
+    if (record.modelPurpose != null && record.modelPurpose !== 'SCENE') return null;
+    if (record.currentVersionId === null && record.lastVersion == null
+      && !(Array.isArray(record.versions) && record.versions.length)) return null;
+  }
+  const latest = kind === 'model' ? selectLatestModelFiles(record) : record;
+  const url = normalizeOptionalString(latest.fileUrl);
+  if (!url || path.extname(normalizeOptionalString(latest.fileName) ?? fileNameFromUrl(url)).toLowerCase() !== '.glb') return null;
+  return kind === 'model' ? normalizeNormalModelRecord(latest, index) : normalizeComboModelRecord(latest, index);
 }
 
-async function queryAllComboModels(
-  baseUrl: string,
-  signal: AbortSignal,
-  requestJson: ModelSyncDependencies['requestJson'],
-): Promise<ComboModelRecord[]> {
-  const rawRecords = await queryAllPages(baseUrl, COMBO_MODEL_QUERY_PATH, '组合模型', 'comboModelName', signal, requestJson);
-  return rawRecords.map((value, index) => normalizeComboModelRecord(value, index));
-}
-
-async function queryAllPages(
-  baseUrl: string,
-  endpointPath: string,
-  label: string,
-  nameField: 'modelName' | 'comboModelName',
-  signal: AbortSignal,
-  requestJson: ModelSyncDependencies['requestJson'],
-  filters: { modelPurpose?: 'SCENE' } = {},
-): Promise<unknown[]> {
-  const records: unknown[] = [];
-  let stableTotal: number | null = null;
-  for (let pageNum = 1; pageNum <= MAX_MODEL_QUERY_PAGES; pageNum += 1) {
-    assertNotAborted(signal);
-    const payload = await requestJson({
-      baseUrl,
-      endpointPath,
-      body: {
-        pageNum,
-        pageSize: MODEL_QUERY_PAGE_SIZE,
-        [nameField]: '',
-        excludeIds: [],
-        ...filters,
-      },
-      signal,
-      timeoutMs: QUERY_TIMEOUT_MS,
-      context: `查询数据中台${label}`,
-    });
-    const page = normalizePagedResponse(payload, label);
-    if (page.pageNum !== pageNum) {
-      throw new Error(`数据中台${label}响应 pageNum 与请求不一致：请求 ${pageNum}，响应 ${page.pageNum}。`);
-    }
-    if (page.pageSize !== MODEL_QUERY_PAGE_SIZE) {
-      throw new Error(`数据中台${label}响应 pageSize 与请求不一致：请求 ${MODEL_QUERY_PAGE_SIZE}，响应 ${page.pageSize}。`);
-    }
-    if (stableTotal === null) stableTotal = page.total;
-    else if (page.total !== stableTotal) throw new Error(`数据中台${label}分页 total 在查询过程中发生变化。`);
-
-    if (page.records.length === 0) {
-      if (records.length === stableTotal) return records;
-      throw new Error(`数据中台${label}分页在未取完 total=${stableTotal} 时返回空页。`);
-    }
-    records.push(...page.records);
-    if (records.length > MAX_MODEL_RECORDS || records.length > stableTotal) {
-      throw new Error(`数据中台${label}累计记录数超过 total=${stableTotal} 或 ${MAX_MODEL_RECORDS} 项上限。`);
-    }
-    if (records.length === stableTotal) {
-      return records;
+/** 普通模型的目录使用最新快照，详情中的主记录和版本文件可能不同。 */
+function selectLatestModelFiles(record: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(record.versions) || record.versions.length === 0) return record;
+  const versions = record.versions.filter(isPlainObject);
+  let latest: Record<string, unknown> | undefined;
+  if (record.currentVersionId != null) {
+    const id = normalizeRequiredId(record.currentVersionId, '普通模型当前版本', 0);
+    latest = versions.find(version => normalizeVersionToken(version.versionId) === id);
+    if (!latest) throw new Error(`数据中台模型 ${record.id} 的详情缺少当前版本 ${id}。`);
+  } else {
+    // 旧接口只有版本序号，数组顺序不代表新旧。
+    let highest = 0;
+    for (const version of versions) {
+      const number = Number(normalizeVersionToken(version.versionNumber));
+      if (Number.isSafeInteger(number) && number > highest) {
+        latest = version;
+        highest = number;
+      }
     }
   }
-  throw new Error(`数据中台${label}分页超过 ${MAX_MODEL_QUERY_PAGES} 页限制。`);
-}
-
-function normalizePagedResponse(value: unknown, label: string): {
-  records: unknown[];
-  total: number;
-  pageNum: number;
-  pageSize: number;
-} {
-  if (!isPlainObject(value)) throw new Error(`数据中台${label}响应结构不正确。`);
-  if (value.success !== true) {
-    const message = normalizeOptionalString(value.message) ?? `数据中台${label}查询失败。`;
-    throw new Error(message);
-  }
-  const data = value.data;
-  if (!isPlainObject(data) || !Array.isArray(data.records)) {
-    throw new Error(`数据中台${label}响应缺少 data.records。`);
-  }
-  const pageSize = normalizePageInteger(data.pageSize, `${label} pageSize`, 1, MODEL_QUERY_PAGE_SIZE);
-  if (data.records.length > pageSize) {
-    throw new Error(`数据中台${label}响应 records 数量超过 pageSize。`);
-  }
-  return {
-    records: data.records,
-    total: normalizePageInteger(data.total, `${label} total`, 0, MAX_MODEL_RECORDS),
-    pageNum: normalizePageInteger(data.pageNum, `${label} pageNum`, 1, MAX_MODEL_QUERY_PAGES),
-    pageSize,
-  };
+  // 只提供版本摘要的接口仍由详情顶层提供当前文件；完整快照中的空脚本列表表示已移除。
+  if (!latest || !Object.hasOwn(latest, 'fileUrl')) return record;
+  return { ...record, currentVersionId: latest.versionId ?? record.currentVersionId,
+    fileName: latest.fileName, fileUrl: latest.fileUrl, metaFileUrl: latest.metaFileUrl,
+    ...(Object.hasOwn(latest, 'thumbnailUrl') ? {
+      thumbnailUrl: latest.thumbnailUrl, thumbnailSha256: latest.thumbnailSha256, thumbnailHash: latest.thumbnailHash,
+      thumbnailRevision: latest.thumbnailRevision, thumbnailUpdatedAt: latest.thumbnailUpdatedAt,
+    } : {}),
+    scriptFiles: latest.scriptFiles, scriptFileName: latest.scriptFileName, scriptFileUrl: latest.scriptFileUrl };
 }
 
 function normalizeNormalModelRecord(value: unknown, index: number): NormalModelRecord {
   const record = requireRecord(value, '普通模型', index);
   const id = normalizeRequiredId(record.id, '普通模型', index);
-  const packageVersion = readRemoteVersionToken(record, [
-    'packageRevision', 'modelRevision', 'resourceRevision', 'revision', 'updatedAt', 'updateTime',
-  ]);
+  const currentVersion = readRemoteVersionToken(record, ['currentVersionId']);
+  const runtimeVersion = readRemoteVersionToken(record, ['packageRevision', 'modelRevision', 'resourceRevision', 'revision']);
+  const updatedAt = readRemoteVersionToken(record, ['updatedAt', 'updateTime']);
+  // 换封面会改变资产的 updatedAt，但不会改变已发布模型的 currentVersionId。
+  const packageVersion = currentVersion ? hashFingerprint([currentVersion, runtimeVersion]) : runtimeVersion ?? updatedAt;
   const scriptsVersion = readRemoteVersionToken(record, [
     'scriptsRevision', 'scriptRevision', 'scriptsUpdatedAt', 'scriptUpdatedAt',
   ]);
@@ -1309,7 +1337,7 @@ function normalizeNormalModelRecord(value: unknown, index: number): NormalModelR
       scripts: scriptsVersion,
       thumbnail: readRemoteVersionToken(record, [
         'thumbnailSha256', 'thumbnailHash', 'thumbnailRevision', 'thumbnailUpdatedAt',
-      ]),
+      ]) ?? updatedAt,
     },
   };
 }
@@ -1505,6 +1533,36 @@ async function prepareDownloadPlan(
   });
 }
 
+/** 仅换封面时保留完整包（包括子模型），本地内容不符则仍按正常流程重新下载。 */
+async function stageCachedModelForThumbnail(
+  prepared: PreparedPackage, asset: ProjectModelAssetEntry, entry: DataPlatformModelIndexEntry,
+  editorRoot: string, signal: AbortSignal,
+): Promise<boolean> {
+  const source = resolvePackageRelativePath(editorRoot, entry.packageRelativePath);
+  if (!asset.metadataPath || !isSameLocalPath(asset.path, path.join(source, path.basename(prepared.mainFilePath)))) return false;
+  await assertRecoveryPathInsideRoot(editorRoot, source);
+  for (const file of [asset.path, asset.metadataPath, ...(asset.scriptPaths ?? [])]) {
+    assertPathInside(source, file, '复用模型文件');
+    await assertRecoveryPathInsideRoot(source, file);
+  }
+  try {
+    const local = await createDataPlatformModelRuntimeRevision({ modelPath: asset.path,
+      metadataPath: asset.metadataPath, scriptPaths: asset.scriptPaths ?? [] });
+    if (local.runtimeRevision !== entry.runtimeRevision) return false;
+  } catch {
+    assertNotAborted(signal);
+    return false;
+  }
+  await fs.cp(source, prepared.packagePath, { recursive: true, force: false, errorOnExist: true,
+    filter: async file => {
+      assertNotAborted(signal);
+      if ((await fs.lstat(file)).isSymbolicLink()) throw new Error('模型缓存不能包含符号链接。');
+      return !asset.thumbnailPath || !isSameLocalPath(file, asset.thumbnailPath);
+    },
+  });
+  return true;
+}
+
 function createDownloadJobs(packages: PreparedPackage[]): DownloadJob[] {
   const jobs: DownloadJob[] = [];
   for (const prepared of packages) {
@@ -1545,7 +1603,7 @@ function createDownloadJobs(packages: PreparedPackage[]): DownloadJob[] {
     }
 
     if (prepared.record.thumbnailUrl) {
-      const extension = thumbnailExtensionFromUrl(prepared.record.thumbnailUrl);
+      const extension = getDataPlatformThumbnailExtension(prepared.record.thumbnailUrl);
       jobs.push({
         label: `${label}缩略图`,
         remoteUrl: prepared.record.thumbnailUrl,
@@ -1563,14 +1621,10 @@ async function finalizeThumbnailPath(
   contentType: string,
   remoteUrl: string,
 ): Promise<string> {
-  const currentExtension = path.extname(destinationPath).toLowerCase();
-  if (THUMBNAIL_EXTENSIONS.has(currentExtension)) return destinationPath;
-  const inferredExtension = MIME_THUMBNAIL_EXTENSIONS[contentType] ?? thumbnailExtensionFromUrl(remoteUrl);
-  if (!inferredExtension || !THUMBNAIL_EXTENSIONS.has(inferredExtension)) {
-    throw new Error('数据中台缩略图扩展名或 Content-Type 不受支持。');
-  }
-  const finalPath = path.join(path.dirname(destinationPath), `thumbnail${inferredExtension}`);
-  await fs.rename(destinationPath, finalPath);
+  const extension = getDataPlatformThumbnailExtension(remoteUrl, contentType);
+  if (!extension) throw new Error('数据中台缩略图扩展名或 Content-Type 不受支持。');
+  const finalPath = path.join(path.dirname(destinationPath), `thumbnail${extension}`);
+  if (finalPath !== destinationPath) await fs.rename(destinationPath, finalPath);
   return finalPath;
 }
 
@@ -1645,6 +1699,7 @@ async function normalizeLocalMetadata(prepared: PreparedPackage): Promise<void> 
     metadata.lengthUnit = DEFAULT_MODEL_LENGTH_UNIT_INFO.lengthUnit;
   }
   if (prepared.thumbnailPath) metadata.thumbnail = path.basename(prepared.thumbnailPath);
+  else delete metadata.thumbnail;
   await fs.mkdir(path.dirname(prepared.metadataPath), { recursive: true });
   await fs.writeFile(prepared.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
 }
@@ -1698,6 +1753,7 @@ function relocateAssetEntry(
     metadataPath: relocate(asset.metadataPath),
     thumbnailPath: finalThumbnailPath,
     thumbnailUrl: finalThumbnailPath ? encodeAssetUrl(finalThumbnailPath) : undefined,
+    thumbnailRevision: finalThumbnailPath ? indexEntry.thumbnailRevision : undefined,
     scriptPaths: finalScriptPaths,
     scriptAssets: finalScriptPaths?.map((scriptPath) => ({
       path: scriptPath,
@@ -1716,6 +1772,7 @@ function refreshIndexedAssetMetadata(
     displayName: entry.displayName,
     deviceType: entry.deviceType,
     assetRevision: entry.runtimeRevision,
+    thumbnailRevision: asset.thumbnailPath ? entry.thumbnailRevision : undefined,
   };
 }
 
@@ -2000,15 +2057,6 @@ function normalizeOptionalTypeScriptFileName(
   return uniqueName;
 }
 
-function thumbnailExtensionFromUrl(value: string): string | null {
-  try {
-    const extension = path.extname(new URL(value, 'http://placeholder.invalid/').pathname).toLowerCase();
-    return THUMBNAIL_EXTENSIONS.has(extension) ? extension : null;
-  } catch {
-    return null;
-  }
-}
-
 function fileNameFromUrl(value: string): string {
   try {
     return decodeURIComponent(path.posix.basename(new URL(value, 'http://placeholder.invalid/').pathname));
@@ -2104,18 +2152,6 @@ function normalizeRequiredUrl(value: unknown, label: string, index: number): str
 
 function normalizeOptionalString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
-}
-
-function normalizePageInteger(value: unknown, label: string, minimum: number, maximum: number): number {
-  const normalized = typeof value === 'number'
-    ? value
-    : typeof value === 'string' && /^\d+$/.test(value.trim())
-      ? Number(value)
-      : Number.NaN;
-  if (!Number.isSafeInteger(normalized) || normalized < minimum || normalized > maximum) {
-    throw new Error(`数据中台${label}无效。`);
-  }
-  return normalized;
 }
 
 async function renamePathWithWindowsRetry(sourcePath: string, targetPath: string): Promise<void> {

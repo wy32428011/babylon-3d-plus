@@ -39,6 +39,7 @@ import { listBuiltinSkyboxAssets } from './builtinSkyboxAssets.js';
 import { importSkyboxFileIntoRoot, listSkyboxAssetsInRoot } from './skyboxAssetStore.js';
 import { listIndexedDataPlatformEnvironments } from './dataPlatformEnvironmentIndex.js';
 import { getCurrentDataPlatformBinding } from './dataPlatformBindingStore.js';
+import { getSceneModelLibraryAssets, resetSceneModelLibrary } from './dataPlatformModelIncrementalSync.js';
 import { createDataPlatformSourceKey, isDataPlatformEnvironmentSyncPending } from './dataPlatformEnvironmentSync.js';
 
 const PROJECT_METADATA_DIRECTORY = '.babylon-editor';
@@ -473,6 +474,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     metadataPath,
     thumbnailPath,
     thumbnailUrl: thumbnailPath ? encodeAssetUrl(thumbnailPath) : undefined,
+    thumbnailRevision: normalizeOptionalTrimmedString(asset.thumbnailRevision),
     scriptPaths,
     scriptAssets,
     parameterScriptMetadata: normalizeOptionalMetadataArray(asset.parameterScriptMetadata),
@@ -537,8 +539,9 @@ export function setCurrentProjectRoot(projectRoot: string): void {
 }
 
 /** 为当前业务工程挂载数据中台共享资源缓存；null 表示普通本地项目。 */
-export function setSharedProjectAssetRoot(projectRoot: string | null): void {
+export function setSharedProjectAssetRoot(projectRoot: string | null, sourceKey?: string): void {
   sharedProjectAssetRoot = projectRoot ? normalizeFilePath(projectRoot) : null;
+  resetSceneModelLibrary(sharedProjectAssetRoot, sourceKey);
   if (sharedProjectAssetRoot) authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
 }
 
@@ -903,36 +906,33 @@ export async function selectCurrentProjectRootWithDialog(assertCanActivate?: () 
 export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
   const projectRoot = await loadRecentProjectRoot();
 
-  if (!projectRoot) {
-    return {
-      projectRoot: null,
-      skyboxSyncContextKey: null,
-      environmentSyncContextKey: null,
-      assets: [],
-      skyboxes: await listBuiltinSkyboxAssets(),
-      orphanedSkyboxes: [],
-    };
+  const sharedAssetRoot = sharedProjectAssetRoot;
+  let indexedLocalAssets: ProjectModelAssetEntry[] = [];
+  if (projectRoot) {
+    await ensureProjectDirectories(projectRoot);
+    authorizeProjectAssetRoots(projectRoot);
+    indexedLocalAssets = (await readProjectAssetIndex(projectRoot)).assets;
   }
 
-  await ensureProjectDirectories(projectRoot);
-  authorizeProjectAssetRoots(projectRoot);
-
-  const localIndex = await readProjectAssetIndex(projectRoot);
   // 共享库仍用于显式更新；单独返回存在的本地文件，避免首次打开用最新共享元数据覆盖发布快照。
   const localAssets: ProjectModelAssetEntry[] = [];
-  for (const asset of localIndex.assets) {
+  for (const asset of indexedLocalAssets) {
     try {
       if ((await fs.stat(asset.path)).isFile()) localAssets.push(asset);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-  let assets = localIndex.assets;
-  if (sharedProjectAssetRoot && normalizeFilePath(sharedProjectAssetRoot) !== normalizeFilePath(projectRoot)) {
-    await ensureProjectDirectories(sharedProjectAssetRoot);
-    authorizeSharedProjectAssetRoots(sharedProjectAssetRoot);
-    const sharedIndex = await readProjectAssetIndex(sharedProjectAssetRoot);
-    assets = mergeProjectAssets(localIndex.assets, sharedIndex.assets);
+  let assets = indexedLocalAssets;
+  if (sharedAssetRoot) {
+    if (sharedAssetRoot !== projectRoot) {
+      await ensureProjectDirectories(sharedAssetRoot);
+      authorizeSharedProjectAssetRoots(sharedAssetRoot);
+      const sharedIndex = await readProjectAssetIndex(sharedAssetRoot);
+      assets = mergeProjectAssets(assets, sharedIndex.assets);
+    }
+    const preparedAssets = getSceneModelLibraryAssets(sharedAssetRoot);
+    if (preparedAssets.length > 0) assets = mergeProjectAssets(assets, preparedAssets);
   }
 
   let environmentSyncContextKey: string | null = null;
@@ -956,9 +956,11 @@ export async function listProjectAssets(): Promise<ProjectListAssetsResult> {
     for (const scriptAsset of asset.scriptAssets ?? []) authorizeAssetFile(scriptAsset.path);
   }
 
-  const { skyboxes, orphanedSkyboxes, localSkyboxes } = await loadProjectSkyboxAssets(projectRoot);
+  const { skyboxes, orphanedSkyboxes, localSkyboxes } = projectRoot
+    ? await loadProjectSkyboxAssets(projectRoot)
+    : { skyboxes: await listBuiltinSkyboxAssets(), orphanedSkyboxes: [], localSkyboxes: [] };
   const binding = getCurrentDataPlatformBinding();
-  const dataPlatformSourceKey = binding && normalizeFilePath(binding.projectRoot).toLowerCase() === normalizeFilePath(projectRoot).toLowerCase()
+  const dataPlatformSourceKey = projectRoot && binding && normalizeFilePath(binding.projectRoot).toLowerCase() === normalizeFilePath(projectRoot).toLowerCase()
     ? createDataPlatformSourceKey(binding.metadata.baseUrl) : undefined;
   const environmentSyncPending = Boolean(dataPlatformSourceKey && sharedProjectEnvironmentRoot
     && isDataPlatformEnvironmentSyncPending(`${dataPlatformSourceKey}:${path.resolve(sharedProjectEnvironmentRoot).toLowerCase()}`));
@@ -1002,7 +1004,7 @@ function mergeProjectAssets(
 }
 
 function createProjectAssetMergeKey(asset: ProjectModelAssetEntry): string {
-  if (asset.source === 'data-platform' && asset.dataPlatformSourceKey && asset.dataPlatformResourceId) {
+  if (asset.libraryKind === 'environment' && asset.source === 'data-platform' && asset.dataPlatformSourceKey && asset.dataPlatformResourceId) {
     return `data-platform:${asset.dataPlatformSourceKey}:environment:${asset.dataPlatformResourceId}`;
   }
   const packageName = path.basename(asset.packagePath ?? path.dirname(asset.path));

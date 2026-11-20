@@ -10,7 +10,7 @@ import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeR
 import { validateSceneLightingBakeSnapshot } from '../shared/sceneLightingBakeContract.js';
 import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 import { encodeAssetUrl } from './assetRegistry.js';
-import { createDataPlatformModelRuntimeRevision, readDataPlatformModelIndex, type DataPlatformModelIndex } from './dataPlatformModelIndex.js';
+import { createDataPlatformModelRuntimeRevision, getPinnedModelScriptOrderPath, readDataPlatformModelIndex, type DataPlatformModelIndex } from './dataPlatformModelIndex.js';
 import { scanModelPackage, validateGlbModelFile } from './modelPackageScanner.js';
 import { createSourceResourcePlan } from './digitalTwinSourceResourcePlan.js';
 
@@ -72,7 +72,7 @@ export async function recoverLocalSceneResourcePaths(options: RecoverLocalSceneR
       reference.owner.fixedInspection, reference.owner.value.versionId, reference.owner.value.contentSha256]);
     const group = groups.get(key) ?? []; group.push(reference); groups.set(key, group);
   }
-  const resolver = new ResourceResolver(options);
+  const resolver = new ResourceResolver(options, collectSavedPinnedScriptOrders(references));
   const resolutions = new Map<Reference[], Resolution>();
   const queue = [...groups.values()]; let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
@@ -189,6 +189,38 @@ function inferResourceIdentity(file: string): { kind: LocalSceneResourceKind; re
   return environment ? { kind: 'environment', resourceId: environment[1] } : undefined;
 }
 
+function normalizePinnedScriptNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_PACKAGE_FILES) return undefined;
+  const names: string[] = [];
+  for (const name of value) {
+    if (typeof name !== 'string' || path.win32.basename(name) !== name || name.includes(':') || containsAsciiControlCharacters(name)
+      || !/\.ts$/i.test(name) || /\.d\.ts$/i.test(name)) return undefined;
+    names.push(name);
+  }
+  return new Set(names.map(name => name.toLowerCase())).size === names.length ? names : undefined;
+}
+
+/** 旧缓存没有顺序记录时，使用保存的模型脚本名作为校验线索。 */
+function collectSavedPinnedScriptOrders(references: readonly Reference[]): Map<string, string[]> {
+  const result = new Map<string, string[]>();
+  const seen = new Set<ResourceOwner>();
+  for (const { owner, sourcePath } of references) {
+    if (seen.has(owner) || (owner.kind !== 'model' && owner.kind !== 'combo') || owner.fixedInspection) continue;
+    const scripts = owner.value.scriptAssets;
+    if (!Array.isArray(scripts) || !scripts.length) continue;
+    const revision = /\/scene-model-versions\/[a-f\d]{64}\/([a-f\d]{64})\//i.exec(sourcePath.replace(/\\/g, '/'))?.[1].toLowerCase();
+    if (!revision) continue;
+    seen.add(owner);
+    if (result.has(revision)) continue;
+    const names = normalizePinnedScriptNames(scripts.map(script => {
+      const file = object(script)?.path;
+      return typeof file === 'string' ? path.win32.basename(file) : undefined;
+    }));
+    if (names) result.set(revision, names);
+  }
+  return result;
+}
+
 class ResourceResolver {
   private readonly files = new Map<string, Promise<{ real: string; isFile: boolean; size: number }>>();
   private readonly models = new Map<string, Promise<void>>();
@@ -199,7 +231,10 @@ class ResourceResolver {
   private sharedIndex?: Promise<DataPlatformModelIndex | null>;
   private readonly workspace: string;
   private readonly project: string | null;
-  constructor(private readonly options: RecoverLocalSceneResourcePathsOptions) {
+  constructor(
+    private readonly options: RecoverLocalSceneResourcePathsOptions,
+    private readonly savedScriptOrders: ReadonlyMap<string, string[]>,
+  ) {
     this.workspace = path.resolve(options.workspaceRoot);
     this.project = options.projectRoot ? path.resolve(options.projectRoot) : null;
   }
@@ -424,19 +459,37 @@ class ResourceResolver {
         if (entries.some(entry => entry.isSymbolicLink())) throw new Error('模型版本包不能包含符号链接。');
         const scan = await scanModelPackage(packageRoot), asset = scan.asset;
         if (!asset?.metadataPath) throw new Error('模型版本包缺少可验证的主模型或元数据。');
-        for (const file of [asset.path, asset.metadataPath, ...(asset.scriptPaths ?? []), ...(asset.thumbnailPath ? [asset.thumbnailPath] : [])]) await this.requireFile(packageRoot, file, false);
+        const scriptNames = await this.readPinnedScriptOrder(packageRoot) ?? this.savedScriptOrders.get(expectedRevision.toLowerCase());
+        const scriptPaths = scriptNames?.map(name => path.join(packageRoot, name)) ?? asset.scriptPaths ?? [];
+        for (const file of [asset.path, asset.metadataPath, ...scriptPaths, ...(asset.thumbnailPath ? [asset.thumbnailPath] : [])]) {
+          await this.requireFile(packageRoot, file, false);
+        }
         const revision = await createDataPlatformModelRuntimeRevision({ modelPath: asset.path, metadataPath: asset.metadataPath,
-          scriptPaths: asset.scriptPaths ?? [], thumbnailPath: asset.thumbnailPath });
+          scriptPaths, thumbnailPath: asset.thumbnailPath });
         if (revision.runtimeRevision !== expectedRevision.toLowerCase()) throw new Error('候选模型包内容与场景固定版本不一致。');
         // 新版固定包的布局指纹包含缩略图，避免只校验主模型就接受已被改写的资源。
         const layout = createHash('sha256').update(JSON.stringify({ mainFile: path.basename(asset.path),
           thumbnailPath: asset.thumbnailPath ? path.relative(packageRoot, asset.thumbnailPath).replace(/\\/g, '/') : null,
           thumbnailRevision: revision.thumbnailRevision })).digest('hex').slice(0, 12);
         cancel(this.options.signal);
-        return { layout, files: [asset.path, asset.metadataPath, ...(asset.scriptPaths ?? [])] };
+        return { layout, files: [asset.path, asset.metadataPath, ...scriptPaths] };
       })(); this.versions.set(key, result);
     }
     return result;
+  }
+
+  private async readPinnedScriptOrder(packageRoot: string): Promise<string[] | undefined> {
+    const file = getPinnedModelScriptOrderPath(packageRoot);
+    try {
+      const { real, size } = await this.requireFile(path.dirname(packageRoot), file, false);
+      if (size > 1024 * 1024) throw new Error('固定模型脚本顺序记录超出大小限制。');
+      const names = normalizePinnedScriptNames(JSON.parse(await fs.readFile(real, 'utf8')));
+      if (!names) throw new Error('固定模型脚本顺序记录格式无效。');
+      return names;
+    } catch (error) {
+      if (isMissing(error)) return undefined;
+      throw error;
+    }
   }
 
   private async verifySkyboxHeader(file: string, extension: string): Promise<void> {

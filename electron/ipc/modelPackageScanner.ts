@@ -14,7 +14,7 @@ import { analyzeGltfJson, DEFAULT_THRESHOLDS } from '../shared/modelDensityAnaly
 import type { SourceModelDensity } from '../shared/modelDensityTypes.js';
 
 const MODEL_EXTENSIONS = new Set(['.glb', '.gltf']);
-const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const MODEL_THUMBNAIL_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 export const MAX_GLB_MODEL_FILE_BYTES = MAX_GLB_FILE_BYTES;
 const MAX_GLB_JSON_CHUNK_BYTES = 64 * 1024 * 1024;
 const GLB_JSON_CHUNK_TYPE = 0x4e4f534a;

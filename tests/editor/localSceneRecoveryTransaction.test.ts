@@ -53,12 +53,15 @@ function fixture() {
     applyAvailableSceneModelUpdates: (scene: any, replacements: any[]) => ({
       scene: { ...scene, modelVersion: replacements[0]?.asset.assetRevision }, issues: [], updatedCount: replacements.length,
     }),
+    getSceneProjectOpenContext: () => null,
     getRequiredEnvironmentResourceIds: () => [],
     reportSceneModelSyncProgress: (_session: string, progress: any) => events.push(progress.phase),
     beginSceneModelAssetRefresh: () => events.push('refresh'), settleSceneModelAssetRefresh: () => events.push('settled'),
     allowScenePreparationEditing: (_session: string, allowed: boolean) => { if (allowed) events.push('editing-unlocked'); },
     environmentPreparationStore: { clearError() {}, fail: (_session: string, error: string) => events.push('error:' + error) },
-    loadProjectAssets: () => { throw new Error('恢复期间禁止全库覆盖本地场景版本'); },
+    loadProjectAssets: async (options?: { refreshModels?: boolean }) => {
+      assert.ok(!options?.refreshModels); events.push('library'); return { ok: true };
+    },
     pushLog() {}, requestEnvironmentApply() {}, crypto: { randomUUID: () => 'refresh' },
   });
   return { state, original, resolve, cleanup, events, request: () => requested };
@@ -112,6 +115,8 @@ test('本地打开先替换中台新版模型，再恢复其他依赖并一次�
     modelReplacements: [{ sourceUrls: ['old'], asset: { assetRevision: 'new' } }] });
   await tick();
   assert.equal(f.request().mode, 'local-recovery');
+  assert.equal(f.request().skipModelDownloads, true);
+  assert.ok(f.events.includes('library'));
   assert.equal(JSON.parse(f.request().sceneContent).modelVersion, 'new');
   assert.equal(f.state.scene.modelVersion, 'new');
   assert.equal(f.state.scene.entities.m.parameter, 123);

@@ -35,7 +35,7 @@ export async function recoverPinnedLocalSceneModel(options: Options) {
   for (const version of versions) {
     options.signal.throwIfAborted();
     if (typeof version.fileUrl !== 'string' || !version.fileUrl) continue;
-    const historical = { ...record };
+    const historical: Record<string, unknown> = { ...record, versions: undefined, currentVersionId: version.versionId };
     for (const field of fields) historical[field] = version[field] ?? null;
     const key = JSON.stringify(fields.map(field => historical[field]));
     if (seen.has(key)) continue;

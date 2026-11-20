@@ -8,6 +8,7 @@ import type { DataPlatformEnvironmentRecord } from './dataPlatformEnvironmentCon
 import { readUtf8File } from '../shared/strictUtf8.js';
 import { MAX_GLB_FILE_BYTES } from '../shared/glbFilePolicy.js';
 import { validateEnvironmentFile } from './environmentFileValidation.js';
+import { getDataPlatformThumbnailExtension, MAX_THUMBNAIL_FILE_BYTES } from './dataPlatformModelThumbnail.js';
 
 const require = createRequire(import.meta.url);
 type AssetRegistryModule = typeof import('./assetRegistry.js');
@@ -21,6 +22,19 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const DECIMAL_PATTERN = /^[1-9]\d{0,63}$/;
 const SOURCE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T/;
+
+export type EnvironmentThumbnailFile = {
+  sha256: string;
+  extension: string;
+  sizeBytes: number;
+};
+
+export type EnvironmentThumbnail = {
+  /** 最近确认的目录记录时间。null 表示下次定向同步也要重新查询。 */
+  updatedAt: string | null;
+  /** null 表示目录已确认没有配图，旧索引没有 thumbnail 则表示尚未查询。 */
+  file: EnvironmentThumbnailFile | null;
+};
 
 export type DataPlatformEnvironmentIndexEntry = {
   sourceKey: string;
@@ -37,6 +51,7 @@ export type DataPlatformEnvironmentIndexEntry = {
   syncedAt: string;
   lastUsedAt: string;
   warning: string | null;
+  thumbnail?: EnvironmentThumbnail;
 };
 
 export type DataPlatformEnvironmentIndex = {
@@ -79,6 +94,34 @@ export function getDataPlatformEnvironmentRelativePath(
   assertDecimal(resourceId, '环境模型资源 ID');
   assertDecimal(fileRevision, '环境模型文件修订');
   return `${MANAGED_CACHE_PREFIX}${sourceKey}/${resourceId}/${fileRevision}/model.glb`;
+}
+
+export function getEnvironmentThumbnailRelativePath(
+  entry: DataPlatformEnvironmentIndexEntry,
+  file: EnvironmentThumbnailFile,
+): string {
+  if (!SHA256_PATTERN.test(file.sha256) || !isThumbnailExtension(file.extension)) {
+    throw new Error('环境缩略图文件身份无效。');
+  }
+  const modelPath = getDataPlatformEnvironmentRelativePath(entry.sourceKey, entry.resourceId, entry.fileRevision);
+  return path.posix.join(path.posix.dirname(modelPath), `thumbnail-${file.sha256}${file.extension}`);
+}
+
+/** 仅暴露当前模型包内可读取且内容与索引一致的图片。 */
+export async function getCachedEnvironmentThumbnailPath(
+  editorRoot: string,
+  entry: DataPlatformEnvironmentIndexEntry,
+  file: EnvironmentThumbnailFile,
+): Promise<string | undefined> {
+  try {
+    const target = resolveEnvironmentIndexEntryPath(editorRoot, getEnvironmentThumbnailRelativePath(entry, file));
+    await assertTrustedEnvironmentPath(editorRoot, target, '环境缩略图缓存');
+    const stat = await fs.lstat(target);
+    if (!stat.isFile() || stat.size !== file.sizeBytes || stat.size <= 0 || stat.size > MAX_THUMBNAIL_FILE_BYTES) return undefined;
+    return await hashFileSha256(target) === file.sha256 ? target : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveEnvironmentIndexEntryPath(editorRoot: string, relativePath: string): string {
@@ -183,6 +226,15 @@ export async function listIndexedDataPlatformEnvironments(
       if (stat.size !== entry.fileSizeBytes) throw new Error('缓存文件大小与索引不一致。');
       await validateEnvironmentFile(filePath, { expectedSize: entry.fileSizeBytes, expectedSha256: entry.fileSha256 });
       const asset = createEnvironmentAsset(entry, filePath);
+      const thumbnail = entry.thumbnail?.file;
+      if (thumbnail) {
+        const thumbnailPath = await getCachedEnvironmentThumbnailPath(editorRoot, entry, thumbnail);
+        if (thumbnailPath) {
+          asset.thumbnailPath = thumbnailPath;
+          asset.thumbnailUrl = encodeAssetUrl(thumbnailPath);
+          asset.thumbnailRevision = thumbnail.sha256;
+        }
+      }
       if (entry.status === 'active') assets.push(asset);
       else staleAssets.push(asset);
     } catch (error) {
@@ -218,6 +270,10 @@ export function buildDataPlatformEnvironmentPlan(options: {
 
   for (const record of [...options.records].sort((a, b) => compareDecimalStrings(a.id, b.id))) {
     const previous = currentById.get(record.id);
+    if (options.requiredResourceIds && !options.requiredResourceIds.has(record.id)) {
+      if (previous) entries.push({ ...previous });
+      continue;
+    }
     if (record.fileStatus !== 'GLB_READY') {
       if (previous) {
         entries.push({ ...previous, status: 'stale', syncedAt, warning: record.warning ?? `远端状态：${record.fileStatus}` });
@@ -227,16 +283,14 @@ export function buildDataPlatformEnvironmentPlan(options: {
     }
     const relativePath = getDataPlatformEnvironmentRelativePath(sourceKey, record.id, record.fileRevision!);
     const next = createActiveEntry(sourceKey, record, relativePath, syncedAt, previous?.lastUsedAt ?? syncedAt);
+    if (previous?.relativePath === relativePath && previous.thumbnail) {
+      next.thumbnail = previous.thumbnail;
+    }
     const hasContent = previous
       && previous.fileSha256 === next.fileSha256
       && previous.fileSizeBytes === next.fileSizeBytes
       && previous.relativePath === relativePath
       && options.existingPaths.has(relativePath);
-    if (options.requiredResourceIds && !options.requiredResourceIds.has(record.id) && !hasContent) {
-      // 未引用资源不下载；只保留已有兼容缓存，不把不存在的新文件写成active。
-      if (previous) entries.push({ ...previous, status: 'stale', warning: '当前场景未引用，远端新修订尚未同步。' });
-      continue;
-    }
     if (!hasContent) downloads.push({ record: { ...record }, relativePath });
     if (!previous || !hasSameSemanticState(previous, next)) changedResourceIds.push(record.id);
     entries.push(next);
@@ -362,7 +416,9 @@ function normalizeIndexEntry(value: unknown): DataPlatformEnvironmentIndexEntry 
   if (typeof value.fileSha256 !== 'string' || !SHA256_PATTERN.test(value.fileSha256)) throw new Error('环境模型索引 SHA-256 无效。');
   const lengthUnit = value.lengthUnit;
   if (lengthUnit !== 'meter' && lengthUnit !== 'centimeter' && lengthUnit !== 'millimeter') throw new Error('环境模型索引单位无效。');
+  const thumbnail = normalizeEnvironmentThumbnail(value.thumbnail);
   return {
+    ...(thumbnail && { thumbnail }),
     sourceKey,
     resourceId,
     displayName: readNonEmptyString(value.displayName, 'displayName'),
@@ -378,6 +434,21 @@ function normalizeIndexEntry(value: unknown): DataPlatformEnvironmentIndexEntry 
     lastUsedAt: normalizeTimestamp(value.lastUsedAt),
     warning: value.warning === null ? null : readNonEmptyString(value.warning, 'warning'),
   };
+}
+
+function isThumbnailExtension(value: unknown): value is string {
+  return typeof value === 'string' && getDataPlatformThumbnailExtension(`thumbnail${value}`) === value;
+}
+
+function normalizeEnvironmentThumbnail(value: unknown): EnvironmentThumbnail | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const { updatedAt, file } = value;
+  if (updatedAt !== null && (typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt)))) return undefined;
+  if (file === null) return { updatedAt, file: null };
+  if (!isPlainObject(file) || typeof file.sha256 !== 'string' || !SHA256_PATTERN.test(file.sha256) || !isThumbnailExtension(file.extension)
+    || typeof file.sizeBytes !== 'number' || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes <= 0
+    || file.sizeBytes > MAX_THUMBNAIL_FILE_BYTES) return undefined;
+  return { updatedAt, file: { sha256: file.sha256, extension: file.extension, sizeBytes: file.sizeBytes } };
 }
 
 function hasSameSemanticState(a: DataPlatformEnvironmentIndexEntry, b: DataPlatformEnvironmentIndexEntry): boolean {

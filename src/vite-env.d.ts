@@ -364,6 +364,7 @@ type AssetEntry = {
   assetRevision?: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
+  thumbnailRevision?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
   packagePath?: string;
   metadataPath?: string;

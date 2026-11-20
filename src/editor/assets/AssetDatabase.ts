@@ -25,6 +25,7 @@ export type AssetEntry = {
   assetRevision?: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
+  thumbnailRevision?: string;
   kind: 'folder' | 'model' | 'texture' | 'scene' | 'unknown';
   packagePath?: string;
   metadataPath?: string;
@@ -236,6 +237,8 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (metadataPath) asset.metadataPath = metadataPath;
     if (thumbnailPath) asset.thumbnailPath = thumbnailPath;
     if (thumbnailUrl) asset.thumbnailUrl = thumbnailUrl;
+    const thumbnailRevision = readOptionalString(payload, 'thumbnailRevision');
+    if (thumbnailRevision) asset.thumbnailRevision = thumbnailRevision;
     if (scriptPaths) asset.scriptPaths = scriptPaths;
     if (scriptAssets) asset.scriptAssets = scriptAssets;
     Object.assign(asset, modelRuntimeCapabilitiesField(payload.runtimeCapabilities));

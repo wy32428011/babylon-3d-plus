@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -20,13 +21,13 @@ app.getAppPath = () => path.resolve();
 let server, bridge, viewer, service;
 protocol.registerSchemesAsPrivileged([{ scheme: 'editor-asset', privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true } }]);
 
-function glb(version) {
+function glb() {
   const positions = new Float32Array([-1, 0, 0, 1, 0, 0, 0, 2, 0]);
   const json = Buffer.from(JSON.stringify({ asset: { version: '2.0' }, buffers: [{ byteLength: positions.byteLength }],
     bufferViews: [{ buffer: 0, byteLength: positions.byteLength }],
     accessors: [{ bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [-1, 0, 0], max: [1, 2, 0] }],
-    materials: [{ name: 'paint', doubleSided: true, emissiveFactor: version === 1 ? [1, 0, 0] : [0, 1, 0],
-      pbrMetallicRoughness: { baseColorFactor: version === 1 ? [1, 0, 0, 1] : [0, 1, 0, 1], metallicFactor: 0 } }],
+    materials: [{ name: 'paint', doubleSided: true, emissiveFactor: [1, 0, 0],
+      pbrMetallicRoughness: { baseColorFactor: [1, 0, 0, 1], metallicFactor: 0 } }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0 }, material: 0 }] }],
     nodes: [{ name: 'Body', mesh: 0 }], scenes: [{ nodes: [0] }], scene: 0 }));
   const n = Math.ceil(json.length / 4) * 4, out = Buffer.alloc(28 + n + positions.byteLength);
@@ -48,10 +49,14 @@ async function run() {
   const bindings = await import('../../dist-electron/ipc/dataPlatformBindingStore.js');
   const assets = await import('../../dist-electron/ipc/projectAssetStore.js');
   const { encodeAssetUrl, authorizeAssetFile, isAuthorizedAssetFile, decodeAssetUrl } = await import('../../dist-electron/ipc/assetRegistry.js');
+  const { resolveEditorAssetImageContentType } = await import('../../dist-electron/ipc/editorAssetCacheHeaders.js');
   protocol.handle('editor-asset', async request => {
     const filePath = decodeAssetUrl(request.url);
     if (!isAuthorizedAssetFile(filePath)) return new Response('Forbidden', { status: 403 });
-    return new Response(await readFile(filePath), { headers: { 'Access-Control-Allow-Origin': '*' } });
+    const contentType = resolveEditorAssetImageContentType(filePath);
+    return new Response(await readFile(filePath), {
+      headers: { 'Access-Control-Allow-Origin': '*', ...(contentType ? { 'Content-Type': contentType } : {}) },
+    });
   });
   const { buildDigitalTwinSourcePackage } = await import('../../dist-electron/ipc/digitalTwinSourcePackage.js');
   const { buildDigitalTwinDistPackage } = await import('../../dist-electron/ipc/digitalTwinDistPackage.js');
@@ -61,30 +66,102 @@ async function run() {
       transaction: 'src/editor/assets/sceneModelSyncTransaction.ts' }, output: { entryFileNames: '[name].mjs' } } } });
   const [{ applySceneModelUpdates }, document, serializer, { createViewerModelClickHandler }, { runSceneModelSyncTransaction }] = await Promise.all(
     ['apply', 'document', 'serializer', 'click', 'transaction'].map(name => import(pathToFileURL(path.join(moduleRoot, name + '.mjs')).href)));
-  let revision = 1, downloads = 0;
-  const requests = [], distFiles = new Map();
+  let metadataVersion = 1, scriptVersion = 1, downloads = 0;
+  let extraCatalogRecords = [], detailName, includeCombo = false;
+  const requests = [], detailIds = [], distFiles = new Map();
+  const geometry = glb();
+  const thumbnail = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  const thumbnailRoute = '/api/v1/files/model-cover';
+  const environmentRecord = {
+    id: '125', modelName: '环境模型', fileStatus: 'GLB_READY', fileName: 'environment.glb',
+    fileSizeBytes: String(geometry.length), fileSha256: createHash('sha256').update(geometry).digest('hex'),
+    fileRevision: '1', runtimeRevision: '1', lengthUnit: 'meter', downloadUrl: '/files/model.glb',
+    updatedAt: '2026-11-19T12:00:00',
+  };
+  const script = version => `export default class RuntimeComponent {
+    constructor(private node: import('@babylonjs/core').TransformNode) {}
+    onStart() {
+      for (const mesh of this.node.getChildMeshes()) {
+        const material = mesh.material;
+        material?.emissiveColor?.set(${version === 1 ? '1, 0, 0' : '0, 1, 0'});
+        material?.albedoColor?.set(${version === 1 ? '1, 0, 0' : '0, 1, 0'});
+      }
+    }
+  }`;
+  const modelRecord = () => ({ id: '123', modelName: 'fixture', fileName: 'model.glb', fileUrl: '/files/model.glb',
+    thumbnailUrl: thumbnailRoute, updatedAt: '2026-11-19T12:00:00',
+    metaFileUrl: `/files/v${metadataVersion}.json`, currentVersionId: `90071992547409${metadataVersion}${scriptVersion}`,
+    scriptFiles: [{ fileName: 'z-fixture.ts', fileUrl: `/files/v${scriptVersion}.ts` },
+      { fileName: 'a-hook.model.ts', fileUrl: '/files/hook.ts' }] });
   server = createServer(async (request, response) => {
     const route = new URL(request.url, 'http://test').pathname;
     requests.push(route);
     response.setHeader('Connection', 'close');
+    if (route === '/editor') {
+      response.setHeader('Content-Type', 'text/html');
+      response.end('<!doctype html><title>同步桥接验证</title>');
+      return;
+    }
     if (route === '/api/v1/digital-twin/runtime-config/detail') {
       request.resume(); response.setHeader('Content-Type', 'application/json');
       response.end(JSON.stringify({ success: true, data: { projectId: '11', runtimeEnabled: true, configJson: '{}' } })); return;
     }
+    if (route === '/api/v1/env-models/sync-manifest/query') {
+      request.resume(); response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({ success: true, data: { protocolVersion: '1', manifestRevision: '1',
+        nextCursorId: null, hasMore: false, records: [environmentRecord] } }));
+      return;
+    }
     if (route === '/api/v1/models/detail') {
       let raw = ''; for await (const chunk of request) raw += chunk;
-      assert.equal(JSON.parse(raw).id, '123');
+      const { id } = JSON.parse(raw);
       response.setHeader('Content-Type', 'application/json');
-      response.end(JSON.stringify({ success: true, data: { id: '123', modelName: 'fixture', fileName: 'model.glb',
-        fileUrl: `/files/v${revision}.glb`, metaFileUrl: `/files/v${revision}.json`, revision: String(revision) } })); return;
+      detailIds.push(id);
+      const current = modelRecord();
+      const older = { versionId: '1', versionNumber: 1, fileName: 'old.glb', fileUrl: '/history/old.glb',
+        metaFileUrl: '/history/old.json', scriptFiles: [{ fileName: 'old.ts', fileUrl: '/history/old.ts' }] };
+      const latest = { versionId: current.currentVersionId, versionNumber: 10 * metadataVersion + scriptVersion,
+        fileName: current.fileName, fileUrl: current.fileUrl, metaFileUrl: current.metaFileUrl,
+        scriptFiles: current.scriptFiles };
+      // 模型主记录可能仍指向旧文件，目录和 currentVersionId 指向同一份最新版快照。
+      const data = { ...current, fileUrl: older.fileUrl, metaFileUrl: older.metaFileUrl, scriptFiles: older.scriptFiles,
+        modelName: detailName ?? 'fixture', versions: [latest, older] };
+      response.end(JSON.stringify(id === '123' ? { success: true, data }
+        : { success: false, code: 'MODEL_NOT_FOUND', message: '模型不存在' }));
+      return;
     }
-    const version = /\/files\/v(\d)\.(glb|json)$/.exec(route);
-    if (version) {
+    if (route.endsWith('/query')) {
+      let raw = ''; for await (const chunk of request) raw += chunk;
+      const { pageNum, pageSize } = JSON.parse(raw);
+      const records = route === '/api/v1/models/query' ? [modelRecord(), ...extraCatalogRecords]
+        : route === '/api/v1/env-models/query' ? [{ ...environmentRecord, thumbnailUrl: thumbnailRoute }]
+        : route === '/api/v1/combo-models/query' && includeCombo ? [{ id: '124', comboModelName: '组合模型',
+          fileName: 'model.glb', fileUrl: '/files/model.glb', thumbnailUrl: thumbnailRoute,
+          updatedAt: '2026-11-19T12:00:00' }] : [];
+      response.setHeader('Content-Type', 'application/json');
+      response.end(JSON.stringify({ success: true, data: { records, pageNum, pageSize, total: records.length } }));
+      return;
+    }
+    if (route === thumbnailRoute) {
       downloads++;
-      const content = version[2] === 'glb' ? glb(Number(version[1]))
-        : Buffer.from(JSON.stringify({ lengthUnit: 'meter', modelParameters: config(Number(version[1])) }));
-      response.setHeader('Content-Type', version[2] === 'glb' ? 'model/gltf-binary' : 'application/json');
-      response.end(content); return;
+      response.setHeader('Content-Type', 'image/gif');
+      response.end(thumbnail);
+      return;
+    }
+    if (route === '/files/model.glb' || route === '/files/hook.ts' || /^\/files\/v\d\.(json|ts)$/.test(route)) {
+      downloads++;
+      const version = Number(/v(\d)/.exec(route)?.[1]);
+      if (route.endsWith('.glb')) {
+        response.setHeader('Content-Type', 'model/gltf-binary');
+        response.end(geometry);
+      } else if (route.endsWith('.ts')) {
+        response.setHeader('Content-Type', 'text/plain');
+        response.end(route.endsWith('/hook.ts') ? 'export class FixtureHelper {}' : script(version));
+      } else {
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({ lengthUnit: 'meter', modelParameters: config(version) }));
+      }
+      return;
     }
     const file = distFiles.get(route.replace(/^\/viewer\//, ''));
     if (file) {
@@ -103,9 +180,14 @@ async function run() {
     baseUrl, webBaseUrl: baseUrl, workspaceRoot, projectId: '11', projectName: '模型同步集成验证', editorProjectId: null,
     latestVersionId: null, latestVersionNumber: null, resourceRevision: '1', entryScenePath: null, syncedAt: new Date().toISOString() }));
   await assets.activateProjectRoot(projectRoot);
+  const { executeDataPlatformModelSync } = await import('../../dist-electron/ipc/dataPlatformModelIncrementalSync.js');
+  const { getPinnedModelScriptOrderPath } = await import('../../dist-electron/ipc/dataPlatformModelIndex.js');
+  await executeDataPlatformModelSync({ baseUrl, editorRoot: sharedResourcesRoot });
+  requests.length = 0;
   const oldPath = path.join(projectRoot, 'Assets', 'Models', 'Model-123-fixture', 'model.glb');
-  await mkdir(path.dirname(oldPath), { recursive: true }); await writeFile(oldPath, glb(1)); authorizeAssetFile(oldPath);
+  await mkdir(path.dirname(oldPath), { recursive: true }); await writeFile(oldPath, geometry); authorizeAssetFile(oldPath);
   const scene = document.createEmptySceneDocument('最新模型参数保留');
+  scene.sceneSettings.lighting.bake.enabled = false;
   scene.sceneSettings.camera.savedPose = { alpha: -Math.PI / 2, beta: Math.PI / 2, radius: 15,
     target: { x: 2.5, y: 1, z: 0 } };
   const models = [1, 2].map((width, index) => {
@@ -121,27 +203,65 @@ async function run() {
     chart: { id: 'chart-1', name: '设备大屏', projectId: '11', screenId: 'screen-1' } }];
   scene.entityIds.push(click.id); scene.entities[click.id] = click;
   ipcMain.handle('data-platform:prepareLocalSceneResources', (_event, request) => service.prepareLocalSceneResources(baseUrl, workspaceRoot, request));
-  bridge = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve('dist-electron/preload.cjs'), contextIsolation: true, sandbox: true } });
-  await bridge.loadURL('data:text/html,<title>同步桥接验证</title>');
-  const prepare = async (document, mode = 'data-platform-latest') => bridge.webContents.executeJavaScript(`window.editorApi.prepareLocalSceneResources(${JSON.stringify({ mode, sceneContent: serializer.serializeScene(document) })})`);
+  ipcMain.handle('project:listAssets', () => assets.listProjectAssets());
+  const editorUrl = baseUrl + '/editor';
+  bridge = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve('dist-electron/preload.cjs'),
+    contextIsolation: true, sandbox: true, additionalArguments: [`--editor-entry-url=${encodeURIComponent(editorUrl)}`] } });
+  await bridge.loadURL(editorUrl);
+  assert.equal(await bridge.webContents.executeJavaScript('typeof window.editorApi?.prepareLocalSceneResources'), 'function');
+  const prepare = async (document, mode = 'data-platform-latest', options = {}) => bridge.webContents.executeJavaScript(`window.editorApi.prepareLocalSceneResources(${JSON.stringify({ ...options, mode, sceneContent: serializer.serializeScene(document) })})`);
   const first = await prepare(scene);
+  assert.deepEqual(first.issues, [], '中台最新版模型、meta、TS 和当前缩略图均可用');
   const firstScene = applySceneModelUpdates(scene, first.modelReplacements, first.sourceKey).scene;
   const firstPath = first.modelAssets[0].path;
-  revision = 2;
+  const listLibrary = () => bridge.webContents.executeJavaScript('window.editorApi.listProjectAssets()');
+  const [firstCard] = (await listLibrary()).assets;
+  assert.equal(firstCard.assetRevision, first.modelAssets[0].assetRevision);
+  async function verifyThumbnail(asset) {
+    assert.equal(path.extname(asset.thumbnailPath), '.gif');
+    assert.deepEqual(await readFile(asset.thumbnailPath), thumbnail);
+    assert.match(asset.thumbnailRevision, /^[a-f0-9]{64}$/);
+    const thumbnailUrl = new URL(asset.thumbnailUrl);
+    thumbnailUrl.searchParams.set('v', asset.thumbnailRevision);
+    const width = await bridge.webContents.executeJavaScript(`(async () => {
+      const image = new Image();
+      image.src = ${JSON.stringify(thumbnailUrl.href)};
+      await image.decode();
+      return image.naturalWidth;
+    })()`);
+    assert.equal(width, 1, '编辑器应能从本地资产协议解码缩略图');
+  }
+  await verifyThumbnail(firstCard);
+  metadataVersion = 2;
   let currentScene = firstScene;
   let result;
-  const transaction = await runSceneModelSyncTransaction({ sceneSessionId: 'integration', syncLibrary: false,
+  const sync = () => runSceneModelSyncTransaction({ sceneSessionId: 'integration', syncLibrary: false,
     getSnapshot: () => ({ sceneSessionId: 'integration', scene: currentScene }),
     prepare: async document => { result = await prepare(document, 'scene-latest'); return result; },
     apply: async (document, resources) => ({ ...applySceneModelUpdates(document, resources.modelReplacements, resources.sourceKey), issues: [] }),
     commit: (before, after) => { assert.equal(before, currentScene); currentScene = after; return true; },
   });
+  const transaction = await sync();
   assert.ok(transaction.updatedCount >= models.length);
   assert.ok(transaction.warnings.some(warning => /删除 1 项/.test(warning)), '删除参数只记录日志，不阻断模型替换');
-  const fetchedBytes = await bridge.webContents.executeJavaScript(`fetch(${JSON.stringify(result.modelAssets[0].sourceUrl)}).then(async response => { if (!response.ok) throw new Error('模型协议读取失败 ' + response.status); return (await response.arrayBuffer()).byteLength; })`);
-  assert.equal(fetchedBytes, glb(2).length, '实际 editor-asset 协议必须允许读取固定模型文件');
-  assert.equal(result.modelAssets.length, 1); assert.notEqual(result.modelAssets[0].path, firstPath);
-  assert.deepEqual(await readFile(firstPath), glb(1), '同步新版不能覆盖上一版本文件');
+  const metadataAsset = result.modelAssets[0];
+  assert.notEqual(metadataAsset.assetRevision, first.modelAssets[0].assetRevision, '仅 meta 变化也必须生成新版本');
+  assert.deepEqual(await readFile(metadataAsset.path), geometry);
+  const [metadataCard] = (await listLibrary()).assets;
+  assert.equal(metadataCard.assetRevision, metadataAsset.assetRevision, '定向下载完成即刷新同一模型卡片的修订');
+  assert.deepEqual(metadataCard.parameterConfig, config(2));
+  scriptVersion = 2;
+  await sync();
+  assert.equal(result.modelAssets.length, 1);
+  const scriptAsset = result.modelAssets[0];
+  assert.notEqual(scriptAsset.assetRevision, metadataAsset.assetRevision, '仅 TS 变化也必须生成新版本');
+  assert.deepEqual(await readFile(scriptAsset.metadataPath), await readFile(metadataAsset.metadataPath));
+  assert.deepEqual(await readFile(scriptAsset.path), geometry);
+  assert.deepEqual(await readFile(firstPath), geometry, '同步新版仍保留上一版本的固定包');
+  assert.equal(await readFile(first.modelAssets[0].scriptAssets[0].path, 'utf8'), script(1));
+  const fetchedBytes = await bridge.webContents.executeJavaScript(`fetch(${JSON.stringify(scriptAsset.sourceUrl)}).then(async response => { if (!response.ok) throw new Error('模型协议读取失败 ' + response.status); return (await response.arrayBuffer()).byteLength; })`);
+  assert.equal(fetchedBytes, geometry.length, '实际 editor-asset 协议必须允许读取固定模型文件');
+  assert.equal((await listLibrary()).assets[0].assetRevision, scriptAsset.assetRevision);
   const updated = currentScene;
   for (let i = 0; i < models.length; i++) {
     const current = updated.entities[models[i].id];
@@ -158,10 +278,62 @@ async function run() {
   assert.equal(localUpdated.entities[models[0].id].components.modelAsset.sourceUrl, result.modelAssets[0].sourceUrl,
     '打开本地旧场景也必须应用中台当前模型');
   assert.deepEqual(localUpdated.entities[models[1].id].components.modelAsset.parameterValues, { width: 2, enabled: false, label: '', speed: 5 });
+  const recovered = await prepare(localUpdated, 'local-recovery');
+  assert.deepEqual(recovered.issues, [], '本地恢复必须校验中台声明顺序的全部 TS 脚本');
+  const recoveredAsset = serializer.deserializeScene(recovered.recoveredSceneContent).entities[models[0].id].components.modelAsset;
+  assert.deepEqual(recoveredAsset.scriptAssets.map(script => script.name), ['z-fixture.ts', 'a-hook.model.ts']);
+  assert.equal(recoveredAsset.sourceUrl, scriptAsset.sourceUrl);
+  const slotOnly = { ...updated, entityIds: [click.id], entities: { [click.id]: updated.entities[click.id] } };
+  assert.deepEqual((await prepare(slotOnly, 'local-recovery')).issues, [], '轻量槽位无脚本列表时也能恢复固定版本');
+  const orderFile = getPinnedModelScriptOrderPath(scriptAsset.packagePath);
+  await rename(orderFile, orderFile + '.bak');
+  try {
+    assert.deepEqual((await prepare(updated, 'local-recovery')).issues, [], '旧固定包用场景保存的脚本顺序复算摘要');
+  } finally {
+    await rename(orderFile + '.bak', orderFile);
+  }
+  assert.deepEqual((await prepare(firstScene, 'local-recovery')).issues, [], '撤回到升级前的快照仍可恢复');
   const repeat = await prepare(updated);
   assert.equal(downloads, beforeRepeat, '相同资源版本再次打开无需下载');
   assert.equal(applySceneModelUpdates(updated, repeat.modelReplacements, repeat.sourceKey).scene, updated);
-  assert.ok(!requests.some(route => route.endsWith('/query')), '不能启动全库查询');
+  assert.ok(!requests.some(route => route.endsWith('/query')), '稳定资源 ID 不需要查询全库目录');
+  assert.ok(!requests.some(route => route.startsWith('/history/')), '同一模型只下载当前版的文件');
+
+  const missingPath = path.join(projectRoot, 'Assets', 'Models', 'Model-123-fixture', 'unavailable.glb');
+  const missing = document.createModelEntity(missingPath, encodeAssetUrl(missingPath), '待处理的旧引用');
+  missing.components.modelAsset.assetRevision = 'f'.repeat(64);
+  const unresolved = { ...scene, entityIds: [missing.id], entities: { [missing.id]: missing } };
+  const requestsBeforeRecovery = requests.length;
+  const dependencies = await prepare(unresolved, 'local-recovery', { skipModelDownloads: true });
+  assert.ok(dependencies.issues.some(issue => issue.resourceKind === 'model' && issue.resourceId === '123'));
+  assert.equal(requests.length, requestsBeforeRecovery, '依赖检查报告缺失的模型，不重新下载当前版或历史版');
+
+  const historicalPackage = path.basename(path.dirname(firstPath)).replace('Model-123-', 'Model-999-');
+  const historicalPath = path.join(projectRoot, 'Assets', 'Models', historicalPackage, 'model.glb');
+  const historicalReference = { sourcePath: historicalPath, sourceUrl: encodeAssetUrl(historicalPath) };
+  const historical = structuredClone(scene);
+  for (const model of models) Object.assign(historical.entities[model.id].components.modelAsset, historicalReference);
+  const historicalDevice = historical.entities[click.id].components.clickEventBinding.deviceSlots[0].deviceType;
+  Object.assign(historicalDevice, historicalReference);
+  const beforeMigration = detailIds.length;
+  const migrated = await prepare(historical);
+  assert.deepEqual(migrated.issues, []);
+  assert.deepEqual(detailIds.slice(beforeMigration), ['999', '123', '123']);
+  assert.equal(migrated.modelReplacements[0].asset.path, scriptAsset.path);
+  const migratedScene = applySceneModelUpdates(historical, migrated.modelReplacements, migrated.sourceKey).scene;
+  assert.equal(migratedScene.entities[models[0].id].components.modelAsset.dataPlatformModel.resourceId, '123');
+  assert.equal(migratedScene.entities[click.id].components.clickEventBinding.deviceSlots[0].deviceType.sourceUrl, scriptAsset.sourceUrl);
+
+  detailName = '详情名称已改';
+  const inconsistent = await prepare(historical);
+  assert.equal(inconsistent.modelReplacements.length, 0);
+  assert.match(inconsistent.issues[0].message, /匹配到 0 个候选/);
+  detailName = undefined;
+  extraCatalogRecords = [{ ...modelRecord(), id: '124' }];
+  const ambiguous = await prepare(historical);
+  assert.equal(ambiguous.modelReplacements.length, 0);
+  assert.match(ambiguous.issues[0].message, /匹配到 2 个候选/);
+  extraCatalogRecords = [];
   const entrySceneFilePath = path.join(projectRoot, 'Scenes', 'updated.scene.json');
   await writeFile(entrySceneFilePath, serializer.serializeScene(updated));
   const saved = serializer.deserializeScene(await readFile(entrySceneFilePath, 'utf8'));
@@ -181,7 +353,7 @@ async function run() {
   assert.deepEqual(published.entities[models[1].id].components.modelAsset.parameterValues, { width: 2, enabled: false, label: '', speed: 5 });
   assert.deepEqual(published.entities[models[1].id].components.modelAsset.parameterConfig, saved.entities[models[1].id].components.modelAsset.parameterConfig);
   const events = [], screens = [];
-  const handler = createViewerModelClickHandler(published, { updateSelection() {}, setSlotHighlight() {}, focusTarget() {}, triggerManualEvents() {},
+  const handler = createViewerModelClickHandler(published, { updateSelection() {}, setSlotHighlight() {}, setHighlightExcludeTrack() {}, focusTarget() {}, triggerManualEvents() {},
     emitAssetClicked: event => events.push(event), showScreen: screen => screens.push(screen) });
   handler(models[1].id);
   assert.equal(events[0].assetCode, 'DEVICE-1'); assert.equal(screens.length, 1);
@@ -219,10 +391,37 @@ async function run() {
   const widthRatio = modelWidths[1] / modelWidths[0];
   assert.ok(widthRatio > 1.8 && widthRatio < 2.2, `原参数应作用于实际模型几何，宽度比例 ${widthRatio}`);
   assert.deepEqual(browserErrors, []);
+
+  bindings.clearCurrentDataPlatformBinding();
+  assets.clearProjectAssetStoreSession();
+  assert.deepEqual((await listLibrary()).assets, [], '关闭会话后卸载定向模型库');
+  await prepare(scene, 'local-latest');
+  const rootlessLibrary = await listLibrary();
+  assert.equal(rootlessLibrary.projectRoot, null);
+  assert.deepEqual(rootlessLibrary.assets.map(asset => asset.assetRevision), [scriptAsset.assetRevision]);
+  assets.setSharedProjectAssetRoot(sharedResourcesRoot, 'a'.repeat(64));
+  assert.equal((await listLibrary()).assets[0].assetRevision, first.modelAssets[0].assetRevision,
+    '同一共享目录切换中台后，不显示旧来源的定向版本');
+  await prepare(scene, 'local-latest');
+  includeCombo = true;
+  await executeDataPlatformModelSync({ baseUrl, editorRoot: sharedResourcesRoot });
+  const { executeDataPlatformEnvironmentSync } = await import('../../dist-electron/ipc/dataPlatformEnvironmentSync.js');
+  await executeDataPlatformEnvironmentSync({ baseUrl, editorRoot: sharedResourcesRoot,
+    contextKey: service.createDataPlatformEnvironmentSyncContextKey(baseUrl, sharedResourcesRoot) });
+  const { assets: libraryAssets } = await listLibrary();
+  const libraryAsset = libraryAssets.find(asset => asset.displayName === 'fixture');
+  const comboAsset = libraryAssets.find(asset => asset.displayName === '组合模型');
+  assert.equal(libraryAsset.assetRevision, scriptAsset.assetRevision);
+  assert.equal(libraryAsset.path, path.join(sharedResourcesRoot, 'Assets', 'Models', 'Model-123-fixture', 'model.glb'),
+    '全库成功后使用已提交的共享索引');
+  await verifyThumbnail(libraryAsset);
+  await verifyThumbnail(comboAsset);
+  await verifyThumbnail(libraryAssets.find(asset => asset.displayName === '环境模型'));
   await writeFile(path.join(artifactRoot, 'result.json'), JSON.stringify({ passed: true, models: models.length, greenPixels,
     parameterValues: models.map(model => saved.entities[model.id].components.modelAsset.parameterValues),
     parameterDefaults: Object.fromEntries(saved.entities[models[0].id].components.modelAsset.parameterConfig.parameters.map(parameter => [parameter.key, parameter.defaultValue])),
     downloads, modelWidths, widthRatio, sourceFiles: source.resourceFiles.length, checks: ['actual-preload', 'explicit-scene-transaction', 'targeted-http', 'immutable-old-version', 'zero-download-repeat',
+      'library-revisions', 'rootless-library', 'script-only-update', 'fixed-package-recovery', 'legacy-source-id', 'local-thumbnail-decode',
       'instance-parameters', 'latest-parameter-config', 'removed-parameter-pruned', 'new-parameter-default', 'save-reopen', 'source-dist', 'viewer-click', 'real-viewer-webgl', 'rendered-parameter-width-ratio'] }, null, 2));
   console.log('PASS: 实际 preload → 定向 HTTP 最新模型 → 多实例参数保留 → 保存重开 → SOURCE/DIST → Viewer 点击与真实绿色模型渲染。');
   console.log('ARTIFACTS=' + artifactRoot);

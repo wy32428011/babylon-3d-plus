@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
+import { runSceneModelSyncTransaction } from '../../src/editor/assets/sceneModelSyncTransaction.ts';
 
 const source = (await readFile(new URL('../../src/editor/panels/ProjectPanel.tsx', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 const start = source.indexOf('  const startModelLibrarySync = useCallback(');
@@ -147,4 +148,47 @@ test('切换快照场景清除主动同步占用，新场景可再次同步', ()
   assert.equal(effects.explicitSceneSyncRef.current, null);
   assert.equal(effects.localResourcePreparingRef.current, false);
   assert.equal(effects.preparing, false);
+});
+
+test('主动同步提交或下载失败仍刷新模型库，切换会话后忽略旧结果', async () => {
+  const explicitStart = source.indexOf('  const startExplicitSceneModelSync = useCallback(');
+  const explicitEnd = source.indexOf('  explicitSceneSyncHandlerRef.current =', explicitStart);
+  assert.ok(explicitStart >= 0 && explicitEnd > explicitStart);
+  const explicitSync = stripTypeScriptTypes(source.slice(explicitStart, explicitEnd));
+  for (const scenario of [
+    { changedSession: false, libraryErrors: [], expected: ['commit', 'issue', 'library', 'library-error'] },
+    { changedSession: false, libraryErrors: ['环境下载失败'], expected: ['issue', 'library', 'library-error'] },
+    { changedSession: true, libraryErrors: [], expected: [] },
+  ]) {
+    let resolve!: (value: unknown) => void;
+    const prepared = new Promise(done => { resolve = done; });
+    const calls: string[] = [];
+    const state = { sceneSessionId: 'A', scene: { sceneSettings: {} }, runtimeMode: 'edit',
+      commitLatestSceneResources: () => { calls.push('commit'); return false; },
+      recordSceneResourceIssues: () => calls.push('issue') };
+    const scope: any = {
+      useCallback: (fn: unknown) => fn, props: {}, runSceneModelSyncTransaction,
+      useEditorStore: { getState: () => state }, serializeScene: JSON.stringify,
+      getSceneModelPublishSession: () => null, crypto: { randomUUID: () => 'test' },
+      explicitSceneSyncRef: { current: null }, localResourcePreparingRef: { current: false },
+      autoLibrarySyncSessionRef: { current: null }, setIsPreparingSceneResources() {},
+      window: { editorApi: { prepareLocalSceneResources: () => prepared } },
+      reportSceneModelSyncProgress() {}, beginSceneModelAssetRefresh() {}, settleSceneModelAssetRefresh() {},
+      environmentPreparationStore: { clearError() {}, fail() {} },
+      getRequiredEnvironmentResourceIds: () => [], loadEnvironmentFromAsset() {},
+      applyAvailableSceneModelUpdates: (scene: unknown) => ({ scene, updatedCount: 0, issues: [] }),
+      loadProjectAssets: (options: unknown) => {
+        assert.equal(options, undefined);
+        calls.push('library');
+        return { ok: false, error: '读取模型库失败' };
+      },
+      pushLog() {}, setLibraryStatuses: () => calls.push('library-error'),
+    };
+    runInNewContext([explicitSync, 'globalThis.start = startExplicitSceneModelSync;'].join(String.fromCharCode(10)), scope);
+    const pending = scope.start(true);
+    if (scenario.changedSession) state.sceneSessionId = 'B';
+    resolve({ configured: true, sourceKey: 'source', modelReplacements: [], environmentAssets: [], libraryErrors: scenario.libraryErrors });
+    await pending;
+    assert.deepEqual(calls, scenario.expected);
+  }
 });

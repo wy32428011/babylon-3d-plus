@@ -6,9 +6,12 @@ import path from 'node:path';
 import test, { after } from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-const [{ executeDataPlatformEnvironmentSync, createDataPlatformSourceKey }] = await importIsolatedTypeScriptModules<[
+const [{ executeDataPlatformEnvironmentSync, createDataPlatformSourceKey, getLatestDataPlatformEnvironmentSyncProgress }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformEnvironmentSync'),
 ]>(['electron/ipc/dataPlatformEnvironmentSync.ts'], { deferCleanup: (cleanup) => after(cleanup) });
+const [{ listIndexedDataPlatformEnvironments }] = await importIsolatedTypeScriptModules<[
+  typeof import('../../electron/ipc/dataPlatformEnvironmentIndex'),
+]>(['electron/ipc/dataPlatformEnvironmentIndex.ts'], { deferCleanup: (cleanup) => after(cleanup) });
 
 const SOURCE_URL = 'https://example.com/platform';
 const SOURCE_KEY = createDataPlatformSourceKey(SOURCE_URL);
@@ -68,7 +71,8 @@ function createDownload(bytesByUrl: ReadonlyMap<string, Buffer>, failures = new 
     await mkdir(path.dirname(options.destinationPath), { recursive: true });
     await writeFile(options.destinationPath, bytes);
     options.onBytes?.(bytes.byteLength);
-    return { bytes: bytes.byteLength, contentType: 'model/gltf-binary', finalUrl: options.remoteUrl, etag: '"fixture"', resumedBytes: 0 };
+    const contentType = options.remoteUrl.endsWith('.png') ? 'image/png' : 'model/gltf-binary';
+    return { bytes: bytes.byteLength, contentType, finalUrl: options.remoteUrl, etag: '"fixture"', resumedBytes: 0 };
   };
 }
 
@@ -85,6 +89,9 @@ test('同步清单修订变化时只重启一次并提交稳定快照', async ()
       runId: 'revision-retry',
       dependencies: {
         requestJson: async (options) => {
+          if (options.endpointPath === 'api/v1/env-models/query') {
+            return { success: true, data: { records: [record], total: 1, pageNum: 1, pageSize: 100 } };
+          }
           revisions.push((options.body as { manifestRevision: string | null }).manifestRevision);
           call += 1;
           if (call === 1) return { success: true, data: { protocolVersion: '1', manifestRevision: '1', records: [], nextCursorId: '1', hasMore: true } };
@@ -99,6 +106,71 @@ test('同步清单修订变化时只重启一次并提交稳定快照', async ()
     const index = JSON.parse(await readFile(path.join(editorRoot, '.babylon-editor', 'data-platform-environment-index.json'), 'utf8'));
     assert.equal(index.manifestRevision, '2');
     assert.equal(index.entries[0].status, 'active');
+  });
+});
+
+test('全库同步补齐缩略图，换封面失败后保留旧图且再次同步仅下载图片', async () => {
+  await withEditorRoot(async (editorRoot) => {
+    const bytes = createGlb();
+    const record = readyRecord('1', bytes);
+    let thumbnailUrl: string | null = '/thumbnail.png';
+    let servesLoginPage = false;
+    const downloads: string[] = [];
+    let directoryRequests = 0;
+    const oldThumbnail = Buffer.from('first thumbnail');
+    const newThumbnail = Buffer.from('second thumbnail');
+    const download = createDownload(new Map([
+      [record.downloadUrl, bytes], ['/thumbnail.png', oldThumbnail], ['/new-thumbnail.png', newThumbnail],
+    ]));
+    const sync = () => executeDataPlatformEnvironmentSync({
+      baseUrl: SOURCE_URL,
+      editorRoot,
+      contextKey: 'workspace:thumbnails',
+      dependencies: {
+        requestJson: async (options) => {
+          if (options.endpointPath === 'api/v1/env-models/sync-manifest/query') return manifest([record]);
+          assert.equal(options.endpointPath, 'api/v1/env-models/query');
+          directoryRequests += 1;
+          return { success: true, data: { records: [{ ...record, thumbnailUrl }], total: 1, pageNum: 1, pageSize: 100 } };
+        },
+        downloadFile: async (options) => {
+          downloads.push(options.remoteUrl);
+          const result = await download(options);
+          return servesLoginPage && options.remoteUrl === thumbnailUrl
+            ? { ...result, contentType: 'text/html' }
+            : result;
+        },
+      },
+    });
+    const loadAsset = async () => (await listIndexedDataPlatformEnvironments(editorRoot)).assets[0];
+
+    await sync();
+    const first = await loadAsset();
+    assert.deepEqual(await readFile(first.thumbnailPath!), oldThumbnail);
+    await sync();
+    assert.equal(directoryRequests, 1, '时间和本地图片均一致时跳过目录及下载');
+    assert.deepEqual(downloads, [record.downloadUrl, '/thumbnail.png']);
+
+    record.updatedAt = '2026-08-12T08:00:00.000Z';
+    thumbnailUrl = '/new-thumbnail.png';
+    servesLoginPage = true;
+    await sync();
+    assert.match(getLatestDataPlatformEnvironmentSyncProgress()?.message ?? '', /1 个缩略图未更新/);
+    assert.equal((await loadAsset()).thumbnailPath, first.thumbnailPath);
+    servesLoginPage = false;
+    await sync();
+    const second = await loadAsset();
+    assert.deepEqual(await readFile(second.thumbnailPath!), newThumbnail);
+    assert.notEqual(second.thumbnailUrl, first.thumbnailUrl);
+    assert.equal(second.assetRevision, first.assetRevision);
+    assert.equal(second.path, first.path);
+    assert.deepEqual(downloads.slice(2), [thumbnailUrl, thumbnailUrl]);
+
+    record.updatedAt = '2026-08-12T09:00:00.000Z';
+    thumbnailUrl = null;
+    await sync();
+    assert.equal((await loadAsset()).thumbnailPath, undefined);
+    assert.equal(downloads.length, 4, '中台移除封面时不重新下载 GLB');
   });
 });
 
