@@ -20,7 +20,7 @@ import {
   resolveHierarchyGroupTransformSelection,
 } from '../model/entityHierarchy';
 import { containsManualRoamSpawnEntity } from '../model/manualRoamSpawn';
-import { isSpecializedTelemetryDeviceType } from '../model/telemetryBinding';
+import { isSpecializedTelemetryDeviceType, resolveModelTelemetryDataDrivenConfig } from '../model/telemetryBinding';
 import { findBuiltInSlotEntities, findLayerChangePlatformEntity } from '../model/builtInSlotBinding';
 import { getDevicePartDeclaration } from '../model/devicePartBinding';
 import { useEditorStore } from '../store/editorStore';
@@ -356,6 +356,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const cadReference = selectedEntity.components.cadReference;
   const light = selectedEntity.components.light;
   const modelAsset = selectedEntity.components.modelAsset;
+  const modelDataDrivenConfig = modelAsset ? resolveModelTelemetryDataDrivenConfig(modelAsset) : null;
   const modelGenerator = selectedEntity.components.modelGenerator;
   const deviceSpawner = selectedEntity.components.deviceSpawner;
   const agvMap = selectedEntity.components.agvMap;
@@ -790,23 +791,25 @@ export function InspectorPanel(props: InspectorPanelProps) {
               </label>
             ) : null}
           </fieldset>
-          {isSpecializedTelemetryDeviceType(modelAsset.dataDrivenConfig?.device.devType) ? (
+          {isSpecializedTelemetryDeviceType(modelDataDrivenConfig?.device.devType) ? (
             <>
               <TelemetryBindingInspector
                 entityId={selectedEntity.id}
                 binding={selectedEntity.components.telemetryBinding}
-                dataDrivenConfig={modelAsset.dataDrivenConfig ?? null}
+                dataDrivenConfig={modelDataDrivenConfig}
                 disabled={isLocked}
                 modelAssetCode={modelAsset.assetCode}
                 onChange={updateSelectedTelemetryBinding}
                 onRestoreDefault={restoreSelectedTelemetryBindingDefault}
               />
-              <CargoGeneratorInspector
-                binding={selectedEntity.components.telemetryBinding}
-                modelDevType={modelAsset.dataDrivenConfig?.device.devType}
-                disabled={isLocked}
-                onChange={updateSelectedTelemetryBinding}
-              />
+              {modelDataDrivenConfig?.device.devType !== 'led' ? (
+                <CargoGeneratorInspector
+                  binding={selectedEntity.components.telemetryBinding}
+                  modelDevType={modelDataDrivenConfig?.device.devType}
+                  disabled={isLocked}
+                  onChange={updateSelectedTelemetryBinding}
+                />
+              ) : null}
             </>
           ) : null}
           <ModelParametersInspector modelAsset={modelAsset} disabled={isLocked} compact={isCompactModelInspector} />

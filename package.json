@@ -40,6 +40,8 @@
     "test:manual-roam:integration": "npm run build:electron && node scripts/run-manual-roam-avatar-integration.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "test:telemetry": "node scripts/telemetry-test.mjs",
+    "test:led-telemetry": "node scripts/telemetry-test.mjs ledTelemetry.test.ts && node --test tests/editor/ledTelemetryInspector.integration.test.mjs",
+    "test:led-telemetry:webgl": "node tests/runtime/ledTelemetry.webgl.mjs",
     "test:virtual-conveyor": "node --test tests/runtime/virtualConveyorPackage.test.mjs",
     "test:model-array": "node scripts/model-array-test.mjs",
     "test:composition-array": "node scripts/test-composition-array.mjs && node --test scripts/test-composition-array-runtime.mjs tests/editor/entityArrayDialog.test.mjs",

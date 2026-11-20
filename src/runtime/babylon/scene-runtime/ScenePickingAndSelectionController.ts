@@ -34,7 +34,7 @@ type Dependencies = {
   readonly patrol: Pick<ScenePatrolAndRoamController, 'autoPatrolMarkerRuntime' | 'manualRoamSpawnRuntime'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'meshes' | 'lightMarkerRuntime'>;
   readonly locators: Pick<SceneLocatorController, 'locators' | 'refreshSlotHighlightOverlay' | 'refreshLocatorPresentation' | 'disposeSlotHighlightOverlay'>;
-  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayInstanceEntities' | 'resolveModelArrayBatchForEntityId'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayInstanceEntities' | 'modelArrayTelemetryProxies' | 'resolveModelArrayBatchForEntityId'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'modelGenerators' | 'deviceSpawnerMarkers' | 'generatedOutputOwners'>;
   readonly effects: Pick<ScenePoiAndEffectsController, 'poiEffectRuntime' | 'clickEventBindingRuntime'>;
@@ -642,6 +642,11 @@ export class ScenePickingAndSelectionController {
         if (visibleProxies.length) selectedModelGroups.push(visibleProxies);
         const selected = selectedArrayEntityIdsByBatch.get(motionBatch) ?? new Set<string>();
         selected.add(entityId); selectedArrayEntityIdsByBatch.set(motionBatch, selected);
+      }
+      const telemetryProxy = this.dependencies.arrays.modelArrayTelemetryProxies.get(entityId);
+      if (telemetryProxy) {
+        const meshes = telemetryProxy.meshes.filter(mesh => !mesh.isDisposed() && mesh.getTotalVertices() > 0);
+        if (meshes.length) selectedModelGroups.push(this.dependencies.environment.lightingRuntime.getSelectionMeshes(entityId, meshes));
       }
       const batch = this.dependencies.arrays.resolveModelArrayBatchForEntityId(entityId);
       if (!batch) continue;

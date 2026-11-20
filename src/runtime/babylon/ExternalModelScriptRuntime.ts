@@ -137,6 +137,11 @@ export class ExternalModelScriptRuntime {
     }
   }
 
+  /** 供遥测调度识别运行中由其他同步路径清空的上下文，避免缓存阻止恢复注入。 */
+  hasRuntimeTelemetrySnapshot(): boolean {
+    return this.runtimeContext.telemetry !== null;
+  }
+
   /** 更新脚本运行时上下文，固定注入 runtimeMode 与 runtimeTelemetry 给所有实例。 */
   updateRuntimeContext(context: ExternalModelScriptRuntimeContext): void {
     this.runtimeContext = {

@@ -736,7 +736,9 @@ export class ModelAssetRuntimeController {
     try {
       model.externalScriptRuntime.updateAssetCode(modelAsset.assetCode);
       model.externalScriptRuntime.updateParameterValues(modelAsset.parameterValues);
-      this.dependencies.telemetry.updateModelExternalScriptRuntimeContext(model, runtimeMode, null, true);
+      if (runtimeMode === 'edit') {
+        this.dependencies.telemetry.updateModelExternalScriptRuntimeContext(model, runtimeMode, null, true);
+      }
       if (model.externalScriptStarting) return;
 
       model.externalScriptRuntime.update();

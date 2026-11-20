@@ -27,7 +27,7 @@ import { inspectionConfigurationMatches, normalizeInspectionBinding } from '../.
 import { sanitizeDeviceSpawnerComponent } from '../../model/deviceSpawner';
 import { sanitizeAgvMapComponent } from '../../model/agvMap';
 import { cloneClickEventBindingComponent, sanitizeClickEventBindingComponent } from '../../model/clickEventBinding';
-import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent } from '../../model/telemetryBinding';
+import { createDefaultTelemetryBinding, normalizeTelemetryBindingComponent, resolveModelTelemetryDataDrivenConfig } from '../../model/telemetryBinding';
 import { getDevicePartDeclaration } from '../../model/devicePartBinding';
 import { sanitizePoiEffectComponent } from '../../model/poiEffect';
 import { deserializeScene, hasSceneDocumentChanges, serializeScene } from '../../project/SceneSerializer';
@@ -1431,8 +1431,9 @@ export const createSceneDocumentSlice: EditorSlice<
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '恢复遥测绑定');
       const entity = getSelectedEntity(state);
-      const devType = entity?.components.modelAsset?.dataDrivenConfig?.device.devType
-        ?? (entity ? getDevicePartDeclaration(state.scene, entity)?.device.devType : undefined);
+      const devType = (entity?.components.modelAsset
+        ? resolveModelTelemetryDataDrivenConfig(entity.components.modelAsset)?.device.devType
+        : undefined) ?? (entity ? getDevicePartDeclaration(state.scene, entity)?.device.devType : undefined);
       if (!entity || !devType) return state;
       const before = entity.components.telemetryBinding ?? null;
       const after = createDefaultTelemetryBinding(devType);

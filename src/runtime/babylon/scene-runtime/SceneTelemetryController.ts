@@ -37,7 +37,7 @@ import { type ModelRuntimeEntry } from './sceneRuntimeTypes';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
-  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayTelemetryProxies' | 'devicePartTelemetryProxies' | 'refreshModelArrayRuntimeRepresentation' | 'prepareModelArrayRuntimeMutation'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayBatchByMeshUniqueId' | 'modelArrayTelemetryProxies' | 'devicePartTelemetryProxies' | 'refreshModelArrayRuntimeRepresentation' | 'prepareModelArrayRuntimeMutation' | 'syncModelArrayTelemetryProxies'>;
   readonly assets: Pick<ModelAssetRuntimeController, 'models'>;
   readonly variants: Pick<ParameterVariantHostPool, 'modelArrayParameterVariants'>;
   readonly outputs: Pick<GeneratedModelOutputController, 'spawnedDeviceModels' | 'getGeneratedCargoFallbackSpec' | 'ensureGeneratedCargoFallback' | 'ensureGeneratedCargoOutputOwner' | 'syncGeneratedCargoVisual' | 'setGeneratedCargoRootPose' | 'disposeGeneratedCargo' | 'clearModelGeneratorLoadFailureCache' | 'syncAllModelGeneratorPresentations' | 'syncDeviceSpawnerMarkerVisibility' | 'configureDeviceSpawnersFromDocument' | 'deviceSpawnerRuntime' | 'stopDeviceSpawning' | 'generatedOutputOwners' | 'revealDrivenSpawnedDevices'>;
@@ -188,9 +188,15 @@ export class SceneTelemetryController {
       }
       count++;
     };
-    // Map.forEach 不为每个成员创建 entries() 的键值对数组。
-    this.dependencies.assets.models.forEach(append);
-    this.dependencies.variants.modelArrayParameterVariants.forEach(variant => append(variant.model, variant.representativeEntityId));
+    // LED 同源文字代理替代宿主消费遥测，避免相同设备主键被判定为绑定冲突。
+    this.dependencies.assets.models.forEach((model, entityId) => {
+      if (!this.dependencies.arrays.modelArrayTelemetryProxies.has(entityId)) append(model, entityId);
+    });
+    this.dependencies.variants.modelArrayParameterVariants.forEach(variant => {
+      if (!this.dependencies.arrays.modelArrayTelemetryProxies.has(variant.representativeEntityId)) {
+        append(variant.model, variant.representativeEntityId);
+      }
+    });
     this.dependencies.arrays.modelArrayTelemetryProxies.forEach(append);
     this.dependencies.arrays.devicePartTelemetryProxies.forEach(append);
     this.dependencies.outputs.spawnedDeviceModels.forEach((model, key) => append(model, `spawned:${key}`));
@@ -247,6 +253,7 @@ export class SceneTelemetryController {
     this.dependencies.effects.clickEventBindingRuntime.setPreviewActive(true);
     this.clearTelemetryPreviewRuntimeState();
     this.updateAllExternalScriptRuntimeContexts('runtime', null);
+    this.dependencies.arrays.syncModelArrayTelemetryProxies();
     this.dependencies.outputs.clearModelGeneratorLoadFailureCache();
     this.dependencies.outputs.syncAllModelGeneratorPresentations();
     this.dependencies.outputs.syncDeviceSpawnerMarkerVisibility();
@@ -338,6 +345,7 @@ export class SceneTelemetryController {
     // 最终销毁不重新进入编辑态脚本、不重试加载；共享资源由后续销毁阶段释放。
     if (this.updatesStopped || this.dependencies.document.disposed) return;
     this.updateAllExternalScriptRuntimeContexts('edit', null);
+    this.dependencies.arrays.syncModelArrayTelemetryProxies();
     this.dependencies.outputs.clearModelGeneratorLoadFailureCache();
     this.dependencies.outputs.syncAllModelGeneratorPresentations();
     this.dependencies.locators.refreshAllBuiltInSlotRenderability();
@@ -452,7 +460,7 @@ export class SceneTelemetryController {
       if (model.telemetryPreviewBaseline || !model.assetHandle || !model.stackerTelemetryReady) continue;
       model.telemetryPreviewBaseline = captureModelTelemetryPreviewBaseline({ root: model.root, contentRoot: model.contentRoot });
     }
-    // 遥测代理无几何无需捕获基线，但探测邻居/行程缓存需要同样的预热；就绪状态跟随宿主。
+    // 遥测代理不需要整机运动基线，但探测邻居/行程缓存需要同样的预热；就绪状态跟随宿主。
     for (const proxy of this.dependencies.arrays.modelArrayTelemetryProxies.values()) {
       if (!proxy.assetHandle || !proxy.stackerTelemetryReady) continue;
       if (this.specializedTelemetryRuntime.resolveDeviceType(proxy) === 'conveyor') {

@@ -167,8 +167,8 @@ export type ModelRuntimeEntry = {
   stackerTelemetryReady: boolean;
   telemetryPreviewBaseline: ModelTelemetryPreviewBaseline | null;
   /**
-   * 合批阵列中仅承载遥测身份的代理条目：指向提供几何与脚本配置的宿主模型（源模型或参数变体）。
-   * 普通模型为 undefined；代理条目无网格，渲染仍由宿主批次的 thinInstance 承担。
+   * 合批阵列中承载独立设备身份的代理条目：指向提供几何与脚本配置的宿主模型（源模型或参数变体）。
+   * 普通模型为 undefined；conveyor 代理无网格，LED 代理仅持有独立 Box010 文字层。
    */
   telemetryProxySource?: ModelRuntimeEntry;
 };

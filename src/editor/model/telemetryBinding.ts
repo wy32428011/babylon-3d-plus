@@ -47,7 +47,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
@@ -262,6 +262,17 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
     ...(subDevices ? { subDevices } : {}),
     fixedNodes,
   };
+}
+
+/** 兼容 dataDriven 引入前的 LED 场景：旧实体已持久化 deviceType，可直接恢复声明与诊断面板。 */
+export function resolveModelTelemetryDataDrivenConfig(modelAsset: {
+  readonly dataDrivenConfig?: ModelDataDrivenConfig;
+  readonly deviceType?: string;
+}): ModelDataDrivenConfig | null {
+  if (modelAsset.dataDrivenConfig) return modelAsset.dataDrivenConfig;
+  return normalizeTelemetryDeviceType(modelAsset.deviceType) === 'led'
+    ? { device: { devType: 'led' }, fixedNodes: [] }
+    : null;
 }
 
 /** 根据 expectedIntervalMs 计算保守 stale 阈值，最低 2000ms。 */

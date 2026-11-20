@@ -15,7 +15,7 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel, isHcliftRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { isConveyorRuntimeModel, isHcliftRuntimeModel, isLedRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
 import { RgvNlTelemetryDriver, isRgvNlRuntimeModel } from './rgvNlDriver';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
@@ -72,7 +72,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     if (isShuttleRuntimeModel(model)) return { ...this.shuttleDriver.getLightingMotionNodes(model), known: true };
     if (isRgvRuntimeModel(model)) return { ...this.rgvDriver.getLightingMotionNodes(model), known: true };
     if (isLiftRuntimeModel(model)) return { ...this.liftDriver.getLightingMotionNodes(model), known: true };
-    if (isConveyorRuntimeModel(model)) return { moving: [], fixed: [], known: true };
+    if (isConveyorRuntimeModel(model) || isLedRuntimeModel(model)) return { moving: [], fixed: [], known: true };
     return { moving: [], fixed: [], known: false };
   }
 
@@ -161,6 +161,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         isCapable: isLiftRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.liftDriver.applyToModel(model, snapshot, deltaSeconds),
       },
+      {
+        deviceType: 'led',
+        isCapable: isLedRuntimeModel,
+        apply: () => undefined,
+      },
     ];
     for (const driver of this.drivers) {
       this.candidateGroups.set(driver.deviceType, { candidates: [], conflictKeys: new Set(), count: 0, changed: false });
@@ -204,8 +209,9 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         const contextSignature = cachedContext?.signature ?? null;
         const scriptRuntime = candidate.model.externalScriptRuntime;
         const lastContext = this.state.lastInjectedScriptContexts.get(candidate.entityId);
-        const contextUnchanged = lastContext?.signature === contextSignature && lastContext?.runtime === scriptRuntime
-          && this.injectedModels.get(candidate.model) === candidate.entityId;
+        const runtimeTelemetryCleared = context !== null && scriptRuntime?.hasRuntimeTelemetrySnapshot?.() === false;
+        const contextUnchanged = !runtimeTelemetryCleared && lastContext?.signature === contextSignature
+          && lastContext?.runtime === scriptRuntime && this.injectedModels.get(candidate.model) === candidate.entityId;
         if (!snapshot && contextUnchanged) {
           if (contextStarted !== null) this.performanceStages.contextMs += performance.now() - contextStarted;
           continue;

@@ -59,6 +59,18 @@ export function isConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
     || signature.includes('链条');
 }
 
+/** LED 只消费脚本遥测上下文，不由专用驱动修改节点或几何。 */
+export function isLedRuntimeModel(model: ModelRuntimeEntry): boolean {
+  if (model.entitySnapshot?.components.modelAsset?.deviceType?.trim().toLowerCase() === 'led') return true;
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'led') return true;
+  }
+  return false;
+}
+
 /** 通过模型包脚本、元数据或路径判断当前导入模型是否是 stacker。 */
 export function isStackerModelAsset(modelAsset: ModelAssetComponent): boolean {
   const signature = JSON.stringify([

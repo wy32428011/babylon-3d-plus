@@ -1,6 +1,7 @@
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { Quaternion } from '@babylonjs/core/Maths/math.vector.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import type { Nullable, Observer } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
@@ -10,7 +11,9 @@ import type { TelemetryBindingComponent } from '../../../editor/model/telemetryB
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { resolveModelAssetSharedInstancingPolicy } from '../SharedModelAssetCache';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
-import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset } from '../telemetry/specialized/specializedModelAssets';
+import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLedRuntimeModel } from '../telemetry/specialized/specializedModelAssets';
+import { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh.js';
+import { ExternalModelScriptRuntime } from '../ExternalModelScriptRuntime';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import type { ModelAssetRuntimeController } from './ModelAssetRuntimeController';
 import type { ParameterVariantHostPool } from './ParameterVariantHostPool';
@@ -22,7 +25,7 @@ import type { SceneWorldBoundsController } from './SceneWorldBoundsController';
 import type { SceneDocumentController } from './SceneDocumentController';
 import type { SceneTransformPreviewController } from './SceneTransformPreviewController';
 import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
-import { type ModelRuntimeEntry, type ModelArrayParameterVariantRuntimeEntry, type SceneRuntimeModelArrayIdentityMode } from './sceneRuntimeTypes';
+import { EDITOR_ENTITY_ID_METADATA_KEY, type ModelRuntimeEntry, type ModelArrayParameterVariantRuntimeEntry, type SceneRuntimeModelArrayIdentityMode } from './sceneRuntimeTypes';
 
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
@@ -31,7 +34,7 @@ type Dependencies = {
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'syncConveyorTrajectoriesForArrayInstances'>;
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'modelReadinessErrors' | 'loadDiagnostics'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'rebuildModelSelectionOutline' | 'outlinedModelArrayBatches'>;
-  readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime'>;
+  readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime' | 'telemetryPreviewActive'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'isModelBoundsMesh'>;
   readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'refreshGroupTransformPreviewTargets'>;
@@ -44,7 +47,7 @@ export class ModelArrayRuntimeController {
 
   /** 阵列副本保留完整 Scene Entity；相同参数组合共享一个脚本宿主，而不是逐实体加载模型。 */
   public readonly modelArrayInstanceEntities = new Map<string, Entity>();
-  /** 合批 conveyor 实例的遥测代理（key=实例实体 ID）：无几何，仅承载设备身份与遥测状态。 */
+  /** 合批设备的遥测代理（key=实例实体 ID）：conveyor 无几何，LED 仅含独立文字层。 */
   public readonly modelArrayTelemetryProxies = new Map<string, ModelRuntimeEntry>();
   /** 复合模型的逻辑子设备代理（key=逻辑实体 ID），与阵列实例一样共享几何但独立接收遥测。 */
   public readonly devicePartTelemetryProxies = new Map<string, ModelRuntimeEntry>();
@@ -59,6 +62,7 @@ export class ModelArrayRuntimeController {
   public modelArrayVariantRenderSuppressionObserver: Nullable<Observer<Scene>> = null;
   public modelArrayVariantRenderRestoreObserver: Nullable<Observer<Scene>> = null;
   public modelArrayIdentityMode: SceneRuntimeModelArrayIdentityMode = 'device';
+  private telemetryProxyPreviewActive = false;
   private updatesStopped = false;
   private disposed = false;
 
@@ -136,12 +140,21 @@ export class ModelArrayRuntimeController {
   }
 
   /**
-   * 合批 conveyor 只失去渲染身份，不失去设备身份：为每台启用遥测的非代表实例维护一个
-   * 无几何遥测代理（独立 assetCode/binding/遥测状态），几何查询经 telemetryProxySource
-   * 换算回宿主模型，链路协议与货物走行无需拆批即可逐设备运行。
+   * 合批设备保留独立遥测身份：conveyor 使用无几何代理承载链路状态；
+   * LED 额外创建独立 Box010 文字层，避免动态文字材质进入静态批次。
    */
   public syncModelArrayTelemetryProxies(): void {
     if (this.updatesStopped) return;
+    const previewActive = this.dependencies.telemetry.telemetryPreviewActive;
+    if (this.telemetryProxyPreviewActive !== previewActive) {
+      this.telemetryProxyPreviewActive = previewActive;
+      for (const model of this.dependencies.assets.models.values()) {
+        if (isLedRuntimeModel(model)) this.refreshModelArrayRuntimeRepresentation(model);
+      }
+      for (const variant of this.dependencies.variants.modelArrayParameterVariants.values()) {
+        if (isLedRuntimeModel(variant.model)) this.refreshModelArrayRuntimeRepresentation(variant.model);
+      }
+    }
     const desired = new Map<string, { entity: Entity; host: ModelRuntimeEntry }>();
     for (const instanceEntity of this.modelArrayInstanceEntities.values()) {
       const modelAsset = instanceEntity.components.modelAsset;
@@ -151,12 +164,13 @@ export class ModelArrayRuntimeController {
       if (!modelAsset || (binding?.enabled === false && binding.surfaceArrows?.enabled === false)) continue;
       // devType 归一化在导入边界已统一小写；文件名关键词识别兜底未声明 devType 的旧包。
       const devType = modelAsset.dataDrivenConfig?.device?.devType?.trim().toLowerCase();
-      if (devType !== 'conveyor' && !isConveyorModelAsset(modelAsset)) continue;
+      if (devType === 'led' && !this.dependencies.telemetry.telemetryPreviewActive) continue;
+      if (devType !== 'led' && devType !== 'conveyor' && !isConveyorModelAsset(modelAsset)) continue;
 
       const variant = this.dependencies.variants.modelArrayParameterVariantByEntityId.get(instanceEntity.id);
       if (variant) {
-        // 变体代表机的位姿与身份由变体宿主模型直接承载，无需代理。
-        if (variant.representativeEntityId === instanceEntity.id) continue;
+        // 变体代表机的位姿与身份由变体宿主模型直接承载；LED 文字仍需逐实例独立绘制。
+        if (devType !== 'led' && variant.representativeEntityId === instanceEntity.id) continue;
         desired.set(instanceEntity.id, { entity: instanceEntity, host: variant.model });
         continue;
       }
@@ -174,6 +188,7 @@ export class ModelArrayRuntimeController {
         continue;
       }
       desired.set(instanceEntity.id, { entity: instanceEntity, host: sourceModel });
+      if (devType === 'led' && sourceEntityId) desired.set(sourceEntityId, { entity: sourceEntity, host: sourceModel });
     }
 
     for (const [entityId, proxy] of [...this.modelArrayTelemetryProxies.entries()]) {
@@ -188,13 +203,67 @@ export class ModelArrayRuntimeController {
       proxy.entitySnapshot = target.entity;
       proxy.assetCode = target.entity.components.modelAsset?.assetCode ?? proxy.assetCode;
       proxy.telemetryBinding = target.entity.components.telemetryBinding ?? null;
+      proxy.externalScriptRuntime?.updateAssetCode(proxy.assetCode);
+      proxy.externalScriptRuntime?.updateParameterValues(target.entity.components.modelAsset?.parameterValues);
       this.dependencies.presentation.applyTransform(proxy.root, target.entity.components.transform);
     }
   }
 
-  /** 创建合批 conveyor 实例的遥测代理：加载/就绪门控通过访问器跟随宿主，避免异步时序两处各写一份。 */
+  /** 创建合批设备遥测代理：加载/就绪门控通过访问器跟随宿主，避免异步时序两处各写一份。 */
   public createModelArrayTelemetryProxy(entity: Entity, host: ModelRuntimeEntry): ModelRuntimeEntry {
     return this.createTelemetryProxy(entity, host, this.modelArrayTelemetryProxies, false);
+  }
+
+  /** LED 只复用屏幕几何；独立脚本和材质消费各自 MQTT，框体仍由宿主批次渲染。 */
+  private initializeLedTelemetryOverlay(
+    proxy: ModelRuntimeEntry,
+    host: ModelRuntimeEntry,
+    modelAsset: ModelAssetComponent,
+  ): void {
+    const source = host.meshes.find((mesh) => /^Box010(?:\.|_|$)/i.test(mesh.name) && mesh.getTotalVertices() > 0);
+    const geometrySource = source instanceof InstancedMesh ? source.sourceMesh : source;
+    if (!source || !(geometrySource instanceof Mesh) || !geometrySource.geometry) {
+      proxy.readinessError = 'LED 宿主缺少 Box010 屏幕网格，无法创建独立文字层。';
+      return;
+    }
+    const overlay = new Mesh(`Box010_${sanitizeBabylonName(proxy.entitySnapshot?.id ?? 'led')}`, this.context.scene);
+    geometrySource.geometry.applyToMesh(overlay);
+    overlay.parent = proxy.contentRoot;
+    host.root.computeWorldMatrix(true);
+    source.computeWorldMatrix(true);
+    const inverseHostRoot = host.root.getWorldMatrix().clone();
+    inverseHostRoot.invert();
+    overlay.rotationQuaternion = Quaternion.Identity();
+    source.getWorldMatrix().multiply(inverseHostRoot).decompose(overlay.scaling, overlay.rotationQuaternion, overlay.position);
+    overlay.material = source.material;
+    overlay.sideOrientation = geometrySource.sideOrientation;
+    overlay.visibility = source.visibility;
+    overlay.isVisible = source.isVisible;
+    overlay.layerMask = source.layerMask;
+    overlay.renderingGroupId = source.renderingGroupId;
+    overlay.alphaIndex = source.alphaIndex;
+    overlay.receiveShadows = source.receiveShadows;
+    overlay.isPickable = true;
+    overlay.metadata = { [EDITOR_ENTITY_ID_METADATA_KEY]: proxy.entitySnapshot?.id ?? null };
+    proxy.meshes = [overlay];
+
+    const runtime = new ExternalModelScriptRuntime(proxy.contentRoot, modelAsset, {
+      expectedScriptHashes: host.assetHandle?.runtimeCapabilities?.scripts,
+    });
+    proxy.externalScriptRuntime = runtime;
+    proxy.externalScriptStarting = true;
+    runtime.updateAssetCode(proxy.assetCode);
+    runtime.updateParameterValues(modelAsset.parameterValues);
+    runtime.updateRuntimeContext({
+      mode: this.dependencies.telemetry.telemetryPreviewActive ? 'runtime' : 'edit',
+      telemetry: null,
+    });
+    void runtime.start().then(() => {
+      if (proxy.externalScriptRuntime !== runtime || proxy.root.isDisposed()) return;
+      proxy.externalScriptStarting = false;
+      proxy.readinessError = runtime.getInitializationError() ?? undefined;
+      runtime.update();
+    });
   }
 
   private createTelemetryProxy(
@@ -219,7 +288,7 @@ export class ModelArrayRuntimeController {
       assetCode: modelAsset?.assetCode ?? entity.components.telemetryBinding?.assetCode ?? '',
       telemetryBinding: entity.components.telemetryBinding ?? null,
       stackerCapable: false,
-      conveyorCapable: true,
+      conveyorCapable: modelAsset?.dataDrivenConfig?.device.devType !== 'led',
       rgvCapable: false,
       liftCapable: false,
       root,
@@ -253,14 +322,18 @@ export class ModelArrayRuntimeController {
     };
     Object.defineProperty(proxy, 'assetHandle', { get: () => host.assetHandle });
     Object.defineProperty(proxy, 'stackerTelemetryReady', { get: () => host.stackerTelemetryReady });
+    if (modelAsset?.dataDrivenConfig?.device.devType === 'led') {
+      this.initializeLedTelemetryOverlay(proxy, host, modelAsset);
+    }
     registry.set(entity.id, proxy);
     return proxy;
   }
 
-  /** 销毁遥测代理：代理自身没有网格与资产，只释放位姿节点子树。 */
+  /** 销毁遥测代理：先释放独立脚本文字资源，再释放代理位姿和屏幕网格。 */
   public disposeModelArrayTelemetryProxy(entityId: string, proxy: ModelRuntimeEntry): void {
     if (this.modelArrayTelemetryProxies.get(entityId) !== proxy) return;
     this.modelArrayTelemetryProxies.delete(entityId);
+    runSceneRuntimeCleanup(this.context, `阵列遥测代理脚本 ${entityId}`, () => proxy.externalScriptRuntime?.dispose());
     runSceneRuntimeCleanup(this.context, `阵列遥测代理节点 ${entityId}`, () => {
       if (!proxy.root.isDisposed()) proxy.root.dispose(false, false);
     });
@@ -486,7 +559,8 @@ export class ModelArrayRuntimeController {
     modelAsset: ModelAssetComponent,
     telemetryBinding: TelemetryBindingComponent | null | undefined = null,
   ): string {
-    const telemetryIdentity = this.modelArrayIdentityMode === 'device'
+    const ledOverlayOnly = modelAsset.dataDrivenConfig?.device.devType === 'led' || modelAsset.deviceType === 'led';
+    const telemetryIdentity = !ledOverlayOnly && this.modelArrayIdentityMode === 'device'
       && telemetryBinding
       && telemetryBinding.enabled !== false
       ? {
@@ -494,6 +568,9 @@ export class ModelArrayRuntimeController {
           binding: this.createModelArrayJsonSignature(telemetryBinding),
         }
       : null;
+    const parameterValues = ledOverlayOnly && modelAsset.parameterValues
+      ? Object.fromEntries(Object.entries(modelAsset.parameterValues).filter(([key]) => key !== 'displayText'))
+      : modelAsset.parameterValues;
     return JSON.stringify({
       sourcePath: modelAsset.sourcePath,
       sourceUrl: modelAsset.sourceUrl,
@@ -509,7 +586,7 @@ export class ModelArrayRuntimeController {
       parameterScripts: this.createModelArrayJsonSignature(modelAsset.parameterScriptMetadata),
       animationScripts: this.createModelArrayJsonSignature(modelAsset.animationScriptMetadata),
       parameterConfig: this.createModelArrayJsonSignature(modelAsset.parameterConfig),
-      parameterValues: this.createModelArrayTransientJsonSignature(modelAsset.parameterValues),
+      parameterValues: this.createModelArrayTransientJsonSignature(parameterValues),
       dataDrivenConfig: this.createModelArrayJsonSignature(modelAsset.dataDrivenConfig),
       telemetryIdentity,
     });
@@ -740,7 +817,9 @@ export class ModelArrayRuntimeController {
 
     // 必须与聚焦/测量共用同一份有效可见几何：参数脚本关闭部件后，隐藏 Mesh 不能继续留在阵列批次中。
     // 有效集合变化会同步改变 sourceSignature，避免参数快速路径复用包含旧几何的批次。
-    const sourceMeshes = model.meshes.filter((mesh) => this.dependencies.bounds.isModelBoundsMesh(model, mesh));
+    const ledOverlayOnly = this.dependencies.telemetry.telemetryPreviewActive && isLedRuntimeModel(model);
+    const sourceMeshes = model.meshes.filter((mesh) => this.dependencies.bounds.isModelBoundsMesh(model, mesh)
+      && (!ledOverlayOnly || !/^Box010(?:\.|_|$)/i.test(mesh.name)));
     const hasSourceGeometry = model.meshes.some((mesh) => (
       !mesh.isDisposed() && mesh.getTotalVertices() > 0
     ));
