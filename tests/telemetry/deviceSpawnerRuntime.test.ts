@@ -261,3 +261,25 @@ test('未注册的产生器 id 只记录一次日志，disposeAll 销毁全部�
   assert.equal(spawned.length, 2);
   deviceTelemetryStore.clear();
 });
+
+test('AGV mode=0 按协议下线，mode=2 可重新生成；其它设备 mode=0 不改变通用生命周期', () => {
+  const { host, spawned, disposed } = createHost();
+  const runtime = new DeviceSpawnerRuntime(host);
+  runtime.configure([SPAWNER]);
+  try {
+    sendMessage('AGV-01', [{ p: 'mode', v: 0 }]);
+    assert.equal(spawned.length, 0, 'AGV 离线首帧不得生成');
+
+    sendMessage('AGV-01', [{ p: 'mode', v: 2 }]);
+    assert.equal(spawned.length, 1);
+    sendMessage('AGV-01', [{ p: 'mode', v: 0 }], { withSpawner: false });
+    assert.equal(disposed.length, 1, 'AGV mode=0 必须销毁既有实例');
+
+    sendMessage('AGV-02', [{ p: 'mode', v: 2 }]);
+    sendMessage('AGV-02', [{ p: 'mode', v: 0 }], { withSpawner: false, deviceType: 'shuttle' });
+    assert.equal(spawned.length, 2, '非 AGV 的 mode=0 仍不产生或销毁实例');
+  } finally {
+    runtime.disposeAll();
+    deviceTelemetryStore.clear();
+  }
+});

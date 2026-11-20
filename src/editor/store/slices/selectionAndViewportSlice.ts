@@ -16,6 +16,7 @@ import type { EditorSlice } from './editorStoreTypes';
 /** 选区、视口工具与相机请求的编辑会话状态。 */
 export const createSelectionAndViewportSlice: EditorSlice<
   "hierarchySelectionIds" |
+  "selectedSpawnedDeviceId" |
   "sceneFocusRequest" |
   "projectAssetFocusRequest" |
   "revealHierarchyEntityRequest" |
@@ -59,6 +60,7 @@ export const createSelectionAndViewportSlice: EditorSlice<
   "requestSelectedGroupTransform" |
   "consumeGroupInspectorTransformRequest" |
   "selectEntity" |
+  "selectSpawnedDevice" |
   "selectHierarchyEntities" |
   "requestSceneFocusForSelection" |
   "requestProjectAssetFocusForEntity" |
@@ -68,6 +70,7 @@ export const createSelectionAndViewportSlice: EditorSlice<
   "consumeProjectAssetFocusRequest"
 > = (set, get) => ({
   hierarchySelectionIds: [],
+  selectedSpawnedDeviceId: null,
   sceneFocusRequest: null,
   projectAssetFocusRequest: null,
   revealHierarchyEntityRequest: null,
@@ -497,9 +500,25 @@ export const createSelectionAndViewportSlice: EditorSlice<
       return {
         scene,
         hierarchySelectionIds,
+        selectedSpawnedDeviceId: null,
         selectedModelMeasurement: null,
         selectedAutoPatrolWaypointId: null,
         ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),
+      };
+    });
+  },
+  selectSpawnedDevice: (entityId) => {
+    set((state) => {
+      const selectedSpawnedDeviceId = entityId?.startsWith('spawned:') ? entityId : null;
+      const scene = selectedSpawnedDeviceId && state.scene.selectedEntityId
+        ? { ...state.scene, selectedEntityId: null }
+        : state.scene;
+      return {
+        scene,
+        hierarchySelectionIds: selectedSpawnedDeviceId ? [] : state.hierarchySelectionIds,
+        selectedSpawnedDeviceId,
+        selectedModelMeasurement: null,
+        selectedAutoPatrolWaypointId: null,
       };
     });
   },
@@ -517,6 +536,7 @@ export const createSelectionAndViewportSlice: EditorSlice<
       return {
         scene,
         hierarchySelectionIds,
+        selectedSpawnedDeviceId: null,
         selectedModelMeasurement: null,
         selectedAutoPatrolWaypointId: null,
         ...resolveSelectionTransformMode(state, scene, hierarchySelectionIds),

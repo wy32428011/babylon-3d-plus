@@ -59,6 +59,20 @@ export function isConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
     || signature.includes('链条');
 }
 
+/** AGV 由整机根节点消费绝对平面位姿，不依赖模型包外置脚本。 */
+export function isAgvRuntimeModel(model: ModelRuntimeEntry): boolean {
+  const modelAsset = model.entitySnapshot?.components.modelAsset ?? model.resolvedModelAsset;
+  if (modelAsset?.deviceType?.trim().toLowerCase() === 'agv'
+    || modelAsset?.dataDrivenConfig?.device.devType === 'agv') return true;
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
+    if (devType === 'agv') return true;
+  }
+  return false;
+}
+
 /** LED 只消费脚本遥测上下文，不由专用驱动修改节点或几何。 */
 export function isLedRuntimeModel(model: ModelRuntimeEntry): boolean {
   if (model.entitySnapshot?.components.modelAsset?.deviceType?.trim().toLowerCase() === 'led') return true;

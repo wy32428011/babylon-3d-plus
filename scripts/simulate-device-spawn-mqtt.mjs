@@ -98,15 +98,31 @@ function createDevicePayload(options, device, tick) {
 
   const spawnerCode = device.announced ? null : options.spawner;
   device.announced = true;
-  const wave = Math.sin(seconds * 0.6 + device.phase);
+  const angle = seconds * 0.6 + device.phase;
+  const wave = Math.sin(angle);
+  const x = Math.cos(angle) * 5 + device.phase * 8;
+  const y = Math.sin(angle) * 3;
   return {
     data: [
       point('deviceCode', device.assetCode, spawnerCode),
+      point('mode', 2, spawnerCode),
+      point('command', 0, spawnerCode),
+      point('deviceType', options.deviceType, spawnerCode),
+      point('signalBits', 1, spawnerCode),
+      point('task', 1000 + device.assetCode, spawnerCode),
+      point('x', x, spawnerCode),
+      point('y', y, spawnerCode),
+      point('z', null, spawnerCode),
       point('movement_x', wave >= 0 ? 1 : 2, spawnerCode),
-      point('distance_x', Math.round((5 + wave * 3 + device.phase) * 10000) / 10000, spawnerCode),
+      point('r', angle * 180 / Math.PI + 90, spawnerCode),
+      point('containerCode', `PALLET-${device.assetCode}`, spawnerCode),
+      point('batteryLevel', 100 - (tick % 80), spawnerCode),
       point('normal', true, spawnerCode),
       point('errorCode', 0, spawnerCode),
       point('message', '模拟运行', spawnerCode),
+      point('timestamp', Date.now(), spawnerCode),
+      point('task_begin_point', 'P01', spawnerCode),
+      point('task_end_point', 'P02', spawnerCode),
     ],
     ts: new Date().toISOString(),
   };

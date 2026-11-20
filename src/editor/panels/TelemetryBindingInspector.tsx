@@ -78,7 +78,7 @@ function formatSpecializedEntry(config: unknown, depth = 0): string {
   return parts.length > 0 ? parts.join(' · ') : '—';
 }
 
-/** specialized 模型的 dataDriven 只读摘要：配置真源在模型包 .model.ts，Inspector 不提供编辑。 */
+/** specialized 模型的 dataDriven 只读摘要：配置真源在模型包，Inspector 不提供编辑。 */
 function SpecializedDataDrivenSummary(props: { config: ModelDataDrivenConfig | null }) {
   const motion = props.config?.specializedMotion ?? {};
   const cargo = props.config?.cargo ?? {};
@@ -92,7 +92,7 @@ function SpecializedDataDrivenSummary(props: { config: ModelDataDrivenConfig | n
   return (
     <div className="telemetry-specialized-summary">
       <p className="muted">
-        专用 {device?.devType ?? ''} 驱动接管：通道映射由模型包 dataDriven 声明，此处只读；修改请编辑模型包 .model.ts。
+        专用 {device?.devType ?? ''} 驱动接管：通道映射由模型包 dataDriven 声明，此处只读；修改请更新模型包配置。
       </p>
       {motionEntries.map(([key, value]) => (
         <p className="muted" key={`motion-${key}`}>motion.{key}：{formatSpecializedEntry(value)}</p>
@@ -477,6 +477,24 @@ function LiftLayerBindingsEditor(props: {
         <p className="telemetry-runtime-error">第二设备号未填写。请手动输入 assetCode；未填写前该逻辑设备不参与 MQTT 驱动。</p>
       ) : null}
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
+      {binding.deviceType === 'agv' ? (
+        <>
+          <label className="inspector-row">
+            <span>模型正方向轴</span>
+            <select
+              disabled={props.disabled}
+              value={binding.modelForwardAxis ?? props.dataDrivenConfig?.device.modelForwardAxis ?? 'x'}
+              onChange={(event) => commit({ modelForwardAxis: event.target.value as TelemetryBindingComponent['modelForwardAxis'] })}
+            >
+              <option value="x">+X</option>
+              <option value="-x">-X</option>
+              <option value="z">+Z</option>
+              <option value="-z">-Z</option>
+            </select>
+          </label>
+          <p className="muted">模型包通过 dataDriven.device.modelForwardAxis 提供默认值，此处可校准当前模板实例。MQTT r=0 对应场景 +X，顺时针为正；x/y 当前直接驱动场景 X/Z，单位为米。</p>
+        </>
+      ) : null}
       {binding.deviceType === 'rgv' ? (
         <RgvColumnBindingsEditor entityId={props.entityId} binding={binding} disabled={props.disabled} commit={commit} />
       ) : null}

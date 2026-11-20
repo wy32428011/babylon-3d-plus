@@ -37,6 +37,8 @@ import { SceneSettingsPanel } from './SceneSettingsPanel';
 import { LightingBakeInspector } from './LightingBakeInspector';
 import { AutoPatrolInspector } from './AutoPatrolInspector';
 import { ManualRoamAvatarInspector } from './ManualRoamAvatarInspector';
+import { SpawnedDeviceInspector } from './SpawnedDeviceInspector';
+import { spawnedDeviceInspectorStore } from '../../runtime/mqtt/spawnedDeviceInspectorStore';
 
 type TransformField = 'position' | 'rotation' | 'scale';
 const axes: Array<keyof Vector3Data> = ['x', 'y', 'z'];
@@ -147,6 +149,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
   const sceneSessionId = useEditorStore(state => state.sceneSessionId);
   const transformPreview = useSyncExternalStore(transformPreviewStore.subscribe, transformPreviewStore.getSnapshot, transformPreviewStore.getSnapshot);
   const hierarchySelectionIds = useEditorStore((state) => state.hierarchySelectionIds);
+  const selectedSpawnedDeviceId = useEditorStore((state) => state.selectedSpawnedDeviceId);
+  const selectedSpawnedDevice = useSyncExternalStore(
+    spawnedDeviceInspectorStore.subscribe,
+    () => spawnedDeviceInspectorStore.getSnapshot(selectedSpawnedDeviceId),
+    () => null,
+  );
   const selectedModelMeasurement = useEditorStore((state) => state.selectedModelMeasurement);
   const selectedGroupSpatialInfo = useEditorStore((state) => state.selectedGroupSpatialInfo);
   const requestSelectedGroupTransform = useEditorStore((state) => state.requestSelectedGroupTransform);
@@ -234,6 +242,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     return `${value.toFixed(3)} ${SCENE_LENGTH_UNIT_SYMBOL}`;
   }
 
+  if (selectedSpawnedDevice) return <SpawnedDeviceInspector instance={selectedSpawnedDevice} />;
   if (!selectedEntity) {
     return <SceneSettingsPanel readOnly={props.readOnly} />;
   }

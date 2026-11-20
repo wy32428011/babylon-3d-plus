@@ -23,6 +23,8 @@ export type ModelDataDrivenConfig = {
     device?: string;
     devType?: string;
     defaultAssetCode?: string;
+    /** AGV 模型包声明的局部车头轴；场景模板可用 telemetryBinding 覆盖。 */
+    modelForwardAxis?: 'x' | '-x' | 'z' | '-z';
     calibrationRate?: number;
     rpmToMetersPerSecond?: number;
   };
@@ -47,7 +49,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led', 'agv'];
 
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
@@ -73,6 +75,8 @@ export type TelemetryBindingComponent = {
   aisleCode?: string;
   /** 输送线专用：模型局部正向校准，同时供货物行走、编辑轨迹和表面箭头使用。 */
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
+  /** AGV 专用：模型局部车头轴；遥测 r=0 指向场景 +X，顺时针为正。 */
+  modelForwardAxis?: 'x' | '-x' | 'z' | '-z';
   /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
   surfaceArrows?: ConveyorSurfaceArrowsConfig;
   /** 堆垛机专用：行走、升降及双货叉的箭头外观；缺省不启用，实时运动与预览不保存。 */
@@ -233,6 +237,7 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
   const deviceName = normalizeOptionalString(device.device);
   const devType = normalizeTelemetryDeviceType(device.devType);
   const defaultAssetCode = normalizeOptionalString(device.defaultAssetCode);
+  const modelForwardAxis = normalizeTrajectoryDirection(device.modelForwardAxis) as ModelDataDrivenConfig['device']['modelForwardAxis'];
   const calibrationRate = device.calibrationRate === undefined ? undefined : normalizeFiniteNumber(device.calibrationRate, 4, 0.01, 10000);
   const rpmToMetersPerSecond = device.rpmToMetersPerSecond === undefined ? undefined : normalizeFiniteNumber(device.rpmToMetersPerSecond, 0.01, 0, 1000);
   // specializedMotion 是旧场景中的归一化字段；将它视为 motion 来源可保持再次打开时的键存在语义和配置幂等。
@@ -247,12 +252,13 @@ export function normalizeModelDataDrivenConfig(value: unknown): ModelDataDrivenC
     : undefined;
   const subDevices = normalizeSubDevices(value.subDevices);
   const fixedNodes = normalizeStringArray(value.fixedNodes);
-  if (!deviceName && !devType && !defaultAssetCode && !hasMotionKey && !specializedMotion && !cargo && !subDevices && fixedNodes.length === 0) return null;
+  if (!deviceName && !devType && !defaultAssetCode && !modelForwardAxis && !hasMotionKey && !specializedMotion && !cargo && !subDevices && fixedNodes.length === 0) return null;
   return {
     device: {
       ...(deviceName ? { device: deviceName } : {}),
       ...(devType ? { devType } : {}),
       ...(defaultAssetCode ? { defaultAssetCode } : {}),
+      ...(modelForwardAxis ? { modelForwardAxis } : {}),
       ...(calibrationRate !== undefined ? { calibrationRate } : {}),
       ...(rpmToMetersPerSecond !== undefined ? { rpmToMetersPerSecond } : {}),
     },
@@ -270,8 +276,9 @@ export function resolveModelTelemetryDataDrivenConfig(modelAsset: {
   readonly deviceType?: string;
 }): ModelDataDrivenConfig | null {
   if (modelAsset.dataDrivenConfig) return modelAsset.dataDrivenConfig;
-  return normalizeTelemetryDeviceType(modelAsset.deviceType) === 'led'
-    ? { device: { devType: 'led' }, fixedNodes: [] }
+  const deviceType = normalizeTelemetryDeviceType(modelAsset.deviceType);
+  return deviceType === 'led' || deviceType === 'agv'
+    ? { device: { devType: deviceType }, fixedNodes: [] }
     : null;
 }
 
@@ -281,13 +288,17 @@ export function createTelemetryStaleAfterMs(expectedIntervalMs: number): number 
 }
 
 /** 为带 devType 的模型创建默认遥测绑定。 */
-export function createDefaultTelemetryBinding(deviceType: string): TelemetryBindingComponent {
+export function createDefaultTelemetryBinding(
+  deviceType: string,
+  modelForwardAxis?: TelemetryBindingComponent['modelForwardAxis'],
+): TelemetryBindingComponent {
   const expectedIntervalMs = DEFAULT_TELEMETRY_EXPECTED_INTERVAL_MS;
   return {
     enabled: true,
     sourceId: 'default',
     deviceType: normalizeTelemetryDeviceType(deviceType, 'device') ?? 'device',
     ...(normalizeTelemetryDeviceType(deviceType) === 'conveyor' ? { surfaceArrows: createDefaultConveyorSurfaceArrowsConfig() } : {}),
+    ...(normalizeTelemetryDeviceType(deviceType) === 'agv' ? { modelForwardAxis: modelForwardAxis ?? 'x' } : {}),
     expectedIntervalMs,
     staleAfterMs: createTelemetryStaleAfterMs(expectedIntervalMs),
   };
@@ -328,6 +339,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(rgvMotionArrows ? { rgvMotionArrows } : {}),
     ...(liftMotionArrows ? { liftMotionArrows } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
+    ...(normalizeTrajectoryDirection(value.modelForwardAxis) ? { modelForwardAxis: value.modelForwardAxis as TelemetryBindingComponent['modelForwardAxis'] } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
     ...(typeof value.cargoInitialSync === 'boolean' ? { cargoInitialSync: value.cargoInitialSync } : {}),

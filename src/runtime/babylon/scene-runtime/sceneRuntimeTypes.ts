@@ -12,7 +12,7 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import type { AnimationGroup, Observer, Node } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
-import type { ChartMarkerComponent, DataPlatformScreenComponent, LocatorStorageDepth, ModelAssetComponent, ModelGeneratorComponent, ModelGeneratorTarget, TransformComponent } from '../../../editor/model/components';
+import type { AgvMapComponent, ChartMarkerComponent, DataPlatformScreenComponent, LocatorStorageDepth, ModelAssetComponent, ModelGeneratorComponent, ModelGeneratorTarget, TransformComponent } from '../../../editor/model/components';
 import type { Vector3Data } from '../../../editor/model/math';
 import type { TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
 import { type CompositionNodeTree } from '../composition/compositionCargoBuilder';
@@ -123,6 +123,11 @@ export type EntityArrayPreviewEntry = {
   placementSignature: string;
 };
 
+export type AgvMapPlacement = {
+  transform: TransformComponent;
+  map: Pick<AgvMapComponent, 'xAxis' | 'yAxis' | 'scale'>;
+};
+
 export type ModelRuntimeEntry = {
   sourceUrl: string;
   /** 生成输出没有持久实体快照，保留其实际解析后的来源供场景规则读取。 */
@@ -132,6 +137,8 @@ export type ModelRuntimeEntry = {
   entitySnapshot: Entity | null;
   assetCode: string;
   telemetryBinding: TelemetryBindingComponent | null;
+  /** 动态 AGV 的产生器地图放置快照；静态设备保持世界坐标驱动。 */
+  agvMapPlacement?: AgvMapPlacement;
   stackerCapable: boolean;
   conveyorCapable: boolean;
   rgvCapable: boolean;

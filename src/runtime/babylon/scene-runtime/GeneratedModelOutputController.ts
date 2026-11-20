@@ -6,17 +6,18 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { Entity } from '../../../editor/model/Entity';
-import type { MeshKind, ModelAssetComponent, ModelGeneratorComponent, ModelGeneratorTarget } from '../../../editor/model/components';
+import type { MeshKind, ModelAssetComponent, ModelGeneratorComponent, ModelGeneratorTarget, TransformComponent } from '../../../editor/model/components';
 import { BUILT_IN_BOX_SIZE_METERS, BUILT_IN_PLANE_SIZE_METERS, BUILT_IN_SPHERE_DIAMETER_METERS, getBuiltInMeshGroundOffsetMeters } from '../../../editor/model/builtInMeshGeometry';
 import { createModelAssetCode } from '../../../editor/model/SceneDocument';
 import { createId } from '../../../shared/ids';
-import type { TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
+import { createDefaultTelemetryBinding, type TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
 import { createModelGeneratorTargetSignature, createRuntimeModelAssetFromTarget, sanitizeModelAssetTemplate } from '../../../editor/model/modelGenerator';
 import { resolveModelGeneratorTargetFromSnapshot } from '../modelGeneratorRuntime';
 import { buildCompositionNodeTree, readCompositionNodeArraySourceId, readCompositionNodeMeshRenderer, type CompositionNodeTree } from '../composition/compositionCargoBuilder';
 import { clearCompositionCache, getCompositionLibraryEntry } from '../composition/compositionCargoCache';
 import { sanitizeBabylonName } from '../runtimeValueUtils';
 import { type DeviceTelemetrySnapshot } from '../../mqtt/deviceTelemetry';
+import { spawnedDeviceInspectorStore } from '../../mqtt/spawnedDeviceInspectorStore';
 import { EntityArrayThinInstanceBatch } from '../EntityArrayThinInstanceBatch';
 import { ModelGeneratorAssetPreloader } from '../ModelGeneratorAssetPreloader';
 import { createModelAssetTemplateKey, resolveModelAssetSharedInstancingPolicy } from '../SharedModelAssetCache';
@@ -1230,6 +1231,7 @@ export class GeneratedModelOutputController {
       const deviceType = (
         templateEntity.components.telemetryBinding?.deviceType
         || templateEntity.components.modelAsset.dataDrivenConfig?.device.devType
+        || templateEntity.components.modelAsset.deviceType
         || ''
       ).trim().toLowerCase();
       configs.push({
@@ -1279,7 +1281,12 @@ export class GeneratedModelOutputController {
     const templateModelAsset = templateEntity?.components.modelAsset;
     const templateModel = this.dependencies.assets.models.get(spawner.templateEntityId);
     if (!templateEntity || !templateModelAsset || !templateModel?.assetHandle) return false;
-
+    const spawnerEntity = this.dependencies.document.shadowDocument?.entities[spawner.entityId];
+    const agvMap = spawnerEntity?.components.agvMap;
+    const agvMapPlacement = spawnerEntity && agvMap ? {
+      transform: JSON.parse(JSON.stringify(spawnerEntity.components.transform)) as TransformComponent,
+      map: { xAxis: agvMap.xAxis, yAxis: agvMap.yAxis, scale: agvMap.scale },
+    } : undefined;
     // 拷贝模板参数，assetCode 由消息提供；绑定 assetCode 显式覆盖，防止指向模板自身编号。
     const modelAsset: ModelAssetComponent = {
       ...(JSON.parse(JSON.stringify(templateModelAsset)) as Omit<ModelAssetComponent, 'assetCode'>),
@@ -1288,7 +1295,15 @@ export class GeneratedModelOutputController {
     const templateBinding = templateEntity.components.telemetryBinding;
     const telemetryBinding: TelemetryBindingComponent | null = templateBinding
       ? { ...(JSON.parse(JSON.stringify(templateBinding)) as TelemetryBindingComponent), assetCode }
-      : null;
+      : spawner.deviceType
+        ? {
+            ...createDefaultTelemetryBinding(
+              spawner.deviceType,
+              templateModelAsset.dataDrivenConfig?.device.modelForwardAxis,
+            ),
+            assetCode,
+          }
+        : null;
     // 合成实体快照供驱动读取参数（shuttle/stacker 经 entitySnapshot 取 parameterValues）。
     const entitySnapshot: Entity = {
       ...(JSON.parse(JSON.stringify(templateEntity)) as Entity),
@@ -1320,6 +1335,7 @@ export class GeneratedModelOutputController {
       entitySnapshot,
       assetCode,
       telemetryBinding,
+      ...(agvMapPlacement ? { agvMapPlacement } : {}),
       stackerCapable: isStackerModelAsset(modelAsset),
       conveyorCapable: isConveyorModelAsset(modelAsset),
       rgvCapable: isRgvModelAsset(modelAsset),
@@ -1353,6 +1369,12 @@ export class GeneratedModelOutputController {
       telemetryPreviewBaseline: null,
     };
     this.spawnedDeviceModels.set(key, model);
+    spawnedDeviceInspectorStore.register({
+      entityId: entitySnapshot.id,
+      entity: entitySnapshot,
+      spawnerEntityId: spawner.entityId,
+      spawnerName: spawner.entityName,
+    });
 
     void this.dependencies.assets.loadModelRuntimeAssets(modelAsset, model.assetSignature, undefined, model.entitySnapshot?.id ?? model.root.name)
       .then((loadedAssets) => {
@@ -1453,6 +1475,7 @@ export class GeneratedModelOutputController {
     const model = this.spawnedDeviceModels.get(key);
     if (!model) return;
     this.spawnedDeviceModels.delete(key);
+    if (model.entitySnapshot) spawnedDeviceInspectorStore.delete(model.entitySnapshot.id);
     this.spawnedDeviceRevealPending.delete(key);
     for (const mesh of model.meshes) {
       this.spawnedDeviceHiddenLayerMasks.delete(mesh.uniqueId);

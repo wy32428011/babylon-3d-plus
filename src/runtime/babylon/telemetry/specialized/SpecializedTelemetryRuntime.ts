@@ -15,7 +15,8 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isConveyorRuntimeModel, isHcliftRuntimeModel, isLedRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { isAgvRuntimeModel, isConveyorRuntimeModel, isHcliftRuntimeModel, isLedRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { AgvTelemetryDriver } from './agvDriver';
 import { RgvNlTelemetryDriver, isRgvNlRuntimeModel } from './rgvNlDriver';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
@@ -72,6 +73,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     if (isShuttleRuntimeModel(model)) return { ...this.shuttleDriver.getLightingMotionNodes(model), known: true };
     if (isRgvRuntimeModel(model)) return { ...this.rgvDriver.getLightingMotionNodes(model), known: true };
     if (isLiftRuntimeModel(model)) return { ...this.liftDriver.getLightingMotionNodes(model), known: true };
+    if (isAgvRuntimeModel(model)) return { moving: [model.root], fixed: [], known: true };
     if (isConveyorRuntimeModel(model) || isLedRuntimeModel(model)) return { moving: [], fixed: [], known: true };
     return { moving: [], fixed: [], known: false };
   }
@@ -87,6 +89,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly shuttleDriver: ShuttleTelemetryDriver;
   private readonly liftDriver: LiftTelemetryDriver;
   private readonly hcliftDriver: HcliftTelemetryDriver;
+  private readonly agvDriver: AgvTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
   private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
@@ -115,6 +118,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.shuttleDriver = new ShuttleTelemetryDriver(this);
     this.liftDriver = new LiftTelemetryDriver(this);
     this.hcliftDriver = new HcliftTelemetryDriver(this);
+    this.agvDriver = new AgvTelemetryDriver();
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -165,6 +169,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         deviceType: 'led',
         isCapable: isLedRuntimeModel,
         apply: () => undefined,
+      },
+      {
+        deviceType: 'agv',
+        isCapable: isAgvRuntimeModel,
+        apply: (model, snapshot) => this.agvDriver.applyToModel(model, snapshot),
       },
     ];
     for (const driver of this.drivers) {

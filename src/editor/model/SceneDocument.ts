@@ -33,6 +33,7 @@ import type { ModelScriptAsset } from './components';
 import {
   createDefaultTelemetryBinding,
   normalizeModelDataDrivenConfig,
+  normalizeTelemetryDeviceType,
 } from './telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from './builtInSlotBinding';
 import {
@@ -1462,8 +1463,10 @@ export function createModelEntity(
   const normalizedBuiltInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(builtInSlotBindingConfig);
   const normalizedLayerChangePlatformBindingConfig = normalizeLayerChangePlatformBindingConfig(layerChangePlatformBindingConfig);
   const assetCode = createModelAssetCode(normalizedDataDrivenConfig?.device.defaultAssetCode ?? defaultAssetCodePrefix, id);
-  const telemetryBinding = normalizedDataDrivenConfig?.device.devType
-    ? createDefaultTelemetryBinding(normalizedDataDrivenConfig.device.devType)
+  const telemetryDeviceType = normalizedDataDrivenConfig?.device.devType
+    ?? (normalizeTelemetryDeviceType(deviceType) === 'agv' ? 'agv' : undefined);
+  const telemetryBinding = telemetryDeviceType
+    ? createDefaultTelemetryBinding(telemetryDeviceType, normalizedDataDrivenConfig?.device.modelForwardAxis)
     : null;
 
   return {

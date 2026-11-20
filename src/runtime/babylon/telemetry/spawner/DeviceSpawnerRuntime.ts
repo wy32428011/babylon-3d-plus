@@ -1,5 +1,6 @@
 import {
   onDeviceTelemetryMessages,
+  readIntegerField,
   readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
@@ -64,8 +65,9 @@ type SpawnedDeviceRecord = {
   lastMessageAt: number;
 };
 
-/** 判断快照是否携带显式下线点位。 */
+/** 判断快照是否携带显式下线点位；AGV 同时遵循 mode=0 的离线协议。 */
 function isOfflineSnapshot(snapshot: DeviceTelemetrySnapshot): boolean {
+  if (snapshot.deviceType === 'agv' && readIntegerField(snapshot.fields, 'mode') === 0) return true;
   const status = readStringField(snapshot.fields, DEVICE_SPAWN_OFFLINE_POINT_NAME);
   return status !== null && status.trim().toLowerCase() === DEVICE_SPAWN_OFFLINE_POINT_VALUE;
 }

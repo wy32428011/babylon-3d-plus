@@ -213,8 +213,19 @@ export function useSceneSelectionHandlers({
         && (!previewModelHit || !previewModelHit.precise || previewGeneratedHit.distance < previewModelHit.distance)
         ? previewGeneratedHit.hit
         : null;
+      const spawnedDeviceId = generatedUnit?.unitKind === 'spawned-device'
+        ? generatedUnit.highlightEntityId
+        : null;
+      if (spawnedDeviceId) {
+        state.selectSpawnedDevice(spawnedDeviceId);
+        state.setEnvironmentAdjustmentActive(false);
+      } else if (generatedUnit) {
+        state.selectSpawnedDevice(null);
+      }
       const resolution = (generatedUnit ? resolveGeneratedUnitClick(state.scene, generatedUnit) : null)
-        ?? resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell);
+        ?? (spawnedDeviceId
+          ? { kind: 'ignore' as const }
+          : resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell));
       if (resolution.kind !== 'pass-through') {
         // 命中 show-chart 效果时向宿主页面发送点击事件；编辑器无握手流程，用固定会话标识 + 通配 origin（仅开发预览）。
         const assetClickedPayload = buildClickEventAssetClickedPayload(state.scene, resolution);
@@ -245,6 +256,7 @@ export function useSceneSelectionHandlers({
           }
         }
         if (resolution.kind === 'trigger-cell') {
+          state.selectSpawnedDevice(null);
           state.setEnvironmentAdjustmentActive(false);
           if (resolution.effects.includes('highlight')) {
             runtimeRef.current?.setLocalSlotHighlight(resolution.locatorEntityId, resolution.cell);
@@ -274,8 +286,8 @@ export function useSceneSelectionHandlers({
             } else {
               clickProductHighlightIdRef.current = resolution.entityId;
               runtimeRef.current?.setLocalHighlightEntityIds([resolution.entityId]);
-              // 产物高亮与编辑器选区互斥：旧选中设备不清掉会残留双高亮，也表现为切不回产物。
-              state.selectEntity(null);
+              // 动态设备已由 selectSpawnedDevice 建立独立 Inspector 选区；其它产物仍清除文档选区。
+              if (generatedUnit?.unitKind !== 'spawned-device') state.selectEntity(null);
             }
           }
           if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {

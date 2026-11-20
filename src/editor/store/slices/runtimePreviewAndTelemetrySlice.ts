@@ -102,6 +102,7 @@ export const createRuntimePreviewAndTelemetrySlice: EditorSlice<
           ? { ...state.scene, selectedEntityId: null }
           : state.scene,
         hierarchySelectionIds: [],
+        selectedSpawnedDeviceId: null,
         environmentAdjustmentActive: false,
         cameraPoseSaveRequest: null,
         openingAnimationPreviewRequest: null,
@@ -119,6 +120,7 @@ export const createRuntimePreviewAndTelemetrySlice: EditorSlice<
       return {
         runtimeMode: 'edit',
         runtimePerformanceEnabled: false,
+        selectedSpawnedDeviceId: null,
         logs: prependLog(state.logs, '已停止运行预览模式。'),
       };
     });

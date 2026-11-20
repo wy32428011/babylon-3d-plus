@@ -1430,12 +1430,14 @@ export const createSceneDocumentSlice: EditorSlice<
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '恢复遥测绑定');
       const entity = getSelectedEntity(state);
-      const devType = (entity?.components.modelAsset
-        ? resolveModelTelemetryDataDrivenConfig(entity.components.modelAsset)?.device.devType
-        : undefined) ?? (entity ? getDevicePartDeclaration(state.scene, entity)?.device.devType : undefined);
+      const modelDataDriven = entity?.components.modelAsset
+        ? resolveModelTelemetryDataDrivenConfig(entity.components.modelAsset)
+        : null;
+      const devType = modelDataDriven?.device.devType
+        ?? (entity ? getDevicePartDeclaration(state.scene, entity)?.device.devType : undefined);
       if (!entity || !devType) return state;
       const before = entity.components.telemetryBinding ?? null;
-      const after = createDefaultTelemetryBinding(devType);
+      const after = createDefaultTelemetryBinding(devType, modelDataDriven?.device.modelForwardAxis);
       if (JSON.stringify(before) === JSON.stringify(after)) return state;
       const command = updateTelemetryBindingCommand(entity.id, before, after);
       const result = executeCommand(state.scene, state.history, command);

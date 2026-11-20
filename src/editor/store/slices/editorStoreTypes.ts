@@ -227,6 +227,8 @@ export type EditorState = {
   sceneResourceIssues: string[];
   recordSceneResourceIssues: (sceneSessionId: string, issues: string[]) => void;
   hierarchySelectionIds: string[];
+  /** 运行预览中当前选中的动态设备合成 ID；不进入场景持久化。 */
+  selectedSpawnedDeviceId: string | null;
   entityClipboard: EntityClipboard | null;
   entityArrayRequest: EntityArrayRequest | null;
   sceneFocusRequest: SceneFocusRequest | null;
@@ -423,6 +425,7 @@ export type EditorState = {
   reportCadReferenceRuntimeLoad: (status: CadReferenceLoadStatus) => void;
   loadSceneAsset: (asset: AssetEntry) => Promise<void>;
   selectEntity: (entityId: string | null) => void;
+  selectSpawnedDevice: (entityId: string | null) => void;
   selectHierarchyEntities: (entityIds: string[], primaryEntityId: string | null) => void;
   moveEntitiesToFolder: (entityIds: string[], folderId: string | null) => void;
   toggleEntityVisible: (entityId: string) => void;

@@ -688,8 +688,12 @@ function normalizeComponents(value: unknown, entityId: string): EntityComponents
     const telemetryBinding = normalizeTelemetryBindingComponent(components.telemetryBinding);
     if (!telemetryBinding) throwUnsupportedSceneFileError();
     normalized.telemetryBinding = telemetryBinding;
-  } else if (normalized.modelAsset?.dataDrivenConfig?.device.devType) {
-    normalized.telemetryBinding = createDefaultTelemetryBinding(normalized.modelAsset.dataDrivenConfig.device.devType);
+  } else if (normalized.modelAsset?.dataDrivenConfig?.device.devType
+    || normalized.modelAsset?.deviceType?.trim().toLowerCase() === 'agv') {
+    normalized.telemetryBinding = createDefaultTelemetryBinding(
+      normalized.modelAsset.dataDrivenConfig?.device.devType ?? 'agv',
+      normalized.modelAsset.dataDrivenConfig?.device.modelForwardAxis,
+    );
   }
 
   if ('camera' in components && components.camera !== undefined) {
