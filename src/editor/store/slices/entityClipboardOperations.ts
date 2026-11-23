@@ -434,6 +434,9 @@ export function prepareEntityClipboardPaste(
       if (marker?.dataSourceEntityId) marker.dataSourceEntityId = remap(marker.dataSourceEntityId);
       const spawner = entity.components.deviceSpawner;
       if (spawner?.templateEntityId) spawner.templateEntityId = remap(spawner.templateEntityId);
+      for (const rule of spawner?.templateRules ?? []) {
+        if (rule.templateEntityId) rule.templateEntityId = remap(rule.templateEntityId);
+      }
       const telemetry = entity.components.telemetryBinding;
       if (telemetry?.cargoGeneratorId) telemetry.cargoGeneratorId = remap(telemetry.cargoGeneratorId);
       for (const field of ['columnBindings', 'incomingLayerBindings', 'outgoingLayerBindings'] as const) {

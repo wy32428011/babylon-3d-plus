@@ -164,6 +164,134 @@ export function resolveAgvMapTrackPoints(map: AgvMapDefinition, track: AgvMapTra
   return from && to ? [{ x: from.x, y: from.y }, { x: to.x, y: to.y }] : [];
 }
 
+export type AgvMapRoute = {
+  nodeIds: string[];
+  trackIds: string[];
+  points: AgvMapPoint[];
+  distance: number;
+};
+
+type AgvRouteEdge = {
+  fromNodeId: string;
+  toNodeId: string;
+  trackId: string;
+  points: AgvMapPoint[];
+  distance: number;
+};
+
+function measureAgvRoutePoints(points: AgvMapPoint[]): number {
+  let distance = 0;
+  for (let index = 1; index < points.length; index++) {
+    distance += Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+  }
+  return distance;
+}
+
+/** 按轨迹长度求有向最短路径；仅 bidirectional=true 的路线允许反向通行。 */
+export function findAgvMapShortestRoute(
+  map: AgvMapDefinition,
+  startNodeId: string,
+  endNodeId: string,
+): AgvMapRoute | null {
+  const start = startNodeId.trim();
+  const end = endNodeId.trim();
+  const nodesById = new Map(map.nodes.map(node => [node.id, node]));
+  if (!nodesById.has(start) || !nodesById.has(end)) return null;
+  if (start === end) {
+    const node = nodesById.get(start)!;
+    return { nodeIds: [start], trackIds: [], points: [{ x: node.x, y: node.y }], distance: 0 };
+  }
+
+  const adjacency = new Map<string, AgvRouteEdge[]>();
+  const addEdge = (edge: AgvRouteEdge) => {
+    const edges = adjacency.get(edge.fromNodeId) ?? [];
+    edges.push(edge);
+    adjacency.set(edge.fromNodeId, edges);
+  };
+  for (const track of map.tracks) {
+    const points = resolveAgvMapTrackPoints(map, track);
+    if (points.length < 2) continue;
+    const distance = measureAgvRoutePoints(points);
+    addEdge({ fromNodeId: track.fromNodeId, toNodeId: track.toNodeId, trackId: track.id, points, distance });
+    if (track.bidirectional === true) {
+      addEdge({
+        fromNodeId: track.toNodeId,
+        toNodeId: track.fromNodeId,
+        trackId: track.id,
+        points: [...points].reverse(),
+        distance,
+      });
+    }
+  }
+
+  const distances = new Map<string, number>([[start, 0]]);
+  const previous = new Map<string, AgvRouteEdge>();
+  const queue: { nodeId: string; distance: number }[] = [{ nodeId: start, distance: 0 }];
+  const pushQueue = (entry: { nodeId: string; distance: number }) => {
+    let index = queue.length;
+    queue.push(entry);
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (queue[parent].distance <= entry.distance) break;
+      queue[index] = queue[parent];
+      index = parent;
+    }
+    queue[index] = entry;
+  };
+  const shiftQueue = () => {
+    const first = queue[0];
+    const last = queue.pop()!;
+    if (queue.length > 0) {
+      let index = 0;
+      while (true) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        if (left >= queue.length) break;
+        const child = right < queue.length && queue[right].distance < queue[left].distance ? right : left;
+        if (queue[child].distance >= last.distance) break;
+        queue[index] = queue[child];
+        index = child;
+      }
+      queue[index] = last;
+    }
+    return first;
+  };
+
+  while (queue.length > 0) {
+    const { nodeId, distance } = shiftQueue();
+    if (distance !== distances.get(nodeId)) continue;
+    if (nodeId === end) break;
+    for (const edge of adjacency.get(nodeId) ?? []) {
+      const nextDistance = distance + edge.distance;
+      if (nextDistance >= (distances.get(edge.toNodeId) ?? Number.POSITIVE_INFINITY)) continue;
+      distances.set(edge.toNodeId, nextDistance);
+      previous.set(edge.toNodeId, edge);
+      pushQueue({ nodeId: edge.toNodeId, distance: nextDistance });
+    }
+  }
+  if (!previous.has(end)) return null;
+
+  const steps: AgvRouteEdge[] = [];
+  let cursor = end;
+  while (cursor !== start) {
+    const edge = previous.get(cursor);
+    if (!edge) return null;
+    steps.push(edge);
+    cursor = edge.fromNodeId;
+  }
+  steps.reverse();
+  const points: AgvMapPoint[] = [];
+  for (const step of steps) {
+    points.push(...(points.length === 0 ? step.points : step.points.slice(1)));
+  }
+  return {
+    nodeIds: [start, ...steps.map(step => step.toNodeId)],
+    trackIds: steps.map(step => step.trackId),
+    points,
+    distance: distances.get(end)!,
+  };
+}
+
 /** 将地图二维点换算为产生器局部三维坐标；比例尺单位为米/地图单位。 */
 export function mapAgvPointToScene(
   point: AgvMapPoint,

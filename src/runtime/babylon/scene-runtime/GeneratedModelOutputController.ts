@@ -10,7 +10,8 @@ import type { MeshKind, ModelAssetComponent, ModelGeneratorComponent, ModelGener
 import { BUILT_IN_BOX_SIZE_METERS, BUILT_IN_PLANE_SIZE_METERS, BUILT_IN_SPHERE_DIAMETER_METERS, getBuiltInMeshGroundOffsetMeters } from '../../../editor/model/builtInMeshGeometry';
 import { createModelAssetCode } from '../../../editor/model/SceneDocument';
 import { createId } from '../../../shared/ids';
-import { createDefaultTelemetryBinding, type TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
+import { createDefaultTelemetryBinding, isAgvTelemetryDeviceType, type TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
+import { isAgvSpawnerTemplateEntity, resolveDeviceSpawnerTemplateDeviceType } from '../../../editor/model/deviceSpawner';
 import { createModelGeneratorTargetSignature, createRuntimeModelAssetFromTarget, sanitizeModelAssetTemplate } from '../../../editor/model/modelGenerator';
 import { resolveModelGeneratorTargetFromSnapshot } from '../modelGeneratorRuntime';
 import { buildCompositionNodeTree, readCompositionNodeArraySourceId, readCompositionNodeMeshRenderer, type CompositionNodeTree } from '../composition/compositionCargoBuilder';
@@ -25,6 +26,7 @@ import { GeneratedCargoInstancePool, type GeneratedCargoPoolEntry } from './Gene
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
 import { DeviceSpawnerRuntime, createSpawnedDeviceEntityId, createSpawnedDeviceKey, type DeviceSpawnerConfig, type SpawnedDeviceKey } from '../telemetry/spawner/DeviceSpawnerRuntime';
 import { AgvMapRuntime } from '../agv/AgvMapRuntime';
+import { getAgvMapDefinition } from '../../../editor/model/agvMapLibrary';
 import { STACKER_CARGO_COLOR, STACKER_CARGO_EMISSIVE_COLOR, STACKER_CARGO_SIZE, CONVEYOR_CARGO_COLOR, CONVEYOR_CARGO_EMISSIVE_COLOR, CONVEYOR_CARGO_SIZE, RGV_CARGO_COLOR, RGV_CARGO_EMISSIVE_COLOR, RGV_CARGO_SIZE, LIFT_CARGO_COLOR, LIFT_CARGO_EMISSIVE_COLOR, LIFT_CARGO_SIZE, SHUTTLE_CARGO_COLOR, SHUTTLE_CARGO_EMISSIVE_COLOR, SHUTTLE_CARGO_SIZE } from '../telemetry/specialized/types';
 import type { GeneratedCargoKind, GeneratedCargoRuntimeEntry } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
@@ -1224,16 +1226,24 @@ export class GeneratedModelOutputController {
       const component = entity?.components.deviceSpawner;
       if (!entity || !component || !component.spawnerCode) continue;
       const templateEntity = component.templateEntityId ? document.entities[component.templateEntityId] : undefined;
-      if (!templateEntity?.components.modelAsset) {
-        Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [`设备产生器“${entity.name}”未绑定有效模板实例，本次预览不生效。`]);
+      const agvSpawner = Boolean(entity.components.agvMap);
+      if (!templateEntity?.components.modelAsset || (agvSpawner && !isAgvSpawnerTemplateEntity(templateEntity))) {
+        const message = agvSpawner
+          ? `AGV产生器“${entity.name}”的默认模板不存在，或设备类型不是 agv/agv_xxx，本次预览不生效。`
+          : `设备产生器“${entity.name}”未绑定有效模板实例，本次预览不生效。`;
+        Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]);
         continue;
       }
-      const deviceType = (
-        templateEntity.components.telemetryBinding?.deviceType
-        || templateEntity.components.modelAsset.dataDrivenConfig?.device.devType
-        || templateEntity.components.modelAsset.deviceType
-        || ''
-      ).trim().toLowerCase();
+      const deviceType = resolveDeviceSpawnerTemplateDeviceType(templateEntity);
+      const templateRules = agvSpawner ? component.templateRules.flatMap((rule) => {
+        if (!rule.templateEntityId) return [rule];
+        const ruleTemplate = document.entities[rule.templateEntityId];
+        if (isAgvSpawnerTemplateEntity(ruleTemplate)) return [rule];
+        Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [
+          `AGV产生器“${entity.name}”已跳过无效规则模板：${rule.templateEntityId}（模板不存在或设备类型不是 agv/agv_xxx）。`,
+        ]);
+        return [];
+      }) : [];
       configs.push({
         entityId,
         entityName: entity.name,
@@ -1241,6 +1251,7 @@ export class GeneratedModelOutputController {
         templateEntityId: templateEntity.id,
         timeoutSeconds: component.timeoutSeconds,
         deviceType,
+        templateRules,
       });
     }
     this.deviceSpawnerRuntime.configure(configs);
@@ -1272,20 +1283,21 @@ export class GeneratedModelOutputController {
   }
 
   /** 基于模板实体派生一台动态设备实例；模板模型未加载完成时返回 false，等待下一条消息重试。 */
-  public spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string): boolean {
+  public spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string, selectedTemplateEntityId = spawner.templateEntityId): boolean {
     if (this.deviceSpawningStopped || this.dependencies.document.disposed) return false;
     const key = createSpawnedDeviceKey(spawner.spawnerCode, assetCode);
     if (this.spawnedDeviceModels.has(key)) return true;
 
-    const templateEntity = this.dependencies.document.shadowDocument?.entities[spawner.templateEntityId];
+    const templateEntity = this.dependencies.document.shadowDocument?.entities[selectedTemplateEntityId];
     const templateModelAsset = templateEntity?.components.modelAsset;
-    const templateModel = this.dependencies.assets.models.get(spawner.templateEntityId);
+    const templateModel = this.dependencies.assets.models.get(selectedTemplateEntityId);
     if (!templateEntity || !templateModelAsset || !templateModel?.assetHandle) return false;
     const spawnerEntity = this.dependencies.document.shadowDocument?.entities[spawner.entityId];
     const agvMap = spawnerEntity?.components.agvMap;
     const agvMapPlacement = spawnerEntity && agvMap ? {
       transform: JSON.parse(JSON.stringify(spawnerEntity.components.transform)) as TransformComponent,
       map: { xAxis: agvMap.xAxis, yAxis: agvMap.yAxis, scale: agvMap.scale },
+      definition: getAgvMapDefinition(agvMap) ?? undefined,
     } : undefined;
     // 拷贝模板参数，assetCode 由消息提供；绑定 assetCode 显式覆盖，防止指向模板自身编号。
     const modelAsset: ModelAssetComponent = {
@@ -1294,7 +1306,11 @@ export class GeneratedModelOutputController {
     };
     const templateBinding = templateEntity.components.telemetryBinding;
     const telemetryBinding: TelemetryBindingComponent | null = templateBinding
-      ? { ...(JSON.parse(JSON.stringify(templateBinding)) as TelemetryBindingComponent), assetCode }
+      ? {
+          ...(JSON.parse(JSON.stringify(templateBinding)) as TelemetryBindingComponent),
+          ...(isAgvTelemetryDeviceType(spawner.deviceType) ? { deviceType: spawner.deviceType } : {}),
+          assetCode,
+        }
       : spawner.deviceType
         ? {
             ...createDefaultTelemetryBinding(
@@ -1555,7 +1571,7 @@ export class GeneratedModelOutputController {
   initializeDeviceSpawnerRuntime(): void {
     this.deviceSpawnerRuntime = new DeviceSpawnerRuntime({
       pushLog: (message) => Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [message]),
-      spawnDeviceInstance: (spawner, assetCode) => this.spawnDeviceInstance(spawner, assetCode),
+      spawnDeviceInstance: (spawner, assetCode, templateEntityId) => this.spawnDeviceInstance(spawner, assetCode, templateEntityId),
       disposeDeviceInstance: (key) => this.disposeSpawnedDeviceModel(key),
       isDeviceKnown: (sourceId, deviceType, assetCode) => this.isTelemetryDeviceKnown(sourceId, deviceType, assetCode),
     });

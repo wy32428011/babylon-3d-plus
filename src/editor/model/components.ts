@@ -252,6 +252,14 @@ export type ModelGeneratorComponent = {
  * 设备产生器组件：运行预览时按 MQTT 消息（s=spawnerCode）动态克隆模板实体生成设备实例，
  * 超时无消息或收到下线点位后销毁。模型与参数全部从模板实体派生，assetCode 由消息 e 字段提供。
  */
+export type DeviceSpawnerTemplateRule = {
+  id: string;
+  attributeName: string;
+  attributeValue: string;
+  /** 命中后使用的场景模板实例；null 表示回退默认模板。 */
+  templateEntityId: string | null;
+};
+
 export type DeviceSpawnerComponent = {
   /** 产生器 id，与消息 s 字段严格匹配。 */
   spawnerCode: string;
@@ -259,6 +267,8 @@ export type DeviceSpawnerComponent = {
   templateEntityId: string | null;
   /** 无消息自动销毁超时（秒）。 */
   timeoutSeconds: number;
+  /** 按顺序匹配消息字段并选择模板；当前由 AGV 产生器编辑和使用。 */
+  templateRules: DeviceSpawnerTemplateRule[];
 };
 
 /** AGV 产生器的地图显示配置；实体位置是地图 (0,0)，比例尺单位为米/地图单位。 */

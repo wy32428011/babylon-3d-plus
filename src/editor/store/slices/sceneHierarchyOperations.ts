@@ -343,10 +343,24 @@ export function deleteEntitiesInScene(scene: SceneDocument, entityIds: string[])
     }
 
     const deviceSpawner = components.deviceSpawner;
-    if (deviceSpawner?.templateEntityId && deletingIds.has(deviceSpawner.templateEntityId)) {
+    const defaultTemplateDeleted = Boolean(
+      deviceSpawner?.templateEntityId && deletingIds.has(deviceSpawner.templateEntityId),
+    );
+    const hasDeletedRuleTemplate = deviceSpawner?.templateRules.some(
+      (rule) => rule.templateEntityId && deletingIds.has(rule.templateEntityId),
+    ) ?? false;
+    if (deviceSpawner && (defaultTemplateDeleted || hasDeletedRuleTemplate)) {
       components = {
         ...components,
-        deviceSpawner: { ...deviceSpawner, templateEntityId: null },
+        deviceSpawner: {
+          ...deviceSpawner,
+          ...(defaultTemplateDeleted ? { templateEntityId: null } : {}),
+          templateRules: deviceSpawner.templateRules.map((rule) => (
+            rule.templateEntityId && deletingIds.has(rule.templateEntityId)
+              ? { ...rule, templateEntityId: null }
+              : rule
+          )),
+        },
       };
     }
 

@@ -1,7 +1,13 @@
 import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
-import { getAgvMapSceneAxisBase, mapAgvPointToScene, type AgvMapSceneAxis } from '../../../../editor/model/agvMap';
+import {
+  findAgvMapShortestRoute,
+  getAgvMapSceneAxisBase,
+  mapAgvPointToScene,
+  type AgvMapRoute,
+  type AgvMapSceneAxis,
+} from '../../../../editor/model/agvMap';
 import type { TelemetryBindingComponent } from '../../../../editor/model/telemetryBinding';
-import { readIntegerField, readNumberField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
+import { readIntegerField, readNumberField, readStringField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import type { AgvMapPlacement } from '../../scene-runtime/sceneRuntimeTypes';
 
@@ -36,41 +42,187 @@ function readAgvMapCoordinate(point: Vector3, axis: AgvMapSceneAxis, scale: numb
   return (axis.startsWith('-') ? -value : value) / scale;
 }
 
-function applyAgvMapPosition(model: ModelRuntimeEntry, x: number | null, y: number | null): void {
+function resolveAgvMapPosition(
+  model: ModelRuntimeEntry,
+  x: number | null,
+  y: number | null,
+  currentPosition: Vector3,
+): Vector3 {
   const placement = model.agvMapPlacement;
   if (!placement) {
-    if (x !== null) model.root.position.x = x;
-    if (y !== null) model.root.position.z = y;
-    return;
+    return new Vector3(x ?? currentPosition.x, currentPosition.y, y ?? currentPosition.z);
   }
 
   const matrix = createAgvMapPlacementMatrix(placement);
-  const current = Vector3.TransformCoordinates(model.root.position, matrix.clone().invert());
+  const current = Vector3.TransformCoordinates(currentPosition, matrix.clone().invert());
   const mapped = mapAgvPointToScene({
     x: x ?? readAgvMapCoordinate(current, placement.map.xAxis, placement.map.scale),
     y: y ?? readAgvMapCoordinate(current, placement.map.yAxis, placement.map.scale),
   }, placement.map);
-  const world = Vector3.TransformCoordinates(new Vector3(mapped.x, mapped.y, mapped.z), matrix);
-  model.root.position.copyFrom(world);
+  return Vector3.TransformCoordinates(new Vector3(mapped.x, mapped.y, mapped.z), matrix);
 }
+
+function resolveClosestAgvYaw(targetYaw: number, referenceYaw: number): number {
+  const delta = targetYaw - referenceYaw;
+  return referenceYaw + Math.atan2(Math.sin(delta), Math.cos(delta));
+}
+
+export const AGV_MOTION_DEFAULT_SEGMENT_SECONDS = 0.5;
+const AGV_MOTION_MIN_SEGMENT_SECONDS = 1 / 60;
+
+function readSnapshotTime(snapshot: DeviceTelemetrySnapshot): number {
+  return snapshot.sourceTimestamp ?? snapshot.receivedAt;
+}
+
+function resolveSegmentDuration(
+  model: ModelRuntimeEntry,
+  previousTimeMs: number,
+  nextTimeMs: number,
+): number {
+  const measuredSeconds = (nextTimeMs - previousTimeMs) / 1000;
+  if (Number.isFinite(measuredSeconds) && measuredSeconds > 0) {
+    return Math.max(AGV_MOTION_MIN_SEGMENT_SECONDS, measuredSeconds);
+  }
+  const expectedSeconds = (model.telemetryBinding?.expectedIntervalMs
+    ?? AGV_MOTION_DEFAULT_SEGMENT_SECONDS * 1000) / 1000;
+  return Math.max(AGV_MOTION_MIN_SEGMENT_SECONDS, expectedSeconds);
+}
+
+function readTaskNodeId(snapshot: DeviceTelemetrySnapshot, key: string): string | null {
+  return readStringField(snapshot.fields, key)?.trim() || null;
+}
+
+function readTaskRouteKey(snapshot: DeviceTelemetrySnapshot): string | null {
+  const start = readTaskNodeId(snapshot, 'task_begin_point');
+  const end = readTaskNodeId(snapshot, 'task_end_point');
+  return start && end ? `${start}\0${end}` : null;
+}
+
+type AgvMotionState = {
+  lastSnapshot: DeviceTelemetrySnapshot;
+  lastSampleTimeMs: number;
+  startPosition: Vector3;
+  targetPosition: Vector3;
+  startYaw: number;
+  targetYaw: number | null;
+  elapsedSeconds: number;
+  durationSeconds: number;
+  taskRouteKey: string | null;
+  taskRoute: AgvMapRoute | null;
+};
 
 /** 动态 AGV 按产生器地图原点、轴映射和比例尺定位；静态 AGV 保持世界坐标驱动。 */
 export class AgvTelemetryDriver {
-  public applyToModel(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+  private motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
+
+  public applyToModel(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    deltaSeconds: number,
+  ): void {
     if (snapshot.faulted || readIntegerField(snapshot.fields, 'mode') === 0) return;
 
     const x = readNumberField(snapshot.fields, 'x');
     const y = readNumberField(snapshot.fields, 'y');
     const heading = readNumberField(snapshot.fields, 'r');
-    if (x !== null || y !== null) applyAgvMapPosition(model, x, y);
-    if (heading !== null) {
-      model.root.rotationQuaternion = null;
-      model.root.rotation.y = resolveAgvYawRadians(
-        heading,
-        model.telemetryBinding?.modelForwardAxis
-          ?? model.entitySnapshot?.components.modelAsset?.dataDrivenConfig?.device.modelForwardAxis
-          ?? 'x',
-      );
+    let state = this.motionStates.get(model);
+    if (!state) {
+      if (x === null && y === null && heading === null) return;
+      const targetYaw = heading === null ? null : this.resolveModelYaw(model, heading);
+      model.root.position.copyFrom(resolveAgvMapPosition(model, x, y, model.root.position));
+      if (targetYaw !== null) {
+        model.root.rotationQuaternion = null;
+        model.root.rotation.y = targetYaw;
+      }
+      state = {
+        lastSnapshot: snapshot,
+        lastSampleTimeMs: readSnapshotTime(snapshot),
+        startPosition: model.root.position.clone(),
+        targetPosition: model.root.position.clone(),
+        startYaw: model.root.rotation.y,
+        targetYaw,
+        elapsedSeconds: AGV_MOTION_DEFAULT_SEGMENT_SECONDS,
+        durationSeconds: AGV_MOTION_DEFAULT_SEGMENT_SECONDS,
+        taskRouteKey: null,
+        taskRoute: null,
+      };
+      this.motionStates.set(model, state);
+      this.updateTaskRoute(model, snapshot, state);
+      return;
     }
+
+    if (state.lastSnapshot !== snapshot) {
+      const sampleTimeMs = readSnapshotTime(snapshot);
+      const targetPosition = resolveAgvMapPosition(model, x, y, state.targetPosition);
+      const resolvedYaw = heading === null ? null : this.resolveModelYaw(model, heading);
+      const targetYaw = resolvedYaw === null
+        ? state.targetYaw
+        : resolveClosestAgvYaw(resolvedYaw, state.targetYaw ?? model.root.rotation.y);
+      if (!targetPosition.equals(state.targetPosition) || targetYaw !== state.targetYaw) {
+        state.startPosition.copyFrom(model.root.position);
+        state.targetPosition.copyFrom(targetPosition);
+        state.startYaw = model.root.rotation.y;
+        state.targetYaw = targetYaw;
+        state.elapsedSeconds = 0;
+        state.durationSeconds = resolveSegmentDuration(model, state.lastSampleTimeMs, sampleTimeMs);
+      }
+      state.lastSampleTimeMs = sampleTimeMs;
+      state.lastSnapshot = snapshot;
+      this.updateTaskRoute(model, snapshot, state);
+    }
+
+    if (state.elapsedSeconds >= state.durationSeconds) return;
+    state.elapsedSeconds = Math.min(
+      state.durationSeconds,
+      state.elapsedSeconds + Math.max(0, deltaSeconds),
+    );
+    const progress = state.elapsedSeconds / state.durationSeconds;
+    Vector3.LerpToRef(state.startPosition, state.targetPosition, progress, model.root.position);
+    if (state.targetYaw !== null) {
+      model.root.rotationQuaternion = null;
+      model.root.rotation.y = state.startYaw + (state.targetYaw - state.startYaw) * progress;
+    }
+  }
+
+  public hasPendingMotion(model: ModelRuntimeEntry): boolean {
+    const state = this.motionStates.get(model);
+    if (!state) return false;
+    return state.elapsedSeconds < state.durationSeconds;
+  }
+
+  public getTaskRoute(model: ModelRuntimeEntry, startNodeId?: string, endNodeId?: string): AgvMapRoute | null {
+    const state = this.motionStates.get(model);
+    if (!state) return null;
+    if (startNodeId !== undefined && endNodeId !== undefined
+      && state.taskRouteKey !== `${startNodeId}\0${endNodeId}`) return null;
+    return state.taskRoute;
+  }
+
+  public resetMotionStates(): void {
+    this.motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
+  }
+
+  private updateTaskRoute(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    state: AgvMotionState,
+  ): void {
+    const routeKey = readTaskRouteKey(snapshot);
+    if (routeKey === state.taskRouteKey) return;
+    state.taskRouteKey = routeKey;
+    state.taskRoute = null;
+    const map = model.agvMapPlacement?.definition;
+    if (!routeKey || !map) return;
+    const [startNodeId, endNodeId] = routeKey.split('\0');
+    state.taskRoute = findAgvMapShortestRoute(map, startNodeId, endNodeId);
+  }
+
+  private resolveModelYaw(model: ModelRuntimeEntry, heading: number): number {
+    return resolveAgvYawRadians(
+      heading,
+      model.telemetryBinding?.modelForwardAxis
+        ?? model.entitySnapshot?.components.modelAsset?.dataDrivenConfig?.device.modelForwardAxis
+        ?? 'x',
+    );
   }
 }

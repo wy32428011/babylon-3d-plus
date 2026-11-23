@@ -13,6 +13,7 @@ import { Scene } from '@babylonjs/core/scene.js';
 import type { AnimationGroup, Observer, Node } from '@babylonjs/core';
 import type { Entity } from '../../../editor/model/Entity';
 import type { AgvMapComponent, ChartMarkerComponent, DataPlatformScreenComponent, LocatorStorageDepth, ModelAssetComponent, ModelGeneratorComponent, ModelGeneratorTarget, TransformComponent } from '../../../editor/model/components';
+import type { AgvMapDefinition } from '../../../editor/model/agvMap';
 import type { Vector3Data } from '../../../editor/model/math';
 import type { TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
 import { type CompositionNodeTree } from '../composition/compositionCargoBuilder';
@@ -126,6 +127,7 @@ export type EntityArrayPreviewEntry = {
 export type AgvMapPlacement = {
   transform: TransformComponent;
   map: Pick<AgvMapComponent, 'xAxis' | 'yAxis' | 'scale'>;
+  definition?: AgvMapDefinition;
 };
 
 export type ModelRuntimeEntry = {

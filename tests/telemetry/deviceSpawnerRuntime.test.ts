@@ -27,7 +27,7 @@ function topicFor(assetCode: string, deviceType = 'agv'): string {
 
 function createHost() {
   const logs: string[] = [];
-  const spawned: { spawnerCode: string; assetCode: string }[] = [];
+  const spawned: { spawnerCode: string; assetCode: string; templateEntityId: string }[] = [];
   const disposed: string[] = [];
   const knownDevices = new Set<string>();
   let spawnResult = true;
@@ -35,9 +35,9 @@ function createHost() {
     pushLog(message: string) {
       logs.push(message);
     },
-    spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string) {
+    spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string, templateEntityId: string) {
       if (!spawnResult) return false;
-      spawned.push({ spawnerCode: spawner.spawnerCode, assetCode });
+      spawned.push({ spawnerCode: spawner.spawnerCode, assetCode, templateEntityId });
       return true;
     },
     disposeDeviceInstance(key: string) {
@@ -77,7 +77,7 @@ test('首条带 s 的消息触发生成，客户端 upsert 的快照即实例驱
   runtime.configure([SPAWNER]);
   try {
     sendMessage('AGV-01', [{ p: 'distance_x', v: 4.2 }]);
-    assert.deepEqual(spawned, [{ spawnerCode: 'AGV-SPAWN', assetCode: 'AGV-01' }]);
+    assert.deepEqual(spawned, [{ spawnerCode: 'AGV-SPAWN', assetCode: 'AGV-01', templateEntityId: 'entity-template-1' }]);
 
     const snapshot = deviceTelemetryStore.getSnapshot('AGV-01', 'agv', 'default');
     assert.ok(snapshot, '快照应写入遥测仓库供驱动消费');
@@ -278,6 +278,59 @@ test('AGV mode=0 按协议下线，mode=2 可重新生成；其它设备 mode=0 
     sendMessage('AGV-02', [{ p: 'mode', v: 2 }]);
     sendMessage('AGV-02', [{ p: 'mode', v: 0 }], { withSpawner: false, deviceType: 'shuttle' });
     assert.equal(spawned.length, 2, '非 AGV 的 mode=0 仍不产生或销毁实例');
+  } finally {
+    runtime.disposeAll();
+    deviceTelemetryStore.clear();
+  }
+});
+
+
+test('AGV 按消息字段顺序选择规则模板，空规则和未命中回退默认模板', () => {
+  const { host, spawned } = createHost();
+  const runtime = new DeviceSpawnerRuntime(host);
+  runtime.configure([{
+    ...SPAWNER,
+    templateRules: [
+      {
+        id: 'heavy',
+        attributeName: 'vehicle_type',
+        attributeValue: 'heavy',
+        templateEntityId: 'entity-template-heavy',
+      },
+      {
+        id: 'default-on-match',
+        attributeName: 'vehicle_type',
+        attributeValue: 'empty',
+        templateEntityId: null,
+      },
+      {
+        id: 'by-asset-code',
+        attributeName: 'assetCode',
+        attributeValue: 'AGV-03',
+        templateEntityId: 'entity-template-three',
+      },
+    ],
+  }]);
+  try {
+    sendMessage('AGV-01', [{ p: 'vehicle_type', v: 'heavy' }]);
+    sendMessage('AGV-02', [{ p: 'vehicle_type', v: 'light' }]);
+    sendMessage('AGV-03', [{ p: 'vehicle_type', v: 'light' }]);
+    sendMessage('AGV-04', [{ p: 'vehicle_type', v: 'empty' }]);
+    sendMessage('AGV-05', [{ p: 'vehicle_type', v: 100 }, { p: 'enabled', v: true }]);
+
+    assert.deepEqual(
+      spawned.map(({ assetCode, templateEntityId }) => ({ assetCode, templateEntityId })),
+      [
+        { assetCode: 'AGV-01', templateEntityId: 'entity-template-heavy' },
+        { assetCode: 'AGV-02', templateEntityId: 'entity-template-1' },
+        { assetCode: 'AGV-03', templateEntityId: 'entity-template-three' },
+        { assetCode: 'AGV-04', templateEntityId: 'entity-template-1' },
+        { assetCode: 'AGV-05', templateEntityId: 'entity-template-1' },
+      ],
+    );
+
+    sendMessage('AGV-01', [{ p: 'vehicle_type', v: 'light' }], { withSpawner: false });
+    assert.equal(spawned.length, 5, '实例存活期间字段变化只保活，不重新生成或更换模板');
   } finally {
     runtime.disposeAll();
     deviceTelemetryStore.clear();

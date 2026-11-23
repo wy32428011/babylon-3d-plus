@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   createDefaultAgvMapComponent,
+  findAgvMapShortestRoute,
   mapAgvPointToScene,
   resolveAgvMapTrackPoints,
   sanitizeAgvMapComponent,
@@ -62,5 +63,37 @@ test('地图点按正负轴与米制比例尺换算，原点始终不变', () =>
   const component = { xAxis: '-z' as const, yAxis: 'x' as const, scale: 2.5 };
   assert.deepEqual(mapAgvPointToScene({ x: 4, y: -2 }, component), { x: -5, y: 0, z: -10 });
   assert.deepEqual(mapAgvPointToScene({ x: 0, y: 0 }, component), { x: 0, y: 0, z: 0 });
+});
+
+test('任务起终点按轨迹长度求有向最短路径并保留完整折线', () => {
+  const map = {
+    schemaVersion: 1 as const,
+    id: 'route-test',
+    name: '路线测试',
+    nodes: [
+      { id: 'A', name: 'A', x: 0, y: 0 },
+      { id: 'B', name: 'B', x: 3, y: 0 },
+      { id: 'C', name: 'C', x: 3, y: 4 },
+    ],
+    tracks: [
+      { id: 'AB', fromNodeId: 'A', toNodeId: 'B', bidirectional: true, points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 3, y: 0 }] },
+      { id: 'BC', fromNodeId: 'B', toNodeId: 'C' },
+      { id: 'AC', fromNodeId: 'A', toNodeId: 'C', points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 3, y: 4 }] },
+    ],
+  };
+  assert.deepEqual(findAgvMapShortestRoute(map, 'A', 'C'), {
+    nodeIds: ['A', 'B', 'C'],
+    trackIds: ['AB', 'BC'],
+    points: [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 3, y: 0 }, { x: 3, y: 4 }],
+    distance: 7,
+  });
+  assert.deepEqual(findAgvMapShortestRoute(map, 'B', 'A')?.points, [
+    { x: 3, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 0 },
+  ]);
+  assert.equal(findAgvMapShortestRoute(map, 'C', 'A'), null, '未声明双向的轨迹不得反向通行');
+  assert.equal(findAgvMapShortestRoute(map, '220', '72'), null, '节点缺失时不得用直线伪造路线');
+  assert.deepEqual(findAgvMapShortestRoute(map, 'A', 'A'), {
+    nodeIds: ['A'], trackIds: [], points: [{ x: 0, y: 0 }], distance: 0,
+  });
 });
 

@@ -1468,7 +1468,7 @@ export function createModelEntity(
   const normalizedLayerChangePlatformBindingConfig = normalizeLayerChangePlatformBindingConfig(layerChangePlatformBindingConfig);
   const assetCode = createModelAssetCode(normalizedDataDrivenConfig?.device.defaultAssetCode ?? defaultAssetCodePrefix, id);
   const telemetryDeviceType = normalizedDataDrivenConfig?.device.devType
-    ?? (normalizeTelemetryDeviceType(deviceType) === 'agv' ? 'agv' : undefined);
+    ?? (normalizeTelemetryDeviceType(deviceType)?.startsWith('agv') ? normalizeTelemetryDeviceType(deviceType) : undefined);
   const telemetryBinding = telemetryDeviceType
     ? createDefaultTelemetryBinding(telemetryDeviceType, normalizedDataDrivenConfig?.device.modelForwardAxis)
     : null;

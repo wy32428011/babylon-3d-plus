@@ -52,7 +52,7 @@ AGV 产生器位于 POI 库，复用设备产生器的模板实体、MQTT 动态
 字段约定：
 
 - `businessType` 是可选业务分类字符串，当前预置示例使用 `pickup`、`dropoff`、`station`、`charging`、`waiting`；渲染不依赖该分类。
-- `bidirectional` 是可选业务元数据，本版仅保存，不影响轨迹显示。
+- `bidirectional` 表示路线是否允许反向通行；缺省或 `false` 按 `fromNodeId → toNodeId` 单向处理。它不影响轨迹显示，但参与任务最短路径计算。
 - `points` 是可选的完整有序折线，至少两个点，适合 CAD 中的多段线。省略时使用 `fromNodeId`、`toNodeId` 对应业务节点的 XY 坐标绘制直线。
 - 当前校验上限为 4096 个业务节点、8192 条轨迹、每条轨迹 2048 个折线点。
 
@@ -60,16 +60,22 @@ AGV 产生器位于 POI 库，复用设备产生器的模板实体、MQTT 动态
 
 ## AGV MQTT 位姿驱动
 
-设备模型的 `deviceType` 或模型包 `dataDriven.device.devType` 声明为 `agv` 后，模型 Inspector 会显示「数据驱动」。旧场景只有 `modelAsset.deviceType='agv'` 时也会补建默认绑定，不要求重新导入模型。
+设备模型的 `deviceType` 或模型包 `dataDriven.device.devType` 声明为 `agv`/`agv_xxx` 后，模型 Inspector 会显示「数据驱动」并复用同一 AGV 位姿驱动；快照仍按原始协议类型精确匹配。旧场景只有 `modelAsset.deviceType='agv'` 时也会补建默认绑定，不要求重新导入模型。
 
 标准配置流程：拖入 AGV 模型并校准、隐藏模板实例 → 创建 AGV 产生器并关联模板、选择地图和点击事件 → 运行预览接收 MQTT。产生器只在运行态创建动态设备，隐藏模板自身不参与设备驱动。
 
+- 默认模板和条件规则模板都从场景实例中选择，模板必须带 `modelAsset`，最终设备类型必须是 `agv` 或以 `agv` 开头（例如 `agv_forklift`，大小写不敏感）；非 AGV 实例不会出现在下拉选项中，旧配置引用失效时会在面板和运行日志中提示。
+- 「条件模板规则」复用模型生成器的属性名/属性值匹配方式：按列表顺序取第一条命中，属性名读取标准快照 `fields`，也支持顶层 `sourceId`、`deviceType`、`assetCode`；数字、布尔值和字符串统一转为字符串并去除首尾空格后精确比较。规则模板留空表示使用默认模板，未命中任何规则也使用默认模板。
+- 规则只在首次生成实例时求值，存活期间的后续字段变化只保活，不替换模型。规则模板的模型、参数、脚本、车头轴和完整 Transform 均从各自场景实例派生；动态实例的遥测设备类型跟随默认模板，因此规则只改变视觉配置，不改变原消息的 topic 匹配协议。
+
 - 模型包通过 `dataDriven.device.modelForwardAxis` 声明 GLB 局部车头轴默认值；模板的 `telemetryBinding.modelForwardAxis` 可覆盖该默认值，「恢复模型默认绑定」会回到包内声明。可选 `+X`、`-X`、`+Z`、`-Z`，缺省 `+X`，动态实例继承模板最终配置。
 - 角度协议约定 `r=0` 时车头指向场景 `+X`，顺时针为正。驱动根据模型正方向轴补偿初始朝向，不把 `movement_x` 当作位移量。
-- 动态 AGV 的 `x/y` 是产生器地图坐标：先按产生器的 `xAxis/yAxis/scale` 换算，再应用产生器实体的完整 Transform。地图原点就是产生器位置，比例尺和轴映射与地图显示一致。未关联地图的静态 AGV 仍按场景世界 `X/Z` 驱动。`z=null` 不参与整机移动；只更新一个平面字段时保留另一地图通道。当前不做路网吸附或路径约束。
-- `normal=false`、非零 `errorCode`、数据断流或 `mode=0` 时不继续更新位姿；动态实例收到 `mode=0` 后按 AGV 离线协议销毁，也继续兼容通用 `status=offline`。
-- 其余 `command`、`deviceType`、`signalBits`、`task`、`containerCode`、`batteryLevel`、`message`、`timestamp`、`task_begin_point`、`task_end_point` 等原始字段保留在标准快照和运行时诊断中。当前不据此生成货物或执行装卸动画。
-- AGV 产生器按模板的 `deviceType` 注册，首条带 `s` 的 MQTT 消息生成实例，后续消息按 topic 中的设备号及完整 `sourceId/deviceType/assetCode` 驱动对应实例。动态实例在生成时读取产生器的地图放置配置；当前不消费任务点或路网拓扑。
+- 动态 AGV 的 `x/y` 是产生器地图坐标：先按产生器的 `xAxis/yAxis/scale` 换算，再应用产生器实体的完整 Transform。地图原点就是产生器位置，比例尺和轴映射与地图显示一致。未关联地图的静态 AGV 仍按场景世界 `X/Z` 驱动。`z=null` 不参与整机移动；只更新一个平面字段时保留上一目标的另一地图通道。当前不做路网吸附或路径约束。
+- 首个有效位姿直接落位，避免动态实例从模板位置滑入；后续 `x/y/r` 采用延迟一个采样点的分段线性插值：收到新样本后，从当前画面位置向新目标播放，时长取相邻样本 `sourceTimestamp`（缺失时 `receivedAt`）的实际差值，位置速度为两点距离除以该时长，不做缓入缓出或阻尼减速。报文提前到达时从当前插值位置承接，车头沿最短转角按同一时长旋转。正常连续推送时画面约落后一个采样周期；该平滑只跟随 MQTT 实时位姿，不代表沿路网自动寻路。
+- `normal=false`、非零 `errorCode` 或 `mode=0` 时冻结位姿；数据断流时不接受新目标，但已开始的短过渡会继续到最近目标后停止。动态实例收到 `mode=0` 后按 AGV 离线协议销毁，也继续兼容通用 `status=offline`。
+- `task_begin_point` 与 `task_end_point` 同时存在时，动态 AGV 按地图节点和轨迹方向计算累计折线长度最短的路线，结果包含节点序列、轨迹 ID、完整折线和地图单位长度；相同任务起终点复用缓存。`bidirectional=true` 的轨迹可反向使用，其余轨迹只允许正向。任一节点不存在或路网不可达时返回无路线，不用两点直线替代。点击动态 AGV 后，只读「运行时诊断」展示路线摘要或不可达原因。该结果当前只用于任务路线诊断，不覆盖 `x/y/r` 实时位置，也不让车辆脱离真实上报位置自动行驶。
+- 其余 `command`、`deviceType`、`signalBits`、`task`、`containerCode`、`batteryLevel`、`message`、`timestamp` 等原始字段保留在标准快照和运行时诊断中。当前不据此生成货物或执行装卸动画。
+- AGV 产生器按模板的 `deviceType` 注册，首条带 `s` 的 MQTT 消息生成实例，后续消息按 topic 中的设备号及完整 `sourceId/deviceType/assetCode` 驱动对应实例。动态实例在生成时读取产生器的地图放置配置及对应地图定义。
 - 动态 AGV 可点击。点击后右侧显示「动态 AGV 实例」及只读「数据驱动」模块，包含来源产生器、继承配置、在线状态、topic、时间和最新 MQTT fields；产生器配置的高亮、聚焦和图表点击事件继续执行。动态选区和实例快照不写入场景文档，实例下线或退出预览即清理。
 
 可用 `npm run demo:spawn:mqtt` 发布包含上述字段的 AGV 演示数据，或先运行 `node scripts/simulate-device-spawn-mqtt.mjs --once --stdout` 检查报文。领域回归入口为 `npm run test:agv-drive`，产生器与地图回归入口为 `npm run test:agv-spawner`。

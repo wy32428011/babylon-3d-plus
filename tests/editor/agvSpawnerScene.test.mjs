@@ -11,6 +11,8 @@ const entries = {
   commands: '/src/editor/commands/entityCommands.ts',
   cad: '/src/editor/cad/cadReferenceCore.ts',
   cadStatus: '/src/editor/cad/cadReferenceLoadStatus.ts',
+  spawner: '/src/editor/model/deviceSpawner.ts',
+  hierarchy: '/src/editor/store/slices/sceneHierarchyOperations.ts',
 };
 const modules = await createP4SsrTestModules(Object.values(entries));
 test.after(() => modules.close());
@@ -20,6 +22,11 @@ const { decodeBuiltInAssetDragPayload, encodeBuiltInAssetDragPayload } = await m
 const { parseCadReferenceDxfStream } = await modules.ssrLoadModule(entries.streaming);
 const { importAgvCadMapCommand } = await modules.ssrLoadModule(entries.commands);
 const { createCadReferenceComponentMetadata } = await modules.ssrLoadModule(entries.cad);
+const {
+  isAgvSpawnerTemplateEntity,
+  sanitizeDeviceSpawnerComponent,
+} = await modules.ssrLoadModule(entries.spawner);
+const { deleteEntitiesInScene } = await modules.ssrLoadModule(entries.hierarchy);
 
 test('AGV产生器 POI 拖拽载荷通过内置资源白名单解码', () => {
   const encoded = encodeBuiltInAssetDragPayload({ kind: 'agv-spawner' });
@@ -30,6 +37,12 @@ test('AGV产生器复用设备生成组件并随场景保存地图和原点', ()
   const entity = createAgvSpawnerEntity({ x: 4, y: 2, z: -3 });
   entity.components.deviceSpawner.spawnerCode = 'AGV-SPAWN';
   entity.components.deviceSpawner.templateEntityId = 'template-agv';
+  entity.components.deviceSpawner.templateRules = [{
+    id: 'heavy-agv',
+    attributeName: 'vehicle_type',
+    attributeValue: 'heavy',
+    templateEntityId: 'template-heavy-agv',
+  }];
   entity.components.agvMap = {
     mapId: 'demo-loop-dispatch',
     showTrajectories: false,
@@ -47,7 +60,55 @@ test('AGV产生器复用设备生成组件并随场景保存地图和原点', ()
   assert.deepEqual(restoredEntity.components.transform.position, { x: 4, y: 2, z: -3 });
   assert.deepEqual(restoredEntity.components.agvMap, entity.components.agvMap);
   assert.equal(restoredEntity.components.deviceSpawner.spawnerCode, 'AGV-SPAWN');
+  assert.deepEqual(restoredEntity.components.deviceSpawner.templateRules, entity.components.deviceSpawner.templateRules);
   assert.ok(restoredEntity.components.clickEventBinding);
+});
+
+test('AGV 模板只接受 agv 前缀，旧场景补空规则且删除模板会清理规则引用', () => {
+  const legacy = sanitizeDeviceSpawnerComponent({
+    spawnerCode: 'AGV-SPAWN',
+    templateEntityId: 'template-agv',
+    timeoutSeconds: 30,
+  });
+  assert.deepEqual(legacy.templateRules, []);
+
+  const createTemplate = (id, deviceType) => ({
+    id,
+    name: id,
+    parentId: null,
+    childrenIds: [],
+    components: { modelAsset: { deviceType } },
+  });
+  const defaultTemplate = createTemplate('template-agv', 'agv');
+  const heavyTemplate = createTemplate('template-heavy', 'AGV_FORKLIFT');
+  const otherTemplate = createTemplate('template-other', 'conveyor');
+  assert.equal(isAgvSpawnerTemplateEntity(defaultTemplate), true);
+  assert.equal(isAgvSpawnerTemplateEntity(heavyTemplate), true);
+  assert.equal(isAgvSpawnerTemplateEntity(otherTemplate), false);
+
+  const spawner = createAgvSpawnerEntity();
+  spawner.components.deviceSpawner.templateEntityId = defaultTemplate.id;
+  spawner.components.deviceSpawner.templateRules = [{
+    id: 'heavy',
+    attributeName: 'vehicle_type',
+    attributeValue: 'heavy',
+    templateEntityId: heavyTemplate.id,
+  }];
+  const scene = createEmptySceneDocument('AGV模板');
+  scene.entityIds = [spawner.id, defaultTemplate.id, heavyTemplate.id, otherTemplate.id];
+  scene.entities = Object.fromEntries([
+    spawner, defaultTemplate, heavyTemplate, otherTemplate,
+  ].map((entity) => [entity.id, entity]));
+
+  const withoutHeavy = deleteEntitiesInScene(scene, [heavyTemplate.id]);
+  assert.equal(
+    withoutHeavy.entities[spawner.id].components.deviceSpawner.templateRules[0].templateEntityId,
+    null,
+    '规则模板删除后保留规则并回退默认模板',
+  );
+  assert.equal(withoutHeavy.entities[spawner.id].components.deviceSpawner.templateEntityId, defaultTemplate.id);
+  const withoutDefault = deleteEntitiesInScene(scene, [defaultTemplate.id]);
+  assert.equal(withoutDefault.entities[spawner.id].components.deviceSpawner.templateEntityId, null);
 });
 
 test('Store 创建、地图编辑、撤销重做和复制保持完整 AGV 配置', async () => {
@@ -78,6 +139,16 @@ test('Store 创建、地图编辑、撤销重做和复制保持完整 AGV 配置
     useEditorStore.getState().redo();
     assert.equal(useEditorStore.getState().scene.entities[id].components.agvMap.mapId, 'demo-production-line');
 
+    const spawner = useEditorStore.getState().scene.entities[id].components.deviceSpawner;
+    useEditorStore.getState().updateSelectedDeviceSpawner({
+      ...spawner,
+      templateRules: [{
+        id: 'copy-rule',
+        attributeName: 'vehicle_type',
+        attributeValue: 'heavy',
+        templateEntityId: 'template-heavy-agv',
+      }],
+    });
     useEditorStore.getState().copySelectedEntities();
     useEditorStore.getState().pasteEntityClipboard();
     const pastedId = useEditorStore.getState().scene.selectedEntityId;
@@ -85,6 +156,10 @@ test('Store 创建、地图编辑、撤销重做和复制保持完整 AGV 配置
     assert.deepEqual(
       useEditorStore.getState().scene.entities[pastedId].components.agvMap,
       useEditorStore.getState().scene.entities[id].components.agvMap,
+    );
+    assert.deepEqual(
+      useEditorStore.getState().scene.entities[pastedId].components.deviceSpawner.templateRules,
+      useEditorStore.getState().scene.entities[id].components.deviceSpawner.templateRules,
     );
   } finally {
     useEditorStore.setState(before, true);

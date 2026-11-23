@@ -60,7 +60,7 @@ export function AgvSpawnerInspector({ entityId, spawner, map, disabled = false }
 
   return (
     <>
-      <DeviceSpawnerInspector component={spawner} disabled={disabled} />
+      <DeviceSpawnerInspector component={spawner} disabled={disabled} agvOnly />
       <fieldset className="transform-fieldset">
         <legend>AGV地图</legend>
         <label className="inspector-row">

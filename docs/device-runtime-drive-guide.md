@@ -448,7 +448,8 @@ hclift 每帧向共享状态发布载货台状态（`hcliftPlatformSurfaces`，k
 | 配置 | 语义 |
 |---|---|
 | `spawnerCode` | 产生器 id，与消息 `s` 字段 + topic 设备类型复合严格匹配 |
-| `templateEntityId` | 场景模板实例（带 modelAsset 的实体）；产生个体时深克隆其模型与组件参数，**assetCode 不拷贝**（由 topic 段提供）；模板自身不参与驱动 |
+| `templateEntityId` | 默认场景模板实例（带 modelAsset 的实体）；产生个体时深克隆其模型与组件参数，**assetCode 不拷贝**（由 topic 段提供）；模板自身不参与驱动。AGV 产生器要求默认模板设备类型为 `agv` 或以 `agv` 开头 |
+| `templateRules` | AGV 条件模板规则（最多 32 条）：`attributeName/attributeValue/templateEntityId`，按顺序取首条命中；规则模板为空或未命中时回退默认模板，规则模板同样只接受 AGV 前缀类型 |
 | `timeoutSeconds` | 无消息自动销毁超时（clamp 1–3600，默认 30） |
 
 ### MQTT 协议
@@ -458,16 +459,16 @@ hclift 每帧向共享状态发布载货台状态（`hcliftPlatformSurfaces`，k
 - 路由：`MqttTelemetryClient` / `ElectronMqttTelemetryClient` 消息入口统一调 `ingestDeviceTelemetryMessage`（deviceTelemetry.ts）——parse → `store.upsert` → notify `onDeviceTelemetryMessages` 订阅者。`DeviceSpawnerRuntime.handleSnapshot` 三段式判定：
   1. assetCode 命中实例反查表（`instancesByAssetCode`）→ 含 `status=offline` 则销毁，否则刷新 `lastMessageAt`（**保活不依赖 s**）；
   2. `spawnerCode` 为空 → 忽略（常规未知设备消息，快照留 store 无候选消费）；
-  3. `(spawnerCode, deviceType)` **严格匹配**已注册产生器 且 `host.isDeviceKnown(sourceId, deviceType, assetCode)` 为 false → `spawnDeviceInstance` 生成；客户端已 upsert 的快照即新设备驱动数据源，无需重键。
+  3. `(spawnerCode, deviceType)` **严格匹配**已注册产生器 且 `host.isDeviceKnown(sourceId, deviceType, assetCode)` 为 false → 按快照字段顺序求值 AGV `templateRules`（顶层 `sourceId/deviceType/assetCode` 与模型生成器同样可匹配），以命中模板或默认模板调用 `spawnDeviceInstance` 生成；客户端已 upsert 的快照即新设备驱动数据源，无需重键。规则仅首次生成时求值，后续字段变化不换模板。
 - 显式下线：固定点位 `p="status"`、`v="offline"`（常量固化于 spawner 模块，后续按真实协议调整），同 topic 发送、可不带 s。
 
 ### 生命周期（telemetry/spawner/DeviceSpawnerRuntime.ts）
 
 1. `beginTelemetryPreview`：SceneRuntime `configureDeviceSpawnersFromDocument` 解析各产生器模板实体（deviceType 取模板 telemetryBinding.deviceType 或 dataDrivenConfig.device.devType），`DeviceSpawnerRuntime.configure` 以 `(spawnerCode, deviceType)` 复合键注册并订阅遥测消息；同时 `SpecializedTelemetryRuntime.collectResolvedBindingKeys()` eager 构建静态绑定键集合，消除首帧前窗口。
 2. `isDeviceKnown`（SceneRuntime）：静态侧按 `createTelemetryBindingKey(sourceId, deviceType, assetCode)` 查每帧重建的 `resolvedBindingKeys`（含冲突 key）；动态侧查 `deviceSpawnerRuntime.hasAssetCode(assetCode)`（`spawnedDeviceModels` 在 `spawnDeviceInstance` 同步登记，加载中实例也被覆盖，无 in-flight 窗口）。
-3. `SceneRuntime.spawnDeviceInstance`：JSON 深拷贝模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为 topic 段编号**，合成 entitySnapshot 供驱动读 parameterValues；root 经 `applyTransform` **继承模板实例完整变换（位置/旋转/缩放）**，与常规实体 root 同源；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；模板未加载完成返回 false，实例不登记、下一条消息重试。
-3b. **首帧揭示**（消除闪烁移动）：实例创建时入 `spawnedDeviceRevealPending`，网格挂载后即逐 mesh 置 `layerMask=0`（原值存 `spawnedDeviceHiddenLayerMasks`，脚本 start 新建的网格在 settle 回调里补一次）；`applyDeviceTelemetryFrame` 每帧 `specializedTelemetryRuntime.applyFrame` 之后调 `revealDrivenSpawnedDevices`，当实例通过驱动候选门槛（`assetHandle && stackerTelemetryReady`）时恢复原 layerMask——此刻首帧驱动已把设备吸附到 MQTT 目标位（司机均为偏移子节点/首帧吸附，不改 root），直接显示在目标位，不会先在模板位姿渲染若干帧再跳走。无有效快照的设备不会被驱动，按模板位姿显示（本就不产生位移）。销毁/退出预览时从集合清理。**隐藏只能走 layerMask**：禁用 root 会让脚本把 `isEnabled()`=false 捕获为参数基线并每帧还原（整车永隐）；`isVisible=false` 会被脚本 bounds 过滤（如 multi-shuttle 的 `isBoundsMesh`）踢出参数化目标（主体颜色/尺寸拉伸丢失）；加载期间 root 下本就无网格，无需额外处理。
-4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`，常量由 `createSpawnedDeviceEntityId` / `parseSpawnedDeviceEntityId` 维护），**五种现有 driver 零改动**驱动动画；网格 `isPickable=true` 仅为生成器产物点击链路服务，常规实体拾取仍按元数据缺 `editorEntityId` 过滤，动态实例不进编辑选择。
+3. `SceneRuntime.spawnDeviceInstance`：按运行时传入的默认/规则模板 ID，JSON 深拷贝该模板 modelAsset/telemetryBinding 并**显式覆盖 assetCode 为 topic 段编号**，合成 entitySnapshot 供驱动读 parameterValues；AGV 规则模板的 telemetryBinding.deviceType 改随默认模板，保证不同 AGV 子类型视觉模板仍消费原 topic 快照；root 经 `applyTransform` **继承所选模板实例完整变换（位置/旋转/缩放）**，与常规实体 root 同源；走完整异步加载管线（loadModelRuntimeAssets → applyModelAssetParameters → syncModelAssetExternalScripts）；`parameterBaseline/textureCache` 新建 Map（勿共享模板）；所选模板未加载完成返回 false，实例不登记、下一条消息重试。
+3b. **首帧揭示**（消除闪烁移动）：实例创建时入 `spawnedDeviceRevealPending`，网格挂载后即逐 mesh 置 `layerMask=0`（原值存 `spawnedDeviceHiddenLayerMasks`，脚本 start 新建的网格在 settle 回调里补一次）；`applyDeviceTelemetryFrame` 每帧 `specializedTelemetryRuntime.applyFrame` 之后调 `revealDrivenSpawnedDevices`，当实例通过驱动候选门槛（`assetHandle && stackerTelemetryReady`）时恢复原 layerMask——此刻首帧驱动已把设备吸附到 MQTT 目标位（AGV 首帧直接写 root 目标位，其余设备按各自首帧吸附规则落位），直接显示在目标位，不会先在模板位姿渲染若干帧再跳走。无有效快照的设备不会被驱动，按模板位姿显示（本就不产生位移）。销毁/退出预览时从集合清理。**隐藏只能走 layerMask**：禁用 root 会让脚本把 `isEnabled()`=false 捕获为参数基线并每帧还原（整车永隐）；`isVisible=false` 会被脚本 bounds 过滤（如 multi-shuttle 的 `isBoundsMesh`）踢出参数化目标（主体颜色/尺寸拉伸丢失）；加载期间 root 下本就无网格，无需额外处理。
+4. 驱动：实例表 `spawnedDeviceModels` 经 host.collectModels() 并入候选（entityId 为 `spawned:{key}`，常量由 `createSpawnedDeviceEntityId` / `parseSpawnedDeviceEntityId` 维护），复用各专用 driver 驱动动画；AGV 首个有效 `x/y/r` 位姿直接落位，后续延迟一个采样点，按相邻 `sourceTimestamp`（缺失时 `receivedAt`）的真实时间差对位置和最短转角做线性插值，不在报文边界缓入缓出或阻尼刹停；断流完成最近采样段，故障和 `mode=0` 冻结。动态 AGV 同时按 `task_begin_point/task_end_point` 缓存有向路网最短路线，并在只读运行时诊断展示路线摘要或不可达状态；路线不覆盖实时位姿；网格 `isPickable=true` 仅为生成器产物点击链路服务，常规实体拾取仍按元数据缺 `editorEntityId` 过滤，动态实例不进编辑选择。
 5. 回收：`applyFrame(nowMs)` 每帧先收集 `now - lastMessageAt > timeoutSeconds` 的实例，**帧尾统一销毁**（禁止边迭代边销毁），同步删 assetCode 反查索引；显式下线立即销毁；`endTelemetryPreview` 调 `disposeAll` 清零（在预览态早退判断之前执行）。
 
 ### 调试工具

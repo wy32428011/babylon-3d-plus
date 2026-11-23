@@ -4,6 +4,8 @@ import {
   readStringField,
   type DeviceTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
+import type { DeviceSpawnerTemplateRule } from '../../../../editor/model/components';
+import { isAgvTelemetryDeviceType } from '../../../../editor/model/telemetryBinding';
 
 /** 显式下线点位（暂定协议，后续按真实协议调整时只改这两个常量）。 */
 export const DEVICE_SPAWN_OFFLINE_POINT_NAME = 'status';
@@ -18,6 +20,8 @@ export type DeviceSpawnerConfig = {
   timeoutSeconds: number;
   /** 模板派生的设备类型，与消息 topic 段复合严格匹配。 */
   deviceType: string;
+  /** AGV 条件模板规则，按列表顺序取首条命中。 */
+  templateRules?: readonly DeviceSpawnerTemplateRule[];
 };
 
 export type SpawnedDeviceKey = string;
@@ -51,7 +55,7 @@ export type DeviceSpawnerRuntimeHost = {
    * 基于模板派生一台动态设备实例（异步加载 + 脚本绑定）。
    * 模板未就绪返回 false，调用方丢弃实例记录并等待下一条消息重试。
    */
-  spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string): boolean;
+  spawnDeviceInstance(spawner: DeviceSpawnerConfig, assetCode: string, templateEntityId: string): boolean;
   disposeDeviceInstance(key: SpawnedDeviceKey): void;
   /** topic (sourceId, deviceType, assetCode) 是否已命中既有设备（静态实体或任一产生器的实例）。 */
   isDeviceKnown(sourceId: string, deviceType: string, assetCode: string): boolean;
@@ -67,9 +71,35 @@ type SpawnedDeviceRecord = {
 
 /** 判断快照是否携带显式下线点位；AGV 同时遵循 mode=0 的离线协议。 */
 function isOfflineSnapshot(snapshot: DeviceTelemetrySnapshot): boolean {
-  if (snapshot.deviceType === 'agv' && readIntegerField(snapshot.fields, 'mode') === 0) return true;
+  if (isAgvTelemetryDeviceType(snapshot.deviceType) && readIntegerField(snapshot.fields, 'mode') === 0) return true;
   const status = readStringField(snapshot.fields, DEVICE_SPAWN_OFFLINE_POINT_NAME);
   return status !== null && status.trim().toLowerCase() === DEVICE_SPAWN_OFFLINE_POINT_VALUE;
+}
+
+function readTemplateRuleValue(snapshot: DeviceTelemetrySnapshot, attributeName: string): string | number | boolean | null {
+  const value = attributeName === 'sourceId'
+    ? snapshot.sourceId
+    : attributeName === 'deviceType'
+      ? snapshot.deviceType
+      : attributeName === 'assetCode'
+        ? snapshot.assetCode
+        : snapshot.fields[attributeName];
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : null;
+}
+
+/** 解析本次生成使用的模板；命中空模板规则或未命中规则时使用默认模板。 */
+export function resolveDeviceSpawnerTemplateEntityId(
+  spawner: Pick<DeviceSpawnerConfig, 'templateEntityId' | 'templateRules'>,
+  snapshot: DeviceTelemetrySnapshot,
+): string {
+  for (const rule of spawner.templateRules ?? []) {
+    const attributeName = rule.attributeName.trim();
+    if (!attributeName) continue;
+    const value = readTemplateRuleValue(snapshot, attributeName);
+    if (value === null || String(value).trim() !== rule.attributeValue.trim()) continue;
+    return rule.templateEntityId ?? spawner.templateEntityId;
+  }
+  return spawner.templateEntityId;
 }
 
 /**
@@ -192,7 +222,8 @@ export class DeviceSpawnerRuntime {
 
     const key = createSpawnedDeviceKey(spawnerCode, snapshot.assetCode);
     if (this.instances.has(key)) return;
-    if (!this.host.spawnDeviceInstance(spawner, snapshot.assetCode)) return;
+    const templateEntityId = resolveDeviceSpawnerTemplateEntityId(spawner, snapshot);
+    if (!this.host.spawnDeviceInstance(spawner, snapshot.assetCode, templateEntityId)) return;
     const spawnedRecord: SpawnedDeviceRecord = {
       key,
       spawnerRegistryKey,

@@ -1,8 +1,10 @@
 import type { Scene, Vector3 } from '@babylonjs/core';
 import type { ExternalModelScriptTelemetrySnapshot } from '../../ExternalModelScriptRuntime';
+import { isAgvTelemetryDeviceType } from '../../../../editor/model/telemetryBinding';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import {
   deviceTelemetryStore,
+  readStringField,
   type DeviceTelemetrySnapshot,
   type StackerTelemetrySnapshot,
 } from '../../../mqtt/deviceTelemetry';
@@ -62,6 +64,14 @@ type ModelBindingCacheEntry = {
 type CandidateGroup = { candidates: SpecializedTelemetryRuntimeEntry[]; conflictKeys: Set<string>; count: number; changed: boolean };
 const EMPTY_DIAGNOSTIC_VALUES: string[] = [];
 const EMPTY_TELEMETRY_FIELDS = {};
+
+function matchesSpecializedDriverDeviceType(
+  configuredDeviceType: string,
+  driverDeviceType: SpecializedTelemetryDeviceType,
+): boolean {
+  return configuredDeviceType === driverDeviceType
+    || (driverDeviceType === 'agv' && isAgvTelemetryDeviceType(configuredDeviceType));
+}
 
 /** 专用遥测运行时的门面类：组合各专用 Driver，并承担帧级调度与诊断状态管理。 */
 export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverContext {
@@ -173,7 +183,8 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       {
         deviceType: 'agv',
         isCapable: isAgvRuntimeModel,
-        apply: (model, snapshot) => this.agvDriver.applyToModel(model, snapshot),
+        apply: (model, snapshot, deltaSeconds) => this.agvDriver.applyToModel(model, snapshot, deltaSeconds),
+        applyWhenStale: (model) => this.agvDriver.hasPendingMotion(model),
       },
     ];
     for (const driver of this.drivers) {
@@ -285,6 +296,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   /** 清空 SceneRuntime 级别的预览诊断、metadata 和已上报状态，不影响模型注册或编译绑定。 */
   clearReportedState(): void {
     this.conveyorDriver.clearTaskPulseQueues();
+    this.agvDriver.resetMotionStates();
     this.contextCache = new WeakMap();
     this.bindingCache = new WeakMap();
     this.injectedModels = new WeakMap();
@@ -410,6 +422,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   dispose(): void {
     this.unsubscribeDeviceTelemetry();
     this.conveyorDriver.clearTaskPulseQueues();
+    this.agvDriver.resetMotionStates();
     this.disposeAllCargo();
     this.contextCache = new WeakMap();
     this.bindingCache = new WeakMap();
@@ -696,7 +709,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       const binding = model.telemetryBinding;
       if (binding?.enabled === false) continue;
       const configuredDeviceType = binding?.deviceType.trim().toLowerCase();
-      if (configuredDeviceType && configuredDeviceType !== deviceType) continue;
+      if (configuredDeviceType && !matchesSpecializedDriverDeviceType(configuredDeviceType, deviceType)) continue;
       if (this.resolveSpecializedTelemetryDeviceType(model) !== deviceType) continue;
       const candidate = this.getCachedCandidate(entityId, model, deviceType);
       if (!candidate) continue;
@@ -734,7 +747,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     const configuredDeviceType = model.telemetryBinding?.deviceType.trim().toLowerCase();
     if (configuredDeviceType) {
       const matched = this.drivers.find(
-        (driver) => driver.deviceType === configuredDeviceType && driver.isCapable(model),
+        (driver) => matchesSpecializedDriverDeviceType(configuredDeviceType, driver.deviceType) && driver.isCapable(model),
       );
       return matched ? matched.deviceType : null;
     }
@@ -813,6 +826,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     status: TelemetryRuntimeDiagnosticStatus,
     snapshot?: DeviceTelemetrySnapshot,
   ): void {
+    const startNodeId = snapshot ? readStringField(snapshot.fields, 'task_begin_point')?.trim() || '' : '';
+    const endNodeId = snapshot ? readStringField(snapshot.fields, 'task_end_point')?.trim() || '' : '';
+    const taskRoute = startNodeId && endNodeId && isAgvRuntimeModel(model)
+      ? this.agvDriver.getTaskRoute(model, startNodeId, endNodeId)
+      : null;
     const input = {
       ...status,
       sourceId: snapshot?.sourceId ?? binding.sourceId,
@@ -826,6 +844,15 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       nodeTargets: EMPTY_DIAGNOSTIC_VALUES,
       boneTargets: EMPTY_DIAGNOSTIC_VALUES,
       animationTargets: EMPTY_DIAGNOSTIC_VALUES,
+      ...(startNodeId && endNodeId && isAgvRuntimeModel(model) ? {
+        agvTaskRoute: {
+          startNodeId,
+          endNodeId,
+          nodeIds: taskRoute?.nodeIds ?? [],
+          trackIds: taskRoute?.trackIds ?? [],
+          distance: taskRoute?.distance ?? null,
+        },
+      } : {}),
     };
     const metadataMatches = (metadata: TelemetryRuntimeDiagnosticStatus | undefined): boolean => !!metadata
       && metadata.online === status.online && metadata.stale === status.stale

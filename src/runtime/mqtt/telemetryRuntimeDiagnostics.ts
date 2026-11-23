@@ -23,6 +23,13 @@ export type TelemetryRuntimeDiagnosticSnapshot = TelemetryRuntimeDiagnosticStatu
   nodeTargets: string[];
   boneTargets: string[];
   animationTargets: string[];
+  agvTaskRoute?: {
+    startNodeId: string;
+    endNodeId: string;
+    nodeIds: string[];
+    trackIds: string[];
+    distance: number | null;
+  };
 };
 
 export type TelemetryRuntimeDiagnosticInput = Omit<TelemetryRuntimeDiagnosticSnapshot, 'entityId'>;
@@ -46,6 +53,13 @@ export class TelemetryRuntimeDiagnosticsStore {
       nodeTargets: [...input.nodeTargets],
       boneTargets: [...input.boneTargets],
       animationTargets: [...input.animationTargets],
+      ...(input.agvTaskRoute ? {
+        agvTaskRoute: {
+          ...input.agvTaskRoute,
+          nodeIds: [...input.agvTaskRoute.nodeIds],
+          trackIds: [...input.agvTaskRoute.trackIds],
+        },
+      } : {}),
     };
     this.fieldKeys.set(snapshot, Object.keys(snapshot.fields));
     this.snapshots.set(entityId, snapshot);
@@ -113,6 +127,7 @@ function createDiagnosticSignature(snapshot: TelemetryRuntimeDiagnosticInput): s
     nodeTargets: snapshot.nodeTargets,
     boneTargets: snapshot.boneTargets,
     animationTargets: snapshot.animationTargets,
+    agvTaskRoute: snapshot.agvTaskRoute,
   });
 }
 
@@ -132,5 +147,18 @@ function areDiagnosticValuesEqual(
     && areTelemetryStringArraysEqual(current.nodeTargets, next.nodeTargets)
     && areTelemetryStringArraysEqual(current.boneTargets, next.boneTargets)
     && areTelemetryStringArraysEqual(current.animationTargets, next.animationTargets)
+    && areAgvTaskRoutesEqual(current.agvTaskRoute, next.agvTaskRoute)
     && areFlatTelemetryFieldsEqual(next.fields, current.fields, keys);
+}
+
+function areAgvTaskRoutesEqual(
+  current: TelemetryRuntimeDiagnosticSnapshot['agvTaskRoute'],
+  next: TelemetryRuntimeDiagnosticInput['agvTaskRoute'],
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return current.startNodeId === next.startNodeId && current.endNodeId === next.endNodeId
+    && current.distance === next.distance
+    && areTelemetryStringArraysEqual(current.nodeIds, next.nodeIds)
+    && areTelemetryStringArraysEqual(current.trackIds, next.trackIds);
 }

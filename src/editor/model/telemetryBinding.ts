@@ -51,9 +51,14 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
 export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led', 'agv'];
 
+/** AGV 模型允许使用 agv 或 agv_xxx 子类型，运行时仍由同一 AGV 驱动处理。 */
+export function isAgvTelemetryDeviceType(devType: string | undefined): boolean {
+  return devType?.trim().toLowerCase().startsWith('agv') ?? false;
+}
+
 /** 判断归一化后的 devType 是否由 specialized 驱动接管。 */
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
-  return devType !== undefined && SPECIALIZED_TELEMETRY_DEVICE_TYPES.includes(devType);
+  return devType !== undefined && (SPECIALIZED_TELEMETRY_DEVICE_TYPES.includes(devType) || isAgvTelemetryDeviceType(devType));
 }
 
 export type TelemetryBindingComponent = {
@@ -277,8 +282,8 @@ export function resolveModelTelemetryDataDrivenConfig(modelAsset: {
 }): ModelDataDrivenConfig | null {
   if (modelAsset.dataDrivenConfig) return modelAsset.dataDrivenConfig;
   const deviceType = normalizeTelemetryDeviceType(modelAsset.deviceType);
-  return deviceType === 'led' || deviceType === 'agv'
-    ? { device: { devType: deviceType }, fixedNodes: [] }
+  return deviceType === 'led' || isAgvTelemetryDeviceType(deviceType)
+    ? { device: { devType: deviceType! }, fixedNodes: [] }
     : null;
 }
 
@@ -298,7 +303,7 @@ export function createDefaultTelemetryBinding(
     sourceId: 'default',
     deviceType: normalizeTelemetryDeviceType(deviceType, 'device') ?? 'device',
     ...(normalizeTelemetryDeviceType(deviceType) === 'conveyor' ? { surfaceArrows: createDefaultConveyorSurfaceArrowsConfig() } : {}),
-    ...(normalizeTelemetryDeviceType(deviceType) === 'agv' ? { modelForwardAxis: modelForwardAxis ?? 'x' } : {}),
+    ...(isAgvTelemetryDeviceType(normalizeTelemetryDeviceType(deviceType)) ? { modelForwardAxis: modelForwardAxis ?? 'x' } : {}),
     expectedIntervalMs,
     staleAfterMs: createTelemetryStaleAfterMs(expectedIntervalMs),
   };

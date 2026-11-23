@@ -1,5 +1,6 @@
 import type { TransformNode } from '@babylonjs/core';
 import type { ModelAssetComponent } from '../../../../editor/model/components';
+import { isAgvTelemetryDeviceType } from '../../../../editor/model/telemetryBinding';
 import { isPlainRecord, readStringArrayPath } from '../../runtimeValueUtils';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import {
@@ -62,13 +63,13 @@ export function isConveyorModelAsset(modelAsset: ModelAssetComponent): boolean {
 /** AGV 由整机根节点消费绝对平面位姿，不依赖模型包外置脚本。 */
 export function isAgvRuntimeModel(model: ModelRuntimeEntry): boolean {
   const modelAsset = model.entitySnapshot?.components.modelAsset ?? model.resolvedModelAsset;
-  if (modelAsset?.deviceType?.trim().toLowerCase() === 'agv'
-    || modelAsset?.dataDrivenConfig?.device.devType === 'agv') return true;
+  if (isAgvTelemetryDeviceType(modelAsset?.deviceType)
+    || isAgvTelemetryDeviceType(modelAsset?.dataDrivenConfig?.device.devType)) return true;
   for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
     if (!isPlainRecord(dataDriven)) continue;
     const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
     const devType = typeof deviceConfig.devType === 'string' ? deviceConfig.devType.trim().toLowerCase() : '';
-    if (devType === 'agv') return true;
+    if (isAgvTelemetryDeviceType(devType)) return true;
   }
   return false;
 }

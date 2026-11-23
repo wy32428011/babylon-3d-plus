@@ -193,6 +193,10 @@ function TelemetryRuntimeDiagnosticsView(props: Pick<Props, 'entityId' | 'bindin
   const diagnosticFields = diagnostic?.fields ?? {};
   const fields = Object.keys(diagnosticFields).length > 0 ? diagnosticFields : deviceSnapshot?.fields ?? {};
   const errors = diagnostic?.errors ?? [];
+  const taskRoute = diagnostic?.agvTaskRoute;
+  const routeSummary = taskRoute && taskRoute.nodeIds.length > 12
+    ? `${taskRoute.nodeIds.slice(0, 6).join(' → ')} → … → ${taskRoute.nodeIds.slice(-6).join(' → ')}`
+    : taskRoute?.nodeIds.join(' → ');
 
   return (
     <div className="telemetry-runtime-diagnostics">
@@ -202,6 +206,13 @@ function TelemetryRuntimeDiagnosticsView(props: Pick<Props, 'entityId' | 'bindin
       <p className="muted">最后接收：{formatTimestamp(diagnostic?.lastReceivedAt ?? deviceSnapshot?.receivedAt)}</p>
       <p className="muted">topic：{diagnostic?.topic ?? deviceSnapshot?.topic ?? '—'}</p>
       <p className="muted">sequence：{diagnostic?.sequence ?? deviceSnapshot?.sequence ?? '—'} / sourceTimestamp：{formatTimestamp(diagnostic?.sourceTimestamp ?? deviceSnapshot?.sourceTimestamp)}</p>
+      {taskRoute ? (
+        taskRoute.distance !== null ? (
+          <p className="muted" title={taskRoute.nodeIds.join(' → ')}>任务路线：{taskRoute.startNodeId} → {taskRoute.endNodeId}，{taskRoute.trackIds.length} 段 / {taskRoute.distance.toFixed(2)} 地图单位<br />节点：{routeSummary}</p>
+        ) : (
+          <p className="telemetry-runtime-error">任务路线：{taskRoute.startNodeId} → {taskRoute.endNodeId} 无可达路线，请检查节点是否存在及轨迹方向。</p>
+        )
+      ) : null}
       <div className="telemetry-runtime-fields-wrap"><span>标准化 fields</span><pre className="telemetry-runtime-fields">{formatFields(fields)}</pre></div>
       {(diagnostic?.message || deviceSnapshot?.message) ? <p className="muted">设备 message：{diagnostic?.message || deviceSnapshot?.message}</p> : null}
       {diagnostic?.conflict ? <p className="telemetry-runtime-error">重复绑定冲突：同一 sourceId/deviceType/assetCode 命中多个模型，运行时已停止驱动。</p> : null}
@@ -477,7 +488,7 @@ function LiftLayerBindingsEditor(props: {
         <p className="telemetry-runtime-error">第二设备号未填写。请手动输入 assetCode；未填写前该逻辑设备不参与 MQTT 驱动。</p>
       ) : null}
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
-      {binding.deviceType === 'agv' ? (
+      {binding.deviceType.startsWith('agv') ? (
         <>
           <label className="inspector-row">
             <span>模型正方向轴</span>

@@ -1,5 +1,6 @@
 import {
   createDefaultTelemetryBinding,
+  isAgvTelemetryDeviceType,
   normalizeTelemetryDeviceType,
   type TelemetryBindingComponent,
 } from '../../../editor/model/telemetryBinding';
@@ -19,6 +20,8 @@ export function createTelemetryBindingKey(sourceId: string, deviceType: string, 
 export type ResolvedSpecializedTelemetryBinding = {
   sourceId: string;
   deviceType: SpecializedTelemetryDeviceType;
+  /** 快照中的原始协议类型；agv_xxx 仍由统一 agv 驱动消费。 */
+  snapshotDeviceType: string;
   assetCode: string;
   staleAfterMs: number;
   key: string;
@@ -38,7 +41,9 @@ export function resolveSpecializedTelemetryBinding(
 
   const binding = options.binding ?? createDefaultTelemetryBinding(options.deviceType);
   const normalizedDeviceType = normalizeTelemetryDeviceType(binding.deviceType);
-  if (normalizedDeviceType !== options.deviceType) return null;
+  if (!normalizedDeviceType) return null;
+  if (normalizedDeviceType !== options.deviceType
+    && !(options.deviceType === 'agv' && isAgvTelemetryDeviceType(normalizedDeviceType))) return null;
 
   const sourceId = binding.sourceId.trim() || 'default';
   const assetCode = (binding.assetCode ?? options.modelAssetCode).trim();
@@ -46,7 +51,8 @@ export function resolveSpecializedTelemetryBinding(
 
   return {
     sourceId,
-    deviceType: normalizedDeviceType,
+    deviceType: options.deviceType,
+    snapshotDeviceType: normalizedDeviceType,
     assetCode,
     staleAfterMs: binding.staleAfterMs,
     key: createTelemetryBindingKey(sourceId, normalizedDeviceType, assetCode),
@@ -58,7 +64,7 @@ export function resolveSpecializedTelemetrySnapshot(
   store: Pick<DeviceTelemetryStore, 'getSnapshot'>,
   binding: ResolvedSpecializedTelemetryBinding,
 ): DeviceTelemetrySnapshot | null {
-  return store.getSnapshot(binding.assetCode, binding.deviceType, binding.sourceId);
+  return store.getSnapshot(binding.assetCode, binding.snapshotDeviceType, binding.sourceId);
 }
 
 /** 统计完全相同的专用遥测主键，重复绑定时由调用方停止全部冲突模型。 */
