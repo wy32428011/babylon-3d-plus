@@ -1034,12 +1034,12 @@ export function Toolbar(props: ToolbarProps) {
               />
             </label>
             <label className="fetch-config-dialog-row">
-              <span>API Key</span>
+              <span>API Key（可选）</span>
               <input
                 type="text"
                 value={fetchDraft.apiKey}
                 maxLength={256}
-                placeholder="sk-..."
+                placeholder="无需鉴权时留空"
                 onChange={(event) => setFetchDraft({ ...fetchDraft, apiKey: event.target.value })}
               />
             </label>
