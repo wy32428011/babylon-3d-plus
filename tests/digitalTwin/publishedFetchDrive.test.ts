@@ -11,6 +11,7 @@ import {
 const PUBLISHED_FETCH_CONFIG: FetchConfig = {
   url: 'https://published.example.test/inventory',
   apiKey: 'editor-only-api-key',
+  method: 'GET',
   syncIntervalSeconds: 30,
 };
 
@@ -27,21 +28,21 @@ function createRuntimeConfig(apiBaseUrl: string | null): DigitalTwinProjectRunti
 test('发布 Viewer 在中台未配置地址时保留包内 Fetch 地址，但不下发编辑器 API Key', () => {
   assert.deepEqual(
     resolvePublishedFetchConfig(PUBLISHED_FETCH_CONFIG, createRuntimeConfig(null)),
-    { url: 'https://published.example.test/inventory', apiKey: '', syncIntervalSeconds: 30 },
+    { url: 'https://published.example.test/inventory', apiKey: '', method: 'GET', syncIntervalSeconds: 30 },
   );
 });
 
 test('发布 Viewer 缺少中台运行配置时也不向浏览器传递编辑器 API Key', () => {
   assert.deepEqual(
     resolvePublishedFetchConfig(PUBLISHED_FETCH_CONFIG, null),
-    { url: 'https://published.example.test/inventory', apiKey: '', syncIntervalSeconds: 30 },
+    { url: 'https://published.example.test/inventory', apiKey: '', method: 'GET', syncIntervalSeconds: 30 },
   );
 });
 
 test('发布 Viewer 使用数据中台实时 Fetch 地址覆盖包内默认地址', () => {
   assert.deepEqual(
     resolvePublishedFetchConfig(PUBLISHED_FETCH_CONFIG, createRuntimeConfig('https://platform.example.test/current-inventory')),
-    { url: 'https://platform.example.test/current-inventory', apiKey: '', syncIntervalSeconds: 30 },
+    { url: 'https://platform.example.test/current-inventory', apiKey: '', method: 'GET', syncIntervalSeconds: 30 },
   );
 });
 

@@ -6,9 +6,28 @@ import {
   DEFAULT_FETCH_SYNC_INTERVAL_SECONDS,
   FETCH_SYNC_INTERVAL_MAX_SECONDS,
   FETCH_SYNC_INTERVAL_MIN_SECONDS,
+  sanitizeFetchConfig,
   sanitizeFetchSyncIntervalSeconds,
 } from '../../src/editor/model/SceneDocument';
 import { deserializeScene, serializeScene } from '../../src/editor/project/SceneSerializer';
+
+test('Fetch 请求方式随场景序列化往返保留', () => {
+  const scene = createEmptySceneDocument('GET 请求');
+  scene.fetchConfig.method = 'GET';
+
+  assert.equal(deserializeScene(serializeScene(scene)).fetchConfig.method, 'GET');
+});
+
+test('旧场景缺少请求方式或配置非法时回退 POST', () => {
+  const sceneFile = JSON.parse(serializeScene(createEmptySceneDocument('旧 POST 场景'))) as {
+    scene: { fetchConfig: Record<string, unknown> };
+  };
+  delete sceneFile.scene.fetchConfig.method;
+
+  assert.equal(deserializeScene(JSON.stringify(sceneFile)).fetchConfig.method, 'POST');
+  assert.equal(sanitizeFetchConfig({ method: 'get' }).method, 'POST');
+  assert.equal(sanitizeFetchConfig({ method: 'PUT' }).method, 'POST');
+});
 
 test('场景 fetch 定时同步间隔（秒）随序列化往返保留', () => {
   const scene = createEmptySceneDocument('定时同步');

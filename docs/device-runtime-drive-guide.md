@@ -34,12 +34,12 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
 
 ### fetch 链路（LocatorFetchRuntime + SceneRuntime）
 
-- 场景级 `FetchConfig{url, apiKey, syncIntervalSeconds}`（SceneDocument.ts:272-277）。`syncIntervalSeconds`（秒，默认 60、最小 10）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
+- 场景级 `FetchConfig{url, apiKey, method, syncIntervalSeconds}`（SceneDocument.ts:274-280）。`method` 支持 GET/POST，旧场景缺省 POST；`syncIntervalSeconds`（秒，默认 60、最小 10）为定时全量同步间隔，`0` 表示关闭定时、仅运行预览开始时同步一次。
 - **三个触发源**：
   1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1328），同时按 `syncIntervalSeconds` 启动定时器（`startFetchSyncTimer` :1460，幂等重启）。
   2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1367）；响应应用后解除格口抑制并销毁保留货箱。
   3. 定时全量：`runScheduledFetchSync`（:1476）复用 ① 的全量体 `runFetchFullSync`（:1341）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
-- 请求 `fetchInventoryRecords`（:1396-1435）：POST `{rows}`，响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure` :1449），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
+- 请求 `fetchInventoryRecords`：按 `method` 选择 POST `{rows}` 或 GET 重复 `rows` 查询参数（全量不传），响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure`），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
 - 乱序防护：`latestFetchRequestByRow` 代际戳（声明 :883，打戳与校验见 `runFetchFullSync` :1341-1364）。
 
 ### 参数注入
@@ -209,7 +209,7 @@ go_column/列号边沿锁行走目标(:135-146) → 滑向目标列 → movement
 - `${side}_task`（全局货物身份）、`${side}_containerCode`(:1120)。
 
 ### fetch 响应（唯二消费 fetch 的设备之一）
-放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 单排 POST(SceneRuntime.ts:1367-1393) → 响应应用后 `clearSuppressedCells` 并销毁保留货(:1386-1388)，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:790)。
+放货完成 `keepCargoForFetchRowSync` 保留 MQTT 货箱 → `handleFetchRowSync(row)` 按配置发起单排 GET/POST 请求 → 响应应用后 `clearSuppressedCells` 并销毁保留货，避免网络延迟空窗。取/放期间 `suppressFetchCell` 抑制该格口 fetch 渲染(stackerDriver.ts:790)。
 
 **内置货格留存**：目标 locator 勾选 `retainCargo` 时，放货完成不再走保留货清算/销毁，而是把货物移入共享留存表 `slotRetainedCargoMeshes`（key=货格实体+列+层），强制停在格口支撑位；fetch 格口额外调用 `retainFetchCellForLocator` 建立**持久抑制**并照常单排同步刷新同排其它格口。堆垛机再次取同格时 `beginStackerFetch` 按 `front_x/front_y` 先查留存表，命中则接管同一货物实例并释放持久抑制（瞬态抑制仍由取货流程建立）。前后叉各自用入场锁定的 `front/backCargoPlaceTarget` 归属，目标字段变化或相位退出不影响留存格口。
 

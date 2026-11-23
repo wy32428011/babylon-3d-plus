@@ -34,6 +34,28 @@ type Dependencies = {
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'invalidateModelStatistics'>;
 };
 
+/** POST 保持 JSON rows 请求体；GET 以重复 rows 查询参数传排号，空数组表示全量且不追加参数。 */
+export function createFetchInventoryRequest(
+  fetchConfig: FetchConfig,
+  rows: string[],
+  signal: AbortSignal,
+): { url: string; init: RequestInit } {
+  const headers: Record<string, string> = {};
+  if (fetchConfig.apiKey) headers['X-API-Key'] = fetchConfig.apiKey;
+
+  if (fetchConfig.method === 'GET') {
+    const url = new URL(fetchConfig.url, globalThis.location?.href);
+    url.searchParams.delete('rows');
+    for (const row of rows) url.searchParams.append('rows', row);
+    return { url: url.toString(), init: { method: 'GET', headers, signal } };
+  }
+
+  headers['Content-Type'] = 'application/json; charset=utf-8';
+  return {
+    url: fetchConfig.url,
+    init: { method: 'POST', headers, body: JSON.stringify({ rows }), signal },
+  };
+}
 
 /** SceneLocatorFetchController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class SceneLocatorFetchController {
@@ -364,15 +386,8 @@ export class SceneLocatorFetchController {
     const isCurrent = () => !controller.signal.aborted && !this.disposed && !this.dependencies.document.disposed;
 
     try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' };
-      if (fetchConfig.apiKey) headers['X-API-Key'] = fetchConfig.apiKey;
-
-      const response = await fetch(fetchConfig.url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ rows }),
-        signal: controller.signal,
-      });
+      const request = createFetchInventoryRequest(fetchConfig, rows, controller.signal);
+      const response = await fetch(request.url, request.init);
       if (!isCurrent()) return null;
 
       if (!response.ok) {

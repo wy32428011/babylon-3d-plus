@@ -274,6 +274,8 @@ export type SceneSettings = {
 export type FetchConfig = {
   url: string;
   apiKey: string;
+  /** HTTP 请求方式；旧场景缺省为 POST。 */
+  method: 'GET' | 'POST';
   /** 定时全量库存同步间隔（秒）；0 表示关闭定时，仅在进入运行预览时同步一次。 */
   syncIntervalSeconds: number;
 };
@@ -286,6 +288,7 @@ export const DEFAULT_FETCH_SYNC_INTERVAL_SECONDS = 60;
 export const DEFAULT_FETCH_CONFIG: FetchConfig = {
   url: '',
   apiKey: '',
+  method: 'POST',
   syncIntervalSeconds: DEFAULT_FETCH_SYNC_INTERVAL_SECONDS,
 };
 
@@ -1015,7 +1018,8 @@ export function sanitizeFetchConfig(config: unknown): FetchConfig {
   const obj = config as Record<string, unknown>;
   const url = typeof obj.url === 'string' ? obj.url.trim().slice(0, 2048) : '';
   const apiKey = typeof obj.apiKey === 'string' ? obj.apiKey.trim().slice(0, 256) : '';
-  return { url, apiKey, syncIntervalSeconds: sanitizeFetchSyncIntervalSeconds(obj.syncIntervalSeconds) };
+  const method = obj.method === 'GET' ? 'GET' : 'POST';
+  return { url, apiKey, method, syncIntervalSeconds: sanitizeFetchSyncIntervalSeconds(obj.syncIntervalSeconds) };
 }
 
 /** 归一化 fetch 定时同步间隔（秒）：非数值回退默认；0 与负数表示关闭定时；1~9 收敛到最小 10 秒，上限 1 小时。 */

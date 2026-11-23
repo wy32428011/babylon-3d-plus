@@ -549,6 +549,26 @@ select {
   background: #1e1e1e;
 }
 
+.fetch-config-method-options {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.fetch-config-method-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.fetch-config-dialog-row .fetch-config-method-options input {
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+}
+
 .fetch-config-dialog-row input::placeholder {
   color: #777777;
 }

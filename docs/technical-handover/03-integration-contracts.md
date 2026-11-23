@@ -159,7 +159,7 @@ Electron 有主进程 MQTT IPC 路径，Viewer 使用浏览器 MQTT.js，两者�
 
 | 链路 | 请求 | 响应与注意点 |
 | --- | --- | --- |
-| 库存/库位 Fetch | 场景 `fetchConfig.url`，POST `{rows}`；编辑配置可带 X-API-Key | 读取 `data.records[].result[]`，需要容器及库位字段；不是固定中台 URL |
+| 库存/库位 Fetch | 场景 `fetchConfig.url` + `method`；POST 使用 `{rows}`，GET 使用重复 `rows` 查询参数（全量不传）；编辑配置可带 X-API-Key | 读取 `data.records[].result[]`，需要容器及库位字段；不是固定中台 URL |
 | 特效数据源 | POST `/api/v1/data-sources/fetch`，`{id,runParams:{assetCode}}` | data 包含 statusCode/durationMs/responseBody/message，responseBody 为字符串 |
 | 特效最新值 | POST `/api/v1/dataflow/mqtt-storage/detail`，`{namespace,deviceType,deviceNo:assetCode}` | `{device,payloadJson}`，payloadJson 为字符串；不是 records 数组 |
 | 流程对外 API | POST `/api/v1/dataflow/open/apis/{apiCode}/invoke`，业务参数，按配置带 X-API-Key | 当前 PUBLISHED 的本次运行 records；需检查内部 status |

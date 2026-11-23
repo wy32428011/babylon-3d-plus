@@ -4,6 +4,7 @@ import test from 'node:test';
 import { Color3, Material, Matrix, Mesh, MeshBuilder, NullEngine, Scene, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 
 import { LocatorFetchRuntime, type FetchContainerRecord } from '../../src/runtime/babylon/LocatorFetchRuntime';
+import { createFetchInventoryRequest } from '../../src/runtime/babylon/scene-runtime/SceneLocatorFetchController';
 import type { LocatorRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorTarget } from '../../src/editor/model/components';
 
@@ -452,4 +453,54 @@ test('全空排忽略渲染结果：本排无记录也不强制清空既有货�
     scene.dispose();
     engine.dispose();
   }
+});
+
+test('POST 库存请求保持 JSON rows 请求体和 API Key 请求头', () => {
+  const controller = new AbortController();
+  const request = createFetchInventoryRequest({
+    url: 'https://example.test/inventory',
+    apiKey: 'secret',
+    method: 'POST',
+    syncIntervalSeconds: 60,
+  }, ['2'], controller.signal);
+
+  assert.equal(request.url, 'https://example.test/inventory');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.body, JSON.stringify({ rows: ['2'] }));
+  assert.deepEqual(request.init.headers, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'X-API-Key': 'secret',
+  });
+  assert.equal(request.init.signal, controller.signal);
+});
+
+test('GET 单排库存请求使用 rows 查询参数并保留已有查询条件', () => {
+  const request = createFetchInventoryRequest({
+    url: 'https://example.test/inventory?source=wms&rows=99#result',
+    apiKey: 'secret',
+    method: 'GET',
+    syncIntervalSeconds: 60,
+  }, ['2', '3'], new AbortController().signal);
+  const url = new URL(request.url);
+
+  assert.equal(url.searchParams.get('source'), 'wms');
+  assert.deepEqual(url.searchParams.getAll('rows'), ['2', '3']);
+  assert.equal(url.hash, '#result');
+  assert.equal(request.init.method, 'GET');
+  assert.equal(request.init.body, undefined);
+  assert.deepEqual(request.init.headers, { 'X-API-Key': 'secret' });
+});
+
+test('GET 全量库存请求不传 rows，空 API Key 不发送鉴权头', () => {
+  const request = createFetchInventoryRequest({
+    url: 'https://example.test/inventory',
+    apiKey: '',
+    method: 'GET',
+    syncIntervalSeconds: 60,
+  }, [], new AbortController().signal);
+  const url = new URL(request.url);
+
+  assert.equal(url.searchParams.has('rows'), false);
+  assert.deepEqual(request.init.headers, {});
+  assert.equal(request.init.body, undefined);
 });

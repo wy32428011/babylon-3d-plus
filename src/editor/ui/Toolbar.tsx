@@ -1022,7 +1022,24 @@ export function Toolbar(props: ToolbarProps) {
             }}
           >
             <h3>Fetch 配置</h3>
-            <p className="muted">配置 fetch 数据源的基础请求地址、API Key 与定时全量同步间隔。</p>
+            <p className="muted">配置 fetch 数据源的请求方式、基础请求地址、API Key 与定时全量同步间隔。</p>
+            <div className="fetch-config-dialog-row">
+              <span>请求方式</span>
+              <div className="fetch-config-method-options" role="radiogroup" aria-label="请求方式">
+                {(['POST', 'GET'] as const).map((method) => (
+                  <label key={method}>
+                    <input
+                      type="radio"
+                      name="fetch-request-method"
+                      value={method}
+                      checked={fetchDraft.method === method}
+                      onChange={() => setFetchDraft({ ...fetchDraft, method })}
+                    />
+                    {method}
+                  </label>
+                ))}
+              </div>
+            </div>
             <label className="fetch-config-dialog-row">
               <span>请求地址</span>
               <input
