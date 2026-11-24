@@ -7,6 +7,7 @@ const entries = {
   serializer: '/src/editor/project/SceneSerializer.ts',
   assets: '/src/editor/assets/AssetDatabase.ts',
   store: '/src/editor/store/editorStore.ts',
+  agvMap: '/src/editor/model/agvMap.ts',
   streaming: '/src/editor/cad/cadReferenceStreamingDxf.ts',
   commands: '/src/editor/commands/entityCommands.ts',
   cad: '/src/editor/cad/cadReferenceCore.ts',
@@ -19,6 +20,7 @@ test.after(() => modules.close());
 const { createAgvSpawnerEntity, createEmptySceneDocument } = await modules.ssrLoadModule(entries.scene);
 const { deserializeScene, serializeScene } = await modules.ssrLoadModule(entries.serializer);
 const { decodeBuiltInAssetDragPayload, encodeBuiltInAssetDragPayload } = await modules.ssrLoadModule(entries.assets);
+const { resolveAgvMapNodeId, sanitizeAgvMapDefinition } = await modules.ssrLoadModule(entries.agvMap);
 const { parseCadReferenceDxfStream } = await modules.ssrLoadModule(entries.streaming);
 const { importAgvCadMapCommand } = await modules.ssrLoadModule(entries.commands);
 const { createCadReferenceComponentMetadata } = await modules.ssrLoadModule(entries.cad);
@@ -307,4 +309,114 @@ test('重复上传只等待同一产生器的新 CAD 渲染结果', async (t) =>
   publishCadReferenceLoadStatus({ entityId, sourceUrl: after, state: 'ready', percent: 100, detail: '新图' });
   await pending;
   assert.deepEqual(progress, ['loading', 'ready']);
+});
+
+test('NDC8 业务站点（Ndc8_Activity_*）提取精确/容差节点映射、隔离撞号并随场景序列化', async () => {
+  const activityCircle = (layer, x, y) => [[0, 'CIRCLE'], [8, layer], [10, x], [20, y], [40, 200]];
+  const mtext = (layer, value, x) => [[0, 'MTEXT'], [8, layer], [10, x], [20, 50], [40, 190], [1, value]];
+  const content = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0),
+    ...circle(1000, 0),
+    ...circle(2000, 0),
+    ...text('Ndc8_PointID', '1', 0),
+    ...text('Ndc8_PointID', '2318', 1000),
+    ...text('Ndc8_PointID', '1974', 2000),
+    ...lwpolyline([[0, 0], [1000, 0]], 'Ndc8_Main'),
+    ...lwpolyline([[1000, 0], [2000, 0]], 'Ndc8_Main'),
+    ...text('Ndc8_MainID', 'T1', 500),
+    ...text('Ndc8_MainID', 'T2', 1500),
+    // 精确重合的站点 633 -> 2318，以及与路网点 1 撞号但实际位于 1974 附近（偏移 16 mm）的站点 1
+    ...activityCircle('Ndc8_Activity_焊接线站点', 1000, 0),
+    ...activityCircle('Ndc8_Activity_焊接线站点', 2016, 0),
+    ...text('Ndc8_Activity_焊接线站点ID', '633', 1000),
+    ...text('Ndc8_Activity_焊接线站点ID', '1', 2016),
+    ...mtext('Ndc8_Activity_焊接线站点Name', '633', 1000),
+    ...mtext('Ndc8_Activity_焊接线站点Name', '1974', 2016),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  const parsed = await parseCadReferenceDxfStream(async () => new Response(content), {
+    agvMap: { id: 'cad-stations', name: '含站点地图' },
+  });
+  assert.deepEqual(parsed.agvMap.stations, [
+    { id: '633', name: '633', nodeId: '2318', x: 1, y: 0, businessType: '焊接线站点' },
+    { id: '1', name: '1974', nodeId: '1974', x: 2.016, y: 0, businessType: '焊接线站点' },
+  ]);
+  assert.equal(resolveAgvMapNodeId(parsed.agvMap, '633'), '2318');
+  assert.equal(resolveAgvMapNodeId(parsed.agvMap, '1'), '1974');
+  assert.equal(resolveAgvMapNodeId(parsed.agvMap, '2318'), '2318');
+  assert.equal(resolveAgvMapNodeId(parsed.agvMap, '9999'), null);
+
+  const entity = createAgvSpawnerEntity({ x: 0, y: 0, z: 0 });
+  entity.components.agvMap = {
+    ...entity.components.agvMap,
+    mapId: parsed.agvMap.id,
+    importedMap: parsed.agvMap,
+  };
+  const scene = createEmptySceneDocument('AGV站点序列化');
+  scene.entityIds = [entity.id];
+  scene.entities = { [entity.id]: entity };
+  const restored = deserializeScene(serializeScene(scene));
+  assert.deepEqual(restored.entities[entity.id].components.agvMap.importedMap, parsed.agvMap);
+});
+
+test('NDC8 业务站点偏离路网点超过容差、数量不一致或 JSON 引用无效节点时阻止导入', async () => {
+  const activityCircle = (layer, x, y) => [[0, 'CIRCLE'], [8, layer], [10, x], [20, y], [40, 200]];
+  const farStation = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0), ...circle(1000, 0),
+    ...text('Ndc8_PointID', '1', 0), ...text('Ndc8_PointID', '2', 1000),
+    ...lwpolyline([[0, 0], [1000, 0]], 'Ndc8_Main'),
+    ...text('Ndc8_MainID', 'T1', 500),
+    ...activityCircle('Ndc8_Activity_测试站', 1200, 0),
+    ...text('Ndc8_Activity_测试站ID', 'S1', 1200),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  await assert.rejects(
+    parseCadReferenceDxfStream(async () => new Response(farStation), { agvMap: { id: 'cad-far', name: '过远站点' } }),
+    /附近未找到唯一的路网节点/,
+  );
+
+  const missingId = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0), ...circle(1000, 0),
+    ...text('Ndc8_PointID', '1', 0), ...text('Ndc8_PointID', '2', 1000),
+    ...lwpolyline([[0, 0], [1000, 0]], 'Ndc8_Main'),
+    ...text('Ndc8_MainID', 'T1', 500),
+    ...activityCircle('Ndc8_Activity_测试站', 0, 0),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  await assert.rejects(
+    parseCadReferenceDxfStream(async () => new Response(missingId), { agvMap: { id: 'cad-noid', name: '缺编号站点' } }),
+    /点位数量（1）与编号数量（0）不一致/,
+  );
+
+  assert.equal(
+    sanitizeAgvMapDefinition({
+      schemaVersion: 1,
+      id: 'bad-station-ref',
+      name: '无效站点引用',
+      nodes: [{ id: '1', name: '1', x: 0, y: 0 }],
+      tracks: [],
+      stations: [{ id: '633', name: '633', nodeId: 'missing', x: 0, y: 0 }],
+    }),
+    null,
+  );
+  assert.equal(
+    sanitizeAgvMapDefinition({
+      schemaVersion: 1,
+      id: 'dup-station-id',
+      name: '重复站点编号',
+      nodes: [{ id: '1', name: '1', x: 0, y: 0 }],
+      tracks: [],
+      stations: [
+        { id: '633', name: '633', nodeId: '1', x: 0, y: 0 },
+        { id: '633', name: '633-b', nodeId: '1', x: 0, y: 0 },
+      ],
+    }),
+    null,
+  );
 });

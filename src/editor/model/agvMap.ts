@@ -5,6 +5,7 @@ export const AGV_MAP_SCHEMA_VERSION = 1;
 export const AGV_MAP_MAX_NODES = 4_096;
 export const AGV_MAP_MAX_TRACKS = 8_192;
 export const AGV_MAP_MAX_TRACK_POINTS = 2_048;
+export const AGV_MAP_MAX_STATIONS = 4_096;
 export const AGV_MAP_SCALE_MIN = 0.001;
 export const AGV_MAP_SCALE_MAX = 1000;
 export const AGV_MAP_SCALE_DEFAULT = 1;
@@ -16,6 +17,14 @@ export type AgvMapPoint = { x: number; y: number };
 export type AgvBusinessNode = AgvMapPoint & {
   id: string;
   name: string;
+  businessType?: string;
+};
+
+export type AgvMapStation = AgvMapPoint & {
+  id: string;
+  name: string;
+  /** 对应的路网节点 ID（指向 nodes 中的 id）。 */
+  nodeId: string;
   businessType?: string;
 };
 
@@ -35,6 +44,8 @@ export type AgvMapDefinition = {
   name: string;
   nodes: AgvBusinessNode[];
   tracks: AgvMapTrack[];
+  /** 可选业务站点映射（如 NDC8 的 Ndc8_Activity_*）；独立编号，避免与路网节点撞号。 */
+  stations?: AgvMapStation[];
 };
 
 export function createDefaultAgvMapComponent(): AgvMapComponent {
@@ -154,7 +165,51 @@ export function sanitizeAgvMapDefinition(value: unknown): AgvMapDefinition | nul
     });
   }
 
-  return { schemaVersion: AGV_MAP_SCHEMA_VERSION, id, name, nodes, tracks };
+  let stations: AgvMapStation[] | undefined;
+  if (record.stations !== undefined) {
+    if (!Array.isArray(record.stations) || record.stations.length > AGV_MAP_MAX_STATIONS) return null;
+    const normalizedStations: AgvMapStation[] = [];
+    const stationIds = new Set<string>();
+    for (const rawStation of record.stations) {
+      if (typeof rawStation !== 'object' || rawStation === null || Object.getPrototypeOf(rawStation) !== Object.prototype) return null;
+      const source = rawStation as Record<string, unknown>;
+      const stationId = normalizeIdentifier(source.id);
+      const stationName = normalizeIdentifier(source.name);
+      const nodeId = normalizeIdentifier(source.nodeId);
+      const point = normalizePoint(source);
+      if (!stationId || !stationName || !nodeId || !point || stationIds.has(stationId)) return null;
+      if (!nodeIds.has(nodeId)) return null;
+      const businessType = source.businessType === undefined ? undefined : normalizeIdentifier(source.businessType);
+      if (source.businessType !== undefined && !businessType) return null;
+      stationIds.add(stationId);
+      normalizedStations.push({
+        id: stationId,
+        name: stationName,
+        nodeId,
+        ...point,
+        ...(businessType ? { businessType } : {}),
+      });
+    }
+    if (normalizedStations.length > 0) stations = normalizedStations;
+  }
+
+  return {
+    schemaVersion: AGV_MAP_SCHEMA_VERSION,
+    id,
+    name,
+    nodes,
+    tracks,
+    ...(stations ? { stations } : {}),
+  };
+}
+
+/** 将业务站点 ID 或路网节点 ID 解析为对应的路网节点 ID（优先匹配业务站点映射）。 */
+export function resolveAgvMapNodeId(map: AgvMapDefinition, pointOrStationId: string): string | null {
+  const target = normalizeIdentifier(pointOrStationId);
+  if (!target) return null;
+  const station = map.stations?.find(item => item.id === target);
+  if (station) return station.nodeId;
+  return map.nodes.some(node => node.id === target) ? target : null;
 }
 
 export function resolveAgvMapTrackPoints(map: AgvMapDefinition, track: AgvMapTrack): AgvMapPoint[] {
