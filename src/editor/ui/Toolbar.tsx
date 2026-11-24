@@ -192,6 +192,9 @@ type ToolbarProps = {
   sceneFullscreen: boolean;
   /** 切换 Scene 画布全屏显示。 */
   onToggleSceneFullscreen: () => void;
+  appUpdateStage?: import('../../../electron/shared/appUpdate').AppUpdateStage;
+  appUpdateVersion?: string | null;
+  onCheckForUpdate?: () => void;
 };
 
 type ToolbarIconButtonProps = {
@@ -803,6 +806,22 @@ export function Toolbar(props: ToolbarProps) {
           detail={createDeploymentToolbarDetail(deploymentExportProgress)}
           label={getDeploymentStageLabel(deploymentExportProgress.stage, props.deploymentExportStatus)}
           percent={deploymentExportProgress.percent}
+        />
+      ) : null}
+      {props.onCheckForUpdate ? (
+        <ToolbarIconButton
+          active={props.appUpdateStage === 'available' || props.appUpdateStage === 'downloaded'}
+          icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>}
+          label={
+            props.appUpdateStage === 'downloaded'
+              ? `新版本 v${props.appUpdateVersion ?? ''} 已就绪，点击重启安装`
+              : props.appUpdateStage === 'available'
+                ? `发现新版本 v${props.appUpdateVersion ?? ''}，点击下载`
+                : props.appUpdateStage === 'downloading'
+                  ? '正在下载软件更新，点击查看进度'
+                  : '检查软件更新'
+          }
+          onClick={props.onCheckForUpdate}
         />
       ) : null}
       </div>

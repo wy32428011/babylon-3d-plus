@@ -840,6 +840,12 @@
       "command": "node --test tests/editor/inspectionCrossRepository.test.mjs",
       "category": "external",
       "reason": "需显式设置 CENTRAL_DATA_PLATFORM_ROOT 指向中台源码；异步模拟窗口连接两仓真实控制器，不验证真实浏览器或网络。"
+    },
+    {
+      "name": "test:app-update",
+      "command": "node --experimental-strip-types --test tests/shared/appUpdate.test.ts",
+      "category": "legacy",
+      "reason": "应用自动更新状态机、发布说明清洗与错误消息格式化单元测试；真实安装包与 GitHub Releases 下载需打包后实机验收。"
     }
   ]
 }

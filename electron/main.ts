@@ -21,6 +21,7 @@ import { disposeAllDeploymentExportTasks, registerDeploymentExportIpc } from './
 import { disposeAllDigitalTwinPublishTasks, registerDigitalTwinPublishIpc } from './ipc/digitalTwinPublishIpc.js';
 import { disposeAllMqttIpcClients, registerMqttIpc } from './ipc/mqttIpc.js';
 import { registerProjectIpc } from './ipc/projectIpc.js';
+import { disposeAppUpdateIpc, registerAppUpdateIpc, scheduleStartupAppUpdateCheck } from './ipc/appUpdateIpc.js';
 import { resolveEditorAssetProtocolResponse } from './ipc/editorAssetCacheHeaders.js';
 
 function registerInspectionModelIpc(): void {
@@ -259,6 +260,7 @@ function createMainWindow(): void {
     if (quitAfterWindowClose) { quitAfterWindowClose = false; app.quit(); }
   });
   mainWindow.webContents.on('did-finish-load', () => {
+    scheduleStartupAppUpdateCheck();
     if (!pendingDataPlatformDeepLink || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('data-platform:deepLinkOpen', pendingDataPlatformDeepLink);
     pendingDataPlatformDeepLink = null;
@@ -336,6 +338,10 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
   registerMqttIpc();
   registerDeploymentExportIpc();
   registerDigitalTwinPublishIpc();
+  registerAppUpdateIpc({
+    getMainWindow: () => mainWindowReference,
+    approveWindowClose: () => { mainWindowCloseGuard?.approve(); },
+  });
   createMainWindow();
 
   app.on('activate', () => {
@@ -366,6 +372,7 @@ app.on('before-quit', (event) => {
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
 
+  disposeAppUpdateIpc();
   disposeAllDeploymentExportTasks();
   disposeLightingBakeJobs();
   disposeAllMqttIpcClients();

@@ -5,6 +5,7 @@ import { APPLICATION_NAME, BrandLogo } from '../ui/BrandLogo';
 import { createProjectOpenSession } from './projectLoadingCancellation';
 import { beginHomeProjectOpenTrace, beginProjectOpenRequest, finishProjectOpenTrace, finishUnboundProjectOpenTrace } from '../loading/projectOpenTrace';
 import type { ProjectOpenTraceContext } from '../../../electron/shared/projectOpenTrace';
+import type { AppUpdateState } from '../../../electron/shared/appUpdate';
 
 type HomePageProps = {
   onEnterParametricWorkbench?: () => void;
@@ -13,6 +14,8 @@ type HomePageProps = {
   onNewScene: () => void;
   onOpenSceneDialog: () => Promise<boolean>;
   onOpenRecentScene: (filePath: string, isCurrent?: () => boolean, deferEnvironmentUntilSync?: boolean, openTrace?: ProjectOpenTraceContext) => Promise<boolean>;
+  appUpdateState?: AppUpdateState;
+  onCheckForUpdate?: () => void;
 };
 
 type HomeStatus = {
@@ -117,6 +120,8 @@ export function HomePage({
   onNewScene,
   onOpenSceneDialog,
   onOpenRecentScene,
+  appUpdateState,
+  onCheckForUpdate,
 }: HomePageProps) {
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspacesResult>(EMPTY_RECENT_WORKSPACES);
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
@@ -612,6 +617,19 @@ export function HomePage({
             打开项目目录
           </button>
           <button disabled={isOpeningDataPlatformProject} onClick={openDataPlatformConfigDialog} type="button">数据中台配置</button>
+          {onCheckForUpdate ? (
+            <button disabled={isOpeningDataPlatformProject} onClick={onCheckForUpdate} type="button">
+              {appUpdateState?.stage === 'downloaded'
+                ? `重启安装 v${appUpdateState.availableVersion ?? ''}`
+                : appUpdateState?.stage === 'available'
+                  ? `发现新版本 v${appUpdateState.availableVersion ?? ''}`
+                  : appUpdateState?.stage === 'downloading'
+                    ? `下载更新 ${Math.round(appUpdateState.progress?.percent ?? 0)}%`
+                    : appUpdateState?.stage === 'checking'
+                      ? '检查更新中...'
+                      : '检查更新'}
+            </button>
+          ) : null}
           <button disabled={isOpeningDataPlatformProject} onClick={onEnterBlankEditor} type="button">进入空白编辑器</button>
         </div>
       </header>

@@ -351,4 +351,17 @@ if (isTrustedPreloadPage()) contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.on('mqtt:event', listener);
     return () => ipcRenderer.removeListener('mqtt:event', listener);
   },
+  getAppUpdateState: (): Promise<import('./shared/appUpdate.js').AppUpdateState> =>
+    ipcRenderer.invoke('app-update:getState'),
+  checkForAppUpdate: (request?: import('./shared/appUpdate.js').CheckForAppUpdateRequest): Promise<import('./shared/appUpdate.js').AppUpdateState> =>
+    ipcRenderer.invoke('app-update:check', request),
+  downloadAppUpdate: (): Promise<import('./shared/appUpdate.js').AppUpdateState> =>
+    ipcRenderer.invoke('app-update:download'),
+  installAppUpdate: (): Promise<boolean> =>
+    ipcRenderer.invoke('app-update:install'),
+  onAppUpdateState: (handler: (state: import('./shared/appUpdate.js').AppUpdateState) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: import('./shared/appUpdate.js').AppUpdateState) => handler(payload);
+    ipcRenderer.on('app-update:state', listener);
+    return () => ipcRenderer.removeListener('app-update:state', listener);
+  },
 });

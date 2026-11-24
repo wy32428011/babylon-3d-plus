@@ -722,5 +722,10 @@ interface Window {
     mqttDisconnect?: () => Promise<MqttIpcStatus>;
     mqttGetStatus?: () => Promise<MqttIpcStatus>;
     onMqttEvent?: (handler: (event: MqttIpcEvent) => void) => () => void;
+    getAppUpdateState?: () => Promise<import('../electron/shared/appUpdate').AppUpdateState>;
+    checkForAppUpdate?: (request?: import('../electron/shared/appUpdate').CheckForAppUpdateRequest) => Promise<import('../electron/shared/appUpdate').AppUpdateState>;
+    downloadAppUpdate?: () => Promise<import('../electron/shared/appUpdate').AppUpdateState>;
+    installAppUpdate?: () => Promise<boolean>;
+    onAppUpdateState?: (handler: (state: import('../electron/shared/appUpdate').AppUpdateState) => void) => () => void;
   };
 }

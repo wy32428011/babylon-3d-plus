@@ -4359,7 +4359,7 @@
     },
     {
       "file": "scripts/test-entry-manifest.json",
-      "sha256": "d13d998409d4b997618563632b3c7f336c750580083cbec6c442502b5634baa3",
+      "sha256": "ca3bd4cd28accf54460081aa93b78b48965b6f405afa73d446d4c48c81fa7eea",
       "disposition": "metadata",
       "domain": null,
       "command": "npm run test:entries",

@@ -4,8 +4,8 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：1009；测试/runner/smoke 候选：885；fixture/helper/治理工具：124。
-- npm 测试/smoke 入口：156；有静态入口的候选：719；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：1010；测试/runner/smoke 候选：886；fixture/helper/治理工具：124。
+- npm 测试/smoke 入口：157；有静态入口的候选：720；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
 - CI 静态可达候选：166。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
@@ -842,6 +842,7 @@
 | tests/runtime/thinInstanceSparseUpdates.test.ts | NullEngine | test:babylon-optimization | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/transformGizmoPreviewIsolation.test.mjs | NullEngine；包含文件/源码断言候选 | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/virtualConveyorPackage.test.mjs | NullEngine；包含文件/源码断言候选 | test:virtual-conveyor | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/shared/appUpdate.test.ts | Node 测试候选 | test:app-update | 未证明跨平台 | Node 原生 strip-types | 否 / 未确认 |
 | tests/shared/devElectronStartup.test.mjs | 包含文件/源码断言候选 | test:dev-electron | 含 Windows 路径/命令，需 Windows 复核 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | tests/shared/randomUuid.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/shared/viteDevStartup.test.mjs | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 先执行 npm run build:electron，产物必须对应当前源码；先执行 npm run build:viewer，保留 Viewer 模板能力校验；含服务/端口；复核端口与关闭流程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过；引用 dist-electron；核对 build:electron 前置；引用 dist-viewer-template；核对 build:viewer 前置；本地临时端口可用；结束后关闭本次 server | 否 / 未确认 |
@@ -1040,6 +1041,7 @@
 
 ## 必须人工复核的动态调用
 
+- .github/workflows/release.yml 存在块状 run，CI 可达性需人工复核
 - 动态子进程需复核：scripts/smoke-generated-cargo-preload.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：scripts/smoke-manual-roam-skeletal.mjs（其子测试不计为已覆盖）
 - 动态子进程需复核：scripts/smoke-skybox-mosaic.mjs（其子测试不计为已覆盖）
