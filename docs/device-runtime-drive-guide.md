@@ -39,7 +39,7 @@ fetch (LocatorFetchRuntime, 事件驱动 + 定时全量) ───────�
   1. 运行预览开始一次全量：`handleFetchDriveEvent`（SceneRuntime.ts:1328），同时按 `syncIntervalSeconds` 启动定时器（`startFetchSyncTimer` :1460，幂等重启）。
   2. 事件驱动单排：stacker 放货完成触发 `handleFetchRowSync`（:1367）；响应应用后解除格口抑制并销毁保留货箱。
   3. 定时全量：`runScheduledFetchSync`（:1476）复用 ① 的全量体 `runFetchFullSync`（:1341）；**在途 fetch 操作计数非 0 时跳过本轮**，避免抢走单排请求的代际戳导致抑制格口/保留货清算丢失。
-- 请求 `fetchInventoryRecords`：按 `method` 选择 POST `{rows}` 或 GET 重复 `rows` 查询参数（全量不传），响应 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure`），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
+- 请求 `fetchInventoryRecords`：按 `method` 选择 POST `{rows}` 或 GET 重复 `rows` 查询参数（全量不传），响应支持新库存接口的 `data.result[]` 和旧 dataflow 接口的 `data.records[].result[]`；定时路径的失败提示一次性去重（`reportFetchFailure`），成功响应或重新启表后复位，单排/初始化路径仍逐次提示。
 - 乱序防护：`latestFetchRequestByRow` 代际戳（声明 :883，打戳与校验见 `runFetchFullSync` :1341-1364）。
 
 ### 参数注入

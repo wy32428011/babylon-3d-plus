@@ -57,6 +57,24 @@ export function createFetchInventoryRequest(
   };
 }
 
+/** 新库存接口直接返回 data.result[]；旧 dataflow 接口按 data.records[].result[] 分组返回。 */
+export function parseFetchInventoryResponse(payload: unknown): FetchContainerRecord[] | null {
+  const data = (payload as {
+    data?: {
+      result?: FetchContainerRecord[];
+      records?: Array<{ result?: FetchContainerRecord[] }>;
+    };
+  } | null)?.data;
+  if (Array.isArray(data?.result)) return data.result;
+  if (!Array.isArray(data?.records)) return null;
+
+  const records: FetchContainerRecord[] = [];
+  for (const group of data.records) {
+    if (Array.isArray(group?.result)) records.push(...group.result);
+  }
+  return records;
+}
+
 /** SceneLocatorFetchController 的资源、状态及取消/释放操作在同一领域内维护。 */
 export class SceneLocatorFetchController {
   constructor(private readonly context: SceneRuntimeContext, private readonly dependencies: Dependencies) {}
@@ -395,20 +413,12 @@ export class SceneLocatorFetchController {
         return null;
       }
 
-      // dataflow 响应结构：data.records 为结果分组数组，货物记录在每组的 result 里
       const text = await readUtf8ResponseText(response, 'Fetch 响应');
       if (!isCurrent()) return null;
-      const payload = JSON.parse(text) as {
-        data?: { records?: Array<{ result?: FetchContainerRecord[] }> };
-      };
-      const groups = payload.data?.records;
-      if (!Array.isArray(groups)) {
-        this.reportFetchFailure('Fetch 响应缺少 data.records。', quietFailure);
+      const records = parseFetchInventoryResponse(JSON.parse(text));
+      if (records === null) {
+        this.reportFetchFailure('Fetch 响应缺少 data.result 或 data.records。', quietFailure);
         return null;
-      }
-      const records: FetchContainerRecord[] = [];
-      for (const group of groups) {
-        if (Array.isArray(group?.result)) records.push(...group.result);
       }
       // 任一请求成功即视为链路恢复，允许下一轮定时失败重新提示
       this.fetchSyncFailureReported = false;

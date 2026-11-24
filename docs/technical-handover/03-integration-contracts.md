@@ -159,12 +159,12 @@ Electron 有主进程 MQTT IPC 路径，Viewer 使用浏览器 MQTT.js，两者�
 
 | 链路 | 请求 | 响应与注意点 |
 | --- | --- | --- |
-| 库存/库位 Fetch | 场景 `fetchConfig.url` + `method`；POST 使用 `{rows}`，GET 使用重复 `rows` 查询参数（全量不传）；编辑配置可带 X-API-Key | 读取 `data.records[].result[]`，需要容器及库位字段；不是固定中台 URL |
+| 库存/库位 Fetch | 场景 `fetchConfig.url` + `method`；POST 使用 `{rows}`，GET 使用重复 `rows` 查询参数（全量不传）；编辑配置可带 X-API-Key | 读取 `data.result[]`，兼容旧接口 `data.records[].result[]`；需要容器及库位字段，不是固定中台 URL |
 | 特效数据源 | POST `/api/v1/data-sources/fetch`，`{id,runParams:{assetCode}}` | data 包含 statusCode/durationMs/responseBody/message，responseBody 为字符串 |
 | 特效最新值 | POST `/api/v1/dataflow/mqtt-storage/detail`，`{namespace,deviceType,deviceNo:assetCode}` | `{device,payloadJson}`，payloadJson 为字符串；不是 records 数组 |
 | 流程对外 API | POST `/api/v1/dataflow/open/apis/{apiCode}/invoke`，业务参数，按配置带 X-API-Key | 当前 PUBLISHED 的本次运行 records；需检查内部 status |
 
-库存记录字段包括 `containerCode/containerType/isEmpty/locType/row/column/layer/tier/stackingRow/stackingColumn/stackingLayer`。默认间隔 60 秒，0 表示进入预览时只同步一次。若使用 DataFlow 外部 API 供库存，DAG 必须输出符合 `records[].result[]` 的行结构；普通“成功返回 records”不能保证三维能解析。数字孪生 DIST 清空 Key 后，要求 Key 的库存接口也不会自动获得授权，需要单独设计安全的运行态接入方式，而不是把密钥重新放进公开包。
+库存记录字段包括 `containerCode/containerType/isEmpty/locType/row/column/layer/tier/stackingRow/stackingColumn/stackingLayer`。默认间隔 60 秒，0 表示进入预览时只同步一次。新库存接口直接输出 `data.result[]`；若使用旧 DataFlow 外部 API 供库存，DAG 必须输出符合 `data.records[].result[]` 的分组行结构。数字孪生 DIST 清空 Key 后，要求 Key 的库存接口也不会自动获得授权，需要单独设计安全的运行态接入方式，而不是把密钥重新放进公开包。
 
 依据：[库存请求与解析](../../src/runtime/babylon/scene-runtime/SceneLocatorFetchController.ts#L350)、[特效契约](../../electron/shared/effectDataContract.ts#L40)、[数据源返回结构](../../../central-data-platform/backend/twin-module-dataflow/src/main/java/com/centraldataplatform/twin/dataflow/datasource/app/vo/DataSourceTestResultVO.java#L3)、[最新值查询](../../../central-data-platform/backend/twin-module-dataflow/src/main/java/com/centraldataplatform/twin/dataflow/mqttlatest/MqttLatestQueryService.java#L28)、[外部 API 返回](../../../central-data-platform/backend/twin-module-dataflow/src/main/java/com/centraldataplatform/twin/dataflow/flowapi/app/vo/FlowApiInvokeResultVO.java#L11)。
 

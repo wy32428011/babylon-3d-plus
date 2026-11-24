@@ -4,7 +4,7 @@ import test from 'node:test';
 import { Color3, Material, Matrix, Mesh, MeshBuilder, NullEngine, Scene, StandardMaterial, TransformNode, Vector3 } from '@babylonjs/core';
 
 import { LocatorFetchRuntime, type FetchContainerRecord } from '../../src/runtime/babylon/LocatorFetchRuntime';
-import { createFetchInventoryRequest } from '../../src/runtime/babylon/scene-runtime/SceneLocatorFetchController';
+import { createFetchInventoryRequest, parseFetchInventoryResponse } from '../../src/runtime/babylon/scene-runtime/SceneLocatorFetchController';
 import type { LocatorRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 import type { LocatorComponent, ModelGeneratorComponent, ModelGeneratorTarget } from '../../src/editor/model/components';
 
@@ -503,4 +503,37 @@ test('GET 全量库存请求不传 rows，空 API Key 不发送鉴权头', () =>
   assert.equal(url.searchParams.has('rows'), false);
   assert.deepEqual(request.init.headers, {});
   assert.equal(request.init.body, undefined);
+});
+
+test('新库存 GET 接口直接读取 data.result，并忽略批次元数据', () => {
+  const first = createRecord(35, 6, { row: '3', stackingRow: '3' });
+  const second = createRecord(77, 5, { row: '5', stackingRow: '5' });
+
+  assert.deepEqual(parseFetchInventoryResponse({
+    success: true,
+    code: 'OK',
+    data: {
+      storageKey: 'ep2',
+      batchVersion: '1554',
+      totalCount: 2,
+      result: [first, second],
+    },
+  }), [first, second]);
+  assert.deepEqual(parseFetchInventoryResponse({ data: { result: [] } }), []);
+});
+
+test('库存响应继续兼容旧 data.records 分组结构', () => {
+  const first = createRecord(1, 1);
+  const second = createRecord(2, 2);
+
+  assert.deepEqual(parseFetchInventoryResponse({
+    data: { records: [{ result: [first] }, { result: [second] }, {}] },
+  }), [first, second]);
+});
+
+test('库存响应缺少受支持的结果数组时返回 null', () => {
+  assert.equal(parseFetchInventoryResponse(null), null);
+  assert.equal(parseFetchInventoryResponse({ data: null }), null);
+  assert.equal(parseFetchInventoryResponse({ data: { result: null } }), null);
+  assert.equal(parseFetchInventoryResponse({ data: { records: null } }), null);
 });

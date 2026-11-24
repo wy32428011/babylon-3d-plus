@@ -14,7 +14,7 @@ import { countModelMeshTriangles } from './modelTriangleStatistics';
 import type { LocatorRuntimeEntry } from './SceneRuntime';
 import { createMeshModelGeneratorTarget, createModelGeneratorTargetSignature } from '../../editor/model/modelGenerator';
 
-/** fetch 响应中的单条货物记录（dataflow API：data.records[].result[]） */
+/** fetch 响应中的单条货物记录（data.result[] 或旧接口 data.records[].result[]） */
 export type FetchContainerRecord = {
   containerCode: string;
   containerType: string;

@@ -121,7 +121,7 @@ flowchart LR
 
 设备运行以 `sourceId/deviceType/assetCode` 标识关联数据，驱动器覆盖堆垛机、输送线、RGV、穿梭车、提升机等设备，并管理货物、运动箭头、故障和断流行为。模型显示正常不代表遥测绑定正确；Broker 连通也不代表字段映射、运动单位或资产编号正确。
 
-库位/货物 Fetch 是场景配置的 HTTP 接口，发送 `{rows}`，预期 `data.records[].result[]` 中有容器及库位信息。特效 HTTP 则走数据源代理或 MQTT 最新值接口；这两种 Fetch 链并不相同，详细结构见[跨项目契约](03-integration-contracts.md)。
+库位/货物 Fetch 是场景配置的 HTTP 接口，POST 发送 `{rows}`，GET 使用 `rows` 查询参数；预期 `data.result[]` 中有容器及库位信息，并兼容旧接口 `data.records[].result[]`。特效 HTTP 则走数据源代理或 MQTT 最新值接口；这两种 Fetch 链并不相同，详细结构见[跨项目契约](03-integration-contracts.md)。
 
 依据：[设备类型与适配器](../../src/runtime/mqtt/deviceTelemetry.ts#L42)、[专用遥测驱动](../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime.ts#L19)、[库位请求](../../src/runtime/babylon/scene-runtime/SceneLocatorFetchController.ts#L350)、[特效数据运行时](../../src/runtime/effects/EffectDataRuntime.ts#L52)。
 
