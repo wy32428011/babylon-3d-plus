@@ -57,7 +57,7 @@ AGV 产生器位于 POI 库，复用设备产生器的模板实体、MQTT 动态
 - `businessType` 是可选业务分类字符串，当前预置示例使用 `pickup`、`dropoff`、`station`、`charging`、`waiting`；渲染不依赖该分类。
 - `bidirectional` 表示路线是否允许反向通行；缺省或 `false` 按 `fromNodeId → toNodeId` 单向处理。它不影响轨迹显示，但参与任务最短路径计算。
 - `points` 是可选的完整有序折线，至少两个点，适合 CAD 中的多段线。省略时使用 `fromNodeId`、`toNodeId` 对应业务节点的 XY 坐标绘制直线。
-- `stations` 是可选的业务站点列表（如 NDC8 的 `Ndc8_Activity_*`），每项通过 `nodeId` 关联到 `nodes` 中的路网节点。站点编号与路网节点编号独立命名空间，寻路端应先查 `stations` 映射到 `nodeId`（可复用 `resolveAgvMapNodeId`），避免与路网点撞号。
+- `stations` 是可选的业务站点列表（如 NDC8 的 `Ndc8_Activity_*`），每项通过 `nodeId` 关联到 `nodes` 中的路网节点。站点编号与路网节点编号独立命名空间，MQTT 任务端点取站点 `name`，寻路端优先按 `stations.name` 映射到 `nodeId`（可复用 `resolveAgvMapNodeId`），避免与路网点撞号；旧站点 `id` 和路网节点 `id` 仍作为兼容回退。
 - 当前校验上限为 4096 个业务节点、8192 条轨迹、每条轨迹 2048 个折线点、4096 个业务站点。
 
 类型定义和校验入口位于 `src/editor/model/agvMap.ts`，内置地图注册位于 `src/editor/model/agvMapLibrary.ts`。内置地图随场景保存 ID 与显示配置。DXF 导入地图另随场景保存节点与路线，底图从工程内的 DXF 副本读取。
@@ -77,7 +77,7 @@ AGV 产生器位于 POI 库，复用设备产生器的模板实体、MQTT 动态
 - 动态 AGV 的 `x/y` 是产生器地图坐标：先按产生器的 `xAxis/yAxis/scale` 换算，再应用产生器实体的完整 Transform。地图原点就是产生器位置，比例尺和轴映射与地图显示一致。未关联地图的静态 AGV 仍按场景世界 `X/Z` 驱动。`z=null` 不参与整机移动；只更新一个平面字段时保留上一目标的另一地图通道。当前不做路网吸附或路径约束。
 - 首个有效位姿直接落位，避免动态实例从模板位置滑入；后续 `x/y/r` 采用延迟一个采样点的分段线性插值：收到新样本后，从当前画面位置向新目标播放，时长取相邻样本 `sourceTimestamp`（缺失时 `receivedAt`）的实际差值，位置速度为两点距离除以该时长，不做缓入缓出或阻尼减速。报文提前到达时从当前插值位置承接，车头沿最短转角按同一时长旋转。正常连续推送时画面约落后一个采样周期；该平滑只跟随 MQTT 实时位姿，不代表沿路网自动寻路。
 - `normal=false`、非零 `errorCode` 或 `mode=0` 时冻结位姿；数据断流时不接受新目标，但已开始的短过渡会继续到最近目标后停止。动态实例收到 `mode=0` 后按 AGV 离线协议销毁，也继续兼容通用 `status=offline`。
-- `task_begin_point` 与 `task_end_point` 同时存在时，动态 AGV 按地图节点和轨迹方向计算累计折线长度最短的路线，结果包含节点序列、轨迹 ID、完整折线和地图单位长度；相同任务起终点复用缓存。`bidirectional=true` 的轨迹可反向使用，其余轨迹只允许正向。任一节点不存在或路网不可达时返回无路线，不用两点直线替代。点击动态 AGV 后，只读「运行时诊断」展示路线摘要或不可达原因。该结果当前只用于任务路线诊断，不覆盖 `x/y/r` 实时位置，也不让车辆脱离真实上报位置自动行驶。
+- `task_begin_point` 与 `task_end_point` 同时存在时，动态 AGV 先将两个站点 `name` 反查为 `stations.nodeId`，再按地图节点和轨迹方向计算累计折线长度最短的路线，结果包含节点序列、轨迹 ID、完整折线和地图单位长度；相同任务起终点复用缓存。`bidirectional=true` 的轨迹可反向使用，其余轨迹只允许正向。任一站名称不存在或路网不可达时返回无路线，不用两点直线替代。点击动态 AGV 后，只读「运行时诊断」展示路线摘要或不可达原因。该结果当前只用于任务路线贯通诊断，不覆盖 `x/y/r` 实时位置，也不让车辆脱离真实上报位置自动行驶；路径高亮留待后续版本。
 - 其余 `command`、`deviceType`、`signalBits`、`task`、`containerCode`、`batteryLevel`、`message`、`timestamp` 等原始字段保留在标准快照和运行时诊断中。当前不据此生成货物或执行装卸动画。
 - AGV 产生器按模板的 `deviceType` 注册，首条带 `s` 的 MQTT 消息生成实例，后续消息按 topic 中的设备号及完整 `sourceId/deviceType/assetCode` 驱动对应实例。动态实例在生成时读取产生器的地图放置配置及对应地图定义。
 - 动态 AGV 可点击。点击后右侧显示「动态 AGV 实例」及只读「数据驱动」模块，包含来源产生器、继承配置、在线状态、topic、时间和最新 MQTT fields；产生器配置的高亮、聚焦和图表点击事件继续执行。动态选区和实例快照不写入场景文档，实例下线或退出预览即清理。

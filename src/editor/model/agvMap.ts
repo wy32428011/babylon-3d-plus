@@ -203,11 +203,12 @@ export function sanitizeAgvMapDefinition(value: unknown): AgvMapDefinition | nul
   };
 }
 
-/** 将业务站点 ID 或路网节点 ID 解析为对应的路网节点 ID（优先匹配业务站点映射）。 */
-export function resolveAgvMapNodeId(map: AgvMapDefinition, pointOrStationId: string): string | null {
-  const target = normalizeIdentifier(pointOrStationId);
+/** 将 MQTT 站点名称解析为路网节点 ID，并兼容旧站点 ID 和路网节点 ID。 */
+export function resolveAgvMapNodeId(map: AgvMapDefinition, pointOrStationName: string): string | null {
+  const target = normalizeIdentifier(pointOrStationName);
   if (!target) return null;
-  const station = map.stations?.find(item => item.id === target);
+  const station = map.stations?.find(item => item.name === target)
+    ?? map.stations?.find(item => item.id === target);
   if (station) return station.nodeId;
   return map.nodes.some(node => node.id === target) ? target : null;
 }

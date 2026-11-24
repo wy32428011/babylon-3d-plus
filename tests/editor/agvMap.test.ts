@@ -5,6 +5,7 @@ import {
   createDefaultAgvMapComponent,
   findAgvMapShortestRoute,
   mapAgvPointToScene,
+  resolveAgvMapNodeId,
   resolveAgvMapTrackPoints,
   sanitizeAgvMapComponent,
   sanitizeAgvMapDefinition,
@@ -63,6 +64,17 @@ test('地图点按正负轴与米制比例尺换算，原点始终不变', () =>
   const component = { xAxis: '-z' as const, yAxis: 'x' as const, scale: 2.5 };
   assert.deepEqual(mapAgvPointToScene({ x: 4, y: -2 }, component), { x: -5, y: 0, z: -10 });
   assert.deepEqual(mapAgvPointToScene({ x: 0, y: 0 }, component), { x: 0, y: 0, z: 0 });
+});
+
+test('MQTT 站点名称优先映射到路网节点，并兼容站点 ID 和节点 ID', () => {
+  const map = {
+    ...BUILT_IN_AGV_MAPS[0],
+    stations: [{ id: 'P01', name: 'P02', nodeId: 'P03', x: 12, y: 8 }],
+  };
+  assert.equal(resolveAgvMapNodeId(map, 'P02'), 'P03');
+  assert.equal(resolveAgvMapNodeId(map, 'P01'), 'P03');
+  assert.equal(resolveAgvMapNodeId(map, 'P04'), 'P04');
+  assert.equal(resolveAgvMapNodeId(map, 'missing'), null);
 });
 
 test('任务起终点按轨迹长度求有向最短路径并保留完整折线', () => {

@@ -486,7 +486,7 @@ test('动态 AGV 按产生器原点、地图比例尺、轴映射和 Transform �
   assert.deepEqual(root.position.asArray(), [8, 0, 17]);
 });
 
-test('动态 AGV 按任务起终点计算并缓存地图最短路线，不覆盖真实坐标', t => {
+test('动态 AGV 按 MQTT 站点名称计算并缓存地图最短路线，不覆盖真实坐标', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   t.after(() => { scene.dispose(); engine.dispose(); });
@@ -500,20 +500,30 @@ test('动态 AGV 按任务起终点计算并缓存地图最短路线，不覆盖
         scale: { x: 1, y: 1, z: 1 },
       },
       map: { xAxis: 'x', yAxis: 'z', scale: 1 },
-      definition: BUILT_IN_AGV_MAPS[0],
+      definition: {
+        ...BUILT_IN_AGV_MAPS[0],
+        stations: [
+          { id: 'S01', name: '取货站', nodeId: 'P01', x: 0, y: 0 },
+          { id: 'S03', name: '质检站', nodeId: 'P03', x: 12, y: 8 },
+          { id: 'SC01', name: '充电站', nodeId: 'C01', x: -4, y: 0 },
+        ],
+      },
     },
   } as unknown as ModelRuntimeEntry;
   const driver = new AgvTelemetryDriver();
 
-  driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: 'P01', task_end_point: 'P03' }), 0);
+  driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: '取货站', task_end_point: '质检站' }), 0);
   const route = driver.getTaskRoute(model);
   assert.deepEqual(route?.nodeIds, ['P01', 'P02', 'P03']);
+  assert.deepEqual(route?.trackIds, ['T01', 'T02']);
   assert.equal(route?.distance, 20);
   assert.deepEqual(root.position.asArray(), [1, 0, 2], '任务路线不得替代 MQTT 实时位置');
 
-  const sameTask = createSnapshot({ x: 1, y: 2, task_begin_point: 'P01', task_end_point: 'P03' });
+  const sameTask = createSnapshot({ x: 1, y: 2, task_begin_point: '取货站', task_end_point: '质检站' });
   driver.applyToModel(model, sameTask, 1 / 60);
   assert.equal(driver.getTaskRoute(model), route, '相同任务应复用路线缓存');
   driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: 220, task_end_point: 72 }), 1 / 60);
-  assert.equal(driver.getTaskRoute(model), null, '不存在的地图节点必须返回无路线');
+  assert.equal(driver.getTaskRoute(model), null, '不存在的站点名称必须返回无路线');
+  driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: '充电站', task_end_point: '取货站' }), 1 / 60);
+  assert.equal(driver.getTaskRoute(model), null, '站点存在但轨迹方向不贯通时必须返回无路线');
 });

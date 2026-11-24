@@ -4,6 +4,8 @@
 
 ## 最近完成
 
+- 2026-11-24：修正 AGV 任务路线端点解析，`task_begin_point/task_end_point` 现在优先按地图 `stations.name` 反查 `nodeId`，再沿 `tracks` 判断有向路线是否贯通，避免站点名称与路网节点编号撞号；保留旧站点 ID 和节点 ID 兼容。本版仍只提供路线诊断，不新增路径高亮。
+
 - 2026-11-24：货架库存 Fetch 支持新库存接口的 `data.result[]` 响应结构，同时兼容旧 dataflow 接口的 `data.records[].result[]`；GET 地址中的 `storageKey` 等既有查询参数保持不变，单排同步继续在客户端按排号过滤。
 
 - 2026-11-23：货架库存 Fetch 配置新增 GET/POST 请求方式选择，默认及旧场景均保持 POST。POST 继续发送 JSON `{rows}`；GET 单排同步使用 `rows` 查询参数，全量同步不传该参数。请求方式随场景保存并传入发布 Viewer，API Key 仍为可选项。

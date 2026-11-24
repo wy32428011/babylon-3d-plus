@@ -3,6 +3,7 @@ import {
   findAgvMapShortestRoute,
   getAgvMapSceneAxisBase,
   mapAgvPointToScene,
+  resolveAgvMapNodeId,
   type AgvMapRoute,
   type AgvMapSceneAxis,
 } from '../../../../editor/model/agvMap';
@@ -88,13 +89,13 @@ function resolveSegmentDuration(
   return Math.max(AGV_MOTION_MIN_SEGMENT_SECONDS, expectedSeconds);
 }
 
-function readTaskNodeId(snapshot: DeviceTelemetrySnapshot, key: string): string | null {
+function readTaskPoint(snapshot: DeviceTelemetrySnapshot, key: string): string | null {
   return readStringField(snapshot.fields, key)?.trim() || null;
 }
 
 function readTaskRouteKey(snapshot: DeviceTelemetrySnapshot): string | null {
-  const start = readTaskNodeId(snapshot, 'task_begin_point');
-  const end = readTaskNodeId(snapshot, 'task_end_point');
+  const start = readTaskPoint(snapshot, 'task_begin_point');
+  const end = readTaskPoint(snapshot, 'task_end_point');
   return start && end ? `${start}\0${end}` : null;
 }
 
@@ -213,8 +214,12 @@ export class AgvTelemetryDriver {
     state.taskRoute = null;
     const map = model.agvMapPlacement?.definition;
     if (!routeKey || !map) return;
-    const [startNodeId, endNodeId] = routeKey.split('\0');
-    state.taskRoute = findAgvMapShortestRoute(map, startNodeId, endNodeId);
+    const [startPoint, endPoint] = routeKey.split('\0');
+    const startNodeId = resolveAgvMapNodeId(map, startPoint);
+    const endNodeId = resolveAgvMapNodeId(map, endPoint);
+    state.taskRoute = startNodeId && endNodeId
+      ? findAgvMapShortestRoute(map, startNodeId, endNodeId)
+      : null;
   }
 
   private resolveModelYaw(model: ModelRuntimeEntry, heading: number): number {
