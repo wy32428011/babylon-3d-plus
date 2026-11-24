@@ -16,6 +16,7 @@ import { cancelProjectLoading } from '../home/projectLoadingCancellation';
 import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
 import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
+import { getTruncatedLabelText } from '../../shared/ui/truncatedLabelTitle';
 import styles from './EditorLayout.module.css';
 
 const loadDeploymentExportDialog = () => import('../deployment/DeploymentExportDialog').then(module => ({ default: module.DeploymentExportDialog }));
@@ -47,6 +48,14 @@ function hasVisibleEditorOverlay(): boolean {
     || document.querySelector('.console-dialog-backdrop')
     || document.querySelector('[role="dialog"]'),
   );
+}
+
+function handleInspectorLabelMouseOver(target: EventTarget | null): void {
+  if (!(target instanceof Element)) return;
+  const label = target.closest('label > span:first-child');
+  if (!(label instanceof HTMLElement)) return;
+  const text = getTruncatedLabelText(label);
+  if (text) label.title = text;
 }
 
 type EditorLayoutProps = {
@@ -452,7 +461,7 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
             />
           </div>
         </main>
-        <aside className={styles.rightColumn}>
+        <aside className={styles.rightColumn} onMouseOverCapture={event => handleInspectorLabelMouseOver(event.target)}>
           <InspectorPanel readOnly={isRuntimePreview} />
         </aside>
       </div>

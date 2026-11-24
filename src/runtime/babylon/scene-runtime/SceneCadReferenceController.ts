@@ -134,7 +134,7 @@ export class SceneCadReferenceController {
     drawing.position.set(position.x, position.y, position.z);
     drawing.rotationQuaternion = Quaternion.RotationQuaternionFromAxis(right, up, forward);
     drawing.scaling.setAll(map.scale);
-    drawing.setEnabled(map.mapId === map.importedMap?.id);
+    drawing.setEnabled(map.showBaseMap && map.mapId === map.importedMap?.id);
   }
 
   /** 新导入复用缓存；重开同时检查元数据和响应长度，旧场景未知大小走安全后台路径。 */

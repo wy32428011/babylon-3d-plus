@@ -1,8 +1,11 @@
 import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import {
+  AGV_MAP_NODE_RADIUS_DEFAULT,
+  findAgvMapNodeWithinRadius,
   findAgvMapShortestRoute,
   getAgvMapSceneAxisBase,
   mapAgvPointToScene,
+  projectAgvPointToRoute,
   resolveAgvMapNodeId,
   type AgvMapRoute,
   type AgvMapSceneAxis,
@@ -11,6 +14,7 @@ import type { TelemetryBindingComponent } from '../../../../editor/model/telemet
 import { readIntegerField, readNumberField, readStringField, type DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import type { AgvMapPlacement } from '../../scene-runtime/sceneRuntimeTypes';
+import { AgvTaskRouteHighlight } from '../../agv/AgvTaskRouteHighlight';
 
 export type AgvModelForwardAxis = NonNullable<TelemetryBindingComponent['modelForwardAxis']>;
 
@@ -109,12 +113,16 @@ type AgvMotionState = {
   elapsedSeconds: number;
   durationSeconds: number;
   taskRouteKey: string | null;
+  taskRouteAnchorNodeId: string | null;
+  taskRouteEndNodeId: string | null;
   taskRoute: AgvMapRoute | null;
+  taskRouteHighlight: AgvTaskRouteHighlight | null;
 };
 
 /** 动态 AGV 按产生器地图原点、轴映射和比例尺定位；静态 AGV 保持世界坐标驱动。 */
 export class AgvTelemetryDriver {
   private motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
+  private readonly routeHighlights = new Set<AgvTaskRouteHighlight>();
 
   public applyToModel(
     model: ModelRuntimeEntry,
@@ -145,10 +153,18 @@ export class AgvTelemetryDriver {
         elapsedSeconds: AGV_MOTION_DEFAULT_SEGMENT_SECONDS,
         durationSeconds: AGV_MOTION_DEFAULT_SEGMENT_SECONDS,
         taskRouteKey: null,
+        taskRouteAnchorNodeId: null,
+        taskRouteEndNodeId: null,
         taskRoute: null,
+        taskRouteHighlight: null,
       };
       this.motionStates.set(model, state);
+      model.root.onDisposeObservable.add(() => {
+        const current = this.motionStates.get(model);
+        if (current) this.disposeTaskRouteHighlight(current);
+      });
       this.updateTaskRoute(model, snapshot, state);
+      this.updateTaskRouteHighlight(model, state, 0);
       return;
     }
 
@@ -172,17 +188,19 @@ export class AgvTelemetryDriver {
       this.updateTaskRoute(model, snapshot, state);
     }
 
-    if (state.elapsedSeconds >= state.durationSeconds) return;
-    state.elapsedSeconds = Math.min(
-      state.durationSeconds,
-      state.elapsedSeconds + Math.max(0, deltaSeconds),
-    );
-    const progress = state.elapsedSeconds / state.durationSeconds;
-    Vector3.LerpToRef(state.startPosition, state.targetPosition, progress, model.root.position);
-    if (state.targetYaw !== null) {
-      model.root.rotationQuaternion = null;
-      model.root.rotation.y = state.startYaw + (state.targetYaw - state.startYaw) * progress;
+    if (state.elapsedSeconds < state.durationSeconds) {
+      state.elapsedSeconds = Math.min(
+        state.durationSeconds,
+        state.elapsedSeconds + Math.max(0, deltaSeconds),
+      );
+      const progress = state.elapsedSeconds / state.durationSeconds;
+      Vector3.LerpToRef(state.startPosition, state.targetPosition, progress, model.root.position);
+      if (state.targetYaw !== null) {
+        model.root.rotationQuaternion = null;
+        model.root.rotation.y = state.startYaw + (state.targetYaw - state.startYaw) * progress;
+      }
     }
+    this.updateTaskRouteHighlight(model, state, deltaSeconds);
   }
 
   public hasPendingMotion(model: ModelRuntimeEntry): boolean {
@@ -200,6 +218,8 @@ export class AgvTelemetryDriver {
   }
 
   public resetMotionStates(): void {
+    for (const highlight of this.routeHighlights) highlight.dispose();
+    this.routeHighlights.clear();
     this.motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
   }
 
@@ -212,14 +232,84 @@ export class AgvTelemetryDriver {
     if (routeKey === state.taskRouteKey) return;
     state.taskRouteKey = routeKey;
     state.taskRoute = null;
-    const map = model.agvMapPlacement?.definition;
-    if (!routeKey || !map) return;
+    state.taskRouteAnchorNodeId = null;
+    state.taskRouteEndNodeId = null;
+    this.disposeTaskRouteHighlight(state);
+    const placement = model.agvMapPlacement;
+    const map = placement?.definition;
+    if (!routeKey || !map || !placement) return;
     const [startPoint, endPoint] = routeKey.split('\0');
-    const startNodeId = resolveAgvMapNodeId(map, startPoint);
-    const endNodeId = resolveAgvMapNodeId(map, endPoint);
-    state.taskRoute = startNodeId && endNodeId
+    this.replaceTaskRoute(
+      model,
+      state,
+      resolveAgvMapNodeId(map, startPoint),
+      resolveAgvMapNodeId(map, endPoint),
+    );
+  }
+
+  private replaceTaskRoute(
+    model: ModelRuntimeEntry,
+    state: AgvMotionState,
+    startNodeId: string | null,
+    endNodeId: string | null,
+  ): void {
+    const placement = model.agvMapPlacement;
+    const map = placement?.definition;
+    this.disposeTaskRouteHighlight(state);
+    state.taskRouteAnchorNodeId = startNodeId;
+    state.taskRouteEndNodeId = endNodeId;
+    state.taskRoute = map && startNodeId && endNodeId
       ? findAgvMapShortestRoute(map, startNodeId, endNodeId)
       : null;
+    const highlight = placement?.routeHighlight;
+    if (!placement || !state.taskRoute || state.taskRoute.distance <= 0 || !highlight?.enabled) return;
+    state.taskRouteHighlight = new AgvTaskRouteHighlight(
+      model.root.name,
+      model.root.getScene(),
+      state.taskRoute,
+      placement,
+      highlight,
+    );
+    this.routeHighlights.add(state.taskRouteHighlight);
+  }
+
+  private updateTaskRouteHighlight(
+    model: ModelRuntimeEntry,
+    state: AgvMotionState,
+    deltaSeconds: number,
+  ): void {
+    const placement = model.agvMapPlacement;
+    if (!placement) return;
+    const current = Vector3.TransformCoordinates(
+      model.root.position,
+      createAgvMapPlacementMatrix(placement).invert(),
+    );
+    const mapPoint = {
+      x: readAgvMapCoordinate(current, placement.map.xAxis, placement.map.scale),
+      y: readAgvMapCoordinate(current, placement.map.yAxis, placement.map.scale),
+    };
+    const map = placement.definition;
+    if (map && state.taskRouteEndNodeId) {
+      const touchedNodeId = findAgvMapNodeWithinRadius(
+        map,
+        mapPoint,
+        (placement.map.nodeRadius ?? AGV_MAP_NODE_RADIUS_DEFAULT) / placement.map.scale,
+      );
+      if (touchedNodeId && touchedNodeId !== state.taskRouteAnchorNodeId) {
+        this.replaceTaskRoute(model, state, touchedNodeId, state.taskRouteEndNodeId);
+      }
+    }
+    const highlight = state.taskRouteHighlight;
+    if (!highlight || !state.taskRoute) return;
+    const projection = projectAgvPointToRoute(state.taskRoute.points, mapPoint);
+    highlight.update(projection?.progress ?? 0, deltaSeconds);
+  }
+
+  private disposeTaskRouteHighlight(state: AgvMotionState): void {
+    if (!state.taskRouteHighlight) return;
+    this.routeHighlights.delete(state.taskRouteHighlight);
+    state.taskRouteHighlight.dispose();
+    state.taskRouteHighlight = null;
   }
 
   private resolveModelYaw(model: ModelRuntimeEntry, heading: number): number {

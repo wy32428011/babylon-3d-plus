@@ -6,9 +6,10 @@ import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import type { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 
-import { createDefaultAgvMapComponent } from '../../src/editor/model/agvMap.ts';
+import { createDefaultAgvMapComponent, createDefaultAgvRouteHighlightConfig, type AgvRouteHighlightStyle } from '../../src/editor/model/agvMap.ts';
 import { BUILT_IN_AGV_MAPS } from '../../src/editor/model/agvMapLibrary.ts';
 import { AgvMapRuntime } from '../../src/runtime/babylon/agv/AgvMapRuntime.ts';
+import { AgvTaskRouteHighlight } from '../../src/runtime/babylon/agv/AgvTaskRouteHighlight.ts';
 
 function createFixture(t: test.TestContext) {
   const engine = new NullEngine();
@@ -77,4 +78,122 @@ test('产生器位置就是地图原点，释放地图时不遗留几何', t => 
   runtime.sync({ ...createDefaultAgvMapComponent(), mapId: null }, true);
   assert.equal(runtime.root.isEnabled(), false);
   assert.equal(scene.meshes.length, 0);
+});
+
+test('任务路径四种样式共用完成进度，更新进度不重建几何且释放完整', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const route = {
+    nodeIds: ['P01', 'P02', 'P03'],
+    trackIds: ['T01', 'T02'],
+    points: [{ x: 0, y: 0 }, { x: 12, y: 0 }, { x: 12, y: 8 }],
+    distance: 20,
+  };
+  const placement = {
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    },
+    map: { xAxis: 'x' as const, yAxis: 'z' as const, scale: 1 },
+  };
+
+  for (const style of ['flow-path', 'flow-arrows', 'path-reveal', 'pipe-flow'] as AgvRouteHighlightStyle[]) {
+    const highlight = new AgvTaskRouteHighlight(`route-${style}`, scene, route, placement, {
+      ...createDefaultAgvRouteHighlightConfig(),
+      style,
+    });
+    const meshes = scene.meshes.filter(mesh => mesh.metadata?.agvTaskRouteHighlight);
+    assert.equal(meshes.length, style === 'flow-arrows' ? 7 : 1);
+    highlight.update(0.5, 1 / 60);
+    assert.equal(highlight.getProgress(), 0.5);
+    assert.deepEqual(scene.meshes.filter(mesh => mesh.metadata?.agvTaskRouteHighlight), meshes);
+    highlight.update(1, 1 / 60);
+    assert.equal(highlight.getProgress(), 1);
+    highlight.dispose();
+    assert.ok(meshes.every(mesh => mesh.isDisposed()));
+    assert.equal(scene.meshes.filter(mesh => mesh.metadata?.agvTaskRouteHighlight).length, 0);
+  }
+});
+
+test('车辆已驶过的方向标识直接隐藏，只保留剩余路线', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const route = {
+    nodeIds: ['P01', 'P02'],
+    trackIds: ['T01'],
+    points: [{ x: 0, y: 0 }, { x: 10, y: 0 }],
+    distance: 10,
+  };
+  const placement = {
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    },
+    map: { xAxis: 'x' as const, yAxis: 'z' as const, scale: 1 },
+  };
+  const highlight = new AgvTaskRouteHighlight('remaining', scene, route, placement, {
+    ...createDefaultAgvRouteHighlightConfig(), style: 'flow-arrows', amount: 4, speed: 0,
+  });
+  const arrows = Array.from({ length: 4 }, (_, index) => scene.meshes.find(mesh => mesh.name === `remaining_agvRouteArrow_${index}`)!);
+  highlight.update(0.5, 0);
+  assert.deepEqual(arrows.map(arrow => arrow.isEnabled()), [false, false, false, true]);
+  highlight.update(0.9, 0);
+  assert.deepEqual(arrows.map(arrow => arrow.isEnabled()), [false, false, false, false]);
+  highlight.update(1, 0);
+  assert.deepEqual(arrows.map(arrow => arrow.isEnabled()), [false, false, false, false]);
+  highlight.dispose();
+});
+
+test('方向标识按场景米制速度移动，不受路线长度和地图比例尺影响', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const createPlacement = (mapScale: number) => ({
+    transform: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+    },
+    map: { xAxis: 'x' as const, yAxis: 'z' as const, scale: mapScale },
+  });
+  const createRoute = (length: number) => ({
+    nodeIds: ['P01', 'P02'],
+    trackIds: ['T01'],
+    points: [{ x: 0, y: 0 }, { x: length, y: 0 }],
+    distance: length,
+  });
+  const highlights = [
+    new AgvTaskRouteHighlight('short', scene, createRoute(10), createPlacement(1), {
+      ...createDefaultAgvRouteHighlightConfig(), style: 'flow-arrows', amount: 1, speed: 2,
+    }),
+    new AgvTaskRouteHighlight('long', scene, createRoute(20), createPlacement(1), {
+      ...createDefaultAgvRouteHighlightConfig(), style: 'flow-arrows', amount: 1, speed: 2,
+    }),
+    new AgvTaskRouteHighlight('scaled', scene, createRoute(10), createPlacement(2), {
+      ...createDefaultAgvRouteHighlightConfig(), style: 'flow-arrows', amount: 1, speed: 2,
+    }),
+  ];
+  for (const highlight of highlights) highlight.update(0, 1);
+  for (const id of ['short', 'long', 'scaled']) {
+    const arrow = scene.meshes.find(mesh => mesh.name === `${id}_agvRouteArrow_0`)!;
+    assert.ok(Math.abs(arrow.computeWorldMatrix(true).getTranslation().x - 2) < 1e-6, `${id} 应在 1 秒内移动 2 米`);
+  }
+  for (const highlight of highlights) highlight.update(0, 0.5);
+  for (const id of ['short', 'long', 'scaled']) {
+    const arrow = scene.meshes.find(mesh => mesh.name === `${id}_agvRouteArrow_0`)!;
+    assert.ok(Math.abs(arrow.computeWorldMatrix(true).getTranslation().x - 3) < 1e-6, `${id} 应在 1.5 秒内移动 3 米`);
+  }
+  for (const highlight of highlights) highlight.dispose();
+
+  const stopped = new AgvTaskRouteHighlight('stopped', scene, createRoute(10), createPlacement(1), {
+    ...createDefaultAgvRouteHighlightConfig(), style: 'flow-arrows', amount: 1, speed: 0,
+  });
+  stopped.update(0, 1);
+  const arrow = scene.meshes.find(mesh => mesh.name === 'stopped_agvRouteArrow_0')!;
+  assert.equal(arrow.computeWorldMatrix(true).getTranslation().x, 0);
+  stopped.dispose();
 });

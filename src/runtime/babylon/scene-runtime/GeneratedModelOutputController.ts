@@ -1296,8 +1296,9 @@ export class GeneratedModelOutputController {
     const agvMap = spawnerEntity?.components.agvMap;
     const agvMapPlacement = spawnerEntity && agvMap ? {
       transform: JSON.parse(JSON.stringify(spawnerEntity.components.transform)) as TransformComponent,
-      map: { xAxis: agvMap.xAxis, yAxis: agvMap.yAxis, scale: agvMap.scale },
+      map: { xAxis: agvMap.xAxis, yAxis: agvMap.yAxis, scale: agvMap.scale, nodeRadius: agvMap.nodeRadius },
       definition: getAgvMapDefinition(agvMap) ?? undefined,
+      routeHighlight: { ...agvMap.routeHighlight },
     } : undefined;
     // 拷贝模板参数，assetCode 由消息提供；绑定 assetCode 显式覆盖，防止指向模板自身编号。
     const modelAsset: ModelAssetComponent = {

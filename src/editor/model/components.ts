@@ -12,7 +12,7 @@ import type { ModelSourceLengthUnit } from './sceneUnits';
 import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemetryBinding';
 import type { CompositeDeviceFolderComponent, DevicePartBindingComponent } from './devicePartBinding';
 import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
-import type { AgvMapDefinition, AgvMapPoint, AgvMapSceneAxis } from './agvMap';
+import type { AgvMapDefinition, AgvMapPoint, AgvMapSceneAxis, AgvRouteHighlightConfig } from './agvMap';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -276,6 +276,9 @@ export type AgvMapComponent = {
   mapId: string | null;
   importedMap?: AgvMapDefinition;
   showTrajectories: boolean;
+  showBaseMap: boolean;
+  nodeRadius: number;
+  routeHighlight: AgvRouteHighlightConfig;
   xAxis: AgvMapSceneAxis;
   yAxis: AgvMapSceneAxis;
   scale: number;

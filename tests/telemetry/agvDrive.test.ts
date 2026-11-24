@@ -18,6 +18,7 @@ import { deviceTelemetryStore, type DeviceTelemetrySnapshot } from '../../src/ru
 import { telemetryRuntimeDiagnosticsStore } from '../../src/runtime/mqtt/telemetryRuntimeDiagnostics';
 import { AGV_MOTION_DEFAULT_SEGMENT_SECONDS, AgvTelemetryDriver, resolveAgvYawRadians } from '../../src/runtime/babylon/telemetry/specialized/agvDriver';
 import { BUILT_IN_AGV_MAPS } from '../../src/editor/model/agvMapLibrary';
+import { createDefaultAgvRouteHighlightConfig } from '../../src/editor/model/agvMap';
 import { isAgvRuntimeModel } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
 import type { SpecializedTelemetryHost } from '../../src/runtime/babylon/telemetry/specialized/types';
@@ -500,6 +501,7 @@ test('动态 AGV 按 MQTT 站点名称计算并缓存地图最短路线，不覆
         scale: { x: 1, y: 1, z: 1 },
       },
       map: { xAxis: 'x', yAxis: 'z', scale: 1 },
+      routeHighlight: createDefaultAgvRouteHighlightConfig(),
       definition: {
         ...BUILT_IN_AGV_MAPS[0],
         stations: [
@@ -518,12 +520,65 @@ test('动态 AGV 按 MQTT 站点名称计算并缓存地图最短路线，不覆
   assert.deepEqual(route?.trackIds, ['T01', 'T02']);
   assert.equal(route?.distance, 20);
   assert.deepEqual(root.position.asArray(), [1, 0, 2], '任务路线不得替代 MQTT 实时位置');
+  const highlightMesh = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight);
+  assert.ok(highlightMesh, '有效任务路线应创建高亮几何');
 
   const sameTask = createSnapshot({ x: 1, y: 2, task_begin_point: '取货站', task_end_point: '质检站' });
   driver.applyToModel(model, sameTask, 1 / 60);
   assert.equal(driver.getTaskRoute(model), route, '相同任务应复用路线缓存');
+  assert.equal(scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight), highlightMesh);
   driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: 220, task_end_point: 72 }), 1 / 60);
   assert.equal(driver.getTaskRoute(model), null, '不存在的站点名称必须返回无路线');
+  assert.equal(highlightMesh.isDisposed(), true, '任务失效时应释放旧路线高亮');
   driver.applyToModel(model, createSnapshot({ x: 1, y: 2, task_begin_point: '充电站', task_end_point: '取货站' }), 1 / 60);
   assert.equal(driver.getTaskRoute(model), null, '站点存在但轨迹方向不贯通时必须返回无路线');
+});
+
+test('AGV 触及不同节点后从该节点向原任务终点重规划，触及终点后释放路线', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const root = new TransformNode('agv-task-reroute', scene);
+  const model = {
+    root,
+    agvMapPlacement: {
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      map: { xAxis: 'x', yAxis: 'z', scale: 1, nodeRadius: 1 },
+      routeHighlight: createDefaultAgvRouteHighlightConfig(),
+      definition: BUILT_IN_AGV_MAPS[0],
+    },
+  } as unknown as ModelRuntimeEntry;
+  const driver = new AgvTelemetryDriver();
+  const snapshot = createSnapshot({ x: 0, y: 0, task_begin_point: 'P01', task_end_point: 'P03' });
+  driver.applyToModel(model, snapshot, 0);
+  const initialRoute = driver.getTaskRoute(model);
+  const initialHighlight = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight)!;
+  assert.deepEqual(initialRoute?.nodeIds, ['P01', 'P02', 'P03']);
+
+  root.position.set(11.5, 0, 0);
+  driver.applyToModel(model, snapshot, 0);
+  const intermediateRoute = driver.getTaskRoute(model);
+  assert.deepEqual(intermediateRoute?.nodeIds, ['P02', 'P03'], '进入中间节点半径后应截断已行驶路线');
+  assert.equal(initialHighlight.isDisposed(), true);
+  const intermediateHighlight = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight)!;
+  driver.applyToModel(model, snapshot, 0);
+  assert.equal(driver.getTaskRoute(model), intermediateRoute, '同一节点范围内不得重复规划');
+  assert.equal(scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight), intermediateHighlight);
+
+  root.position.set(0.5, 0, 8);
+  driver.applyToModel(model, snapshot, 0);
+  assert.deepEqual(driver.getTaskRoute(model)?.nodeIds, ['P04', 'P03'], '偏航触及其它节点后应保留原终点并选择最短路线');
+  assert.equal(intermediateHighlight.isDisposed(), true);
+  assert.deepEqual(root.position.asArray(), [0.5, 0, 8], '重规划不得改变车辆真实位置');
+
+  root.position.set(12, 0, 8);
+  driver.applyToModel(model, snapshot, 0);
+  assert.deepEqual(driver.getTaskRoute(model)?.nodeIds, ['P03']);
+  assert.equal(driver.getTaskRoute(model)?.distance, 0);
+  assert.equal(scene.meshes.some(mesh => mesh.metadata?.agvTaskRouteHighlight && !mesh.isDisposed()), false, '触及终点后不得保留高亮');
+  driver.resetMotionStates();
 });

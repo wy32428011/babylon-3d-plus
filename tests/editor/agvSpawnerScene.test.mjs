@@ -14,6 +14,7 @@ const entries = {
   cadStatus: '/src/editor/cad/cadReferenceLoadStatus.ts',
   spawner: '/src/editor/model/deviceSpawner.ts',
   hierarchy: '/src/editor/store/slices/sceneHierarchyOperations.ts',
+  labelTitle: '/src/shared/ui/truncatedLabelTitle.ts',
 };
 const modules = await createP4SsrTestModules(Object.values(entries));
 test.after(() => modules.close());
@@ -29,6 +30,13 @@ const {
   sanitizeDeviceSpawnerComponent,
 } = await modules.ssrLoadModule(entries.spawner);
 const { deleteEntitiesInScene } = await modules.ssrLoadModule(entries.hierarchy);
+const { getTruncatedLabelText } = await modules.ssrLoadModule(entries.labelTitle);
+
+test('右侧栏配置标签只在文字截断时提供完整悬停文本', () => {
+  assert.equal(getTruncatedLabelText({ textContent: '路径不透明度 (%)', scrollWidth: 120, clientWidth: 52 }), '路径不透明度 (%)');
+  assert.equal(getTruncatedLabelText({ textContent: '名称', scrollWidth: 24, clientWidth: 52 }), null);
+  assert.equal(getTruncatedLabelText({ textContent: '  ', scrollWidth: 120, clientWidth: 52 }), null);
+});
 
 test('AGV产生器 POI 拖拽载荷通过内置资源白名单解码', () => {
   const encoded = encodeBuiltInAssetDragPayload({ kind: 'agv-spawner' });
@@ -48,6 +56,17 @@ test('AGV产生器复用设备生成组件并随场景保存地图和原点', ()
   entity.components.agvMap = {
     mapId: 'demo-loop-dispatch',
     showTrajectories: false,
+    showBaseMap: false,
+    nodeRadius: 1.5,
+    routeHighlight: {
+      enabled: true,
+      style: 'flow-arrows',
+      remainingColor: '#20d9ff',
+      width: 0.3,
+      opacity: 0.8,
+      speed: 1.2,
+      amount: 8,
+    },
     xAxis: '-z',
     yAxis: 'x',
     scale: 2.5,

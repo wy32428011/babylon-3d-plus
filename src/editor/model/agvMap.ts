@@ -9,10 +9,37 @@ export const AGV_MAP_MAX_STATIONS = 4_096;
 export const AGV_MAP_SCALE_MIN = 0.001;
 export const AGV_MAP_SCALE_MAX = 1000;
 export const AGV_MAP_SCALE_DEFAULT = 1;
+export const AGV_MAP_NODE_RADIUS_MIN = 0.01;
+export const AGV_MAP_NODE_RADIUS_MAX = 100;
+export const AGV_MAP_NODE_RADIUS_DEFAULT = 0.2;
 export const AGV_MAP_SCENE_AXES = ['x', 'y', 'z', '-x', '-y', '-z'] as const;
 
 export type AgvMapSceneAxis = (typeof AGV_MAP_SCENE_AXES)[number];
 export type AgvMapPoint = { x: number; y: number };
+
+export const AGV_ROUTE_HIGHLIGHT_STYLES = ['flow-path', 'flow-arrows', 'path-reveal', 'pipe-flow'] as const;
+export type AgvRouteHighlightStyle = (typeof AGV_ROUTE_HIGHLIGHT_STYLES)[number];
+export type AgvRouteHighlightConfig = {
+  enabled: boolean;
+  style: AgvRouteHighlightStyle;
+  remainingColor: string;
+  width: number;
+  opacity: number;
+  speed: number;
+  amount: number;
+};
+
+export function createDefaultAgvRouteHighlightConfig(): AgvRouteHighlightConfig {
+  return {
+    enabled: true,
+    style: 'flow-path',
+    remainingColor: '#20d9ff',
+    width: 0.22,
+    opacity: 0.85,
+    speed: 1.5,
+    amount: 6,
+  };
+}
 
 export type AgvBusinessNode = AgvMapPoint & {
   id: string;
@@ -52,6 +79,9 @@ export function createDefaultAgvMapComponent(): AgvMapComponent {
   return {
     mapId: null,
     showTrajectories: true,
+    showBaseMap: true,
+    nodeRadius: AGV_MAP_NODE_RADIUS_DEFAULT,
+    routeHighlight: createDefaultAgvRouteHighlightConfig(),
     xAxis: 'x',
     yAxis: 'z',
     scale: AGV_MAP_SCALE_DEFAULT,
@@ -68,6 +98,33 @@ export function getAgvMapSceneAxisBase(axis: AgvMapSceneAxis): keyof Vector3Data
 
 export function areAgvMapAxesCompatible(xAxis: AgvMapSceneAxis, yAxis: AgvMapSceneAxis): boolean {
   return getAgvMapSceneAxisBase(xAxis) !== getAgvMapSceneAxisBase(yAxis);
+}
+
+function sanitizeAgvRouteHighlight(value: unknown): AgvRouteHighlightConfig {
+  const defaults = createDefaultAgvRouteHighlightConfig();
+  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) return defaults;
+  const record = value as Record<string, unknown>;
+  const finite = (key: 'width' | 'opacity' | 'speed' | 'amount', min: number, max: number) => {
+    const input = record[key];
+    return typeof input === 'number' && Number.isFinite(input)
+      ? Math.min(max, Math.max(min, input))
+      : defaults[key];
+  };
+  const color = (key: 'remainingColor') => {
+    const input = record[key];
+    return typeof input === 'string' && /^#[0-9a-f]{6}$/i.test(input) ? input.toLowerCase() : defaults[key];
+  };
+  return {
+    enabled: typeof record.enabled === 'boolean' ? record.enabled : defaults.enabled,
+    style: AGV_ROUTE_HIGHLIGHT_STYLES.includes(record.style as AgvRouteHighlightStyle)
+      ? record.style as AgvRouteHighlightStyle
+      : defaults.style,
+    remainingColor: color('remainingColor'),
+    width: finite('width', 0.02, 5),
+    opacity: finite('opacity', 0, 1),
+    speed: finite('speed', 0, 100),
+    amount: Math.round(finite('amount', 1, 64)),
+  };
 }
 
 /** 清理 AGV 地图显示配置；冲突轴回退到常规地面 X/Z 映射。 */
@@ -91,6 +148,11 @@ export function sanitizeAgvMapComponent(value: unknown): AgvMapComponent | null 
     mapId,
     ...(importedMap ? { importedMap } : {}),
     showTrajectories: typeof record.showTrajectories === 'boolean' ? record.showTrajectories : true,
+    showBaseMap: typeof record.showBaseMap === 'boolean' ? record.showBaseMap : true,
+    nodeRadius: typeof record.nodeRadius === 'number' && Number.isFinite(record.nodeRadius)
+      ? Math.min(AGV_MAP_NODE_RADIUS_MAX, Math.max(AGV_MAP_NODE_RADIUS_MIN, record.nodeRadius))
+      : AGV_MAP_NODE_RADIUS_DEFAULT,
+    routeHighlight: sanitizeAgvRouteHighlight(record.routeHighlight),
     ...axes,
     scale: Math.min(AGV_MAP_SCALE_MAX, Math.max(AGV_MAP_SCALE_MIN, rawScale)),
   };
@@ -213,6 +275,23 @@ export function resolveAgvMapNodeId(map: AgvMapDefinition, pointOrStationName: s
   return map.nodes.some(node => node.id === target) ? target : null;
 }
 
+export function findAgvMapNodeWithinRadius(
+  map: AgvMapDefinition,
+  point: AgvMapPoint,
+  radius: number,
+): string | null {
+  if (!Number.isFinite(radius) || radius < 0) return null;
+  let closestNodeId: string | null = null;
+  let closestDistanceSquared = radius * radius;
+  for (const node of map.nodes) {
+    const distanceSquared = (point.x - node.x) ** 2 + (point.y - node.y) ** 2;
+    if (distanceSquared > closestDistanceSquared) continue;
+    closestNodeId = node.id;
+    closestDistanceSquared = distanceSquared;
+  }
+  return closestNodeId;
+}
+
 export function resolveAgvMapTrackPoints(map: AgvMapDefinition, track: AgvMapTrack): AgvMapPoint[] {
   if (track.points) return track.points;
   const from = map.nodes.find(node => node.id === track.fromNodeId);
@@ -226,6 +305,42 @@ export type AgvMapRoute = {
   points: AgvMapPoint[];
   distance: number;
 };
+
+export type AgvRouteProjection = {
+  point: AgvMapPoint;
+  distance: number;
+  progress: number;
+};
+
+export function projectAgvPointToRoute(points: AgvMapPoint[], point: AgvMapPoint): AgvRouteProjection | null {
+  let total = 0;
+  for (let index = 1; index < points.length; index++) {
+    total += Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+  }
+  if (total <= 0) return null;
+
+  let closest: AgvRouteProjection | null = null;
+  let closestDistanceSquared = Number.POSITIVE_INFINITY;
+  let traversed = 0;
+  for (let index = 1; index < points.length; index++) {
+    const from = points[index - 1];
+    const to = points[index];
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const length = Math.hypot(dx, dy);
+    if (length <= 0) continue;
+    const fraction = Math.min(1, Math.max(0, ((point.x - from.x) * dx + (point.y - from.y) * dy) / (length * length)));
+    const projected = { x: from.x + dx * fraction, y: from.y + dy * fraction };
+    const distanceSquared = (point.x - projected.x) ** 2 + (point.y - projected.y) ** 2;
+    if (distanceSquared < closestDistanceSquared) {
+      const distance = traversed + length * fraction;
+      closest = { point: projected, distance, progress: distance / total };
+      closestDistanceSquared = distanceSquared;
+    }
+    traversed += length;
+  }
+  return closest;
+}
 
 type AgvRouteEdge = {
   fromNodeId: string;
