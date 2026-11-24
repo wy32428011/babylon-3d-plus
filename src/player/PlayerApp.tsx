@@ -55,6 +55,7 @@ import {
   parseDigitalTwinAllowedParentOrigins,
   parseDigitalTwinProjectRuntimeConfig,
   parsePlayerRuntimeConfig,
+  resolveEffectDataServiceBaseUrl,
   type DigitalTwinProjectRuntimeConfig,
   type PlayerRuntimeConfig,
 } from './runtimeConfig';
@@ -679,7 +680,9 @@ export function PlayerApp() {
           setHistoryUnavailable(reason);
           throw new Error(reason);
         }
-        configureEffectDataTransport({ apiBaseUrl: projectRuntimeConfig?.apiBaseUrl });
+        configureEffectDataTransport({
+          apiBaseUrl: resolveEffectDataServiceBaseUrl(parsedConfig, projectRuntimeConfig, document.baseURI),
+        });
         sceneOpeningSettings = resolvePackageOpeningSettings(sceneDocument.sceneSettings.openingAnimation);
         sceneModelEntranceSettings = normalizeSceneModelEntranceSettings(sceneDocument.sceneSettings.modelEntrance);
         setOpeningSettings(sceneOpeningSettings);

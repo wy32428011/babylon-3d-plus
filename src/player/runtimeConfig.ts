@@ -136,6 +136,76 @@ export function parseDigitalTwinAllowedParentOrigins(config: Record<string, unkn
   return origins;
 }
 
+const DIGITAL_TWIN_RUNTIME_CONFIG_PATH_SUFFIXES = [
+  '/api/v1/digital-twin/runtime-config/detail',
+  '/api/v1/digital-twin/runtime-config',
+] as const;
+
+/** 从项目扩展配置读取显式指定的特效数据服务根地址（可选）。 */
+export function parseDigitalTwinEffectDataBaseUrl(config?: Record<string, unknown>): string | null {
+  if (!config || !Object.hasOwn(config, 'effects') || config.effects === null || config.effects === undefined) return null;
+  const effects = assertObject(config.effects, '项目运行配置 configJson.effects');
+  if (!Object.hasOwn(effects, 'apiBaseUrl')) return null;
+  const raw = effects.apiBaseUrl;
+  if (raw === null || raw === undefined || (typeof raw === 'string' && !raw.trim())) return null;
+  const path = '项目运行配置 configJson.effects.apiBaseUrl';
+  const source = assertString(raw, path, 2048);
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    throw new Error(`${path} 不是有效 URL。`);
+  }
+  if (
+    !['http:', 'https:'].includes(url.protocol)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || url.origin === 'null'
+  ) {
+    throw new Error(`${path} 必须是无凭据、无查询参数和无片段的 HTTP(S) 地址。`);
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+/**
+ * 解析特效托管 HTTP 取数使用的中台服务根地址（无凭据、无查询参数、无片段）。
+ *
+ * `projectRuntimeConfig.apiBaseUrl` 在中台用于覆盖货架 Fetch 的完整请求地址（可含业务路径与非敏感查询参数），
+ * 不能直接当作中台根地址拼接 `api/v1/data-sources/fetch`；此处优先读取显式扩展配置
+ * `configJson.effects.apiBaseUrl`，否则从 `digitalTwin.runtimeConfigEndpoint` 推导中台服务根路径。
+ */
+export function resolveEffectDataServiceBaseUrl(
+  config: PlayerRuntimeConfig,
+  projectRuntimeConfig: DigitalTwinProjectRuntimeConfig | null,
+  baseUri: string,
+): string | null {
+  const configured = parseDigitalTwinEffectDataBaseUrl(projectRuntimeConfig?.config);
+  if (configured) return configured;
+  const endpoint = config.digitalTwin?.runtimeConfigEndpoint;
+  if (!endpoint) return null;
+
+  let resolved: URL;
+  try {
+    resolved = new URL(endpoint, baseUri);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(resolved.protocol) || resolved.username || resolved.password || resolved.origin === 'null') {
+    return null;
+  }
+
+  const normalizedPathname = resolved.pathname.replace(/\/+$/, '');
+  for (const suffix of DIGITAL_TWIN_RUNTIME_CONFIG_PATH_SUFFIXES) {
+    if (normalizedPathname.endsWith(suffix)) {
+      const prefix = normalizedPathname.slice(0, -suffix.length);
+      return prefix ? `${resolved.origin}${prefix}` : resolved.origin;
+    }
+  }
+  return resolved.origin;
+}
+
 /** 严格解析 MQTT 适配器配置。 */
 function parseMqttAdapter(value: unknown, path: string): MqttAdapterConfig {
   const adapter = assertObject(value, path);
@@ -259,7 +329,7 @@ function parseOptionalSafeUrl(value: unknown, path: string, protocols: string[])
   }
   if (!protocols.includes(url.protocol) || url.username || url.password || url.hash) throw new Error(`${path} 协议或凭据无效。`);
   if ([...url.searchParams.keys()].some(isSensitiveRuntimeConfigKey)) throw new Error(`${path} 不能包含敏感查询参数。`);
-  return url.toString().replace(/\/+$/, '');
+  return url.search ? url.toString() : url.toString().replace(/\/+$/, '');
 }
 /** 严格解析 runtime-config.json，任何未知或缺失字段都会阻断启动。 */
 export function parsePlayerRuntimeConfig(value: unknown): PlayerRuntimeConfig {
