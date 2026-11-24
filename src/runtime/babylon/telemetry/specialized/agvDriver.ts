@@ -7,6 +7,7 @@ import {
   mapAgvPointToScene,
   projectAgvPointToRoute,
   resolveAgvMapNodeId,
+  sliceAgvMapRouteFromNode,
   type AgvMapRoute,
   type AgvMapSceneAxis,
 } from '../../../../editor/model/agvMap';
@@ -116,6 +117,7 @@ type AgvMotionState = {
   taskRouteAnchorNodeId: string | null;
   taskRouteEndNodeId: string | null;
   taskRoute: AgvMapRoute | null;
+  taskRouteFull: AgvMapRoute | null;
   taskRouteHighlight: AgvTaskRouteHighlight | null;
 };
 
@@ -156,6 +158,7 @@ export class AgvTelemetryDriver {
         taskRouteAnchorNodeId: null,
         taskRouteEndNodeId: null,
         taskRoute: null,
+        taskRouteFull: null,
         taskRouteHighlight: null,
       };
       this.motionStates.set(model, state);
@@ -232,6 +235,7 @@ export class AgvTelemetryDriver {
     if (routeKey === state.taskRouteKey) return;
     state.taskRouteKey = routeKey;
     state.taskRoute = null;
+    state.taskRouteFull = null;
     state.taskRouteAnchorNodeId = null;
     state.taskRouteEndNodeId = null;
     this.disposeTaskRouteHighlight(state);
@@ -253,14 +257,29 @@ export class AgvTelemetryDriver {
     startNodeId: string | null,
     endNodeId: string | null,
   ): void {
+    const map = model.agvMapPlacement?.definition;
+    this.setTaskRoute(
+      model,
+      state,
+      startNodeId,
+      endNodeId,
+      map && startNodeId && endNodeId ? findAgvMapShortestRoute(map, startNodeId, endNodeId) : null,
+    );
+  }
+
+  private setTaskRoute(
+    model: ModelRuntimeEntry,
+    state: AgvMotionState,
+    startNodeId: string | null,
+    endNodeId: string | null,
+    route: AgvMapRoute | null,
+  ): void {
     const placement = model.agvMapPlacement;
-    const map = placement?.definition;
     this.disposeTaskRouteHighlight(state);
     state.taskRouteAnchorNodeId = startNodeId;
     state.taskRouteEndNodeId = endNodeId;
-    state.taskRoute = map && startNodeId && endNodeId
-      ? findAgvMapShortestRoute(map, startNodeId, endNodeId)
-      : null;
+    state.taskRoute = route;
+    state.taskRouteFull = route;
     const highlight = placement?.routeHighlight;
     if (!placement || !state.taskRoute || state.taskRoute.distance <= 0 || !highlight?.enabled) return;
     state.taskRouteHighlight = new AgvTaskRouteHighlight(
@@ -289,19 +308,33 @@ export class AgvTelemetryDriver {
       y: readAgvMapCoordinate(current, placement.map.yAxis, placement.map.scale),
     };
     const map = placement.definition;
+    const fullRoute = state.taskRouteFull;
+    let projection = fullRoute ? projectAgvPointToRoute(fullRoute.points, mapPoint) : null;
     if (map && state.taskRouteEndNodeId) {
-      const touchedNodeId = findAgvMapNodeWithinRadius(
-        map,
-        mapPoint,
-        (placement.map.nodeRadius ?? AGV_MAP_NODE_RADIUS_DEFAULT) / placement.map.scale,
-      );
+      const nodeRadius = (placement.map.nodeRadius ?? AGV_MAP_NODE_RADIUS_DEFAULT) / placement.map.scale;
+      const touchedNodeId = findAgvMapNodeWithinRadius(map, mapPoint, nodeRadius);
       if (touchedNodeId && touchedNodeId !== state.taskRouteAnchorNodeId) {
-        this.replaceTaskRoute(model, state, touchedNodeId, state.taskRouteEndNodeId);
+        const remainingRoute = fullRoute
+          ? sliceAgvMapRouteFromNode(map, fullRoute, touchedNodeId)
+          : null;
+        const followsCurrentRoute = projection !== null
+          && Math.hypot(mapPoint.x - projection.point.x, mapPoint.y - projection.point.y) <= nodeRadius;
+        if (remainingRoute) {
+          state.taskRouteAnchorNodeId = touchedNodeId;
+          state.taskRoute = remainingRoute;
+          if (remainingRoute.distance <= 0) this.disposeTaskRouteHighlight(state);
+        } else if (followsCurrentRoute) {
+          state.taskRouteAnchorNodeId = touchedNodeId;
+        } else {
+          this.replaceTaskRoute(model, state, touchedNodeId, state.taskRouteEndNodeId);
+          projection = state.taskRouteFull
+            ? projectAgvPointToRoute(state.taskRouteFull.points, mapPoint)
+            : null;
+        }
       }
     }
     const highlight = state.taskRouteHighlight;
-    if (!highlight || !state.taskRoute) return;
-    const projection = projectAgvPointToRoute(state.taskRoute.points, mapPoint);
+    if (!highlight || !state.taskRouteFull) return;
     highlight.update(projection?.progress ?? 0, deltaSeconds);
   }
 

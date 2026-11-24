@@ -306,6 +306,41 @@ export type AgvMapRoute = {
   distance: number;
 };
 
+export function sliceAgvMapRouteFromNode(
+  map: AgvMapDefinition,
+  route: AgvMapRoute,
+  startNodeId: string,
+): AgvMapRoute | null {
+  const startIndex = route.nodeIds.indexOf(startNodeId);
+  if (startIndex < 0 || route.trackIds.length !== route.nodeIds.length - 1) return null;
+  const nodeIds = route.nodeIds.slice(startIndex);
+  const trackIds = route.trackIds.slice(startIndex);
+  const tracksById = new Map(map.tracks.map(track => [track.id, track]));
+  const points: AgvMapPoint[] = [];
+  let distance = 0;
+  for (let index = 0; index < trackIds.length; index++) {
+    const track = tracksById.get(trackIds[index]);
+    if (!track) return null;
+    const fromNodeId = nodeIds[index];
+    const toNodeId = nodeIds[index + 1];
+    const forward = track.fromNodeId === fromNodeId && track.toNodeId === toNodeId;
+    const reverse = track.bidirectional === true
+      && track.fromNodeId === toNodeId && track.toNodeId === fromNodeId;
+    if (!forward && !reverse) return null;
+    const trackPoints = resolveAgvMapTrackPoints(map, track);
+    if (trackPoints.length < 2) return null;
+    const directedPoints = forward ? trackPoints : [...trackPoints].reverse();
+    points.push(...(points.length === 0 ? directedPoints : directedPoints.slice(1)));
+    distance += measureAgvRoutePoints(directedPoints);
+  }
+  if (nodeIds.length === 1) {
+    const node = map.nodes.find(item => item.id === nodeIds[0]);
+    if (!node) return null;
+    points.push({ x: node.x, y: node.y });
+  }
+  return { nodeIds, trackIds, points, distance };
+}
+
 export type AgvRouteProjection = {
   point: AgvMapPoint;
   distance: number;

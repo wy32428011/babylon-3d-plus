@@ -534,6 +534,115 @@ test('动态 AGV 按 MQTT 站点名称计算并缓存地图最短路线，不覆
   assert.equal(driver.getTaskRoute(model), null, '站点存在但轨迹方向不贯通时必须返回无路线');
 });
 
+test('AGV 触及当前路线节点时保留原计划轨迹，不重新选择其它可达路线', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const root = new TransformNode('agv-task-keep-route', scene);
+  const definition = {
+    schemaVersion: 1 as const,
+    id: 'keep-route-test',
+    name: '保留当前路线测试',
+    nodes: [
+      { id: 'A', name: 'A', x: 0, y: 0 },
+      { id: 'B', name: 'B', x: 10, y: 0 },
+      { id: 'C', name: 'C', x: 10, y: 10 },
+    ],
+    tracks: [
+      { id: 'AB', fromNodeId: 'A', toNodeId: 'B' },
+      {
+        id: 'BC-planned',
+        fromNodeId: 'B',
+        toNodeId: 'C',
+        points: [{ x: 10, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 10 }, { x: 10, y: 10 }],
+      },
+    ],
+  };
+  const model = {
+    root,
+    agvMapPlacement: {
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      map: { xAxis: 'x', yAxis: 'z', scale: 1, nodeRadius: 0.2 },
+      routeHighlight: createDefaultAgvRouteHighlightConfig(),
+      definition,
+    },
+  } as unknown as ModelRuntimeEntry;
+  const driver = new AgvTelemetryDriver();
+  const snapshot = createSnapshot({ x: 0, y: 0, task_begin_point: 'A', task_end_point: 'C' });
+  driver.applyToModel(model, snapshot, 0);
+  assert.deepEqual(driver.getTaskRoute(model)?.trackIds, ['AB', 'BC-planned']);
+  const initialHighlight = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight)!;
+
+  definition.tracks.push({ id: 'BC-alternative', fromNodeId: 'B', toNodeId: 'C' });
+  root.position.set(10, 0, 0);
+  driver.applyToModel(model, snapshot, 0);
+  assert.deepEqual(driver.getTaskRoute(model)?.nodeIds, ['B', 'C']);
+  assert.deepEqual(driver.getTaskRoute(model)?.trackIds, ['BC-planned'], '当前路线仍贯通时不得改选其它轨迹');
+  assert.deepEqual(driver.getTaskRoute(model)?.points, [
+    { x: 10, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 10 }, { x: 10, y: 10 },
+  ]);
+  assert.equal(initialHighlight.isDisposed(), false, '正常途经节点不得重建高亮');
+  assert.equal(scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight), initialHighlight);
+  driver.resetMotionStates();
+});
+
+test('AGV 经过与当前线段重叠的其他节点时不重规划、不重建高亮', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const root = new TransformNode('agv-task-overlapping-node', scene);
+  const model = {
+    root,
+    agvMapPlacement: {
+      transform: {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      },
+      map: { xAxis: 'x', yAxis: 'z', scale: 1, nodeRadius: 0.2 },
+      routeHighlight: createDefaultAgvRouteHighlightConfig(),
+      definition: {
+        schemaVersion: 1 as const,
+        id: 'overlapping-node-test',
+        name: '重叠节点测试',
+        nodes: [
+          { id: 'A', name: 'A', x: 0, y: 0 },
+          { id: 'B', name: 'B', x: 10, y: 0 },
+          { id: 'C', name: 'C', x: 10, y: 10 },
+          { id: 'D', name: 'D', x: 5, y: 0 },
+        ],
+        tracks: [
+          { id: 'AB', fromNodeId: 'A', toNodeId: 'B' },
+          { id: 'BC', fromNodeId: 'B', toNodeId: 'C' },
+          {
+            id: 'DC',
+            fromNodeId: 'D',
+            toNodeId: 'C',
+            points: [{ x: 5, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }],
+          },
+        ],
+      },
+    },
+  } as unknown as ModelRuntimeEntry;
+  const driver = new AgvTelemetryDriver();
+  const snapshot = createSnapshot({ x: 0, y: 0, task_begin_point: 'A', task_end_point: 'C' });
+  driver.applyToModel(model, snapshot, 0);
+  const initialRoute = driver.getTaskRoute(model);
+  const initialHighlight = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight)!;
+  assert.deepEqual(initialRoute?.trackIds, ['AB', 'BC']);
+
+  root.position.set(5, 0, 0);
+  driver.applyToModel(model, snapshot, 0);
+  assert.equal(driver.getTaskRoute(model), initialRoute, '重叠节点不得替换仍然遵循的当前路线');
+  assert.equal(initialHighlight.isDisposed(), false);
+  assert.equal(scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight), initialHighlight);
+  driver.resetMotionStates();
+});
+
 test('AGV 触及不同节点后从该节点向原任务终点重规划，触及终点后释放路线', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
@@ -563,8 +672,9 @@ test('AGV 触及不同节点后从该节点向原任务终点重规划，触及�
   driver.applyToModel(model, snapshot, 0);
   const intermediateRoute = driver.getTaskRoute(model);
   assert.deepEqual(intermediateRoute?.nodeIds, ['P02', 'P03'], '进入中间节点半径后应截断已行驶路线');
-  assert.equal(initialHighlight.isDisposed(), true);
+  assert.equal(initialHighlight.isDisposed(), false, '正常途经节点不得重建高亮');
   const intermediateHighlight = scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight)!;
+  assert.equal(intermediateHighlight, initialHighlight);
   driver.applyToModel(model, snapshot, 0);
   assert.equal(driver.getTaskRoute(model), intermediateRoute, '同一节点范围内不得重复规划');
   assert.equal(scene.meshes.find(mesh => mesh.metadata?.agvTaskRouteHighlight), intermediateHighlight);
