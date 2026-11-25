@@ -1,9 +1,10 @@
 import { useEffect, useSyncExternalStore } from 'react';
-import type {
-  ModelDataDrivenConfig,
-  RobotJointArmCalibration,
-  RobotJointCalibration,
-  RobotSignedJointAxis,
+import {
+  DEFAULT_ROBOT_ARM_NODES,
+  type ModelDataDrivenConfig,
+  type RobotJointArmCalibration,
+  type RobotJointCalibration,
+  type RobotSignedJointAxis,
 } from '../model/telemetryBinding';
 import { robotJointDebugSession } from '../../runtime/robotJointDebugSession';
 import { useEditorStore } from '../store/editorStore';
@@ -81,7 +82,7 @@ export function RobotJointCalibrationInspector(props: Props) {
     const signs = Array.isArray(arm.signs) ? arm.signs : [];
     const offsets = Array.isArray(arm.offsets) ? arm.offsets : [];
     return {
-      nodes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(nodes[index]) ?? `关节 ${index + 1}`),
+      nodes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(nodes[index]) ?? DEFAULT_ROBOT_ARM_NODES[side][index]),
       axes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(axes[index])?.toUpperCase() ?? DEFAULT_AXES[index]),
       signs: Array.from({ length: JOINT_COUNT }, (_, index) => readNumber(signs[index], 1) < 0 ? -1 : 1),
       offsetsDeg: Array.from({ length: JOINT_COUNT }, (_, index) => {
@@ -122,7 +123,7 @@ export function RobotJointCalibrationInspector(props: Props) {
           恢复模型默认
         </button>
       </div>
-      <p className="muted">模型关节角 = MQTT 角度 × 转向轴方向 + 零位偏置。单关节调试执行 0° → 180° → 0° → −180° → 0°，不叠加零位偏置，结束后恢复原姿态。</p>
+      <p className="muted">模型关节角 =（MQTT 角度 + 零位偏置）× 转向轴方向。单关节调试先移动到包含零位偏置的数据 0 位并停留 1 秒，再执行约 10 秒的 0° → 180° → 0° → −180° → 0°，结束后恢复模型原位。</p>
       {SIDES.map(({ key: side, label }) => {
         const defaults = readArm(side);
         const calibration = props.calibration?.[side];

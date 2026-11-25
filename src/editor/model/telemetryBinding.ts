@@ -61,6 +61,27 @@ export function isSpecializedTelemetryDeviceType(devType: string | undefined): b
   return devType !== undefined && (SPECIALIZED_TELEMETRY_DEVICE_TYPES.includes(devType) || isAgvTelemetryDeviceType(devType));
 }
 
+export const DEFAULT_ROBOT_ARM_NODES: Record<'L' | 'R', readonly string[]> = {
+  L: [
+    'zuoshouyuandian01',
+    'zuoshouyuandian02',
+    'zuoshouyuandian03',
+    'zuoshouyuandian04',
+    'zuoshouyuandian05',
+    'zuoshouyuandian06',
+    'zuoshouyuandian07',
+  ],
+  R: [
+    'youshouyuandian01',
+    'yuoshouyuandian02',
+    'yuoshouyuandian03',
+    'yuoshouyuandian04',
+    'yuoshouyuandian05',
+    'yuoshouyuandian06',
+    'yuoshouyuandian07',
+  ],
+};
+
 export type RobotSignedJointAxis = 'x' | '-x' | 'y' | '-y' | 'z' | '-z';
 
 export type RobotJointArmCalibration = {

@@ -3,6 +3,7 @@ import type { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { DeviceTelemetryFields, DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { findModelNodesByName } from '../../runtimeNodeGeometry';
+import { DEFAULT_ROBOT_ARM_NODES } from '../../../../editor/model/telemetryBinding';
 
 export const ROBOT_ARM_JOINT_COUNT = 7;
 
@@ -31,30 +32,14 @@ const DEFAULT_ROBOT_MOTION_CONFIG: RobotMotionConfig = {
   arms: {
     L: {
       field: 'armJointL',
-      nodes: [
-        'zuoshouyuandian01',
-        'zuoshouyuandian02',
-        'zuoshouyuandian03',
-        'zuoshouyuandian04',
-        'zuoshouyuandian05',
-        'zuoshouyuandian06',
-        'zuoshouyuandian07',
-      ],
+      nodes: [...DEFAULT_ROBOT_ARM_NODES.L],
       axes: [...DEFAULT_AXES],
       signs: [...DEFAULT_SIGNS],
       offsets: [...DEFAULT_OFFSETS],
     },
     R: {
       field: 'armJointR',
-      nodes: [
-        'youshouyuandian01',
-        'yuoshouyuandian02',
-        'yuoshouyuandian03',
-        'yuoshouyuandian04',
-        'yuoshouyuandian05',
-        'yuoshouyuandian06',
-        'yuoshouyuandian07',
-      ],
+      nodes: [...DEFAULT_ROBOT_ARM_NODES.R],
       axes: [...DEFAULT_AXES],
       signs: [...DEFAULT_SIGNS],
       offsets: [...DEFAULT_OFFSETS],
@@ -294,6 +279,11 @@ export class RobotTelemetryDriver {
     for (const arm of Object.values(state.arms)) this.applyCurrentAngles(arm);
   }
 
+  getDebugJointOffset(model: ModelRuntimeEntry, side: RobotArmSide, jointIndex: number): number | null {
+    const joint = this.resolveModelState(model).arms[side].joints[jointIndex];
+    return joint && !joint.node.isDisposed() ? joint.offset : null;
+  }
+
   applyDebugToModel(
     model: ModelRuntimeEntry,
     side: RobotArmSide,
@@ -302,7 +292,7 @@ export class RobotTelemetryDriver {
   ): boolean {
     const joint = this.resolveModelState(model).arms[side].joints[jointIndex];
     if (!joint || joint.node.isDisposed()) return false;
-    const delta = Quaternion.RotationAxis(AXIS_VECTORS[joint.axis], angle * joint.sign);
+    const delta = Quaternion.RotationAxis(AXIS_VECTORS[joint.axis], (angle + joint.offset) * joint.sign);
     joint.node.rotationQuaternion = joint.baselineRotation.multiply(delta);
     return true;
   }
@@ -330,7 +320,7 @@ export class RobotTelemetryDriver {
       if (!joint) continue;
       const delta = Quaternion.RotationAxis(
         AXIS_VECTORS[joint.axis],
-        arm.currentAngles[index] * joint.sign + joint.offset,
+        (arm.currentAngles[index] + joint.offset) * joint.sign,
       );
       joint.node.rotationQuaternion = joint.baselineRotation.multiply(delta);
     }

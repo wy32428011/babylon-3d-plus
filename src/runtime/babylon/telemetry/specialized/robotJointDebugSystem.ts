@@ -3,18 +3,33 @@ import { robotJointDebugSession } from '../../../robotJointDebugSession';
 import { isRobotRuntimeModel } from './specializedModelAssets';
 import { RobotTelemetryDriver, type RobotArmSide } from './robotDriver';
 
-export const ROBOT_JOINT_DEBUG_SEGMENT_SECONDS = 1.5;
+export const ROBOT_JOINT_DEBUG_SEGMENT_SECONDS = 2.5;
+export const ROBOT_JOINT_DEBUG_ZERO_SECONDS = 1.5;
+export const ROBOT_JOINT_DEBUG_HOLD_SECONDS = 1;
 const DEBUG_TARGETS = [0, Math.PI, 0, -Math.PI, 0];
 
-export function sampleRobotJointDebugAngle(elapsedSeconds: number): { angle: number; done: boolean } {
+export function sampleRobotJointDebugAngle(
+  elapsedSeconds: number,
+  offset = 0,
+): { angle: number; done: boolean; phase: 'zero' | 'hold' | 'sequence' } {
   const elapsed = Math.max(0, elapsedSeconds);
-  const segmentIndex = Math.floor(elapsed / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS);
-  if (segmentIndex >= DEBUG_TARGETS.length - 1) return { angle: 0, done: true };
-  const progress = (elapsed - segmentIndex * ROBOT_JOINT_DEBUG_SEGMENT_SECONDS) / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS;
+  if (elapsed < ROBOT_JOINT_DEBUG_ZERO_SECONDS) {
+    const progress = elapsed / ROBOT_JOINT_DEBUG_ZERO_SECONDS;
+    const eased = progress * progress * (3 - 2 * progress);
+    return { angle: -offset * (1 - eased), done: false, phase: 'zero' };
+  }
+  if (elapsed < ROBOT_JOINT_DEBUG_ZERO_SECONDS + ROBOT_JOINT_DEBUG_HOLD_SECONDS) {
+    return { angle: 0, done: false, phase: 'hold' };
+  }
+  const sequenceElapsed = elapsed - ROBOT_JOINT_DEBUG_ZERO_SECONDS - ROBOT_JOINT_DEBUG_HOLD_SECONDS;
+  const segmentIndex = Math.floor(sequenceElapsed / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS);
+  if (segmentIndex >= DEBUG_TARGETS.length - 1) return { angle: 0, done: true, phase: 'sequence' };
+  const progress = (sequenceElapsed - segmentIndex * ROBOT_JOINT_DEBUG_SEGMENT_SECONDS) / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS;
   const eased = progress * progress * (3 - 2 * progress);
   return {
     angle: DEBUG_TARGETS[segmentIndex] + (DEBUG_TARGETS[segmentIndex + 1] - DEBUG_TARGETS[segmentIndex]) * eased,
     done: false,
+    phase: 'sequence',
   };
 }
 
@@ -70,13 +85,22 @@ export class RobotJointDebugSystem {
     }
 
     const active = this.active;
+    const offset = this.driver.getDebugJointOffset(active.model, active.side, active.jointIndex);
+    if (offset === null) {
+      robotJointDebugSession.update(request.id, 0, '未找到对应关节节点');
+      return;
+    }
     active.elapsedSeconds += Math.min(0.25, Math.max(0, deltaSeconds));
-    const sample = sampleRobotJointDebugAngle(active.elapsedSeconds);
+    const sample = sampleRobotJointDebugAngle(active.elapsedSeconds, offset);
     if (!this.driver.applyDebugToModel(active.model, active.side, active.jointIndex, sample.angle)) {
       robotJointDebugSession.update(request.id, 0, '未找到对应关节节点');
       return;
     }
-    robotJointDebugSession.update(request.id, sample.angle * 180 / Math.PI, '正在调试');
+    robotJointDebugSession.update(
+      request.id,
+      sample.angle * 180 / Math.PI,
+      sample.phase === 'zero' ? '正在移动到数据 0 位' : sample.phase === 'hold' ? '数据 0 位停留' : '正在调试',
+    );
     if (sample.done) {
       this.clearActive();
       robotJointDebugSession.finish(request.id);

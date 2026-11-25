@@ -7,6 +7,7 @@ import { Scene } from '@babylonjs/core/scene.js';
 
 import { createModelEntity } from '../../src/editor/model/SceneDocument';
 import {
+  DEFAULT_ROBOT_ARM_NODES,
   isSpecializedTelemetryDeviceType,
   normalizeModelDataDrivenConfig,
   normalizeTelemetryBindingComponent,
@@ -19,7 +20,7 @@ import {
   type DeviceTelemetrySnapshot,
 } from '../../src/runtime/mqtt/deviceTelemetry';
 import { RobotTelemetryDriver, readRobotArmAngles } from '../../src/runtime/babylon/telemetry/specialized/robotDriver';
-import { RobotJointDebugSystem, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS } from '../../src/runtime/babylon/telemetry/specialized/robotJointDebugSystem';
+import { RobotJointDebugSystem, ROBOT_JOINT_DEBUG_HOLD_SECONDS, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS, ROBOT_JOINT_DEBUG_ZERO_SECONDS } from '../../src/runtime/babylon/telemetry/specialized/robotJointDebugSystem';
 import { robotJointDebugSession } from '../../src/runtime/robotJointDebugSession';
 import { isRobotRuntimeModel } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
@@ -133,6 +134,7 @@ function assertJointAngle(node: TransformNode, baseline: Quaternion, axis: Vecto
 
 test('robot 模型包声明生成默认 MQTT 绑定并保留关节配置', () => {
   const entity = createRobotEntity();
+  assert.deepEqual(DEFAULT_ROBOT_ARM_NODES, { L: LEFT_NODES, R: RIGHT_NODES });
   assert.equal(isSpecializedTelemetryDeviceType('robot'), true);
   assert.match(entity.components.modelAsset?.assetCode ?? '', /^SIM_WP3_01-/);
   assert.equal(entity.components.telemetryBinding?.deviceType, 'robot');
@@ -229,15 +231,19 @@ test('实例级零位偏置和正负转向轴参与校准，旧方向配置保�
   const rightBaseline = right.rotationQuaternion!.clone();
 
   driver.applyToModel(model, createSnapshot({ armJointL: [0], armJointR: [0.5] }, Date.now(), 1000), 0);
-  assertJointAngle(left, leftBaseline, AXES[0], Math.PI / 4);
-  assertJointAngle(right, rightBaseline, Vector3.Up(), -0.5 + Math.PI / 6);
+  assertJointAngle(left, leftBaseline, AXES[0], -Math.PI / 4);
+  assertJointAngle(right, rightBaseline, Vector3.Up(), -0.5 - Math.PI / 6);
 
   entity.components.telemetryBinding!.robotJointCalibration.R!.offsetsDeg[0] = 60;
   driver.applyToModel(model, createSnapshot({ armJointR: [0.5] }, Date.now(), 2000), 0);
-  assertJointAngle(right, rightBaseline, Vector3.Up(), -0.5 + Math.PI / 3);
+  assertJointAngle(right, rightBaseline, Vector3.Up(), -0.5 - Math.PI / 3);
+
+  entity.components.telemetryBinding!.robotJointCalibration.R!.axes![0] = 'y';
+  driver.applyToModel(model, createSnapshot({ armJointR: [0.5] }, Date.now(), 3000), 0);
+  assertJointAngle(right, rightBaseline, Vector3.Up(), 0.5 + Math.PI / 3);
 });
 
-test('单关节调试平滑执行 0→180→0→-180→0，同步角度并恢复姿态', t => {
+test('单关节调试先到数据零位，再平滑往返并恢复模型原位', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const { entity, model, joints } = createRobotModel(scene);
@@ -258,32 +264,46 @@ test('单关节调试平滑执行 0→180→0→-180→0，同步角度并恢复
     engine.dispose();
   });
 
+  const advance = (seconds: number) => {
+    const frameCount = Math.ceil(seconds / 0.25);
+    for (let frame = 0; frame < frameCount; frame++) system.tick(models, false, seconds / frameCount);
+  };
+
   robotJointDebugSession.start(entity.id, 'R', 0);
+  advance(ROBOT_JOINT_DEBUG_ZERO_SECONDS / 2);
+  assert.equal(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg, -15);
+  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 12);
+  advance(ROBOT_JOINT_DEBUG_ZERO_SECONDS / 2);
+  assert.equal(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg, 0);
+  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 6);
+  advance(ROBOT_JOINT_DEBUG_HOLD_SECONDS / 2);
+  assert.equal(robotJointDebugSession.getSnapshot(entity.id).message, '数据 0 位停留');
+  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 6);
+  advance(ROBOT_JOINT_DEBUG_HOLD_SECONDS / 2);
+
   const expectedDegrees = [90, 180, 90, 0, -90, -180, -90, 0];
   for (const [index, degrees] of expectedDegrees.entries()) {
-    for (let frame = 0; frame < 3; frame++) {
-      system.tick(models, false, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 6);
-    }
+    advance(ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 2);
     assert.equal(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg, degrees);
     if (index < expectedDegrees.length - 1) {
-      assertJointAngle(node, baseline, Vector3.Down(), degrees * Math.PI / 180);
+      assertJointAngle(node, baseline, Vector3.Up(), (-30 - degrees) * Math.PI / 180);
       assert.equal(robotJointDebugSession.getSnapshot(entity.id).running, true);
     }
   }
   assert.equal(robotJointDebugSession.getSnapshot(entity.id).running, false);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '调试不叠加零位偏置，完成后恢复导入姿态');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '动画完成后恢复模型原位');
 
   robotJointDebugSession.start(entity.id, 'R', 0);
   system.tick(models, false, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 2);
   assert.ok(!node.rotationQuaternion!.equalsWithEpsilon(baseline));
   robotJointDebugSession.stop(entity.id);
   system.tick(models, false, 0);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '中途停止也恢复原姿态');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '中途停止也恢复模型原位');
 
   robotJointDebugSession.start(entity.id, 'R', 0);
   system.tick(models, false, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 3);
   system.tick(models, true, 0);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '进入 MQTT 预览前恢复原姿态');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '进入 MQTT 预览前恢复模型原位');
   assert.equal(robotJointDebugSession.getSnapshot(entity.id).request, null);
 });
 
