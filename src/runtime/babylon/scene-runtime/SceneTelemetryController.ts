@@ -15,6 +15,8 @@ import { captureModelTelemetryPreviewBaseline, restoreModelTelemetryPreviewBasel
 import { type DeviceTelemetrySnapshot } from '../../mqtt/deviceTelemetry';
 import { resetConveyorTelemetryState, resetHcliftTelemetryState, resetLiftTelemetryState, resetRgvTelemetryState, resetRgvNlTelemetryState, resetShuttleTelemetryState, resetStackerTelemetryState } from '../telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../telemetry/specialized/SpecializedTelemetryRuntime';
+import { RobotJointDebugSystem } from '../telemetry/specialized/robotJointDebugSystem';
+import { robotJointDebugSession } from '../../robotJointDebugSession';
 import type { SpecializedTelemetryHost } from '../telemetry/specialized/types';
 import type { SceneRuntimeContext } from './SceneRuntimeContext';
 import { runSceneRuntimeCleanup } from './sceneRuntimeCleanup';
@@ -63,6 +65,7 @@ export class SceneTelemetryController {
 
   public telemetryObserver!: Nullable<Observer<Scene>>;
   public specializedTelemetryRuntime!: SpecializedTelemetryRuntime;
+  public robotJointDebugSystem!: RobotJointDebugSystem;
   public conveyorSurfaceArrowSystem!: ConveyorSurfaceArrowSystem;
   public stackerMotionArrowSystem!: StackerMotionArrowSystem;
   public hasStackerMotionArrows = false;
@@ -102,6 +105,7 @@ export class SceneTelemetryController {
     this.updatesStopped = true;
     if (this.telemetryObserver) this.context.scene.onBeforeRenderObservable.remove(this.telemetryObserver);
     this.telemetryObserver = null;
+    runSceneRuntimeCleanup(this.context, '机器人关节调试', () => this.robotJointDebugSystem.clear());
     runSceneRuntimeCleanup(this.context, '遥测动静合批', () => this.motionStaticBatchRuntime.dispose());
   }
 
@@ -128,7 +132,10 @@ export class SceneTelemetryController {
   }
 
   /** 同一文件重新打开也有独立会话；烘焙期间的保守暂停只属于原会话。 */
-  beginSceneSession(sessionId: string): void { this.motionStaticBatchRuntime.beginSceneSession(sessionId); }
+  beginSceneSession(sessionId: string): void {
+    this.robotJointDebugSystem.clear();
+    this.motionStaticBatchRuntime.beginSceneSession(sessionId);
+  }
 
   getMotionStaticBatchDiagnostics() {
     return { ...this.motionStaticBatchRuntime.getDiagnostics(), uncontrolledSceneObservers: this.motionObserverSources()
@@ -247,6 +254,7 @@ export class SceneTelemetryController {
     if (this.telemetryPreviewActive || this.updatesStopped || this.dependencies.document.disposed) return;
     this.dependencies.transforms.clearEntityArrayPreview();
     this.dependencies.transforms.clearFolderGroupGizmoTarget();
+    this.robotJointDebugSystem.clear();
     this.telemetryPreviewActive = true;
     this.conveyorSurfaceArrowSystem.clear();
     this.stackerMotionArrowSystem.clear();
@@ -375,6 +383,12 @@ export class SceneTelemetryController {
       lastFrameTimeMs: this.telemetryFrameTimeMs,
       maxFrameTimeMs: this.telemetryMaxFrameTimeMs,
     };
+  }
+
+  updateRobotJointDebug(): void {
+    if (this.updatesStopped || (!robotJointDebugSession.hasActive() && !this.robotJointDebugSystem.hasActive)) return;
+    const deltaSeconds = Math.min(0.25, Math.max(0, this.context.scene.getEngine().getDeltaTime() / 1000));
+    this.robotJointDebugSystem.tick(this.collectTelemetryModels(), this.telemetryPreviewActive, deltaSeconds);
   }
 
   /** 箭头同时覆盖编辑预览和运行态，失效状态也更新，避免停机或断流后残留。 */
@@ -551,6 +565,10 @@ export class SceneTelemetryController {
     this.specializedTelemetryRuntime = new SpecializedTelemetryRuntime(this.context.scene, this.createSpecializedTelemetryHost());
   }
 
+  initializeRobotJointDebugSystem(): void {
+    this.robotJointDebugSystem = new RobotJointDebugSystem();
+  }
+
   /** 按原构造顺序连接此领域的资源与回调。 */
   initializeConveyorSurfaceArrowSystem(): void {
     this.conveyorSurfaceArrowSystem = new ConveyorSurfaceArrowSystem(new ConveyorSurfaceArrowRenderer(this.context.scene));
@@ -578,6 +596,7 @@ export class SceneTelemetryController {
       if (this.updatesStopped || this.dependencies.document.disposed) return;
       this.applyDeviceTelemetryFrame();
       if (this.updatesStopped || this.dependencies.document.disposed) return;
+      this.updateRobotJointDebug();
       this.dependencies.document.flushSingleTransformPreview();
       this.motionStaticBatchRuntime?.sync();
       if (this.updatesStopped || this.dependencies.document.disposed) return;

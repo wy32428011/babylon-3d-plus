@@ -74,6 +74,19 @@ export function isAgvRuntimeModel(model: ModelRuntimeEntry): boolean {
   return false;
 }
 
+/** 机器人按模型包 deviceType/devType=robot 识别，关节通道由 dataDriven.motion 声明。 */
+export function isRobotRuntimeModel(model: ModelRuntimeEntry): boolean {
+  const modelAsset = model.entitySnapshot?.components.modelAsset ?? model.resolvedModelAsset;
+  if (modelAsset?.deviceType?.trim().toLowerCase() === 'robot'
+    || modelAsset?.dataDrivenConfig?.device.devType === 'robot') return true;
+  for (const dataDriven of model.externalScriptRuntime?.getDataDrivenConfigs() ?? []) {
+    if (!isPlainRecord(dataDriven)) continue;
+    const deviceConfig = isPlainRecord(dataDriven.device) ? dataDriven.device : {};
+    if (typeof deviceConfig.devType === 'string' && deviceConfig.devType.trim().toLowerCase() === 'robot') return true;
+  }
+  return false;
+}
+
 /** LED 只消费脚本遥测上下文，不由专用驱动修改节点或几何。 */
 export function isLedRuntimeModel(model: ModelRuntimeEntry): boolean {
   if (model.entitySnapshot?.components.modelAsset?.deviceType?.trim().toLowerCase() === 'led') return true;

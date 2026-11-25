@@ -49,7 +49,7 @@ export function hasModelDataDrivenMotionKey(config: ModelDataDrivenConfig | null
 }
 
 /** 专用驱动接管的设备类型；新增专用驱动时需同步登记。 */
-export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led', 'agv'];
+export const SPECIALIZED_TELEMETRY_DEVICE_TYPES: readonly string[] = ['stacker', 'conveyor', 'shuttle', 'rgv', 'rgv_nl', 'lift', 'hclift', 'led', 'agv', 'robot'];
 
 /** AGV 模型允许使用 agv 或 agv_xxx 子类型，运行时仍由同一 AGV 驱动处理。 */
 export function isAgvTelemetryDeviceType(devType: string | undefined): boolean {
@@ -60,6 +60,19 @@ export function isAgvTelemetryDeviceType(devType: string | undefined): boolean {
 export function isSpecializedTelemetryDeviceType(devType: string | undefined): boolean {
   return devType !== undefined && (SPECIALIZED_TELEMETRY_DEVICE_TYPES.includes(devType) || isAgvTelemetryDeviceType(devType));
 }
+
+export type RobotSignedJointAxis = 'x' | '-x' | 'y' | '-y' | 'z' | '-z';
+
+export type RobotJointArmCalibration = {
+  /** 实例级零位偏置，统一使用角度；运行时换算到模型包声明的 MQTT 角度单位。 */
+  offsetsDeg: number[];
+  /** 每个关节的 MQTT 正方向映射到模型局部正负 XYZ 轴。 */
+  axes?: RobotSignedJointAxis[];
+  /** 旧版仅翻转模型包轴方向的实例配置；新配置统一写 axes。 */
+  signs?: (1 | -1)[];
+};
+
+export type RobotJointCalibration = Partial<Record<'L' | 'R', RobotJointArmCalibration>>;
 
 export type TelemetryBindingComponent = {
   enabled: boolean;
@@ -82,6 +95,8 @@ export type TelemetryBindingComponent = {
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** AGV 专用：模型局部车头轴；遥测 r=0 指向场景 +X，顺时针为正。 */
   modelForwardAxis?: 'x' | '-x' | 'z' | '-z';
+  /** 机器人专用：当前实例的双臂零位偏置和方向覆盖；缺省沿用模型包配置。 */
+  robotJointCalibration?: RobotJointCalibration;
   /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
   surfaceArrows?: ConveyorSurfaceArrowsConfig;
   /** 堆垛机专用：行走、升降及双货叉的箭头外观；缺省不启用，实时运动与预览不保存。 */
@@ -207,6 +222,28 @@ function normalizeColumnBindings(value: unknown): Record<string, string[]> | und
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+function normalizeRobotJointCalibration(value: unknown): RobotJointCalibration | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const result: RobotJointCalibration = {};
+  for (const side of ['L', 'R'] as const) {
+    const arm = value[side];
+    if (!isPlainObject(arm) || (!Array.isArray(arm.offsetsDeg) && !Array.isArray(arm.axes) && !Array.isArray(arm.signs))) continue;
+    const offsetsDeg = Array.isArray(arm.offsetsDeg) ? arm.offsetsDeg : [];
+    const axes = Array.isArray(arm.axes) ? arm.axes : [];
+    const signs = Array.isArray(arm.signs) ? arm.signs : [];
+    const normalizedAxes = Array.from({ length: 7 }, (_, index) => (
+      ['x', '-x', 'y', '-y', 'z', '-z'].includes(String(axes[index])) ? axes[index] : 'z'
+    )) as RobotSignedJointAxis[];
+    result[side] = {
+      offsetsDeg: Array.from({ length: 7 }, (_, index) => normalizeFiniteNumber(offsetsDeg[index], 0, -36000, 36000)),
+      ...(Array.isArray(arm.axes)
+        ? { axes: normalizedAxes }
+        : { signs: Array.from({ length: 7 }, (_, index) => signs[index] === -1 ? -1 : 1) as (1 | -1)[] }),
+    };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function normalizeSubDevices(value: unknown): ModelSubDeviceConfig[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const roles = new Set<string>();
@@ -282,7 +319,7 @@ export function resolveModelTelemetryDataDrivenConfig(modelAsset: {
 }): ModelDataDrivenConfig | null {
   if (modelAsset.dataDrivenConfig) return modelAsset.dataDrivenConfig;
   const deviceType = normalizeTelemetryDeviceType(modelAsset.deviceType);
-  return deviceType === 'led' || isAgvTelemetryDeviceType(deviceType)
+  return deviceType === 'led' || deviceType === 'robot' || isAgvTelemetryDeviceType(deviceType)
     ? { device: { devType: deviceType! }, fixedNodes: [] }
     : null;
 }
@@ -327,6 +364,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
   const stackerMotionArrows = normalizeStackerMotionArrowsConfig(value.stackerMotionArrows);
   const rgvMotionArrows = normalizeRgvMotionArrowsConfig(value.rgvMotionArrows);
   const liftMotionArrows = normalizeLiftMotionArrowsConfig(value.liftMotionArrows);
+  const robotJointCalibration = normalizeRobotJointCalibration(value.robotJointCalibration);
   return {
     enabled: typeof value.enabled === 'boolean' ? value.enabled : true,
     sourceId: normalizeString(value.sourceId, 'default'),
@@ -345,6 +383,7 @@ export function normalizeTelemetryBindingComponent(value: unknown): TelemetryBin
     ...(liftMotionArrows ? { liftMotionArrows } : {}),
     ...(normalizeTrajectoryDirection(value.trajectoryDirection) ? { trajectoryDirection: value.trajectoryDirection as TelemetryBindingComponent['trajectoryDirection'] } : {}),
     ...(normalizeTrajectoryDirection(value.modelForwardAxis) ? { modelForwardAxis: value.modelForwardAxis as TelemetryBindingComponent['modelForwardAxis'] } : {}),
+    ...(robotJointCalibration ? { robotJointCalibration } : {}),
     ...(typeof value.cargoAutoDispose === 'boolean' ? { cargoAutoDispose: value.cargoAutoDispose } : {}),
     ...(typeof value.cargoOriginDevice === 'boolean' ? { cargoOriginDevice: value.cargoOriginDevice } : {}),
     ...(typeof value.cargoInitialSync === 'boolean' ? { cargoInitialSync: value.cargoInitialSync } : {}),

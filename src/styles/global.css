@@ -3786,6 +3786,49 @@ select {
   opacity: 0.45;
 }
 
+.robot-joint-calibration,
+.robot-arm-calibration {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.robot-joint-node-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  color: #c8c8c8;
+  font-size: 12px;
+}
+
+.robot-joint-node-row output {
+  color: #b9d9ea;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.robot-joint-debug-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.robot-joint-debug-row output {
+  color: #b9d9ea;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.robot-joint-debug-status {
+  margin: 0;
+}
+
+.inspector-panel-compact-model .robot-arm-calibration .number-row {
+  grid-template-columns: 104px minmax(0, 1fr);
+}
+
 .model-generator-rule-card,
 .model-generator-binding-card {
   display: grid;

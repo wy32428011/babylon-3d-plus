@@ -17,8 +17,9 @@ import {
   type ResolvedSpecializedTelemetryBinding,
   type SpecializedTelemetryDeviceType,
 } from '../specializedTelemetryBinding';
-import { isAgvRuntimeModel, isConveyorRuntimeModel, isHcliftRuntimeModel, isLedRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
+import { isAgvRuntimeModel, isConveyorRuntimeModel, isHcliftRuntimeModel, isLedRuntimeModel, isLiftRuntimeModel, isRgvRuntimeModel, isRobotRuntimeModel, isShuttleRuntimeModel } from './specializedModelAssets';
 import { AgvTelemetryDriver } from './agvDriver';
+import { RobotTelemetryDriver } from './robotDriver';
 import { RgvNlTelemetryDriver, isRgvNlRuntimeModel } from './rgvNlDriver';
 import { StackerTelemetryDriver } from './stackerDriver';
 import { ConveyorTelemetryDriver } from './conveyorDriver';
@@ -84,6 +85,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     if (isRgvRuntimeModel(model)) return { ...this.rgvDriver.getLightingMotionNodes(model), known: true };
     if (isLiftRuntimeModel(model)) return { ...this.liftDriver.getLightingMotionNodes(model), known: true };
     if (isAgvRuntimeModel(model)) return { moving: [model.root], fixed: [], known: true };
+    if (isRobotRuntimeModel(model)) return { ...this.robotDriver.getLightingMotionNodes(model), known: true };
     if (isConveyorRuntimeModel(model) || isLedRuntimeModel(model)) return { moving: [], fixed: [], known: true };
     return { moving: [], fixed: [], known: false };
   }
@@ -100,6 +102,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   private readonly liftDriver: LiftTelemetryDriver;
   private readonly hcliftDriver: HcliftTelemetryDriver;
   private readonly agvDriver: AgvTelemetryDriver;
+  private readonly robotDriver: RobotTelemetryDriver;
   /** 驱动注册表，数组顺序即无实例绑定时的默认优先级（Stacker 优先）。 */
   private readonly drivers: readonly SpecializedDriverRegistration[];
   private bindingCache = new WeakMap<ModelRuntimeEntry, ModelBindingCacheEntry>();
@@ -129,6 +132,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.liftDriver = new LiftTelemetryDriver(this);
     this.hcliftDriver = new HcliftTelemetryDriver(this);
     this.agvDriver = new AgvTelemetryDriver();
+    this.robotDriver = new RobotTelemetryDriver();
     this.drivers = [
       {
         deviceType: 'stacker',
@@ -185,6 +189,12 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
         isCapable: isAgvRuntimeModel,
         apply: (model, snapshot, deltaSeconds) => this.agvDriver.applyToModel(model, snapshot, deltaSeconds),
         applyWhenStale: (model) => this.agvDriver.hasPendingMotion(model),
+      },
+      {
+        deviceType: 'robot',
+        isCapable: isRobotRuntimeModel,
+        apply: (model, snapshot, deltaSeconds) => this.robotDriver.applyToModel(model, snapshot, deltaSeconds),
+        applyWhenStale: (model) => this.robotDriver.hasPendingMotion(model),
       },
     ];
     for (const driver of this.drivers) {
@@ -297,6 +307,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
   clearReportedState(): void {
     this.conveyorDriver.clearTaskPulseQueues();
     this.agvDriver.resetMotionStates();
+    this.robotDriver.resetMotionStates();
     this.contextCache = new WeakMap();
     this.bindingCache = new WeakMap();
     this.injectedModels = new WeakMap();

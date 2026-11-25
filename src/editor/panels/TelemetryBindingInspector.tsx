@@ -13,6 +13,7 @@ import { ConveyorSurfaceArrowsInspector } from './ConveyorSurfaceArrowsInspector
 import { StackerMotionArrowsInspector } from './StackerMotionArrowsInspector';
 import { RgvMotionArrowsInspector } from './RgvMotionArrowsInspector';
 import { LiftMotionArrowsInspector } from './LiftMotionArrowsInspector';
+import { RobotJointCalibrationInspector } from './RobotJointCalibrationInspector';
 
 /** RGV 列绑定/提升机层绑定共用的目标选项：除自身外的 conveyor 设备。 */
 function buildConveyorTargetOptions(scene: SceneDocument, excludeEntityId: string): { id: string; name: string }[] {
@@ -78,7 +79,7 @@ function formatSpecializedEntry(config: unknown, depth = 0): string {
   return parts.length > 0 ? parts.join(' · ') : '—';
 }
 
-/** specialized 模型的 dataDriven 只读摘要：配置真源在模型包，Inspector 不提供编辑。 */
+/** specialized 模型的 dataDriven 只读摘要：默认映射来自模型包，实例级覆盖在各自绑定编辑器中维护。 */
 function SpecializedDataDrivenSummary(props: { config: ModelDataDrivenConfig | null }) {
   const motion = props.config?.specializedMotion ?? {};
   const cargo = props.config?.cargo ?? {};
@@ -92,7 +93,7 @@ function SpecializedDataDrivenSummary(props: { config: ModelDataDrivenConfig | n
   return (
     <div className="telemetry-specialized-summary">
       <p className="muted">
-        专用 {device?.devType ?? ''} 驱动接管：通道映射由模型包 dataDriven 声明，此处只读；修改请更新模型包配置。
+        专用 {device?.devType ?? ''} 驱动接管：默认通道映射由模型包 dataDriven 声明，此处只读；实例级校准在上方对应配置区修改。
       </p>
       {motionEntries.map(([key, value]) => (
         <p className="muted" key={`motion-${key}`}>motion.{key}：{formatSpecializedEntry(value)}</p>
@@ -442,7 +443,7 @@ function LiftLayerBindingsEditor(props: {
   );
 }
 
-/** 数据驱动 Inspector：编辑实体级 telemetryBinding 基础字段，驱动映射由模型包 .model.ts 声明。 */export function TelemetryBindingInspector(props: Props) {
+/** 数据驱动 Inspector：编辑实体级 telemetryBinding 与实例校准，默认驱动映射由模型包声明。 */export function TelemetryBindingInspector(props: Props) {
   const binding = props.binding;
   if (!binding) {
     return (
@@ -488,6 +489,15 @@ function LiftLayerBindingsEditor(props: {
         <p className="telemetry-runtime-error">第二设备号未填写。请手动输入 assetCode；未填写前该逻辑设备不参与 MQTT 驱动。</p>
       ) : null}
       <button type="button" disabled={props.disabled} onClick={props.onRestoreDefault}>恢复模型默认绑定</button>
+      {binding.deviceType === 'robot' ? (
+        <RobotJointCalibrationInspector
+          entityId={props.entityId}
+          calibration={binding.robotJointCalibration}
+          dataDrivenConfig={props.dataDrivenConfig}
+          disabled={props.disabled}
+          onChange={(robotJointCalibration) => commit({ robotJointCalibration })}
+        />
+      ) : null}
       {binding.deviceType.startsWith('agv') ? (
         <>
           <label className="inspector-row">

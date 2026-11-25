@@ -311,6 +311,7 @@ export class SceneRuntime {
     this.environment.initializeSkyboxRuntime();
     this.environment.initializeEnvironmentRuntime();
     this.telemetry.initializeSpecializedTelemetryRuntime();
+    this.telemetry.initializeRobotJointDebugSystem();
     this.telemetry.initializeConveyorSurfaceArrowSystem();
     this.telemetry.initializeStackerMotionArrowSystem();
     this.telemetry.initializeRgvMotionArrowSystem();
