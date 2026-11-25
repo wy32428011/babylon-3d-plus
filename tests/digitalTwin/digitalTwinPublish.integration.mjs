@@ -842,7 +842,7 @@ async function run() {
     const transferModule = await import('../../dist-electron/ipc/dataPlatformTransfer.js');
     const uploadClientModule = await import('../../dist-electron/ipc/digitalTwinUploadClient.js');
     const projectAssetModule = await import('../../dist-electron/ipc/projectAssetStore.js');
-    const { authorizeAssetFile } = await import('../../dist-electron/ipc/assetRegistry.js');
+    const { authorizeAssetFile, authorizeAssetRoot } = await import('../../dist-electron/ipc/assetRegistry.js');
     const deploymentSceneModule = await import('../../dist-electron/ipc/deploymentExportScene.js');
     const publishModule = await import('../../dist-electron/ipc/digitalTwinPublishService.js');
     const { prepareLightingSceneSave } = await import('../../dist-electron/ipc/sceneLightingBakeResources.js');
@@ -2127,9 +2127,129 @@ async function run() {
       ), /仍包含本机路径.*largeSceneFixture.tail/, '超过旧节点阈值后仍必须完整审计本机路径');
       console.log(JSON.stringify({ largeScenePublish: 'PASS', inputBytes, sceneValueCount: 1_000_001 }));
     }
+    // 数据中台环境缓存目录包含同级缩略图时，SOURCE 与 DIST 必须保持同一收集边界，不得因缩略图触发快照一致性失败。
+    {
+      await resetBinding(); mock.setRemoteStatus(createRemoteStatus()); mock.resetRequests();
+      await writeFile(secondaryPath, sceneContent);
+      const envSourceKey = sha256(mock.baseUrl);
+      const envResourceId = '2054201280000000501';
+      const envFileRevision = '1';
+      const envRuntimeRevision = '2054201280000000502';
+      const envPackageRoot = path.join(
+        sharedResourcesRoot, '.babylon-editor', 'data-platform-cache', 'environments',
+        envSourceKey, envResourceId, envFileRevision,
+      );
+      const envModelPath = path.join(envPackageRoot, 'model.glb');
+      const { deploymentGlbFixture } = await import('../helpers/deploymentGlbFixture.mjs');
+      const envModelBytes = deploymentGlbFixture('env-thumbnail-regression');
+      const envThumbnailBytes = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x00]);
+      const envThumbnailSha256 = sha256(envThumbnailBytes);
+      const envThumbnailName = `thumbnail-${envThumbnailSha256}.png`;
+      const envThumbnailPath = path.join(envPackageRoot, envThumbnailName);
+      const envIndexPath = path.join(sharedResourcesRoot, '.babylon-editor', 'data-platform-environment-index.json');
+      await mkdir(envPackageRoot, { recursive: true });
+      await writeFile(envModelPath, envModelBytes);
+      await writeFile(envThumbnailPath, envThumbnailBytes);
+      await writeFile(envIndexPath, `${JSON.stringify({
+        version: 1,
+        protocolVersion: '1',
+        sourceKey: envSourceKey,
+        manifestRevision: envRuntimeRevision,
+        entries: [{
+          sourceKey: envSourceKey,
+          resourceId: envResourceId,
+          displayName: '中台园区环境',
+          relativePath: `.babylon-editor/data-platform-cache/environments/${envSourceKey}/${envResourceId}/${envFileRevision}/model.glb`,
+          fileName: 'model.glb',
+          fileSizeBytes: envModelBytes.length,
+          fileSha256: sha256(envModelBytes),
+          fileRevision: envFileRevision,
+          runtimeRevision: envRuntimeRevision,
+          lengthUnit: 'meter',
+          status: 'active',
+          syncedAt: '2026-11-20T00:00:00.000Z',
+          lastUsedAt: '2026-11-20T00:00:00.000Z',
+          warning: null,
+          thumbnail: {
+            updatedAt: '2026-11-20T00:00:00.000Z',
+            file: {
+              sha256: envThumbnailSha256,
+              extension: '.png',
+              sizeBytes: envThumbnailBytes.length,
+            },
+          },
+        }],
+      }, null, 2)}\n`, 'utf8');
+      try {
+        const envModelUrl = `editor-asset://local/${encodeURIComponent(envModelPath)}?assetRevision=${envRuntimeRevision}`;
+        const envThumbnailUrl = `editor-asset://local/${encodeURIComponent(envThumbnailPath)}`;
+        const envScene = JSON.parse(sceneContent).scene;
+        envScene.name = '中台环境缩略图发布回归';
+        envScene.sceneSettings.environment = {
+          name: '中台园区环境',
+          packagePath: envPackageRoot,
+          activeVariantUrl: envModelUrl,
+          thumbnailUrl: envThumbnailUrl,
+          variants: [{ name: '默认变体', sourcePath: envModelPath, sourceUrl: envModelUrl }],
+          source: 'data-platform',
+          resourceType: 'ENV_MODEL',
+          dataPlatformResourceId: envResourceId,
+          dataPlatformSourceKey: envSourceKey,
+          dataPlatformRevision: envRuntimeRevision,
+        };
+        const envSceneContent = JSON.stringify({ version: 5, scene: envScene });
+        await writeFile(scenePath, envSceneContent);
+        const envPublishRequestId = 'data-platform-environment-thumbnail-publish';
+        const envPublishResult = await publishModule.publishDigitalTwin(
+          createPublishRequest(envPublishRequestId, envSceneContent),
+          new AbortController().signal,
+          () => undefined,
+        );
+        assert.equal(envPublishResult.status, 'completed');
+
+        const envSourceEntries = await readZipEntries(mock.getUploadedPackage(envPublishRequestId, 'SOURCE'));
+        assert.deepEqual(
+          envSourceEntries.get(`Assets/Environments/Env-${envResourceId}/model.glb`),
+          envModelBytes,
+          'SOURCE 发布包必须包含数据中台环境 model.glb。',
+        );
+        assert.equal(
+          [...envSourceEntries.keys()].some((entryPath) => entryPath.includes(envThumbnailName)),
+          false,
+          'SOURCE 发布包不得包含受管环境同级缩略图。',
+        );
+
+        const envDistEntries = await readZipEntries(mock.getUploadedPackage(envPublishRequestId, 'DIST'));
+        const distEnvEntries = [...envDistEntries.keys()].filter((entryPath) => entryPath.startsWith('project/assets/environments/'));
+        assert.equal(distEnvEntries.some((entryPath) => entryPath.endsWith('/model.glb')), true, 'DIST 发布包必须包含环境 model.glb。');
+        assert.equal(distEnvEntries.some((entryPath) => entryPath.includes(envThumbnailName)), false, 'DIST 发布包不得包含环境同级缩略图。');
+        const distEnvScene = JSON.parse(envDistEntries.get('project/scene.json').toString('utf8'));
+        assert.equal(distEnvScene.scene.sceneSettings.environment.thumbnailUrl, undefined, 'DIST 场景不得保留环境 thumbnailUrl。');
+
+        // 未命中环境 Sidecar 索引的回退分支同样不得整目录扫入受管缓存中的缩略图。
+        await rm(envIndexPath, { force: true });
+        authorizeAssetRoot(envPackageRoot);
+        const fallbackPrepared = await deploymentSceneModule.prepareDeploymentExport(
+          envSceneContent,
+          '中台环境回退分支预检',
+          [],
+          new AbortController().signal,
+          () => undefined,
+        );
+        assert.equal(
+          fallbackPrepared.assetFiles.some((file) => file.destinationRelativePath.includes(envThumbnailName)),
+          false,
+          '未命中环境索引的回退分支同样不得把受管环境缩略图扫入 DIST。',
+        );
+      } finally {
+        await rm(envIndexPath, { force: true });
+        await rm(envPackageRoot, { recursive: true, force: true });
+      }
+    }
     console.log(JSON.stringify({
       status: 'PASS',
       verified: [
+        'data-platform-environment-thumbnail-excluded-from-source-and-dist',
         'large-scenes-over-64mib-and-million-values-source-dist-complete',
         'large-non-entry-scene-prepared-and-original-preserved',
         'large-scene-resource-sync-and-recovery',

@@ -603,6 +603,13 @@ async function resolveEnvironmentReference(
     packageRoot = path.dirname(firstVariantPath);
     copyCompleteDirectory = await isTrustedCompletePackageRoot(packageRoot);
   }
+  // 数据中台受管环境缓存目录包含同级缩略图等编辑器副产物，SOURCE 仅收集变体模型本身；
+  // DIST 保持同一边界，避免把未进入源工程快照的缩略图扫入发布包。
+  if (indexedAsset?.source === 'data-platform'
+    || isDataPlatformEnvironmentCachePath(packageRoot)
+    || isDataPlatformEnvironmentCachePath(firstVariantPath)) {
+    copyCompleteDirectory = false;
+  }
 
   const bundle = getOrCreateBundle(bundles, 'environments', packageRoot, copyCompleteDirectory);
   const variantPaths: ResolvedEnvironmentReference['variantPaths'] = [];
@@ -1150,6 +1157,16 @@ async function assertProjectPackageInsideRoot(packagePath: string, projectContex
 /** 校验资源文件已通过项目索引之外的当前会话资产授权。 */
 function assertAuthorizedDeploymentSourceFile(filePath: string, label: string): void {
   if (!isAuthorizedAssetFile(filePath)) throw new Error(`${label}未经过当前会话的资产选择或项目授权，已拒绝读取。`);
+}
+
+/** 判断路径是否指向数据中台受管环境缓存目录。 */
+function isDataPlatformEnvironmentCachePath(targetPath: string): boolean {
+  const segments = targetPath.split(/[\\/]+/).filter(Boolean);
+  return segments.some((segment, index) => (
+    segment.toLowerCase() === '.babylon-editor'
+    && segments[index + 1]?.toLowerCase() === 'data-platform-cache'
+    && segments[index + 2]?.toLowerCase() === 'environments'
+  ));
 }
 
 /** 只有用户授权过的目录或带相邻 meta.json 的包根才允许完整复制。 */
