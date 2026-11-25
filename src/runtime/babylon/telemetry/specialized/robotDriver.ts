@@ -3,7 +3,6 @@ import type { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import type { DeviceTelemetryFields, DeviceTelemetrySnapshot } from '../../../mqtt/deviceTelemetry';
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { findModelNodesByName } from '../../runtimeNodeGeometry';
-import { DEFAULT_ROBOT_ARM_NODES } from '../../../../editor/model/telemetryBinding';
 
 export const ROBOT_ARM_JOINT_COUNT = 7;
 
@@ -32,14 +31,14 @@ const DEFAULT_ROBOT_MOTION_CONFIG: RobotMotionConfig = {
   arms: {
     L: {
       field: 'armJointL',
-      nodes: [...DEFAULT_ROBOT_ARM_NODES.L],
+      nodes: [],
       axes: [...DEFAULT_AXES],
       signs: [...DEFAULT_SIGNS],
       offsets: [...DEFAULT_OFFSETS],
     },
     R: {
       field: 'armJointR',
-      nodes: [...DEFAULT_ROBOT_ARM_NODES.R],
+      nodes: [],
       axes: [...DEFAULT_AXES],
       signs: [...DEFAULT_SIGNS],
       offsets: [...DEFAULT_OFFSETS],

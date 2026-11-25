@@ -1,6 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import {
-  DEFAULT_ROBOT_ARM_NODES,
   type ModelDataDrivenConfig,
   type RobotJointArmCalibration,
   type RobotJointCalibration,
@@ -81,8 +80,10 @@ export function RobotJointCalibrationInspector(props: Props) {
     const axes = Array.isArray(arm.axes) ? arm.axes : [];
     const signs = Array.isArray(arm.signs) ? arm.signs : [];
     const offsets = Array.isArray(arm.offsets) ? arm.offsets : [];
+    const configuredNodes = Array.from({ length: JOINT_COUNT }, (_, index) => readString(nodes[index]));
     return {
-      nodes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(nodes[index]) ?? DEFAULT_ROBOT_ARM_NODES[side][index]),
+      hasCompleteNodes: configuredNodes.every(node => node !== undefined),
+      nodes: configuredNodes.map(node => node ?? '未配置'),
       axes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(axes[index])?.toUpperCase() ?? DEFAULT_AXES[index]),
       signs: Array.from({ length: JOINT_COUNT }, (_, index) => readNumber(signs[index], 1) < 0 ? -1 : 1),
       offsetsDeg: Array.from({ length: JOINT_COUNT }, (_, index) => {
@@ -123,13 +124,14 @@ export function RobotJointCalibrationInspector(props: Props) {
           恢复模型默认
         </button>
       </div>
-      <p className="muted">模型关节角 =（MQTT 角度 + 零位偏置）× 转向轴方向。单关节调试先移动到包含零位偏置的数据 0 位并停留 1 秒，再执行约 10 秒的 0° → 180° → 0° → −180° → 0°，结束后恢复模型原位。</p>
+      <p className="muted">模型关节角 =（MQTT 角度 + 零位偏置）× 转向轴方向。单关节调试执行约 10 秒的 0° → 180° → 0° → −180° → 0°，结束后恢复模型原位；零位偏置非 0 时先移动到数据 0 位并停留 1 秒，偏置为 0 时直接开始动画。</p>
       {SIDES.map(({ key: side, label }) => {
         const defaults = readArm(side);
         const calibration = props.calibration?.[side];
         return (
           <fieldset className="transform-fieldset robot-arm-calibration" key={side}>
             <legend>{label}（armJoint{side}）</legend>
+            {!defaults.hasCompleteNodes ? <p className="telemetry-runtime-error">未读取到模型包关节节点配置，请重新导入或同步模型包。</p> : null}
             {defaults.nodes.map((node, index) => {
               const offsetDeg = calibration?.offsetsDeg[index] ?? defaults.offsetsDeg[index];
               const axis = readEffectiveAxis(calibration, defaults, index);
@@ -172,7 +174,7 @@ export function RobotJointCalibrationInspector(props: Props) {
                   <div className="robot-joint-debug-row">
                     <button
                       type="button"
-                      disabled={debugDisabled}
+                      disabled={debugDisabled || !defaults.hasCompleteNodes}
                       aria-pressed={jointDebugging && debugSnapshot.running}
                       onClick={() => {
                         if (jointDebugging && debugSnapshot.running) robotJointDebugSession.stop(props.entityId);

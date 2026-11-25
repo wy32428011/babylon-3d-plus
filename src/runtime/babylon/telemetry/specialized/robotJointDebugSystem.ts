@@ -13,15 +13,17 @@ export function sampleRobotJointDebugAngle(
   offset = 0,
 ): { angle: number; done: boolean; phase: 'zero' | 'hold' | 'sequence' } {
   const elapsed = Math.max(0, elapsedSeconds);
-  if (elapsed < ROBOT_JOINT_DEBUG_ZERO_SECONDS) {
-    const progress = elapsed / ROBOT_JOINT_DEBUG_ZERO_SECONDS;
+  const zeroDuration = offset === 0 ? 0 : ROBOT_JOINT_DEBUG_ZERO_SECONDS;
+  const holdDuration = offset === 0 ? 0 : ROBOT_JOINT_DEBUG_HOLD_SECONDS;
+  if (elapsed < zeroDuration) {
+    const progress = elapsed / zeroDuration;
     const eased = progress * progress * (3 - 2 * progress);
     return { angle: -offset * (1 - eased), done: false, phase: 'zero' };
   }
-  if (elapsed < ROBOT_JOINT_DEBUG_ZERO_SECONDS + ROBOT_JOINT_DEBUG_HOLD_SECONDS) {
+  if (elapsed < zeroDuration + holdDuration) {
     return { angle: 0, done: false, phase: 'hold' };
   }
-  const sequenceElapsed = elapsed - ROBOT_JOINT_DEBUG_ZERO_SECONDS - ROBOT_JOINT_DEBUG_HOLD_SECONDS;
+  const sequenceElapsed = elapsed - zeroDuration - holdDuration;
   const segmentIndex = Math.floor(sequenceElapsed / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS);
   if (segmentIndex >= DEBUG_TARGETS.length - 1) return { angle: 0, done: true, phase: 'sequence' };
   const progress = (sequenceElapsed - segmentIndex * ROBOT_JOINT_DEBUG_SEGMENT_SECONDS) / ROBOT_JOINT_DEBUG_SEGMENT_SECONDS;
