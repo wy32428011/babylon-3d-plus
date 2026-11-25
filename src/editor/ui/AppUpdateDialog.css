@@ -1,0 +1,139 @@
+.app-update-dialog {
+  width: min(500px, calc(100vw - 48px));
+  box-sizing: border-box;
+  padding: 22px 24px;
+  border: 1px solid #465260;
+  border-radius: 10px;
+  color: #eef3f8;
+  background: #202832;
+  box-shadow: 0 18px 60px #0009;
+}
+
+.app-update-dialog::backdrop {
+  background: #0008;
+}
+
+.app-update-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.app-update-header h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.app-update-version-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #b8cbe0;
+  background: #2b3644;
+  border: 1px solid #3d4b5c;
+}
+
+.app-update-summary {
+  margin: 0 0 14px;
+  line-height: 1.65;
+  color: #d7e2ee;
+}
+
+.app-update-error {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #7f3939;
+  background: #3a2024;
+  color: #ffbcbc;
+  line-height: 1.55;
+  font-size: 13px;
+}
+
+.app-update-notes {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow: auto;
+  border-radius: 6px;
+  border: 1px solid #354150;
+  background: #182028;
+  color: #cdd9e5;
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-update-progress {
+  margin: 0 0 16px;
+}
+
+.app-update-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #2c3846;
+  overflow: hidden;
+}
+
+.app-update-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: #4e9cff;
+  transition: width 0.18s ease-out;
+}
+
+.app-update-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #a9bdd1;
+}
+
+.app-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.app-update-actions button {
+  padding: 8px 14px;
+  border: 1px solid #576576;
+  border-radius: 5px;
+  color: inherit;
+  background: #303d4c;
+  cursor: pointer;
+}
+
+.app-update-actions button:hover:not(:disabled) {
+  background: #3a495b;
+}
+
+.app-update-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.app-update-actions button.app-update-primary {
+  border-color: #4d8ce0;
+  background: #2f6ec4;
+  color: #ffffff;
+}
+
+.app-update-actions button.app-update-primary:hover:not(:disabled) {
+  background: #3a7cd6;
+}
+
+.app-update-actions button:focus-visible {
+  outline: 2px solid #72b4ff;
+  outline-offset: 2px;
+}

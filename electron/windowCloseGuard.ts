@@ -21,7 +21,7 @@ export function registerWindowCloseIpc(): void {
 }
 
 /** renderer 明确回复前不销毁窗口；失败页或尚未就绪时使用取消优先的原生确认。 */
-export function guardEditorWindowClose(window: BrowserWindow, onCancel: () => void): { isApproved: () => boolean } {
+export function guardEditorWindowClose(window: BrowserWindow, onCancel: () => void): { isApproved: () => boolean; approve: () => void } {
   const state: WindowState = { window, ready: false, approved: false, pending: null, onCancel };
   states.set(window.webContents, state);
   window.webContents.on('did-start-navigation', (_event, _url, isInPlace, isMainFrame) => {
@@ -53,5 +53,5 @@ export function guardEditorWindowClose(window: BrowserWindow, onCancel: () => vo
       console.error('[electron] 关闭确认失败，窗口已保留。', error);
     });
   });
-  return { isApproved: () => state.approved };
+  return { isApproved: () => state.approved, approve: () => { state.pending = null; state.approved = true; } };
 }

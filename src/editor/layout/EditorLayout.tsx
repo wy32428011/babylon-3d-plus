@@ -17,6 +17,7 @@ import { getReturnToHomePageBlockMessage } from '../home/returnToHomePage';
 import { getFullscreenElement } from '../../shared/ui/elementFullscreen';
 import { useElementFullscreen } from '../../shared/ui/useElementFullscreen';
 import { getTruncatedLabelText } from '../../shared/ui/truncatedLabelTitle';
+import type { AppUpdateState } from '../../../electron/shared/appUpdate';
 import styles from './EditorLayout.module.css';
 
 const loadDeploymentExportDialog = () => import('../deployment/DeploymentExportDialog').then(module => ({ default: module.DeploymentExportDialog }));
@@ -60,9 +61,11 @@ function handleInspectorLabelMouseOver(target: EventTarget | null): void {
 
 type EditorLayoutProps = {
   onBackToHome: (beforeLeave?: () => Promise<void>) => Promise<void>;
+  appUpdateState?: AppUpdateState;
+  onCheckForUpdate?: () => void;
 };
 
-export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
+export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }: EditorLayoutProps) {
   const editorShellRef = useRef<HTMLDivElement>(null);
   const returningHomeRef = useRef(false);
   const [isCancellingLoading, setIsCancellingLoading] = useState(false);
@@ -421,6 +424,9 @@ export function EditorLayout({ onBackToHome }: EditorLayoutProps) {
         onStopRuntimePreview={handleStopRuntimePreview}
         sceneFullscreen={sceneFullscreen.isFullscreen}
         onToggleSceneFullscreen={() => void handleToggleSceneFullscreen()}
+        appUpdateStage={appUpdateState?.stage}
+        appUpdateVersion={appUpdateState?.availableVersion ?? null}
+        onCheckForUpdate={onCheckForUpdate}
         cadImportProgress={cadImportProgress}
         canDelete={!isRuntimePreview && canDelete}
         canUndo={!isRuntimePreview && canUndo}
