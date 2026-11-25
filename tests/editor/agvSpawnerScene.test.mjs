@@ -439,3 +439,100 @@ test('NDC8 业务站点偏离路网点超过容差、数量不一致或 JSON 引
     null,
   );
 });
+
+test('AGV 地图导入完成后自动关闭进度框并记录导入日志', async (t) => {
+  const { useEditorStore } = await modules.ssrLoadModule(entries.store);
+  const { forgetCadReferenceLoadStatus, publishCadReferenceLoadStatus } =
+    await modules.ssrLoadModule(entries.cadStatus);
+  const beforeState = useEditorStore.getState();
+  const originalWindow = globalThis.window;
+  const originalFetch = globalThis.fetch;
+  const originalWorker = globalThis.Worker;
+  const sourceUrl = 'editor-asset://local/agv-progress-close.dxf';
+  const content = dxf([
+    [0, 'SECTION'], [2, 'HEADER'], [9, '$INSUNITS'], [70, 4], [0, 'ENDSEC'],
+    [0, 'SECTION'], [2, 'ENTITIES'],
+    ...circle(0, 0), ...circle(1000, 0),
+    ...lwpolyline([[0, 0], [1000, 0]]),
+    ...text('Ndc8_PointID', '1', -100), ...text('Ndc8_PointID', '2', 900),
+    ...text('Ndc8_TestPathID', '88', 450),
+    [0, 'ENDSEC'], [0, 'EOF'],
+  ]);
+  let spawnerId = null;
+  let unsubscribe = () => {};
+  t.after(() => {
+    unsubscribe();
+    if (spawnerId) forgetCadReferenceLoadStatus(spawnerId);
+    useEditorStore.setState(beforeState, true);
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalWorker === undefined) delete globalThis.Worker;
+    else globalThis.Worker = originalWorker;
+    globalThis.fetch = originalFetch;
+  });
+
+  useEditorStore.setState({
+    scene: createEmptySceneDocument('AGV进度关闭'),
+    runtimeMode: 'edit',
+    history: { undoStack: [], redoStack: [] },
+    hierarchySelectionIds: [],
+    cadImportProgress: null,
+    logs: [],
+  });
+  useEditorStore.getState().createAgvSpawner({ x: 0, y: 0, z: 0 });
+  spawnerId = useEditorStore.getState().scene.selectedEntityId;
+  assert.ok(spawnerId);
+
+  globalThis.window = {
+    editorApi: {
+      importCadFile: async () => ({
+        canceled: false,
+        filePath: 'C:/example/agv-progress-close.dxf',
+        sourceUrl,
+        fileSizeBytes: Buffer.byteLength(content, 'utf8'),
+      }),
+    },
+  };
+  globalThis.Worker = class MockCadWorker {
+    postMessage(request) {
+      void parseCadReferenceDxfStream(async () => new Response(content), {
+        agvMap: request.agvMap,
+        unitScaleToMeters: request.unitScaleToMeters,
+      }).then((result) => {
+        this.onmessage?.({ data: { id: request.id, type: 'result', result } });
+      });
+    }
+    terminate() {}
+  };
+  globalThis.fetch = async (url) => {
+    assert.equal(url, sourceUrl);
+    return new Response(content);
+  };
+
+  let sawActiveProgress = false;
+  let publishedReady = false;
+  unsubscribe = useEditorStore.subscribe((state) => {
+    if (state.cadImportProgress?.active) sawActiveProgress = true;
+    if (!publishedReady && state.scene.entities[spawnerId]?.components.cadReference?.sourceUrl === sourceUrl) {
+      publishedReady = true;
+      publishCadReferenceLoadStatus({
+        entityId: spawnerId,
+        sourceUrl,
+        state: 'ready',
+        percent: 100,
+        detail: 'CAD 参考图已显示。',
+      });
+    }
+  });
+
+  await useEditorStore.getState().importCadReference(spawnerId);
+
+  const afterState = useEditorStore.getState();
+  assert.equal(sawActiveProgress, true);
+  assert.equal(afterState.cadImportProgress, null, 'AGV 地图导入完成后进度框应自动关闭');
+  assert.ok(afterState.scene.entities[spawnerId].components.agvMap.importedMap);
+  assert.ok(
+    afterState.logs.some((entry) => /导入AGV地图：agv-progress-close/.test(entry.message)),
+    '导入日志应记录 AGV 地图导入摘要',
+  );
+});

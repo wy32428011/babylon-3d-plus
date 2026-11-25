@@ -656,8 +656,9 @@ export const createProjectAssetsSlice: EditorSlice<
       const summary = map
         ? 'AGV 地图已导入，包含 ' + map.nodes.length + ' 个节点和 ' + map.tracks.length + ' 条路线。'
         : 'CAD 参考图已显示。';
+      if (map) cadRuntimeLoads.delete(entityId);
       set(state => ({
-        cadImportProgress: { ...createCadImportProgress(id, 100, '导入完成', summary, displayName, 'success'), entityId },
+        cadImportProgress: map ? null : { ...createCadImportProgress(id, 100, '导入完成', summary, displayName, 'success'), entityId },
         logs: prependLog(state.logs, (map ? '导入AGV地图：' : '导入CAD参考图：') + displayName + '，' + formatCadReferenceUnitSummary(parseResult)
           + '，' + parseResult.polylineCount + ' 条折线，' + parseResult.pointCount + ' 个点' + (map ? '；' + summary : '')),
       }));
