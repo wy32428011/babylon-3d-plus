@@ -34,7 +34,7 @@ type Dependencies = {
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'syncConveyorTrajectoriesForArrayInstances'>;
   readonly readiness: Pick<SceneTriangleAndReadinessController, 'modelReadinessErrors' | 'loadDiagnostics'>;
   readonly selection: Pick<ScenePickingAndSelectionController, 'rebuildModelSelectionOutline' | 'outlinedModelArrayBatches'>;
-  readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime' | 'telemetryPreviewActive'>;
+  readonly telemetry: Pick<SceneTelemetryController, 'motionStaticBatchRuntime' | 'telemetryPreviewActive' | 'isModelEntranceHidden'>;
   readonly bounds: Pick<SceneWorldBoundsController, 'isModelBoundsMesh'>;
   readonly document: Pick<SceneDocumentController, 'isEntityVisible' | 'isEntityScenePickable'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'refreshGroupTransformPreviewTargets'>;
@@ -252,7 +252,9 @@ export class ModelArrayRuntimeController {
     overlay.sideOrientation = geometrySource.sideOrientation;
     overlay.visibility = source.visibility;
     overlay.isVisible = source.isVisible;
-    overlay.layerMask = source.layerMask;
+    const hostVariant = [...this.dependencies.variants.modelArrayParameterVariants.values()]
+      .find((variant) => variant.model === host);
+    overlay.layerMask = hostVariant?.sourceLayerMasks.get(source.uniqueId) ?? source.layerMask;
     overlay.renderingGroupId = source.renderingGroupId;
     overlay.alphaIndex = source.alphaIndex;
     overlay.receiveShadows = source.receiveShadows;
@@ -288,6 +290,7 @@ export class ModelArrayRuntimeController {
     if (this.updatesStopped) throw new Error('运行时已停止，无法创建遥测代理。');
     const modelAsset = entity.components.modelAsset;
     const root = new TransformNode(`__telemetryProxy_${sanitizeBabylonName(entity.id)}`, this.context.scene);
+    root.setEnabled(!this.dependencies.telemetry.isModelEntranceHidden && this.dependencies.document.isEntityVisible(entity.id));
     const contentRoot = new TransformNode(`__telemetryProxyContent_${sanitizeBabylonName(entity.id)}`, this.context.scene);
     contentRoot.parent = root;
     this.dependencies.presentation.applyTransform(root,

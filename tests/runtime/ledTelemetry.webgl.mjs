@@ -113,11 +113,30 @@ try {
   assert.deepEqual(runningResult.immediate.map(row => row.text).sort(), ['MQTT-A 正常', 'MQTT-B 故障']);
   assert.equal(running.length, 2);
   assert.equal(new Set(running.map(row => row.materialId)).size, 2, '每块 LED 必须拥有独立文字材质');
-  assert.equal(new Set(running.map(row => row.geometryId)).size, 1, '文字层仍应共享屏幕几何');
+  assert.equal(new Set(running.map(row => row.geometryId)).size, 2, '不同尺寸的参数变体保留各自屏幕几何');
   assert.ok(running.every(row => row.meshClass === 'Mesh'));
+  assert.ok(running.every(row => row.layerMask !== 0 && row.active), '源屏和参数变体文字层都必须对相机可见');
+  assert.notEqual(
+    running.find(row => row.assetCode === 'led01').hostRootId,
+    running.find(row => row.assetCode === 'led02').hostRootId,
+    '不同尺寸的副本必须使用参数变体宿主',
+  );
   assert.ok(running.every(row => !row.readinessError && !row.initializationError && !row.diagnostics?.paint));
   assert.deepEqual(running.map(row => row.text).sort(), ['MQTT-A 正常', 'MQTT-B 故障']);
   await page.locator('canvas').screenshot({ path: path.join(output, '02-runtime-mqtt.png') });
+
+  const entrance = await page.evaluate(() => window.ledTelemetryHarness.playEntrance());
+  assert.ok(entrance.prepared.state.every(row => !row.enabled && !row.active), `入场准备期间两块独立文字屏都必须隐藏：${JSON.stringify(entrance)}`);
+  assert.ok(entrance.playing.state.every(row => !row.enabled && !row.active), '入场播放期间不能提前显示文字屏');
+  assert.equal(entrance.playing.snapshot.status, 'playing');
+  assert.equal(entrance.completed.snapshot.status, 'completed');
+  assert.ok(entrance.completed.state.every(row => row.enabled && row.active), '入场完成后两块文字屏都必须恢复');
+  assert.deepEqual(entrance.completed.state.map(row => row.text).sort(), ['MQTT-A 正常', 'MQTT-B 故障'], '入场不能改写 MQTT 文案');
+  assert.ok(entrance.completedModels.every(model => model.rootEnabled && model.hasBatch
+    && model.meshes.every(mesh => mesh.layerMask !== 0 && mesh.enabled && mesh.visible
+      && mesh.thinInstanceCount > 0 && !mesh.entranceOverridden && mesh.active)),
+  `入场完成后源和参数变体框体都必须恢复：${JSON.stringify(entrance.completedModels)}`);
+  await page.locator('canvas').screenshot({ path: path.join(output, '03-runtime-entrance-restored.png') });
 
   const moved = await page.evaluate(() => window.ledTelemetryHarness.moveCamera());
   assert.deepEqual(moved.map(row => row.world), running.map(row => row.world), '移动相机不能改变文字层世界矩阵');
@@ -140,9 +159,16 @@ try {
   assert.equal(completedSource.text, edited.text, '完整滚动一遍后才回退最新模型参数');
   const stopped = await page.evaluate(() => window.ledTelemetryHarness.stop());
   assert.deepEqual(stopped, []);
+  const restoredModels = await page.evaluate(() => window.ledTelemetryHarness.modelState());
+  assert.equal(restoredModels.length, 2);
+  for (const model of restoredModels) {
+    assert.equal(model.hasBatch, true, `${model.entityId} 退出后必须恢复编辑态批次`);
+    assert.ok(model.meshes.length > 0, `${model.entityId} 退出后批次必须包含整机 Mesh`);
+    assert.ok(model.meshes.every(mesh => mesh.layerMask !== 0 && mesh.active), `${model.entityId} 退出后整机必须对相机可见`);
+  }
   await page.locator('canvas').screenshot({ path: path.join(output, '04-editing-restored.png') });
   assert.deepEqual(errors, []);
-  const report = { status: 'PASS', renderer, editing, edited, editedCopy, running: runningResult, moved, picks, interruption, stopped, consoleMessages };
+  const report = { status: 'PASS', renderer, editing, edited, editedCopy, running: runningResult, entrance, moved, picks, interruption, stopped, restoredModels, consoleMessages };
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ status: report.status, output, renderer: renderer.renderer, texts: running.map(row => row.text) }, null, 2));
 } catch (error) {

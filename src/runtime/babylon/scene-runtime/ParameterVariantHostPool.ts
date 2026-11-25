@@ -1,5 +1,6 @@
 
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import type { Entity } from '../../../editor/model/Entity';
 import type { ModelAssetComponent } from '../../../editor/model/components';
 import { createConveyorTelemetryState, createHcliftTelemetryState, createLiftTelemetryState, createRgvTelemetryState, createRgvNlTelemetryState, createShuttleTelemetryState, createStackerTelemetryState, isConveyorModelAsset, isLiftModelAsset, isRgvModelAsset, isStackerModelAsset } from '../telemetry/specialized/specializedModelAssets';
@@ -32,6 +33,7 @@ export class ParameterVariantHostPool {
 
   public readonly modelArrayParameterVariants = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
   public readonly modelArrayParameterVariantByEntityId = new Map<string, ModelArrayParameterVariantRuntimeEntry>();
+  private readonly hiddenSourceMeshes = new WeakSet<AbstractMesh>();
   private disposed = false;
 
   /** 所有异步回调先失效，再逐宿主释放；两个索引都只由宿主池负责清空。 */
@@ -315,7 +317,10 @@ export class ParameterVariantHostPool {
     for (const mesh of variant.model.meshes) {
       if (mesh.isDisposed()) continue;
       activeMeshIds.add(mesh.uniqueId);
-      variant.sourceLayerMasks.set(mesh.uniqueId, mesh.layerMask);
+      if (!this.hiddenSourceMeshes.has(mesh)) {
+        variant.sourceLayerMasks.set(mesh.uniqueId, mesh.layerMask);
+        this.hiddenSourceMeshes.add(mesh);
+      }
       mesh.layerMask = 0;
       mesh.isPickable = false;
     }
@@ -328,6 +333,7 @@ export class ParameterVariantHostPool {
   public restoreModelArrayParameterVariantHost(variant: ModelArrayParameterVariantRuntimeEntry): void {
     variant.model.root.setEnabled(true);
     for (const mesh of variant.model.meshes) {
+      if (!this.hiddenSourceMeshes.delete(mesh)) continue;
       const layerMask = variant.sourceLayerMasks.get(mesh.uniqueId);
       if (layerMask !== undefined) mesh.layerMask = layerMask;
     }

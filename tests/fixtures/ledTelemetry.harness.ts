@@ -9,6 +9,9 @@ import { createDefaultTelemetryBinding } from '../../src/editor/model/telemetryB
 import type { ModelArrayRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelArrayRuntimeController';
 import type { ModelAssetRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelAssetRuntimeController';
 import type { ParameterVariantHostPool } from '../../src/runtime/babylon/scene-runtime/ParameterVariantHostPool';
+import type { ScenePoiAndEffectsController } from '../../src/runtime/babylon/scene-runtime/ScenePoiAndEffectsController';
+import type { SceneTelemetryController } from '../../src/runtime/babylon/scene-runtime/SceneTelemetryController';
+import { normalizeSceneModelEntranceSettings } from '../../src/editor/model/sceneModelEntrance';
 import metadata from '../../Assets/Models/Model-2080102163768123393-LED/meta.json';
 
 const canvas = document.createElement('canvas');
@@ -26,6 +29,8 @@ const access = runtime as unknown as {
   assets: ModelAssetRuntimeController;
   arrays: ModelArrayRuntimeController;
   variants: ParameterVariantHostPool;
+  effects: Pick<ScenePoiAndEffectsController, 'modelEntranceRuntime'>;
+  telemetry: Pick<SceneTelemetryController, 'isModelEntranceHidden'>;
 };
 const sourcePath = 'C:/led-webgl/LED.glb';
 const sourceUrl = 'editor-asset://local/' + encodeURIComponent(sourcePath);
@@ -74,6 +79,11 @@ function createLed(id: string, assetCode: string, x: number, sourceEntityId?: st
 
 let source = createLed('led-source', 'led01', -0.75);
 let copy = createLed('led-copy', 'led02', 0.75, source.id);
+copy.components.modelAsset!.parameterValues = {
+  ...copy.components.modelAsset!.parameterValues,
+  length: 1.35,
+  height: 1.95,
+};
 const documentModel = createEmptySceneDocument('LED MQTT 真实 WebGL 验收');
 documentModel.sceneSettings.lighting.shadows.enabled = false;
 documentModel.sceneSettings.modelEntrance.enabled = false;
@@ -113,6 +123,8 @@ function snapshot(assetCode: string, sequence: number, text: string) {
 }
 
 function state() {
+  const activeMeshes = scene.getActiveMeshes();
+  const active = new Set(activeMeshes.data.slice(0, activeMeshes.length));
   return [...access.arrays.modelArrayTelemetryProxies].map(([entityId, proxy]) => {
     const mesh = proxy.meshes[0];
     const stored = mesh?.metadata?.meshCanvasLabelEmissiveOverlay;
@@ -131,6 +143,9 @@ function state() {
       meshClass: mesh?.getClassName() ?? null,
       materialId: mesh?.material?.uniqueId ?? null,
       geometryId: mesh?.geometry?.uniqueId ?? null,
+      layerMask: mesh?.layerMask ?? null,
+      enabled: proxy.root.isEnabled(),
+      active: mesh ? active.has(mesh) : false,
       text: stored ? JSON.parse(stored.atlasSignature)[0] : null,
       runtimeContext: scriptState.runtimeContext ?? null,
       instances: scriptState.instances?.map(instance => ({
@@ -232,6 +247,30 @@ function moveCamera() {
   return state();
 }
 
+async function playEntrance() {
+  const capture = () => ({
+    snapshot: runtime.getModelEntranceSnapshot(),
+    hidden: access.telemetry.isModelEntranceHidden,
+    state: state(),
+  });
+  await runtime.prepareModelEntrance(normalizeSceneModelEntranceSettings({
+    enabled: true,
+    effect: 'fade',
+    durationSeconds: 0.6,
+  }));
+  const immediate = capture();
+  await renderFrames(2);
+  const prepared = capture();
+  runtime.startModelEntrance();
+  await renderFrames(2);
+  const playing = capture();
+  access.effects.modelEntranceRuntime.tick(2, true);
+  await until(() => scene.isReady(), '入场完成后恢复原材质');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await renderFrames(3);
+  return { immediate, prepared, playing, completed: capture(), completedModels: modelState() };
+}
+
 function pickScreen(entityId: string) {
   const proxy = access.arrays.modelArrayTelemetryProxies.get(entityId);
   const mesh = proxy?.meshes[0];
@@ -285,16 +324,42 @@ async function stop() {
   return state();
 }
 
+function modelState() {
+  const copyVariant = [...access.variants.modelArrayParameterVariants.values()]
+    .find(variant => variant.entities.some(entity => entity.id === copy.id));
+  const activeMeshes = scene.getActiveMeshes();
+  const active = new Set(activeMeshes.data.slice(0, activeMeshes.length));
+  return [
+    { entityId: source.id, model: access.assets.models.get(source.id) },
+    { entityId: copy.id, model: copyVariant?.model },
+  ].map(({ entityId, model }) => ({
+    entityId,
+    rootEnabled: model?.root.isEnabled() ?? null,
+    hasBatch: Boolean(model?.modelArrayBatch),
+    meshes: model?.modelArrayBatch?.meshes.map(mesh => ({
+      name: mesh.name,
+      layerMask: mesh.layerMask,
+      enabled: mesh.isEnabled(),
+      visible: mesh.isVisible && mesh.visibility > 0,
+      thinInstanceCount: mesh.thinInstanceCount,
+      entranceOverridden: Boolean(mesh.material?.pluginManager?.getPlugin('DigitalTwinModelEntrance')),
+      active: active.has(mesh),
+    })) ?? [],
+  }));
+}
+
 Object.assign(window, {
   ledTelemetryHarness: {
     prepare,
     editDisplayText,
     start,
     moveCamera,
+    playEntrance,
     pickScreen,
     interruptLongText,
     stop,
     state,
+    modelState,
     renderer: () => ({ ...engine.getGlInfo(), webGLVersion: engine.webGLVersion }),
     dispose() {
       deviceTelemetryStore.clear();

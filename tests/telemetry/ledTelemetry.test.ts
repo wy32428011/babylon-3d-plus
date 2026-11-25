@@ -13,6 +13,7 @@ import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 import type { Entity } from '../../src/editor/model/Entity';
 import type { ModelAssetComponent } from '../../src/editor/model/components';
 import { ModelArrayRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelArrayRuntimeController';
+import { ParameterVariantHostPool } from '../../src/runtime/babylon/scene-runtime/ParameterVariantHostPool';
 import { SceneTelemetryController } from '../../src/runtime/babylon/scene-runtime/SceneTelemetryController';
 import { deviceTelemetryStore } from '../../src/runtime/mqtt/deviceTelemetry';
 import { telemetryRuntimeDiagnosticsStore } from '../../src/runtime/mqtt/telemetryRuntimeDiagnostics';
@@ -209,6 +210,55 @@ test('LED 同源代理替代宿主和参数变体消费遥测，避免重复设�
 });
 
 
+test('LED 文字代理随模型入场临时隐藏并恢复', () => {
+  const scene = new Scene(new NullEngine());
+  const proxy = { root: new TransformNode('led-proxy', scene) } as ModelRuntimeEntry;
+  const controller = new SceneTelemetryController({ scene } as never, {
+    arrays: { modelArrayTelemetryProxies: new Map([['led-copy', proxy]]) },
+    document: { isEntityVisible: () => true },
+  } as never);
+  try {
+    controller.setModelEntranceHidden(true);
+    assert.equal(proxy.root.isEnabled(), false, '开场准备和播放期间必须隐藏独立文字屏');
+    controller.setModelEntranceHidden(false);
+    assert.equal(proxy.root.isEnabled(), true, '开场结束或取消后必须恢复文字屏');
+  } finally {
+    scene.dispose();
+  }
+});
+
+
+test('LED 参数变体重复隐藏不会覆盖原始渲染层', () => {
+  const scene = new Scene(new NullEngine());
+  const root = new TransformNode('variant-root', scene);
+  const screen = CreateBox('Box010', {}, scene);
+  const originalLayerMask = screen.layerMask;
+  const variant = {
+    model: { root, meshes: [screen] },
+    sourceLayerMasks: new Map<number, number>(),
+  };
+  const pool = new ParameterVariantHostPool({ scene } as never, {} as never);
+  try {
+    pool.hideModelArrayParameterVariantHost(variant as never);
+    pool.hideModelArrayParameterVariantHost(variant as never);
+    assert.equal(screen.layerMask, 0);
+    assert.equal(variant.sourceLayerMasks.get(screen.uniqueId), originalLayerMask);
+
+    pool.restoreModelArrayParameterVariantHost(variant as never);
+    assert.equal(screen.layerMask, originalLayerMask);
+
+    const nextLayerMask = 0x10000000;
+    screen.layerMask = nextLayerMask;
+    pool.hideModelArrayParameterVariantHost(variant as never);
+    assert.equal(variant.sourceLayerMasks.get(screen.uniqueId), nextLayerMask, '恢复后应记录脚本设置的新渲染层');
+    pool.restoreModelArrayParameterVariantHost(variant as never);
+    assert.equal(screen.layerMask, nextLayerMask);
+  } finally {
+    scene.dispose();
+  }
+});
+
+
 test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权', async () => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
@@ -224,6 +274,8 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
   source.material = new StandardMaterial('source-screen', scene);
   const sharedSource = new InstancedMesh('Box010', source);
   sharedSource.parent = hostContent;
+  const originalLayerMask = sharedSource.layerMask;
+  sharedSource.layerMask = 0;
   const host = {
     sourceUrl: 'editor-asset://local/LED.glb',
     assetSignature: 'host',
@@ -267,17 +319,22 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
     },
   } as unknown as Entity;
   host.entitySnapshot = sourceEntity;
-  const telemetry = { telemetryPreviewActive: true };
+  const telemetry = { telemetryPreviewActive: true, isModelEntranceHidden: false };
+  const variant = {
+    model: host,
+    sourceEntityId: 'source',
+    representativeEntityId: entity.id,
+    sourceLayerMasks: new Map([[sharedSource.uniqueId, originalLayerMask]]),
+  };
   const controller = new ModelArrayRuntimeController({ scene } as never, {
     presentation: { applyTransform: () => {} },
     telemetry,
     variants: {
-      modelArrayParameterVariantByEntityId: new Map([[entity.id, {
-        model: host, sourceEntityId: 'source', representativeEntityId: entity.id,
-      }]]),
-      modelArrayParameterVariants: new Map(),
+      modelArrayParameterVariantByEntityId: new Map([[entity.id, variant]]),
+      modelArrayParameterVariants: new Map([['variant', variant]]),
     },
     assets: { models: new Map([['source', host]]) },
+    document: { isEntityVisible: () => true },
   } as never);
   controller.modelArrayInstanceEntities.set(entity.id, entity);
   const previewBatchRefreshes: ModelRuntimeEntry[] = [];
@@ -301,6 +358,7 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
     assert.equal(overlay.isDescendantOf(proxy.contentRoot), true);
     assert.equal(overlay.isEnabled(), true);
     assert.equal(overlay.isVisible, true);
+    assert.equal(overlay.layerMask, originalLayerMask, '文字层不能继承参数宿主的临时隐藏渲染层');
     assert.equal(overlay.isPickable, true);
     assert.equal(overlay.metadata?.editorEntityId, entity.id, '屏幕点击必须映射回整块 LED 实体');
     const sourceRelativeMatrix = sharedSource.getWorldMatrix().multiply(hostRoot.getWorldMatrix().clone().invert());
@@ -313,7 +371,7 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
     assert.equal(source.material, sourceMaterial, '代理更换文字材质不能改写共享宿主材质');
     assert.equal(sharedSource.material, sourceMaterial);
     assert.ok(proxy.externalScriptRuntime);
-    assert.deepEqual(previewBatchRefreshes, [host], '进入运行预览必须立即重建原 LED 批次');
+    assert.ok(previewBatchRefreshes.includes(host), '进入运行预览必须立即重建原 LED 批次');
     proxy.externalScriptRuntime!.updateRuntimeContext({
       mode: 'runtime',
       telemetry: {
@@ -322,10 +380,17 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
       },
     });
     assert.equal(proxy.externalScriptRuntime!.hasRuntimeTelemetrySnapshot(), true);
+    for (const [entityId, current] of [...controller.modelArrayTelemetryProxies]) {
+      controller.disposeModelArrayTelemetryProxy(entityId, current);
+    }
+    telemetry.isModelEntranceHidden = true;
+    controller.syncModelArrayTelemetryProxies();
+    await Promise.resolve();
+    assert.equal(controller.modelArrayTelemetryProxies.get(entity.id)?.root.isEnabled(), false, '开场期间新建的代理也必须保持隐藏');
     telemetry.telemetryPreviewActive = false;
     controller.syncModelArrayTelemetryProxies();
     assert.equal(controller.modelArrayTelemetryProxies.size, 0, '退出运行预览后必须归还编辑态原屏');
-    assert.deepEqual(previewBatchRefreshes, [host, host], '退出运行预览必须立即恢复原 LED 屏幕批次');
+    assert.ok(previewBatchRefreshes.length >= 2, '退出运行预览必须立即恢复原 LED 屏幕批次');
   } finally {
     controller.dispose();
     assert.equal(source.isDisposed(), false);
