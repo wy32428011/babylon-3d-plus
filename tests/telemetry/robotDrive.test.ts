@@ -70,7 +70,7 @@ function createRobotEntity() {
           L: { field: 'armJointL', nodes: LEFT_NODES, axes: AXIS_NAMES, signs: [1, 1, 1, 1, 1, 1, 1] },
           R: { field: 'armJointR', nodes: RIGHT_NODES, axes: AXIS_NAMES, signs: [1, 1, 1, 1, 1, 1, 1] },
         },
-        waist: { field: 'waistJoint', nodes: [WAIST_NODE], axes: ['z'], signs: [1] },
+        waist: { field: 'waistYaw', nodes: [WAIST_NODE], axes: ['z'], signs: [1] },
       },
       fixedNodes: ['shenti'],
     },
@@ -192,8 +192,9 @@ test('EPV 平铺关节字段和直接数组都按 0 到 6 读取', () => {
   assert.deepEqual(readRobotArmAngles(snapshot.fields, 'armJointR'), RIGHT_SAMPLE);
   assert.deepEqual(readRobotArmAngles({ armJointL: [0, 1, 2, 3, 4, 5, 6] }, 'armJointL'), [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(readRobotArmAngles({ armJointL: [0, 1], 'armJointL.1': 9 }, 'armJointL'), [0, 9, null, null, null, null, null]);
-  assert.deepEqual(readRobotJointAngles({ waistJoint: [0.25] }, 'waistJoint', 1), [0.25]);
-  assert.deepEqual(readRobotJointAngles({ 'waistJoint.0': -0.5 }, 'waistJoint', 1), [-0.5]);
+  assert.deepEqual(readRobotJointAngles({ waistYaw: 0.75 }, 'waistYaw', 1), [0.75]);
+  assert.deepEqual(readRobotJointAngles({ waistYaw: [0.25] }, 'waistYaw', 1), [0.25]);
+  assert.deepEqual(readRobotJointAngles({ 'waistYaw.0': -0.5 }, 'waistYaw', 1), [-0.5]);
 });
 
 test('缺少模型包节点声明时不使用编辑器硬编码回退', t => {
@@ -244,7 +245,7 @@ test('双臂 7 轴保留导入基线并按局部 Z/X 交替轴叠加弧度', t =
   assert.ok(joints.get(RIGHT_NODES[2])!.rotationQuaternion!.equalsWithEpsilon(beforeFault));
 });
 
-test('腰部 waistJoint 驱动 shentiyuandian 并纳入运动节点', t => {
+test('腰部 waistYaw 驱动 shentiyuandian 并纳入运动节点', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   t.after(() => { scene.dispose(); engine.dispose(); });
@@ -254,10 +255,10 @@ test('腰部 waistJoint 驱动 shentiyuandian 并纳入运动节点', t => {
   const baseline = waist.rotationQuaternion!.clone();
 
   assert.ok(driver.getLightingMotionNodes(model).moving.includes(waist));
-  driver.applyToModel(model, createSnapshot({ 'waistJoint.0': Math.PI / 2 }, Date.now(), 1000), 0);
+  driver.applyToModel(model, createSnapshot({ waistYaw: Math.PI / 2 }, Date.now(), 1000), 0);
   assertJointAngle(waist, baseline, Vector3.Forward(), Math.PI / 2);
 
-  driver.applyToModel(model, createSnapshot({ waistJoint: [-0.25] }, Date.now(), 2000), 1);
+  driver.applyToModel(model, createSnapshot({ waistYaw: [-0.25] }, Date.now(), 2000), 1);
   assertJointAngle(waist, baseline, Vector3.Forward(), -0.25);
 });
 

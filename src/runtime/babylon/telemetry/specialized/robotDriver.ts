@@ -50,7 +50,7 @@ const DEFAULT_ROBOT_MOTION_CONFIG: RobotMotionConfig = {
     },
   },
   waist: {
-    field: 'waistJoint',
+    field: 'waistYaw',
     nodes: [],
     axes: ['z'],
     signs: [1],
@@ -215,7 +215,7 @@ export function readRobotJointAngles(
   const array = Array.isArray(direct) ? direct : null;
   return Array.from({ length: count }, (_, index) => {
     const indexed = readAngle(fields[`${field}.${index}`]);
-    return indexed ?? readAngle(array?.[index]);
+    return indexed ?? readAngle(array ? array[index] : count === 1 ? direct : undefined);
   });
 }
 

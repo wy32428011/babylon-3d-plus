@@ -39,7 +39,7 @@ test('SceneRuntime 文档校准更新后立即显示腰部零位，无需启动�
     device: { devType: 'robot' },
     specializedMotion: {
       angleUnit: 'rad',
-      waist: { field: 'waistJoint', nodes: ['shentiyuandian'], axes: ['z'], signs: [1] },
+      waist: { field: 'waistYaw', nodes: ['shentiyuandian'], axes: ['z'], signs: [1] },
     },
     fixedNodes: [],
   };

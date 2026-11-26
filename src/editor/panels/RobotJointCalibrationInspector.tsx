@@ -20,7 +20,7 @@ const SIGNED_AXES: { value: RobotSignedJointAxis; label: string }[] = [
 const JOINT_GROUPS = [
   { key: 'L', label: '左臂', field: 'armJointL', count: 7 },
   { key: 'R', label: '右臂', field: 'armJointR', count: 7 },
-  { key: 'waist', label: '腰部', field: 'waistJoint', count: 1 },
+  { key: 'waist', label: '腰部', field: 'waistYaw', count: 1 },
 ] as const;
 
 type Props = {
