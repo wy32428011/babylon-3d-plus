@@ -1029,7 +1029,7 @@ async function openDataPlatformProjectInternal(
   endProjectTracePhase(trace, resolvePhase, 'ok');
   const preserveLocalChanges = async (stagedRoot: string): Promise<void> => {
     if (await hasDifferentLocalProjectContent(projectRoot, stagedRoot, signal)) {
-      conflictCopyPath = await createLocalConflictCopy(workspaceRoot, projectRoot, project.id, existingBinding?.latestVersionId ?? null);
+      conflictCopyPath = await createLocalConflictCopy(workspaceRoot, projectRoot, project.id, existingBinding?.latestVersionId ?? null, signal);
       warning = `已按数据中台工程恢复；原本地内容与远端不同，已保留副本：${conflictCopyPath}`;
     }
   };
@@ -1175,23 +1175,38 @@ async function createLocalConflictCopy(
   projectRoot: string,
   projectId: string,
   versionId: string | null,
+  signal?: AbortSignal,
 ): Promise<string> {
   const conflictParent = path.join(path.resolve(workspaceRoot), 'Conflicts', projectId);
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const conflictRoot = path.join(conflictParent, `${timestamp}-version-${versionId ?? 'local'}-${randomUUID()}`);
-  assertPathInside(path.resolve(workspaceRoot), conflictRoot, '本地冲突副本目录');
   await fs.mkdir(conflictParent, { recursive: true });
-  await fs.cp(projectRoot, conflictRoot, {
-    recursive: true,
-    errorOnExist: true,
-    force: false,
-    filter: (sourcePath) => {
-      const relative = path.relative(projectRoot, sourcePath).replace(/\\/g, '/');
-      return !relative.startsWith('.babylon-editor/data-platform-open-')
-        && !relative.startsWith('.babylon-editor/digital-twin-publish-');
-    },
-  });
-  return conflictRoot;
+  for (let retry = 0; ; retry += 1) {
+    signal?.throwIfAborted();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const conflictRoot = path.join(conflictParent, `${timestamp}-version-${versionId ?? 'local'}-${randomUUID()}`);
+    assertPathInside(path.resolve(workspaceRoot), conflictRoot, '本地冲突副本目录');
+    try {
+      await fs.cp(projectRoot, conflictRoot, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        verbatimSymlinks: true,
+        filter: (sourcePath) => {
+          const relative = path.relative(projectRoot, sourcePath).replace(/\\/g, '/');
+          return !relative.startsWith('.babylon-editor/data-platform-open-')
+            && !relative.startsWith('.babylon-editor/digital-twin-publish-');
+        },
+      });
+      return conflictRoot;
+    } catch (error) {
+      await fs.rm(conflictRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
+      const retryable = process.platform === 'win32'
+        && isNodeError(error)
+        && WINDOWS_RENAME_RETRY_ERROR_CODES.has(error.code ?? '');
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[retry];
+      if (!retryable || delay === undefined) throw error;
+      await waitForRenameRetry(delay, undefined, { signal });
+    }
+  }
 }
 
 /** 比较刚下载并重定位的远端内容，避免以版本号或 mtime 推测本地是否有修改。空目录不构成修改。 */
@@ -1658,7 +1673,7 @@ async function rollbackPromotionItems(items: PromotionItem[]): Promise<string[]>
   for (const item of [...items].reverse()) {
     try {
       if (item.stagedMoved && await pathExists(item.target)) {
-        await fs.rm(item.target, { recursive: item.type === 'directory', force: true });
+        await fs.rm(item.target, { recursive: item.type === 'directory', force: true, maxRetries: 5, retryDelay: 100 });
       }
       if (item.previousMoved && await pathExists(item.backup)) {
         await fs.mkdir(path.dirname(item.target), { recursive: true });

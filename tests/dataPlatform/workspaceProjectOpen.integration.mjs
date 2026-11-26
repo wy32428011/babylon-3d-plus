@@ -79,19 +79,20 @@ async function withRenameFaults(rules, action, copyFaults = []) {
     }
     return originalRename.call(fs, source, destination);
   };
-  const copyFault = (source, destination) => {
+  const copyFault = async (source, destination) => {
     const rule = copyFaults.find((candidate) => candidate.matches(String(source), String(destination)));
     if (!rule) return null;
     rule.attempts = (rule.attempts ?? 0) + 1;
-    return rule.error;
+    if (rule.beforeThrow) await rule.beforeThrow(String(source), String(destination), rule.attempts);
+    return rule.errorAt ? rule.errorAt(rule.attempts) : rule.error;
   };
   fs.cp = async (source, destination, options) => {
-    const error = copyFault(source, destination);
+    const error = await copyFault(source, destination);
     if (error) throw error;
     return originalCp.call(fs, source, destination, options);
   };
   fs.copyFile = async (source, destination, mode) => {
-    const error = copyFault(source, destination);
+    const error = await copyFault(source, destination);
     if (error) throw error;
     return originalCopyFile.call(fs, source, destination, mode);
   };
@@ -248,7 +249,49 @@ async function assertWindowsRenameRecovery(service, archiveByPath, baseUrl, work
   assert.equal(await readFile(path.join(unrecoverable.opened.projectRoot, localAsset), 'utf8'), `本地资源 ${unrecoverable.id}`,
     '可恢复的旧 Assets 仍应恢复');
   assert.equal(await readFile(unrecoverable.bindingPath, 'utf8'), unrecoverable.bindingContent);
-  console.log('PASS: Windows staging/backup/promote/rollback lock retries, finite failure, original errors, cancellation and retained recovery data');
+
+  // 冲突备份复制遇到 Windows 瞬态 EBUSY/EPERM 时应清理半成品目录并在重试后成功。
+  const conflictRetry = await fixture();
+  const conflictCopyDir = path.join(workspace, 'Conflicts', conflictRetry.id);
+  const isConflictCopy = (source, destination) => path.resolve(source) === path.resolve(conflictRetry.opened.projectRoot)
+    && path.resolve(destination).startsWith(path.resolve(conflictCopyDir) + path.sep);
+  const transientConflictErrors = [renameError('EBUSY', '冲突副本 DXF 暂时占用'), renameError('EPERM', '冲突副本目录暂时锁定')];
+  const conflictRetryRule = {
+    matches: isConflictCopy,
+    beforeThrow: async (_source, destination, attempt) => {
+      if (attempt <= transientConflictErrors.length) {
+        await mkdir(destination, { recursive: true });
+        await writeFile(path.join(destination, 'partial.tmp'), 'partial');
+      }
+    },
+    errorAt: (attempt) => transientConflictErrors[attempt - 1],
+  };
+  const conflictRecovered = await withRenameFaults([], conflictRetry.open, [conflictRetryRule]);
+  assert.equal(conflictRetryRule.attempts, 3, '冲突副本复制应在瞬态 EBUSY/EPERM 后重试成功');
+  assert.ok(conflictRecovered.conflictCopyPath);
+  assert.equal(await readFile(path.join(conflictRecovered.conflictCopyPath, localAsset), 'utf8'), `本地资源 ${conflictRetry.id}`);
+  assert.deepEqual(await readdir(conflictCopyDir), [path.basename(conflictRecovered.conflictCopyPath)], '失败重试产生的半成品冲突目录应被清理');
+
+  // 冲突备份遇到不可重试错误（如 ENOSPC）应立刻失败并清理半成品目录，且保留原本地工程。
+  const conflictFatal = await fixture();
+  const conflictFatalDir = path.join(workspace, 'Conflicts', conflictFatal.id);
+  const fatalCopyError = renameError('ENOSPC', '冲突备份磁盘空间不足');
+  const conflictFatalRule = {
+    matches: (source, destination) => path.resolve(source) === path.resolve(conflictFatal.opened.projectRoot)
+      && path.resolve(destination).startsWith(path.resolve(conflictFatalDir) + path.sep),
+    beforeThrow: async (_source, destination) => {
+      await mkdir(destination, { recursive: true });
+      await writeFile(path.join(destination, 'partial.tmp'), 'partial');
+    },
+    errorAt: () => fatalCopyError,
+  };
+  await withRenameFaults([], async () => {
+    await assert.rejects(conflictFatal.open(), (actual) => actual === fatalCopyError);
+  }, [conflictFatalRule]);
+  assert.equal(conflictFatalRule.attempts, 1, '非瞬态错误不应重试冲突备份');
+  assert.deepEqual(await readdir(conflictFatalDir), [], '失败的半成品冲突目录应被清理');
+  await conflictFatal.assertPreserved();
+  console.log('PASS: Windows staging/backup/promote/rollback/conflict-copy lock retries, finite failure, original errors, cancellation and retained recovery data');
 }
 
 async function run() {

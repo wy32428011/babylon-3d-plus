@@ -4935,8 +4935,8 @@
     },
     {
       "file": "tests/dataPlatform/workspaceProjectOpen.integration.mjs",
-      "sha256": "02abc697d5ab06facea9eadf6bd90d964db613bc377ada254ee966b16b846083",
-      "reviewNote": "2026-10-25 原生天空迁移：仅将已支持外层版本扩展到7、未来版本拒绝样例改为8；保留原图/业务数据/锁恢复/回滚断言及Electron隔离前置。与本任务入场备份逐项对照后更新摘要。",
+      "sha256": "7f9cf64d44c3eb2d10f92ed3c7e86b94b74740071f8febe5a99c1d655cdcd1ff",
+      "reviewNote": "2026-11-26 冲突副本 Windows 锁重试加固：在既有版本/锁恢复/回滚断言基础上补充冲突副本 EBUSY/EPERM 重试成功与 ENOSPC 半成品清理断言，保留 Electron 隔离前置。",
       "disposition": "electron-integration",
       "domain": null,
       "command": "electron tests/dataPlatform/workspaceProjectOpen.integration.mjs",
@@ -12460,11 +12460,11 @@
     },
     {
       "file": "tests/shared/viteDevStartup.test.mjs",
-      "sha256": "f963773df314faff50e73ed77523bef25c2849fa2efc62be0148cebbe8dbf18e",
+      "sha256": "f27c9789bf4f75133fc772de4de20cb65dd8415a7a9688883350f596c4cbd132",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/shared/viteDevStartup.test.mjs",
-      "purpose": "开发启动只扫描编辑器入口，排除生成产物并保留源码监听",
+      "purpose": "开发启动只扫描编辑器入口，排除生成产物与运行期工程目录并兜底监听异常",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
         "本地临时端口可用；结束后关闭本次 server",

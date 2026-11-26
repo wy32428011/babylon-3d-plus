@@ -9,6 +9,7 @@ import { app } from 'electron';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as waitForFsRetry } from 'node:timers/promises';
 import type {
   DigitalTwinPublishContext,
   DigitalTwinPublishProgress,
@@ -978,6 +979,24 @@ async function saveCurrentScene(
   return { filePath, entryScenePath: path.relative(projectRoot, filePath).replace(/\\/g, '/'), sceneContent: persistedContent };
 }
 
+const WINDOWS_FS_RETRY_DELAYS_MS = [50, 100, 200, 400, 800, 1_200, 1_600] as const;
+const WINDOWS_FS_RETRY_ERROR_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+async function runWithWindowsFsRetry<T>(operation: () => Promise<T>): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const retryable = process.platform === 'win32'
+        && isNodeError(error)
+        && WINDOWS_FS_RETRY_ERROR_CODES.has(error.code ?? '');
+      const delay = WINDOWS_FS_RETRY_DELAYS_MS[retry];
+      if (!retryable || delay === undefined) throw error;
+      await waitForFsRetry(delay);
+    }
+  }
+}
+
 async function preserveConflictPackage(
   workspaceRoot: string,
   projectId: string,
@@ -986,12 +1005,25 @@ async function preserveConflictPackage(
 ): Promise<string> {
   const conflictRoot = path.join(workspaceRoot, 'Conflicts', projectId);
   await ensureSafeDirectoryWithin(workspaceRoot, conflictRoot, '冲突副本目录');
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const safeReason = reason.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 64) || 'conflict';
-  const targetPath = path.join(conflictRoot, `${timestamp}-${safeReason}-source.zip`);
-  if (!isPathInside(workspaceRoot, targetPath)) throw new Error('冲突副本目标路径越界。');
-  await fs.copyFile(sourcePackagePath, targetPath, fs.constants.COPYFILE_EXCL);
-  return targetPath;
+  for (let retry = 0; ; retry += 1) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const suffix = retry === 0 ? '' : `-${randomUUID().slice(0, 8)}`;
+    const targetPath = path.join(conflictRoot, `${timestamp}-${safeReason}${suffix}-source.zip`);
+    if (!isPathInside(workspaceRoot, targetPath)) throw new Error('冲突副本目标路径越界。');
+    try {
+      await fs.copyFile(sourcePackagePath, targetPath, fs.constants.COPYFILE_EXCL);
+      return targetPath;
+    } catch (error) {
+      await fs.rm(targetPath, { force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
+      const retryable = process.platform === 'win32'
+        && isNodeError(error)
+        && WINDOWS_FS_RETRY_ERROR_CODES.has(error.code ?? '');
+      const delay = WINDOWS_FS_RETRY_DELAYS_MS[retry];
+      if (!retryable || delay === undefined) throw error;
+      await waitForFsRetry(delay);
+    }
+  }
 }
 
 function resolveCompletedVersionNumber(
@@ -1095,10 +1127,10 @@ function emit(
 async function replaceFile(sourcePath: string, targetPath: string): Promise<void> {
   let initialError: unknown;
   try {
-    await fs.rename(sourcePath, targetPath);
+    await runWithWindowsFsRetry(() => fs.rename(sourcePath, targetPath));
     return;
   } catch (error) {
-    if (!isNodeError(error) || !['EEXIST', 'EPERM', 'EACCES'].includes(error.code ?? '')) throw error;
+    if (!isNodeError(error) || !['EEXIST', 'EPERM', 'EACCES', 'EBUSY'].includes(error.code ?? '')) throw error;
     initialError = error;
   }
 
@@ -1116,13 +1148,13 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
   const backupPath = `${targetPath}.backup-${randomUUID()}`;
   let backupMoved = false;
   try {
-    await fs.rename(targetPath, backupPath);
+    await runWithWindowsFsRetry(() => fs.rename(targetPath, backupPath));
     backupMoved = true;
-    await fs.rename(sourcePath, targetPath);
+    await runWithWindowsFsRetry(() => fs.rename(sourcePath, targetPath));
   } catch (error) {
     if (backupMoved) {
       try {
-        await fs.rename(backupPath, targetPath);
+        await runWithWindowsFsRetry(() => fs.rename(backupPath, targetPath));
         backupMoved = false;
       } catch (rollbackError) {
         const originalMessage = error instanceof Error ? error.message : String(error);
@@ -1132,7 +1164,7 @@ async function replaceFile(sourcePath: string, targetPath: string): Promise<void
     }
     throw error;
   }
-  if (backupMoved) await fs.rm(backupPath, { force: true }).catch(() => undefined);
+  if (backupMoved) await fs.rm(backupPath, { force: true, maxRetries: 5, retryDelay: 100 }).catch(() => undefined);
 }
 
 function createSafeSceneFileName(value: string): string {

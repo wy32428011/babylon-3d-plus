@@ -412,7 +412,7 @@
 | tests/digitalTwin/viewerModelClick.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含服务/端口；复核端口与关闭流程 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/viewerTemplateCapabilities.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
 | tests/editor/agvMap.test.ts | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
-| tests/editor/agvSpawnerScene.test.mjs | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/agvSpawnerScene.test.mjs | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/alarmCustomProperty.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/alarmManager.test.mjs | NullEngine；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | NullEngine 仅验证 CPU/几何/状态契约，不证明 GPU 像素或 FPS；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/alarmReference.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
