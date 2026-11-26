@@ -84,6 +84,10 @@ copy.components.modelAsset!.parameterValues = {
   length: 1.35,
   height: 1.95,
 };
+const startupOptions = new URLSearchParams(location.search);
+if (startupOptions.has('same-parameters')) {
+  copy.components.modelAsset!.parameterValues = { ...source.components.modelAsset!.parameterValues };
+}
 const documentModel = createEmptySceneDocument('LED MQTT 真实 WebGL 验收');
 documentModel.sceneSettings.lighting.shadows.enabled = false;
 documentModel.sceneSettings.modelEntrance.enabled = false;
@@ -91,6 +95,7 @@ documentModel.entities[source.id] = source;
 documentModel.entities[copy.id] = copy;
 documentModel.entityIds.push(source.id, copy.id);
 runtime.sync(documentModel);
+if (startupOptions.has('immediate')) runtime.beginTelemetryPreview();
 engine.runRenderLoop(() => scene.render());
 
 async function until<T>(read: () => T | null | false | undefined, description: string): Promise<T> {

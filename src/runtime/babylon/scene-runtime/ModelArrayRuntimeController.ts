@@ -211,8 +211,12 @@ export class ModelArrayRuntimeController {
       }
     }
     for (const [entityId, target] of desired) {
-      const proxy = this.modelArrayTelemetryProxies.get(entityId)
-        ?? this.createModelArrayTelemetryProxy(target.entity, target.host);
+      const existing = this.modelArrayTelemetryProxies.get(entityId);
+      if (isLedRuntimeModel(target.host) && (!target.host.assetHandle || !target.host.measurementReady)) {
+        if (existing) this.disposeModelArrayTelemetryProxy(entityId, existing);
+        continue;
+      }
+      const proxy = existing ?? this.createModelArrayTelemetryProxy(target.entity, target.host);
       proxy.entitySnapshot = target.entity;
       proxy.assetCode = target.entity.components.modelAsset?.assetCode ?? proxy.assetCode;
       proxy.telemetryBinding = target.entity.components.telemetryBinding ?? null;

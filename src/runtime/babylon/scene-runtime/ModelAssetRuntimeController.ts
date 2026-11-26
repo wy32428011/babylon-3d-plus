@@ -51,7 +51,7 @@ function canPrepareSharedTemplate(asset: ModelAssetComponent): boolean {
 /** 此领域仅能访问明确列出的协作能力，资源与缓存由所属 Controller 持有。 */
 type Dependencies = {
   readonly selection: Pick<ScenePickingAndSelectionController, 'selectedEntityIds' | 'isEntityHighlighted' | 'applyModelSelection'>;
-  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayInstanceEntities' | 'endModelArrayHostRenderSuppression' | 'disposeModelArrayBatch' | 'syncModelArrayBatch' | 'beginModelArrayHostRenderSuppression'>;
+  readonly arrays: Pick<ModelArrayRuntimeController, 'modelArrayInstanceEntities' | 'endModelArrayHostRenderSuppression' | 'disposeModelArrayBatch' | 'syncModelArrayBatch' | 'syncModelArrayTelemetryProxies' | 'beginModelArrayHostRenderSuppression'>;
   readonly transforms: Pick<SceneTransformPreviewController, 'modelArrayGizmoProxy' | 'clearEntityArrayPreviewIfSource'>;
   readonly presentation: Pick<SceneMeshPresentationController, 'applyTransform' | 'syncConveyorTrajectory' | 'conveyorTrajectories' | 'disposeConveyorTrajectory'>;
   readonly document: Pick<SceneDocumentController, 'syncedEntities' | 'isEntityVisible' | 'isEntityScenePickable'>;
@@ -522,6 +522,7 @@ export class ModelAssetRuntimeController {
       const latestEntity = current.entitySnapshot ?? entity;
       this.refreshModelEntityMeshes(latestEntity, current);
       this.dependencies.arrays.syncModelArrayBatch(latestEntity, current);
+      this.dependencies.arrays.syncModelArrayTelemetryProxies();
       this.applyModelInteractivity(current, latestEntity.id);
       this.dependencies.selection.applyModelSelection(current, current.highlighted);
       Reflect.apply(this.context.onModelMeasurementChanged, this.context.callbackReceiver, [latestEntity.id]);

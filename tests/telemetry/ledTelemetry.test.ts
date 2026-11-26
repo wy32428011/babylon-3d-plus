@@ -279,11 +279,12 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
   const host = {
     sourceUrl: 'editor-asset://local/LED.glb',
     assetSignature: 'host',
-    assetHandle: {},
+    assetHandle: null,
+    measurementReady: false,
     stackerTelemetryReady: true,
     root: hostRoot,
     contentRoot: hostContent,
-    meshes: [sharedSource],
+    meshes: [],
     modelArrayBatch: null,
     modelArraySuspendedMeshes: new Set(),
   } as unknown as ModelRuntimeEntry;
@@ -344,6 +345,12 @@ test('LED 阵列代理共享屏幕几何但保留独立脚本和释放所有权'
     refreshRepresentation(model);
   };
   try {
+    controller.syncModelArrayTelemetryProxies();
+    assert.equal(controller.modelArrayTelemetryProxies.size, 0, '宿主资产和网格未就绪时不能提前创建 LED 代理');
+
+    host.assetHandle = { kind: 'owned-container', animationGroups: [], dispose: () => {} };
+    host.measurementReady = true;
+    host.meshes = [sharedSource];
     controller.syncModelArrayTelemetryProxies();
     await Promise.resolve();
     const proxy = controller.modelArrayTelemetryProxies.get(entity.id)!;

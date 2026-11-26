@@ -90,6 +90,15 @@ try {
     consoleMessages.push(`[${message.type()}] ${message.text()}`);
     if (message.type() === 'error') errors.push(message.text());
   });
+  await page.goto(`http://127.0.0.1:${address.port}/__led_test__?immediate=1&same-parameters=1`, { waitUntil: 'commit', timeout: 120_000 });
+  await page.waitForFunction(() => Boolean(window.ledTelemetryHarness), undefined, { timeout: 120_000 });
+  const immediateRunning = await page.evaluate(() => window.ledTelemetryHarness.start());
+  assert.equal(immediateRunning.settled.length, 2);
+  assert.equal(new Set(immediateRunning.settled.map(row => row.geometryId)).size, 1, '相同参数的 LED 应共享源几何');
+  assert.ok(immediateRunning.settled.every(row => (
+    !row.readinessError && !row.initializationError && row.meshClass === 'Mesh' && row.active
+  )), `发布启动顺序下 LED 代理必须在宿主就绪后自动创建：${JSON.stringify(immediateRunning)}`);
+
   await page.goto(`http://127.0.0.1:${address.port}/__led_test__`, { waitUntil: 'commit', timeout: 120_000 });
   await page.waitForFunction(() => Boolean(window.ledTelemetryHarness), undefined, { timeout: 120_000 });
   const renderer = await page.evaluate(() => window.ledTelemetryHarness.renderer());
@@ -168,7 +177,7 @@ try {
   }
   await page.locator('canvas').screenshot({ path: path.join(output, '04-editing-restored.png') });
   assert.deepEqual(errors, []);
-  const report = { status: 'PASS', renderer, editing, edited, editedCopy, running: runningResult, entrance, moved, picks, interruption, stopped, restoredModels, consoleMessages };
+  const report = { status: 'PASS', renderer, immediateRunning, editing, edited, editedCopy, running: runningResult, entrance, moved, picks, interruption, stopped, restoredModels, consoleMessages };
   await writeFile(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ status: report.status, output, renderer: renderer.renderer, texts: running.map(row => row.text) }, null, 2));
 } catch (error) {
