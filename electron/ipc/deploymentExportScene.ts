@@ -8,7 +8,7 @@ import { precompileModelScriptFile } from './modelScriptCompiler.js';
 import { CURRENT_SCENE_FILE_VERSION, isSupportedSceneFileVersion } from '../shared/sceneFileVersion.js';
 import { normalizeEffectDeploymentReferences } from '../shared/effectDeploymentReferences.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
+import { getClickEventModelEffectiveResourceKey, getClickEventModelResourceKey, getLocalModelPathSha256, matchesClickEventModelIdentity } from '../shared/clickEventModelIdentity.js';
 import { migrateSceneLightingDocument } from '../shared/sceneLightingConfig.js';
 import { getSceneLightingBakeError } from '../shared/sceneLightingBakeContract.js';
 import { captureSceneLightingBakeRelocation, restoreSceneLightingBakeAfterMappedRewrite, stripLightingPolicyIdentityLocationHints } from '../shared/sceneLightingBakeRelocation.js';
@@ -132,7 +132,7 @@ type ResolvedSkyboxReference = MutableSkyboxReference & {
 type MutableCadReference = { cad: PlainObject };
 
 type MutableClickEventBindingReference = { deviceType: PlainObject };
-type ResolvedClickEventBindingReference = MutableClickEventBindingReference & { sourcePath: string };
+type ResolvedClickEventBindingReference = MutableClickEventBindingReference & { sourcePath: string; resourceKey?: string; localPathSha256?: string };
 
 type ResolvedCadReference = MutableCadReference & {
   sourcePath: string;
@@ -1022,7 +1022,9 @@ async function resolveClickEventBindingReferences(
   for (const reference of references) {
     throwIfDeploymentExportAborted(signal);
     const key = getClickEventModelResourceKey(reference.deviceType.sourceUrl);
-    let model = byUrl.get(reference.deviceType.sourceUrl) ?? (key ? byResourceKey.get(key) : undefined);
+    let model = byUrl.get(reference.deviceType.sourceUrl)
+      ?? (key ? byResourceKey.get(key) : undefined)
+      ?? models.find((candidate) => matchesClickEventModelIdentity(candidate.asset, reference.deviceType));
     if (!model) {
       try {
         model = await resolveModelReference({ asset: reference.deviceType }, projectContext, bundles, signal);
@@ -1034,7 +1036,23 @@ async function resolveClickEventBindingReferences(
       models.push(model);
       indexModel(model);
     }
-    resolved.push({ ...reference, sourcePath: model.sourcePath });
+    const effectiveResourceKey = getClickEventModelEffectiveResourceKey(reference.deviceType);
+    const hasSiblingMatch = models.some((candidate) => candidate.sourcePath !== model!.sourcePath
+      && matchesClickEventModelIdentity(candidate.asset, reference.deviceType));
+    const resourceKey = effectiveResourceKey !== null && !reference.deviceType.dataPlatformModel && hasSiblingMatch
+      ? effectiveResourceKey
+      : undefined;
+    const localPathSha256 = effectiveResourceKey === null && hasSiblingMatch
+      ? (typeof reference.deviceType.localPathSha256 === 'string'
+        ? reference.deviceType.localPathSha256
+        : getLocalModelPathSha256(reference.deviceType.sourceUrl) ?? undefined)
+      : undefined;
+    resolved.push({
+      ...reference,
+      sourcePath: model.sourcePath,
+      ...(resourceKey ? { resourceKey } : {}),
+      ...(localPathSha256 ? { localPathSha256 } : {}),
+    });
   }
   return resolved;
 }
@@ -1048,6 +1066,10 @@ function rewriteClickEventBindingReferences(
     const mappedUrl = requireMappedUrl(sourceUrlMap, reference.sourcePath, '点击事件绑定设备类型');
     reference.deviceType.sourcePath = mappedUrl;
     reference.deviceType.sourceUrl = mappedUrl;
+    if (reference.resourceKey && getClickEventModelResourceKey(mappedUrl) !== reference.resourceKey) {
+      reference.deviceType.resourceKey = reference.resourceKey;
+    }
+    if (reference.localPathSha256) reference.deviceType.localPathSha256 = reference.localPathSha256;
     delete reference.deviceType.thumbnailUrl;
     // 部分模型库以本机路径作为条目 ID；发布时替换为稳定标识，避免加载器将设备槽位判为空。
     reference.deviceType.assetId = `deployment-model:${createHash('sha256').update(mappedUrl).digest('hex').slice(0, 24)}`;

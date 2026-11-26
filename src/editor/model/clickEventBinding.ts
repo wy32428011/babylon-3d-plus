@@ -3,7 +3,7 @@ import { normalizeDataPlatformScreenUrl } from './dataPlatformScreen';
 import { buildDeviceContext, type ModelDeviceContext } from './deviceContext';
 import type { SceneDocument } from './SceneDocument';
 import { createId } from '../../shared/ids';
-import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
+import { getClickEventModelResourceKey, matchesClickEventModelIdentity, normalizeClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
 import { normalizeDataPlatformModelIdentity, type DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 
 /** 点击事件绑定从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
@@ -136,6 +136,10 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
   const thumbnailUrl = sanitizeText(value.thumbnailUrl, 1024);
   const assetRevision = sanitizeText(value.assetRevision, 128);
   const identity = readDeviceModelIdentity(value.dataPlatformModel);
+  const resourceKey = normalizeClickEventModelResourceKey(value.resourceKey) ?? undefined;
+  const localPathSha256 = typeof value.localPathSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.localPathSha256)
+    ? value.localPathSha256
+    : undefined;
 
   return {
     id,
@@ -145,6 +149,8 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
     sourceUrl,
     ...(assetRevision ? { assetRevision } : {}),
     ...(identity ? { dataPlatformModel: identity } : {}),
+    ...(resourceKey ? { resourceKey } : {}),
+    ...(localPathSha256 ? { localPathSha256 } : {}),
     ...(thumbnailUrl && thumbnailUrl.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX) ? { thumbnailUrl } : {}),
   };
 }
@@ -234,24 +240,21 @@ export function cloneClickEventBindingComponent(component: ClickEventBindingComp
 }
 
 /**
- * 运行态查找命中的点击事件绑定：精确 URL 或同一中台资源的包内模型路径均可命中，
+ * 运行态查找命中的点击事件绑定：精确 URL、同一中台资源的包内模型路径，
+ * 或组合固定包成员保留的原始模型类型标识（含解组后成员）均可命中；
  * 多个绑定覆盖同一设备类型时按场景实体顺序取第一个。
  */
 export function findClickEventBindingForEntity(
   scene: SceneDocument,
   entityId: string,
 ): { bindingEntityId: string; component: ClickEventBindingComponent } | null {
-  const sourceUrl = scene.entities[entityId]?.components.modelAsset?.sourceUrl;
-  if (!sourceUrl) return null;
-  const resourceKey = getClickEventModelResourceKey(sourceUrl);
+  const modelAsset = scene.entities[entityId]?.components.modelAsset;
+  if (!modelAsset?.sourceUrl) return null;
 
   for (const entity of Object.values(scene.entities)) {
     const component = entity.components.clickEventBinding;
     if (!component) continue;
-    if (component.deviceSlots.some((slot) => slot.deviceType && (
-      slot.deviceType.sourceUrl === sourceUrl
-      || (resourceKey !== null && getClickEventModelResourceKey(slot.deviceType.sourceUrl) === resourceKey)
-    ))) {
+    if (component.deviceSlots.some((slot) => slot.deviceType && matchesClickEventModelIdentity(modelAsset, slot.deviceType))) {
       return { bindingEntityId: entity.id, component };
     }
   }

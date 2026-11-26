@@ -65,3 +65,28 @@ test('同一健康 sourceUrl 的生成器包目录缺失仍进入计划，不复
   assert.equal(plan.length, 1); assert.equal(plan[0].resourceId, '12');
   assert.deepEqual(plan[0].sourceUrls, [asset.sourceUrl]);
 });
+
+test('解组后的组合固定包成员作为点击目标时，不再误判缺失模型或报错', async () => {
+  const { getLocalModelPathSha256 } = await import('../../electron/shared/clickEventModelIdentity.ts');
+  const compPlatform = {
+    sourceUrl: 'editor-asset://local/' + encodeURIComponent('D:/shared/Assets/Compositions/c1/r1/models/0/model.glb'),
+    sourcePath: 'D:/shared/Assets/Compositions/c1/r1/models/0/model.glb',
+    sourceSnapshot: {
+      contentSha256: 'a'.repeat(64),
+      composition: true,
+      originModel: { resourceKey: 'model:12:model.glb' },
+    },
+  };
+  const localUrl = 'editor-asset://local/' + encodeURIComponent('D:/project/Assets/Models/LocalConv/conv.glb');
+  const compLocal = {
+    sourceUrl: 'editor-asset://local/' + encodeURIComponent('D:/shared/Assets/Compositions/c1/r1/models/1/conv.glb'),
+    sourcePath: 'D:/shared/Assets/Compositions/c1/r1/models/1/conv.glb',
+    sourceSnapshot: {
+      contentSha256: 'b'.repeat(64),
+      composition: true,
+      originModel: { localPathSha256: getLocalModelPathSha256(localUrl) },
+    },
+  };
+  const document = scene([compPlatform, compLocal], [model(url('shared')), model(localUrl)]);
+  assert.deepEqual(await planPublishModelRecovery(document, async () => true), []);
+});

@@ -49,3 +49,70 @@ test('子目录模型沿用包根，保留 glTF 的父目录纹理和缓冲引�
     assert.ok(target.includes(path.join('models','0','variants','model.gltf')));
   } finally {await fs.rm(root,{recursive:true,force:true});}
 });
+
+test('组合打包与物化保留中台与本地模型 originModel，不泄露本机路径，且兼容旧清单与版本恢复', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'composition-origin-'));
+  try {
+    authorizeAssetRoot(root);
+    const sourceKey = 'a'.repeat(64);
+    const platformDir = path.join(root, 'Assets', 'Models', 'Model-123-堆垛机');
+    const localDir = path.join(root, 'Assets', 'Models', 'LocalRack');
+    await fs.mkdir(platformDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    const platformFile = path.join(platformDir, 'stacker.glb');
+    const localFile = path.join(localDir, 'rack.glb');
+    await fs.writeFile(platformFile, 'platform-glb');
+    await fs.writeFile(localFile, 'local-glb');
+    const d = definition();
+    d.nodes[0].components.modelAsset = {
+      sourcePath: platformFile,
+      sourceUrl: 'editor-asset://local/' + encodeURIComponent(platformFile),
+      assetCode: 'old-a',
+      dataPlatformModel: { sourceKey, kind: 'model', resourceId: '123', modelPath: 'stacker.glb' },
+      lengthUnit: 'meter',
+      unitScaleToMeters: 1,
+    };
+    d.nodes[1].components.modelAsset = {
+      sourcePath: localFile,
+      sourceUrl: 'editor-asset://local/' + encodeURIComponent(localFile),
+      assetCode: 'old-b',
+      lengthUnit: 'meter',
+      unitScaleToMeters: 1,
+    };
+    const first = await saveCompositionPackage(root, { definition: d });
+    const firstA = first.definition.nodes[0].components.modelAsset as Record<string, any>;
+    const firstB = first.definition.nodes[1].components.modelAsset as Record<string, any>;
+    assert.equal(firstA.dataPlatformModel, undefined, '固定组合副本仍隔离普通模型最新同步');
+    assert.deepEqual(firstA.sourceSnapshot.originModel, {
+      dataPlatformModel: { sourceKey, kind: 'model', resourceId: '123', modelPath: 'stacker.glb' },
+      resourceKey: 'model:123:stacker.glb',
+    });
+    assert.match(firstB.sourceSnapshot.originModel.localPathSha256, /^[0-9a-f]{64}$/);
+    const manifestText = await fs.readFile(path.join(first.packagePath, 'composition.json'), 'utf8');
+    assert.equal(manifestText.includes(root), false, 'composition.json 不得包含本机绝对路径');
+
+    // 保存第二版并恢复第一版后 originModel 仍完整保留
+    const secondDef = structuredClone(first.definition);
+    secondDef.nodes[0].components.transform.position.x = 10;
+    const second = await saveCompositionPackage(root, { definition: secondDef, targetId: first.id, expectedRevision: first.revision });
+    const restored = await restoreCompositionPackage(root, first.id, second.revision);
+    assert.deepEqual((restored.definition.nodes[0].components.modelAsset as any).sourceSnapshot.originModel, firstA.sourceSnapshot.originModel);
+    assert.deepEqual((restored.definition.nodes[1].components.modelAsset as any).sourceSnapshot.originModel, firstB.sourceSnapshot.originModel);
+
+    // 模拟旧版已落盘 composition.json（仅有 dataPlatformModel、无 compositionOriginModel），加载物化仍能推导 originModel
+    const legacyManifestPath = path.join(restored.packagePath, 'composition.json');
+    const legacyManifest = JSON.parse(await fs.readFile(legacyManifestPath, 'utf8'));
+    delete legacyManifest.definition.nodes[0].components.modelAsset.compositionOriginModel;
+    legacyManifest.definition.nodes[0].components.modelAsset.dataPlatformModel = { sourceKey, kind: 'model', resourceId: '123', modelPath: 'stacker.glb' };
+    const nextManifestText = JSON.stringify(legacyManifest);
+    await fs.writeFile(legacyManifestPath, nextManifestText, 'utf8');
+    const { createHash } = await import('node:crypto');
+    const nextSha = createHash('sha256').update(nextManifestText).digest('hex');
+    const indexPath = path.join(root, 'Assets', 'Compositions', 'index.json');
+    const index = JSON.parse(await fs.readFile(indexPath, 'utf8'));
+    index[0].contentSha256 = nextSha;
+    await fs.writeFile(indexPath, JSON.stringify(index), 'utf8');
+    const loaded = (await listCompositionPackages(root))[0];
+    assert.deepEqual((loaded.definition.nodes[0].components.modelAsset as any).sourceSnapshot.originModel, firstA.sourceSnapshot.originModel);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

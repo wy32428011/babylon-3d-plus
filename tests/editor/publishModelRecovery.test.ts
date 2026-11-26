@@ -11,11 +11,12 @@ try {
     ssr: true, outDir: moduleRoot, rollupOptions: {
       input: { repair: 'src/editor/deployment/repairPublishSceneModels.ts', document: 'src/editor/model/SceneDocument.ts',
         identity: 'electron/shared/publishResourceIdentityMigration.ts', snapshot: 'electron/ipc/publishSceneSnapshots.ts', plan: 'electron/shared/sceneModelUpdatePlan.ts',
-        serializer: 'src/editor/project/SceneSerializer.ts', click: 'src/editor/model/clickEventBinding.ts' },
+        serializer: 'src/editor/project/SceneSerializer.ts', click: 'src/editor/model/clickEventBinding.ts',
+        updates: 'src/editor/assets/applySceneModelUpdates.ts' },
       output: { entryFileNames: '[name].mjs' },
     },
   } });
-  modules = await Promise.all(['repair', 'document', 'serializer', 'click', 'identity', 'snapshot', 'plan'].map(name => import(pathToFileURL(path.join(moduleRoot, name + '.mjs')).href)));
+  modules = await Promise.all(['repair', 'document', 'serializer', 'click', 'identity', 'snapshot', 'plan', 'updates'].map(name => import(pathToFileURL(path.join(moduleRoot, name + '.mjs')).href)));
 } finally {
   if (path.dirname(moduleRoot) !== path.resolve('node_modules') || !path.basename(moduleRoot).startsWith('.publish-model-recovery-')) throw new Error('测试目录无效');
   await rm(moduleRoot, { recursive: true, force: true });
@@ -24,6 +25,7 @@ const [{ repairPublishSceneModels }, document, { serializeScene, deserializeScen
 const { applyPublishModelIdentityReplacements } = modules[4];
 const { assertPublishSceneParameterTemplates, assertPublishSceneInstanceStatePreserved } = modules[5];
 const { planSceneModelUpdates } = modules[6];
+const { applySceneModelUpdates } = modules[7];
 const url = (root: string, file = 'model.glb') => `editor-asset://local/${encodeURIComponent(`C:/${root}/Model-12-堆垛机/${file}`)}`;
 const asset = { id: 'asset', name: '堆垛机', kind: 'model' as const, libraryKind: 'model' as const, path: 'C:/shared/Model-12-堆垛机/model.glb', sourceUrl: url('shared'), assetRevision: 'new' };
 
@@ -299,3 +301,177 @@ test('恢复脚本清单直接采用新版，不按旧脚本匹配，参数内�
   assert.deepEqual(repaired.parameterValues, template.parameterValues);
   assert.deepEqual((template as any).scriptPaths, [oldScript]);
 });
+
+test('场景仅有解组后的组合固定包成员匹配点击绑定时，发布修复不报错、不新增实体且保留槽位原 URL', () => {
+  const { scene, binding } = fixture(false);
+  const compUrl = 'editor-asset://local/' + encodeURIComponent('C:/shared/Assets/Compositions/c1/r1/models/0/model.glb');
+  const member = document.createModelEntity('C:/shared/Assets/Compositions/c1/r1/models/0/model.glb', compUrl, '解组堆垛机');
+  member.components.modelAsset!.sourceSnapshot = {
+    contentSha256: 'c'.repeat(64),
+    composition: true,
+    originModel: { resourceKey: 'model:12:model.glb' },
+  };
+  scene.entities[member.id] = member;
+  scene.entityIds.push(member.id);
+  const result = repairPublishSceneModels(scene, { replacements: [] });
+  assert.equal(result.addedCount, 0);
+  assert.equal(result.reboundCount, 0);
+  assert.equal(result.scene, scene);
+  assert.equal(result.scene.entities[binding.id].components.clickEventBinding!.deviceSlots[0].deviceType!.sourceUrl, url('old'));
+});
+
+test('发布前模型同步新增 subDevices 复合分组与逻辑子设备时，主进程快照校验放行且仍拦截伪造节点', () => {
+  const scene = document.createEmptySceneDocument('复合设备发布测试');
+  const group: any = {
+    id: 'group-area',
+    name: '输送区',
+    isFolder: true,
+    visible: true,
+    locked: false,
+    parentId: null,
+    childrenIds: [],
+    components: { transform: { position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } } },
+  };
+  const host = document.createModelEntity('C:/old/Model-12-堆垛机/model.glb', url('old'), '辊筒移载');
+  host.parentId = group.id;
+  group.childrenIds.push(host.id);
+  scene.entities[group.id] = group;
+  scene.entities[host.id] = host;
+  scene.entityIds.push(group.id, host.id);
+
+  const subDevices = [
+    {
+      role: 'transfer',
+      displayName: '移栽机构',
+      device: { devType: 'conveyor' },
+      cargo: { travel: { axis: 'x', nodes: ['EQ_YZJ'] } },
+      fixedNodes: [],
+    },
+  ];
+  const previous = serializeScene(scene);
+  const updated = applySceneModelUpdates(
+    scene,
+    [
+      {
+        sourceUrls: [url('old')],
+        asset: {
+          ...asset,
+          lengthUnit: 'meter',
+          dataDrivenConfig: {
+            device: { devType: 'conveyor', defaultAssetCode: 'RollerTransfer01' },
+            cargo: { travel: { axis: 'z', nodes: ['GD_4'] } },
+            subDevices,
+            fixedNodes: [],
+          },
+        },
+      },
+    ],
+    'a'.repeat(64),
+  );
+  const next = serializeScene(updated.scene);
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(previous, next));
+
+  // 已有复合分组后续再新增第二个 subDevice 角色也必须通过校验。
+  const updatedAgain = applySceneModelUpdates(
+    updated.scene,
+    [
+      {
+        sourceUrls: [asset.sourceUrl],
+        asset: {
+          ...asset,
+          assetRevision: 'newer',
+          lengthUnit: 'meter',
+          dataDrivenConfig: {
+            device: { devType: 'conveyor', defaultAssetCode: 'RollerTransfer01' },
+            cargo: { travel: { axis: 'z', nodes: ['GD_4'] } },
+            subDevices: [
+              ...subDevices,
+              { role: 'lift', displayName: '顶升机构', device: { devType: 'lifter' }, fixedNodes: [] },
+            ],
+            fixedNodes: [],
+          },
+        },
+      },
+    ],
+    'a'.repeat(64),
+  );
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(next, serializeScene(updatedAgain.scene)));
+
+  // 拒绝伪造逻辑子设备 assetCode、未声明角色以及无 subDevices 的复合分组。
+  const forgedAssetCode = JSON.parse(next);
+  const partEntity: any = Object.values(forgedAssetCode.scene.entities).find((entity: any) => entity.components.devicePartBinding);
+  partEntity.components.telemetryBinding.assetCode = 'FORGED-01';
+  assert.throws(() => assertPublishSceneInstanceStatePreserved(previous, JSON.stringify(forgedAssetCode)), /未经原点击/);
+
+  const forgedRole = JSON.parse(next);
+  const rolePart: any = Object.values(forgedRole.scene.entities).find((entity: any) => entity.components.devicePartBinding);
+  rolePart.components.devicePartBinding.role = 'undeclared';
+  assert.throws(() => assertPublishSceneInstanceStatePreserved(previous, JSON.stringify(forgedRole)), /未经原点击/);
+
+  const forgedNoSubDevices = JSON.parse(next);
+  delete forgedNoSubDevices.scene.entities[host.id].components.modelAsset.dataDrivenConfig.subDevices;
+  assert.throws(() => assertPublishSceneInstanceStatePreserved(previous, JSON.stringify(forgedNoSubDevices)), /未经原点击/);
+});
+
+test('旧非入口场景的扁平 sceneSettings.skybox 迁移为天空盒实体时通过快照校验，篡改强度仍拦截', () => {
+  const skyboxPath = 'C:/shared/Assets/Skyboxes/Sky-1/sky.hdr';
+  const skyboxUrl = 'editor-asset://local/' + encodeURIComponent(skyboxPath);
+  const scene = document.createEmptySceneDocument('旧天空盒场景');
+  const rawLegacy = JSON.parse(serializeScene(scene));
+  rawLegacy.scene.sceneSettings.skybox = {
+    packagePath: 'C:/shared/Assets/Skyboxes/Sky-1',
+    sourcePath: skyboxPath,
+    sourceUrl: skyboxUrl,
+    format: 'hdr',
+    rotationDegrees: 90,
+    intensity: 0.75,
+    resolution: 256,
+  };
+  const previous = JSON.stringify(rawLegacy);
+  const migrated = serializeScene(deserializeScene(previous));
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(previous, migrated));
+
+  const tampered = JSON.parse(migrated);
+  const skyEntity: any = Object.values(tampered.scene.entities).find((entity: any) => entity.components.skybox);
+  skyEntity.components.skybox.intensity = 2;
+  assert.throws(() => assertPublishSceneInstanceStatePreserved(previous, JSON.stringify(tampered)), /skybox\.intensity/);
+});
+
+test('跨中台 sourceKey 组合固定包成员不阻断点击设备补齐校验，同源组合仍禁止凭空新增实体', () => {
+  const { scene, binding } = fixture(false);
+  const sourceKeyA = 'a'.repeat(64);
+  const sourceKeyB = 'b'.repeat(64);
+  const compUrl = 'editor-asset://local/' + encodeURIComponent('C:/shared/Assets/Compositions/c1/r1/models/0/model.glb');
+  const member = document.createModelEntity('C:/shared/Assets/Compositions/c1/r1/models/0/model.glb', compUrl, '跨源组合堆垛机');
+  member.components.modelAsset!.sourceSnapshot = {
+    contentSha256: 'c'.repeat(64),
+    composition: true,
+    originModel: {
+      dataPlatformModel: { sourceKey: sourceKeyA, kind: 'model', resourceId: '12', modelPath: 'model.glb' },
+      resourceKey: 'model:12:model.glb',
+    },
+  };
+  scene.entities[member.id] = member;
+  scene.entityIds.push(member.id);
+  binding.components.clickEventBinding!.deviceSlots[0].deviceType!.dataPlatformModel = {
+    sourceKey: sourceKeyB,
+    kind: 'model',
+    resourceId: '12',
+    modelPath: 'model.glb',
+  };
+  const previous = serializeScene(scene);
+  const repaired = repairPublishSceneModels(scene, {
+    replacements: [{ sourceUrls: [url('old')], asset: { ...asset, dataPlatformSourceKey: sourceKeyB } }],
+  });
+  assert.equal(repaired.addedCount, 1);
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(previous, serializeScene(repaired.scene)));
+
+  // 同源组合已满足点击槽位时，主进程仍拒绝擅自新增同资源实体。
+  const sameSourceScene = structuredClone(scene);
+  sameSourceScene.entities[binding.id].components.clickEventBinding!.deviceSlots[0].deviceType!.dataPlatformModel!.sourceKey = sourceKeyA;
+  assert.throws(
+    () => assertPublishSceneInstanceStatePreserved(serializeScene(sameSourceScene), serializeScene(repaired.scene)),
+    /未经原点击/,
+  );
+});
+

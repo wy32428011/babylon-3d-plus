@@ -490,7 +490,25 @@ export function groupEntitiesInScene(scene: SceneDocument, entityIds: string[]):
   };
 }
 
-/** 解组文件夹：只移除文件夹容器，直属内容按原顺序提升到原父级。 */
+/** 判断实体解组后是否仍处于某个保留下来的组合根之下。 */
+function hasSurvivingCompositionAncestor(
+  scene: SceneDocument,
+  parentId: string | null,
+  ungroupingIds: ReadonlySet<string>,
+): boolean {
+  let cursor = parentId;
+  const visited = new Set<string>();
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
+    const parent = scene.entities[cursor];
+    if (!parent) return false;
+    if (!ungroupingIds.has(cursor) && parent.composition) return true;
+    cursor = parent.parentId;
+  }
+  return false;
+}
+
+/** 解组文件夹：移除文件夹容器，提升直属内容，并在脱离组合根时清理残留的 compositionNodeId。 */
 export function ungroupFoldersInScene(scene: SceneDocument, folderIds: string[]): SceneDocument {
   const ungroupingIds = new Set(
     folderIds.filter((folderId) => scene.entities[folderId]?.isFolder),
@@ -506,13 +524,22 @@ export function ungroupFoldersInScene(scene: SceneDocument, folderIds: string[])
     const childrenIds = entity.isFolder
       ? collectPromotedChildrenIds(scene, entity.childrenIds, ungroupingIds, entityId)
       : [];
+    const clearCompositionNodeId = entity.compositionNodeId !== undefined
+      && !hasSurvivingCompositionAncestor(scene, parentId, ungroupingIds);
     if (selectedEntityId === null && parentId !== entity.parentId) selectedEntityId = entityId;
-    entities[entityId] =
-      parentId === entity.parentId
+    const unchanged =
+      !clearCompositionNodeId
+      && parentId === entity.parentId
       && childrenIds.length === entity.childrenIds.length
-      && childrenIds.every((childId, index) => childId === entity.childrenIds[index])
-        ? entity
-        : { ...entity, parentId, childrenIds };
+      && childrenIds.every((childId, index) => childId === entity.childrenIds[index]);
+    if (unchanged) {
+      entities[entityId] = entity;
+    } else if (clearCompositionNodeId) {
+      const { compositionNodeId: _removed, ...rest } = entity;
+      entities[entityId] = { ...rest, parentId, childrenIds };
+    } else {
+      entities[entityId] = { ...entity, parentId, childrenIds };
+    }
   }
 
   return {

@@ -1,4 +1,5 @@
 import { validateComposition } from '../shared/compositionValidation.js';
+import { resolveCompositionOriginModelIdentity } from '../shared/clickEventModelIdentity.js';
 import { promises as fs, createReadStream } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -68,10 +69,21 @@ export async function materializeComposition(entry: CompositionLibraryEntry): Pr
   }
   authorizeAssetRoot(entry.packagePath);
   const definition = visitPaths(manifest.definition, value => value.startsWith('composition-file:') ? encodeAssetUrl(safe(entry.packagePath, value.slice(17))) : value.startsWith('composition-path:') ? safe(entry.packagePath, value.slice(17)) : value) as CompositionDefinition;
-  // 固定包使用自身副本；原始中台身份仍保留在组合清单，普通模型最新同步不能替换它。
+  // 固定包使用自身副本；原始模型类型标识保留在 sourceSnapshot.originModel 供点击事件等匹配，
+  // 同时删除 modelAsset.dataPlatformModel，避免普通模型最新同步替换组合固定副本。
   for (const node of definition.nodes) {
     const asset = node.components.modelAsset as Record<string, unknown> | undefined;
-    if (asset) { delete asset.dataPlatformModel; asset.sourceSnapshot = { contentSha256: entry.contentSha256, composition: true, compositionResource: { schemaVersion: 1, resourceType: 'ENV_MODEL', libraryId: entry.id, revision: entry.revision, resourceId: entry.resourceId, sourceKey: entry.sourceKey, packagePath: entry.packagePath } }; }
+    if (asset) {
+      const originModel = resolveCompositionOriginModelIdentity(asset);
+      delete asset.dataPlatformModel;
+      delete asset.compositionOriginModel;
+      asset.sourceSnapshot = {
+        contentSha256: entry.contentSha256,
+        composition: true,
+        compositionResource: { schemaVersion: 1, resourceType: 'ENV_MODEL', libraryId: entry.id, revision: entry.revision, resourceId: entry.resourceId, sourceKey: entry.sourceKey, packagePath: entry.packagePath },
+        ...(originModel ? { originModel } : {}),
+      };
+    }
   }
   return { ...entry, definition, thumbnailUrl: manifest.files.some(f => f.path === 'thumbnail.png') ? encodeAssetUrl(path.join(entry.packagePath, 'thumbnail.png')) : undefined };
 }
@@ -188,7 +200,11 @@ export async function saveCompositionPackage(root: string, request: CompositionS
     const definition = structuredClone(request.definition); if (previous) definition.name = previous.name;
     for (const node of definition.nodes) {
       const asset = node.components.modelAsset as Record<string, unknown> | undefined;
-      if (asset) delete asset.sourceSnapshot;
+      if (asset) {
+        const originModel = resolveCompositionOriginModelIdentity(asset);
+        delete asset.sourceSnapshot;
+        if (originModel) asset.compositionOriginModel = originModel;
+      }
     }
     const contentSha256 = await buildPackage(definition, dir, request.thumbnailDataUrl, request.previewGlb, packageHints);
     const entry: CompositionLibraryEntry = { ...previous, id, revision, previousRevision: previous?.revision, sourceKey: previous?.sourceKey ?? sourceKey, name: definition.name, definition, memberCount: definition.nodes.filter(n => !n.isFolder && (n.components.modelAsset || n.components.meshRenderer)).length, packagePath: dir,

@@ -139,7 +139,13 @@ export type ModelScriptAsset = {
 };
 
 /** 发布工程包固定的完整模型包内容版本，后台同步不得替换。 */
-export type ModelSourceSnapshot = { contentSha256: string; composition?: true; compositionResource?: CompositionResourceReference };
+export type ModelSourceSnapshot = {
+  contentSha256: string;
+  composition?: true;
+  compositionResource?: CompositionResourceReference;
+  /** 组合固定包成员保留的原始模型类型标识，供点击事件等按设备类型匹配，不触发普通模型同步。 */
+  originModel?: import('../../../electron/shared/clickEventModelIdentity').CompositionOriginModelIdentity;
+};
 
 /** 可复用的模型资产模板，不包含实例级 assetCode。 */
 export type ModelAssetTemplate = {
@@ -484,6 +490,10 @@ export type ClickEventBindingDeviceType = {
   assetRevision?: string;
   /** 经数据中台确认的稳定模型身份；历史场景可缺省，后续同步成功时补齐。 */
   dataPlatformModel?: DataPlatformModelIdentity;
+  /** 发布导出场景改写旧版中台槽位 URL 到组合副本路径时，保留中台资源键供多个组合副本对齐。 */
+  resourceKey?: string;
+  /** 发布导出场景同时存在普通本地模型与同源组合固定包副本时，保留原本地路径摘要供运行态对齐。 */
+  localPathSha256?: string;
 };
 
 /** 设备类型列表单元；deviceType 为 null 表示待配置的空槽，从模型库拖入后填充。 */
