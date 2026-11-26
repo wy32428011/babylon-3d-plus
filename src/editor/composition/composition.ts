@@ -104,7 +104,11 @@ export function captureComposition(scene: SceneDocument, selected: readonly stri
     components.transform = e.isFolder ? identity() : toLocal(components.transform, frame);
     if (components.modelAsset) {
       components.modelAsset.assetCode = '';
+      const originModel = components.modelAsset.sourceSnapshot?.originModel;
       delete components.modelAsset.sourceSnapshot;
+      if (originModel) {
+        (components.modelAsset as Record<string, unknown>).compositionOriginModel = structuredClone(originModel);
+      }
       if (components.modelAsset.dataDrivenConfig?.device) delete components.modelAsset.dataDrivenConfig.device.defaultAssetCode;
     }
     if (components.modelArrayInstance) {

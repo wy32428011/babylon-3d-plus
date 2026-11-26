@@ -1,5 +1,6 @@
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../../../electron/types';
 import { collectPublishModelReferences, publishModelMatchKey } from '../../../electron/shared/publishModelRecovery';
+import { matchesClickEventModelIdentity } from '../../../electron/shared/clickEventModelIdentity';
 import { createModelEntity, type SceneDocument } from '../model/SceneDocument';
 import { normalizeModelParameterConfig, restoreModelParameterValues } from '../model/modelParameters';
 import { createModelLengthUnitInfo } from '../model/sceneUnits';
@@ -113,7 +114,8 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
     remappedKeys.set(oldKey, publishModelMatchKey(asset.sourceUrl));
     restoredCount += 1;
   }
-  const byModelKey = new Map(models.filter(({ clickTarget }) => clickTarget).map(({ asset }) => [publishModelMatchKey(asset.sourceUrl), asset]));
+  const clickTargetModels = models.filter(({ clickTarget }) => clickTarget).map(({ asset }) => asset);
+  const byModelKey = new Map(clickTargetModels.map((asset) => [publishModelMatchKey(asset.sourceUrl), asset]));
   for (const [oldKey, newKey] of remappedKeys) {
     if (oldKey !== newKey && byModelKey.has(oldKey) && devices.some((device) => publishModelMatchKey(device.sourceUrl) === oldKey)) {
       throw new Error('中台模型主文件已改名，但场景还保留旧文件的独立工程快照；请统一模型版本并核对点击绑定后发布。');
@@ -123,6 +125,8 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
     const originalKey = publishModelMatchKey(device.sourceUrl);
     let model = byModelKey.get(remappedKeys.get(originalKey) ?? originalKey);
     if (!model) {
+      // 场景中已有匹配该设备类型的组合固定包成员（含解组后成员）时，无需拉取或改写槽位到组合内部路径。
+      if (clickTargetModels.some((asset) => matchesClickEventModelIdentity(asset, device))) continue;
       const recovered = byOriginalUrl.get(String(device.sourceUrl));
       if (!recovered) throw new Error(`点击事件设备类型「${device.displayName ?? '未命名模型'}」仍无可用场景模型，已停止发布。`);
       const recoveredKey = publishModelMatchKey(recovered.sourceUrl);

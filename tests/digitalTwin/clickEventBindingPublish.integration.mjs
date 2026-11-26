@@ -14,7 +14,8 @@ async function run() {
   const { importManualRoamAvatarIntoProject } = await import('../../dist-electron/ipc/manualRoamAvatarStore.js');
   const { setCurrentProjectRoot } = await import('../../dist-electron/ipc/projectAssetStore.js');
   const { prepareDeploymentExport } = await import('../../dist-electron/ipc/deploymentExportScene.js');
-  const { authorizeAssetFile, encodeAssetUrl } = await import('../../dist-electron/ipc/assetRegistry.js');
+  const { authorizeAssetFile, authorizeAssetRoot, encodeAssetUrl } = await import('../../dist-electron/ipc/assetRegistry.js');
+  const { saveCompositionPackage } = await import('../../dist-electron/ipc/compositionPackage.js');
   // 使用构建产物覆盖发布态模块加载，避免 Electron 内动态 SSR 加载长时间挂起。
   const moduleRoot = await mkdtemp(path.resolve('node_modules/.click-publish-'));
   try {
@@ -30,6 +31,8 @@ async function run() {
             document: 'src/editor/model/SceneDocument.ts',
             serializer: 'src/editor/project/SceneSerializer.ts',
             click: 'src/player/viewerModelClick.ts',
+            composition: 'src/editor/composition/composition.ts',
+            hierarchy: 'src/editor/store/slices/sceneHierarchyOperations.ts',
           },
           output: { entryFileNames: '[name].mjs' },
         },
@@ -38,6 +41,8 @@ async function run() {
     const { createEmptySceneDocument, createModelEntity, createClickEventBindingEntity, createLocatorEntity } = await import(pathToFileURL(path.join(moduleRoot, 'document.mjs')).href);
     const { serializeScene, deserializeScene } = await import(pathToFileURL(path.join(moduleRoot, 'serializer.mjs')).href);
     const { createViewerModelClickHandler } = await import(pathToFileURL(path.join(moduleRoot, 'click.mjs')).href);
+    const { captureComposition, instantiateComposition } = await import(pathToFileURL(path.join(moduleRoot, 'composition.mjs')).href);
+    const { ungroupFoldersInScene } = await import(pathToFileURL(path.join(moduleRoot, 'hierarchy.mjs')).href);
     const projectRoot = path.join(root, 'project');
     await mkdir(projectRoot);
     setCurrentProjectRoot(projectRoot);
@@ -180,7 +185,84 @@ async function run() {
       /点击事件绑定设备类型.+无法完整发布/,
       '无法打包的绑定必须明确报错，不能发布一个已清空绑定的残缺场景',
     );
-    console.log('PASS: 真实发布和 Viewer 重载后的模型/货格点击、高亮、聚焦、大屏事件、共享库与多版本工程快照、独立绑定资源、旧包兼容、组件完整性及本机路径清理。');
+    // 场景一组合 -> 场景二解组 -> 添加点击事件 -> DIST 导出 -> Web Viewer 点击（覆盖纯组合副本与普通+组合共存两种情况，含中台与本地模型）
+    const compSharedRoot = path.join(root, 'comp-shared');
+    const compPlatformFile = path.join(compSharedRoot, 'Assets', 'Models', 'Model-777-堆垛机', 'stacker.glb');
+    const compLocalFile = path.join(compSharedRoot, 'Assets', 'Models', 'LocalUnit', 'unit.glb');
+    await mkdir(path.dirname(compPlatformFile), { recursive: true });
+    await mkdir(path.dirname(compLocalFile), { recursive: true });
+    await copyFile(asset.path, compPlatformFile);
+    await copyFile(asset.path, compLocalFile);
+    authorizeAssetRoot(compSharedRoot);
+    const compSourceKey = 'f'.repeat(64);
+
+    const compScene1 = createEmptySceneDocument('组合场景一');
+    const srcPlatform = createModelEntity(compPlatformFile, encodeAssetUrl(compPlatformFile), '中台堆垛机');
+    srcPlatform.components.modelAsset.dataPlatformModel = { sourceKey: compSourceKey, kind: 'model', resourceId: '777', modelPath: 'stacker.glb' };
+    const srcLocal = createModelEntity(compLocalFile, encodeAssetUrl(compLocalFile), '本地设备');
+    compScene1.entities = { [srcPlatform.id]: srcPlatform, [srcLocal.id]: srcLocal };
+    compScene1.entityIds = [srcPlatform.id, srcLocal.id];
+    const compEntry = await saveCompositionPackage(compSharedRoot, {
+      definition: captureComposition(compScene1, [srcPlatform.id, srcLocal.id], '双模型组合').definition,
+    });
+
+    const placed = instantiateComposition(compEntry.definition, { x: 0, y: 0, z: 0 }, {
+      libraryId: compEntry.id, revision: compEntry.revision, resourceType: 'ENV_MODEL', packagePath: compEntry.packagePath, contentSha256: compEntry.contentSha256,
+    });
+    let compScene2 = createEmptySceneDocument('解组点击场景二');
+    compScene2.sceneSettings.lighting.bake.enabled = false;
+    for (const e of [placed.root, ...placed.entities]) {
+      compScene2.entities[e.id] = e;
+      compScene2.entityIds.push(e.id);
+    }
+    compScene2 = ungroupFoldersInScene(compScene2, [placed.root.id]);
+    const ungroupedPlatformId = placed.entities[0].id;
+    const ungroupedLocalId = placed.entities[1].id;
+    compScene2.entities[ungroupedPlatformId].components.modelAsset.assetCode = 'COMP-P-01';
+    compScene2.entities[ungroupedLocalId].components.modelAsset.assetCode = 'COMP-L-01';
+
+    const compBinding = createClickEventBindingEntity();
+    compBinding.components.clickEventBinding = {
+      deviceSlots: [
+        { id: 's-p', deviceType: { id: 'd-p', assetId: 'a-p', displayName: '中台堆垛机', sourcePath: compPlatformFile, sourceUrl: encodeAssetUrl(compPlatformFile), dataPlatformModel: { sourceKey: compSourceKey, kind: 'model', resourceId: '777', modelPath: 'stacker.glb' } } },
+        { id: 's-l', deviceType: { id: 'd-l', assetId: 'a-l', displayName: '本地设备', sourcePath: compLocalFile, sourceUrl: encodeAssetUrl(compLocalFile) } },
+      ],
+      events: [{ id: 'ev-click', eventType: 'click', effects: ['highlight', 'focus'] }],
+    };
+    compScene2.entities[compBinding.id] = compBinding;
+    compScene2.entityIds.push(compBinding.id);
+
+    const assertViewerHighlights = (exportedSceneContent, ids, label) => {
+      const loadedScene = deserializeScene(exportedSceneContent);
+      for (const id of ids) {
+        const selections = [];
+        const handler = createViewerModelClickHandler(loadedScene, {
+          updateSelection: (selected) => selections.push([...selected]),
+          setSlotHighlight: () => {},
+          setHighlightExcludeTrack: () => {},
+          focusTarget: () => {},
+          triggerManualEvents: () => {},
+        });
+        handler(id);
+        assert.deepEqual(selections, [[id]], `${label} 点击 ${id} 必须触发高亮`);
+      }
+    };
+
+    // 情况 S1：仅存在解组后的组合副本
+    const exportedCompOnly = await prepareDeploymentExport(serializeScene(compScene2), '解组组合纯点击', [], new AbortController().signal, () => {});
+    assertViewerHighlights(exportedCompOnly.sceneContent, [ungroupedPlatformId, ungroupedLocalId], 'DIST 仅解组组合副本');
+
+    // 情况 S2：同场景同时存在解组后的组合副本与模型库直接摆放的普通模型
+    const normalPlatform = createModelEntity(compPlatformFile, encodeAssetUrl(compPlatformFile), '普通中台堆垛机');
+    normalPlatform.components.modelAsset.dataPlatformModel = { sourceKey: compSourceKey, kind: 'model', resourceId: '777', modelPath: 'stacker.glb' };
+    const normalLocal = createModelEntity(compLocalFile, encodeAssetUrl(compLocalFile), '普通本地设备');
+    compScene2.entities[normalPlatform.id] = normalPlatform;
+    compScene2.entities[normalLocal.id] = normalLocal;
+    compScene2.entityIds.push(normalPlatform.id, normalLocal.id);
+    const exportedMixed = await prepareDeploymentExport(serializeScene(compScene2), '解组组合与普通模型混合点击', [], new AbortController().signal, () => {});
+    assertViewerHighlights(exportedMixed.sceneContent, [ungroupedPlatformId, ungroupedLocalId, normalPlatform.id, normalLocal.id], 'DIST 组合解组与普通模型共存');
+
+    console.log('PASS: 真实发布和 Viewer 重载后的模型/货格点击、高亮、聚焦、大屏事件、共享库与多版本工程快照、独立绑定资源、旧包兼容、组件完整性、组合解组点击及本机路径清理。');
   } finally {
     if (path.dirname(moduleRoot) !== path.resolve('node_modules') || !path.basename(moduleRoot).startsWith('.click-publish-')) throw new Error('测试模块目录范围无效');
     await rm(moduleRoot, { recursive: true, force: true });

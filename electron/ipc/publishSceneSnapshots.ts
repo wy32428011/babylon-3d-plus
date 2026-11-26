@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { getHeapStatistics } from 'node:v8';
-import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
+import { getClickEventModelResourceKey, matchesClickEventModelIdentity } from '../shared/clickEventModelIdentity.js';
 
 function assertSnapshotMemoryAvailable(additionalBytes: number): void {
   // 不限制工程总大小，仅在进程已无法容纳当前场景的解析/序列化副本时报告可恢复错误。
@@ -17,16 +17,21 @@ export type PublishSceneSnapshot = {
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const RESOURCE_FIELDS = new Set(['id', 'name', 'displayName', 'sourceUrl', 'sourcePath', 'path', 'assetId', 'assetRevision',
   'dataPlatformModel', 'sourceSnapshot', 'packagePath', 'metadataPath', 'thumbnailPath', 'thumbnailUrl', 'scriptPaths', 'scriptAssets',
-  'parameterConfig', 'parameterScriptMetadata', 'animationScriptMetadata', 'animationConfig', 'fileSizeBytes',
+  'parameterConfig', 'parameterScriptMetadata', 'animationScriptMetadata', 'animationConfig', 'fileSizeBytes', 'deviceType', 'runtimeCapabilities',
   'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig']);
 
 /** 只描述发布预检读取的 JSON 字段；解析边界与原有校验及拒绝顺序保持一致。 */
-type PublishModelAssetReference = { sourceUrl?: unknown };
+type PublishSubDeviceDeclaration = { role?: unknown; device?: { devType?: unknown } };
+type PublishModelAssetReference = {
+  sourceUrl?: unknown;
+  dataDrivenConfig?: { subDevices?: PublishSubDeviceDeclaration[] };
+};
 type PublishModelTargetReference = { modelAsset?: PublishModelAssetReference };
 type PublishReferenceEntity = {
   id?: unknown;
+  isFolder?: unknown;
   parentId?: unknown;
-  childrenIds?: { length?: unknown };
+  childrenIds?: unknown;
   components: {
     modelAsset?: PublishModelAssetReference;
     modelGenerator?: {
@@ -34,6 +39,10 @@ type PublishReferenceEntity = {
       rules?: Array<{ target?: PublishModelTargetReference }>;
     };
     clickEventBinding?: { deviceSlots?: Array<{ deviceType?: PublishModelAssetReference }> };
+    compositeDevice?: { hostEntityId?: unknown };
+    devicePartBinding?: { hostEntityId?: unknown; role?: unknown };
+    telemetryBinding?: { deviceType?: unknown; assetCode?: unknown };
+    skybox?: Record<string, unknown>;
     transform?: { position?: Record<string, unknown>; rotation?: Record<string, unknown>; scale?: Record<string, unknown> };
     [component: string]: unknown;
   };
@@ -109,10 +118,12 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
       throw new Error('发布准备改变了原场景实体顺序或遗漏实体引用。');
     }
   }
+  const isIdentityTransform = (transform: PublishReferenceEntity['components']['transform']): boolean =>
+    ['x', 'y', 'z'].every(axis => transform?.position?.[axis] === 0 && transform?.rotation?.[axis] === 0 && transform?.scale?.[axis] === 1);
   const clickReferences = (entities: Record<string, PublishReferenceEntity>) => {
-    const targets = new Set<string>();
+    const targets: PublishModelAssetReference[] = [];
     const devices: PublishModelAssetReference[] = [];
-    const addTarget = (asset: PublishModelAssetReference | null | undefined) => { const key = getClickEventModelResourceKey(asset?.sourceUrl); if (key) targets.add(key); };
+    const addTarget = (asset: PublishModelAssetReference | null | undefined) => { if (asset) targets.push(asset); };
     for (const entity of Object.values(entities)) {
       const components = entity?.components;
       addTarget(components?.modelAsset);
@@ -125,23 +136,169 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
   const originalReferences = clickReferences(beforeEntities);
   const missingResourceIds = new Set(originalReferences.devices.flatMap(device => {
     const key = getClickEventModelResourceKey(device.sourceUrl);
-    return key && !originalReferences.targets.has(key) ? [key.split(':').slice(0, 2).join(':')] : [];
+    if (!key) return [];
+    const hasTarget = originalReferences.targets.some(
+      target => getClickEventModelResourceKey(target.sourceUrl) === key || matchesClickEventModelIdentity(target, device),
+    );
+    return hasTarget ? [] : [key.split(':').slice(0, 2).join(':')];
   }));
   const nextDeviceKeys = new Set(clickReferences(afterEntities).devices.map(device => getClickEventModelResourceKey(device.sourceUrl)));
-  const restoredKeys = new Set<string>();
+  const existingCompositeFolderByHostId = new Map<string, string>();
+  const existingPartKeys = new Set<string>();
+  for (const [id, entity] of Object.entries<PublishReferenceEntity>(beforeEntities)) {
+    const compositeHostId = entity?.components?.compositeDevice?.hostEntityId;
+    if (entity?.isFolder === true && typeof compositeHostId === 'string') {
+      existingCompositeFolderByHostId.set(compositeHostId, id);
+    }
+    const partBinding = entity?.components?.devicePartBinding;
+    if (typeof partBinding?.hostEntityId === 'string' && typeof partBinding?.role === 'string' && partBinding.role.trim()) {
+      existingPartKeys.add(`${partBinding.hostEntityId}\0${partBinding.role.trim()}`);
+    }
+  }
+  const declaredSubDevicesByHostId = new Map<string, Map<string, PublishSubDeviceDeclaration>>();
+  const getDeclaredSubDevices = (hostId: string): Map<string, PublishSubDeviceDeclaration> => {
+    const cached = declaredSubDevicesByHostId.get(hostId);
+    if (cached) return cached;
+    const map = new Map<string, PublishSubDeviceDeclaration>();
+    const beforeHost = Object.hasOwn(beforeEntities, hostId) ? (beforeEntities[hostId] as PublishReferenceEntity) : undefined;
+    const afterHost = Object.hasOwn(afterEntities, hostId) ? (afterEntities[hostId] as PublishReferenceEntity) : undefined;
+    const subDevices = beforeHost?.components?.modelAsset ? afterHost?.components?.modelAsset?.dataDrivenConfig?.subDevices : undefined;
+    if (Array.isArray(subDevices)) {
+      for (const declaration of subDevices) {
+        const role = typeof declaration?.role === 'string' ? declaration.role.trim() : '';
+        if (role && !map.has(role)) map.set(role, declaration);
+      }
+    }
+    declaredSubDevicesByHostId.set(hostId, map);
+    return map;
+  };
+  const newCompositeFolderByHostId = new Map<string, string>();
+  const authorizedNewEntityIds = new Set<string>();
+  const rejectUnauthorizedNewEntity = (): never => {
+    throw new Error('发布准备新增了未经原点击设备槽位授权的场景实体。');
+  };
+  // 第一遍：校验由新版 subDevices 复合设备协调新增的复合分组容器。
   for (const [id, entity] of Object.entries<PublishReferenceEntity>(afterEntities)) {
     if (Object.hasOwn(beforeEntities, id)) continue;
-    const key = getClickEventModelResourceKey(entity?.components?.modelAsset?.sourceUrl);
-    const transform = entity?.components?.transform;
+    if (entity?.components?.compositeDevice === undefined) continue;
+    const componentKeys = Object.keys(entity.components ?? {});
+    const hostId = entity.components.compositeDevice?.hostEntityId;
+    const childrenIds = Array.isArray(entity.childrenIds) ? entity.childrenIds : null;
+    if (entity.id !== id || entity.isFolder !== true
+      || componentKeys.length !== 2 || !componentKeys.includes('transform') || !componentKeys.includes('compositeDevice')
+      || !isIdentityTransform(entity.components.transform)
+      || typeof hostId !== 'string' || !Object.hasOwn(beforeEntities, hostId)
+      || getDeclaredSubDevices(hostId).size === 0
+      || existingCompositeFolderByHostId.has(hostId) || newCompositeFolderByHostId.has(hostId)
+      || (entity.parentId ?? null) !== ((beforeEntities[hostId] as PublishReferenceEntity).parentId ?? null)
+      || (afterEntities[hostId] as PublishReferenceEntity)?.parentId !== id
+      || !childrenIds || childrenIds.length < 2 || childrenIds[0] !== hostId
+      || new Set(childrenIds).size !== childrenIds.length
+      || childrenIds.slice(1).some(childId => typeof childId !== 'string' || !Object.hasOwn(afterEntities, childId)
+        || (afterEntities[childId] as PublishReferenceEntity)?.components?.devicePartBinding?.hostEntityId !== hostId)) {
+      rejectUnauthorizedNewEntity();
+    }
+    newCompositeFolderByHostId.set(hostId as string, id);
+    authorizedNewEntityIds.add(id);
+  }
+  const addedPartKeys = new Set<string>();
+  const addedPartsByFolderId = new Map<string, Set<string>>();
+  const hasExistingSkyboxEntity = Object.values<PublishReferenceEntity>(beforeEntities).some(entity => entity?.components?.skybox !== undefined);
+  const legacySkybox = previous.sceneSettings?.skybox && typeof previous.sceneSettings.skybox === 'object' && !Array.isArray(previous.sceneSettings.skybox)
+    ? previous.sceneSettings.skybox as Record<string, unknown>
+    : null;
+  let migratedLegacySkyboxEntity: { id: string; skybox: Record<string, unknown> } | null = null;
+  const restoredKeys = new Set<string>();
+  // 第二遍：校验逻辑子设备、旧扁平天空盒迁移实体与原点击设备槽位恢复实体。
+  for (const [id, entity] of Object.entries<PublishReferenceEntity>(afterEntities)) {
+    if (Object.hasOwn(beforeEntities, id) || authorizedNewEntityIds.has(id)) continue;
+    const components = entity?.components ?? {};
+    const componentKeys = Object.keys(components);
+    if (components.devicePartBinding !== undefined) {
+      const hostId = components.devicePartBinding?.hostEntityId;
+      const role = components.devicePartBinding?.role;
+      const declaration = typeof hostId === 'string' && typeof role === 'string' && role.trim() === role && role.length > 0
+        ? getDeclaredSubDevices(hostId).get(role)
+        : undefined;
+      const expectedFolderId = typeof hostId === 'string'
+        ? (newCompositeFolderByHostId.get(hostId) ?? existingCompositeFolderByHostId.get(hostId))
+        : undefined;
+      const folder = expectedFolderId ? (afterEntities[expectedFolderId] as PublishReferenceEntity | undefined) : undefined;
+      const folderChildren = Array.isArray(folder?.childrenIds) ? folder.childrenIds : null;
+      const partKey = `${String(hostId)}\0${String(role)}`;
+      const telemetry = components.telemetryBinding;
+      const expectedDevType = typeof declaration?.device?.devType === 'string' && declaration.device.devType.trim()
+        ? declaration.device.devType.trim()
+        : 'conveyor';
+      if (entity.id !== id || entity.isFolder === true
+        || !componentKeys.includes('transform') || !componentKeys.includes('devicePartBinding')
+        || componentKeys.some(component => !['transform', 'devicePartBinding', 'telemetryBinding'].includes(component))
+        || !isIdentityTransform(components.transform)
+        || !Array.isArray(entity.childrenIds) || entity.childrenIds.length !== 0
+        || !declaration || !expectedFolderId || entity.parentId !== expectedFolderId
+        || !folderChildren || !folderChildren.includes(id)
+        || existingPartKeys.has(partKey) || addedPartKeys.has(partKey)
+        || (telemetry !== undefined && (!telemetry || typeof telemetry !== 'object' || Array.isArray(telemetry)
+          || telemetry.assetCode !== undefined || telemetry.deviceType !== expectedDevType))) {
+        rejectUnauthorizedNewEntity();
+      }
+      addedPartKeys.add(partKey);
+      const bucket = addedPartsByFolderId.get(expectedFolderId!) ?? new Set<string>();
+      bucket.add(id);
+      addedPartsByFolderId.set(expectedFolderId!, bucket);
+      authorizedNewEntityIds.add(id);
+      continue;
+    }
+    if (components.skybox !== undefined) {
+      const transform = components.transform;
+      const rotationY = transform?.rotation?.y;
+      const rawRotationDegrees = legacySkybox?.rotationDegrees;
+      const expectedRotationY = typeof rawRotationDegrees === 'number' && Number.isFinite(rawRotationDegrees)
+        ? Math.min(360, Math.max(0, rawRotationDegrees)) * Math.PI / 180
+        : null;
+      if (!legacySkybox || hasExistingSkyboxEntity || next.sceneSettings?.skybox != null || migratedLegacySkyboxEntity
+        || entity.id !== id || entity.isFolder === true || entity.parentId !== null
+        || !Array.isArray(entity.childrenIds) || entity.childrenIds.length !== 0
+        || componentKeys.length !== 2 || !componentKeys.includes('transform') || !componentKeys.includes('skybox')
+        || !['x', 'y', 'z'].every(axis => transform?.position?.[axis] === 0 && transform?.scale?.[axis] === 1)
+        || transform?.rotation?.x !== 0 || transform?.rotation?.z !== 0
+        || typeof rotationY !== 'number' || !Number.isFinite(rotationY)
+        || (expectedRotationY !== null && Math.abs(rotationY - expectedRotationY) > 1e-6)) {
+        rejectUnauthorizedNewEntity();
+      }
+      migratedLegacySkyboxEntity = { id, skybox: components.skybox };
+      authorizedNewEntityIds.add(id);
+      continue;
+    }
+    const key = getClickEventModelResourceKey(components.modelAsset?.sourceUrl);
     if (!key || !missingResourceIds.has(key.split(':').slice(0, 2).join(':')) || !nextDeviceKeys.has(key) || restoredKeys.has(key)
-      || entity.id !== id || entity.parentId !== null || entity.childrenIds?.length !== 0
-      || Object.keys(entity.components).some(component => !['modelAsset', 'transform', 'telemetryBinding'].includes(component))
-      || !['x', 'y', 'z'].every(axis => transform?.position?.[axis] === 0 && transform?.rotation?.[axis] === 0 && transform?.scale?.[axis] === 1)) {
+      || entity.id !== id || entity.parentId !== null
+      || !Array.isArray(entity.childrenIds) || entity.childrenIds.length !== 0
+      || componentKeys.some(component => !['modelAsset', 'transform', 'telemetryBinding'].includes(component))
+      || !isIdentityTransform(components.transform)) {
       throw new Error('发布准备新增了未经原点击设备槽位授权的场景实体。');
     }
     restoredKeys.add(key);
+    authorizedNewEntityIds.add(id);
   }
-  const compare = (before: unknown, after: unknown, location: string): void => {
+  const reparentedExistingPartToFolder = new Map<string, string>();
+  const removedReparentedPartIdsByParentId = new Map<string, Set<string>>();
+  for (const [id, entity] of Object.entries<PublishReferenceEntity>(beforeEntities)) {
+    const partBinding = entity?.components?.devicePartBinding;
+    const hostId = partBinding?.hostEntityId;
+    if (typeof hostId !== 'string') continue;
+    const targetFolderId = newCompositeFolderByHostId.get(hostId);
+    if (!targetFolderId || entity.parentId === targetFolderId) continue;
+    if ((afterEntities[id] as PublishReferenceEntity)?.parentId === targetFolderId) {
+      reparentedExistingPartToFolder.set(id, targetFolderId);
+      if (typeof entity.parentId === 'string') {
+        const removed = removedReparentedPartIdsByParentId.get(entity.parentId) ?? new Set<string>();
+        removed.add(id);
+        removedReparentedPartIdsByParentId.set(entity.parentId, removed);
+      }
+    }
+  }
+  const compare = (before: unknown, after: unknown, location: string, rootEntityId?: string): void => {
     if (location.endsWith('.components.skybox.environment') || location.endsWith('.sceneSettings.skybox.environment')) {
       // 产物可以随已验证的源升级重建；主发布流程仍逐文件核对源 SHA、recipe 和 ENV SHA。
       normalizeSkyboxEnvironmentResource(after);
@@ -181,10 +338,40 @@ export function assertPublishSceneInstanceStatePreserved(previousContent: string
       if (skyboxReference && ['dataPlatformResourceId', 'format'].includes(key)) continue;
       if ((resourceReference && RESOURCE_FIELDS.has(key)) || (key === 'modelArrayInstance' && location.endsWith('.components'))) continue;
       if (reconcileParameters && key === 'parameterValues') continue;
+      if (rootEntityId !== undefined && key === 'parentId') {
+        const expectedParent = newCompositeFolderByHostId.get(rootEntityId) ?? reparentedExistingPartToFolder.get(rootEntityId);
+        if (expectedParent !== undefined && newRecord.parentId === expectedParent) continue;
+      }
+      if (rootEntityId !== undefined && key === 'childrenIds' && Array.isArray(value) && Array.isArray(newRecord.childrenIds)) {
+        const nextChildren: unknown[] = newRecord.childrenIds;
+        const removedParts = removedReparentedPartIdsByParentId.get(rootEntityId);
+        const mappedBefore = value
+          .filter(childId => !(typeof childId === 'string' && removedParts?.has(childId)))
+          .map(childId => typeof childId === 'string' && (beforeEntities[childId] as PublishReferenceEntity | undefined)?.parentId === rootEntityId
+            ? (newCompositeFolderByHostId.get(childId) ?? childId)
+            : childId);
+        const addedParts = addedPartsByFolderId.get(rootEntityId);
+        if (addedParts?.size) {
+          const appended = nextChildren.slice(mappedBefore.length);
+          if (nextChildren.length === mappedBefore.length + addedParts.size
+            && mappedBefore.every((childId, index) => nextChildren[index] === childId)
+            && new Set(appended).size === appended.length
+            && appended.every(childId => typeof childId === 'string' && addedParts.has(childId))) {
+            continue;
+          }
+        } else if (nextChildren.length === mappedBefore.length
+          && mappedBefore.every((childId, index) => nextChildren[index] === childId)) {
+          continue;
+        }
+      }
       compare(value, newRecord[key], `${location}.${key}`);
     }
   };
-  for (const [id, entity] of Object.entries(beforeEntities)) compare(entity, afterEntities[id], `entities.${id}`);
+  for (const [id, entity] of Object.entries(beforeEntities)) compare(entity, afterEntities[id], `entities.${id}`, id);
+  if (migratedLegacySkyboxEntity && legacySkybox) {
+    const { rotationDegrees: _rotationDegrees, ...legacySkyboxFields } = legacySkybox;
+    compare(legacySkyboxFields, migratedLegacySkyboxEntity.skybox, `entities.${migratedLegacySkyboxEntity.id}.components.skybox`);
+  }
   const environment = previous.sceneSettings?.environment;
   if (environment) for (const key of ['transform', 'visible', 'opacity', 'placementMode']) {
     if (environment[key] !== undefined) compare(environment[key], next.sceneSettings?.environment?.[key], `sceneSettings.environment.${key}`);

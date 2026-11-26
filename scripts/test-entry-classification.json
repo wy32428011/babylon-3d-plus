@@ -7465,7 +7465,7 @@
     },
     {
       "file": "tests/editor/clickEventBinding.test.mjs",
-      "sha256": "bebb0cd3a18d65682049be55d828cc5e4683765a39e05e0775bea4f89dda782e",
+      "sha256": "4d5631e3f79c1a7fb334c8cea7439ebe3d6a1df44fc975ce5aa8e5d845e0e377",
       "disposition": "node-contract",
       "domain": "editor",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/clickEventBinding.test.mjs",
@@ -7542,7 +7542,7 @@
     },
     {
       "file": "tests/editor/compositionPackage.test.ts",
-      "sha256": "dbaf160d1e23614e352b6f98af8b582c3e5eeaf1d9ce8b1f5cf5e16621c010af",
+      "sha256": "c37c12e92e2e99d5c3d3c2463dd8c6bcb0c463ce0424aa86ab7e561e44d2d076",
       "disposition": "node-contract",
       "domain": "resources",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/compositionPackage.test.ts",

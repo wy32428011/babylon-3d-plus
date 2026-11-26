@@ -100,6 +100,10 @@ export function restoreSceneLightingBakeAfterMappedRewrite(
     if (!parameterValue && source.thumbnailUrl !== undefined && target.thumbnailUrl === undefined) target.thumbnailUrl = source.thumbnailUrl;
     if (!parameterValue && source.assetId !== undefined && target.assetId !== source.assetId
       && (source.sourceUrl || source.modelAsset)) target.assetId = source.assetId;
+    if (!parameterValue && source.resourceKey === undefined && target.resourceKey !== undefined
+      && source.sourceUrl) delete target.resourceKey;
+    if (!parameterValue && source.localPathSha256 === undefined && target.localPathSha256 !== undefined
+      && source.sourceUrl) delete target.localPathSha256;
     const sourceSnapshot = object(source.sourceSnapshot), targetSnapshot = object(target.sourceSnapshot);
     if (sourceSnapshot.compositionResource !== undefined && targetSnapshot.compositionResource === undefined
       && sourceSnapshot.contentSha256 === targetSnapshot.contentSha256) targetSnapshot.compositionResource = sourceSnapshot.compositionResource;

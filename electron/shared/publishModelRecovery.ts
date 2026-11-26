@@ -1,5 +1,5 @@
 import { collectSceneResourceReferences } from './sceneResourceTraversal.js';
-import { getClickEventModelResourceKey } from './clickEventModelIdentity.js';
+import { getClickEventModelResourceKey, matchesClickEventModelIdentity } from './clickEventModelIdentity.js';
 
 type JsonObject = Record<string, unknown>;
 export type PublishModelReference = { asset: JsonObject; target?: JsonObject; clickTarget: boolean };
@@ -29,7 +29,8 @@ export async function planPublishModelRecovery(
   isAvailable: (asset: JsonObject, reference?: PublishModelReference) => Promise<boolean>,
 ): Promise<PublishModelRecoveryItem[]> {
   const { models, devices } = collectPublishModelReferences(scene);
-  const modelKeys = new Set(models.filter(({ clickTarget }) => clickTarget).map(({ asset }) => publishModelMatchKey(asset.sourceUrl)).filter(Boolean));
+  const clickTargetModels = models.filter(({ clickTarget }) => clickTarget).map(({ asset }) => asset);
+  const modelKeys = new Set(clickTargetModels.map((asset) => publishModelMatchKey(asset.sourceUrl)).filter(Boolean));
   const resourceFiles = new Map<string, Set<string>>();
   for (const asset of [...models.map((reference) => reference.asset), ...devices]) {
     const key = getClickEventModelResourceKey(asset.sourceUrl);
@@ -68,7 +69,10 @@ export async function planPublishModelRecovery(
     if (!available) requireRecovery(asset);
   }
   for (const device of devices) {
-    if (!modelKeys.has(publishModelMatchKey(device.sourceUrl))) requireRecovery(device);
+    if (!modelKeys.has(publishModelMatchKey(device.sourceUrl))
+      && !clickTargetModels.some((asset) => matchesClickEventModelIdentity(asset, device))) {
+      requireRecovery(device);
+    }
   }
   return [...plan.values()];
 }

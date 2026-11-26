@@ -939,8 +939,12 @@ export const createSceneDocumentSlice: EditorSlice<
       const result = executeCommand(state.scene, state.history, command);
 
       const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
+      const compositionEditRootId = state.compositionEditRootId && result.scene.entities[state.compositionEditRootId]?.composition
+        ? state.compositionEditRootId
+        : null;
       return {
         ...result,
+        compositionEditRootId,
         hierarchySelectionIds,
         ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
         logs: prependLog(state.logs, `${command.label}: ${ungroupingIds.length} 个分组`),
@@ -1754,8 +1758,12 @@ export const createSceneDocumentSlice: EditorSlice<
       if (result.history === state.history) return state;
 
       const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
+      const compositionEditRootId = state.compositionEditRootId && result.scene.entities[state.compositionEditRootId]?.composition
+        ? state.compositionEditRootId
+        : null;
       return {
         ...result,
+        compositionEditRootId,
         hierarchySelectionIds,
         selectedAutoPatrolWaypointId: sanitizeSelectedAutoPatrolWaypointId(
           result.scene,
@@ -1777,8 +1785,12 @@ export const createSceneDocumentSlice: EditorSlice<
       if (result.history === state.history) return state;
 
       const hierarchySelectionIds = result.scene.selectedEntityId ? [result.scene.selectedEntityId] : [];
+      const compositionEditRootId = state.compositionEditRootId && result.scene.entities[state.compositionEditRootId]?.composition
+        ? state.compositionEditRootId
+        : null;
       return {
         ...result,
+        compositionEditRootId,
         hierarchySelectionIds,
         selectedAutoPatrolWaypointId: sanitizeSelectedAutoPatrolWaypointId(
           result.scene,

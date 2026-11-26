@@ -487,3 +487,104 @@ test('中台设备类型经过拖拽、实体创建、场景往返、刷新与�
   assert.equal(legacy.entities[entity.id].components.modelAsset.deviceType, undefined);
   assert.equal(assets.decodeModelAssetDragPayload(JSON.stringify({ ...source, deviceType: '输送机' })).deviceType, undefined);
 });
+
+test('组合模型在第二场景解除组合并添加点击事件后，中台与本地模型均可正常触发点击，且清理残留 compositionNodeId', async (t) => {
+  const modules = [
+    '/src/editor/composition/composition.ts',
+    '/src/editor/model/SceneDocument.ts',
+    '/src/editor/project/SceneSerializer.ts',
+    '/src/editor/store/slices/sceneHierarchyOperations.ts',
+    '/src/editor/model/clickEventBinding.ts',
+    '/electron/shared/clickEventModelIdentity.ts',
+  ];
+  const server = await createP4SsrTestModules(modules);
+  t.after(() => server.close());
+  const [compMod, docMod, serializerMod, hierarchyMod, clickMod, identityMod] = await Promise.all(modules.map((p) => server.ssrLoadModule(p)));
+
+  const sourceKey = 'a'.repeat(64);
+  const platformFile = 'D:/workspace/SharedResources/Assets/Models/Model-2080101858762530818-双立柱堆垛机/stacker.glb';
+  const localFile = 'D:/workspace/Projects/P1/Assets/Models/LocalConveyor/conveyor.glb';
+  const unrelatedFile = 'D:/workspace/Projects/P1/Assets/Models/Unrelated/other.glb';
+  const toUrl = (f) => 'editor-asset://local/' + encodeURIComponent(f);
+
+  // 场景一：放置中台模型与本地模型并采集为组合模板，模拟物化为固定包路径（models/0、models/1）并移除 dataPlatformModel
+  const scene1 = docMod.createEmptySceneDocument('场景一');
+  const m1 = docMod.createModelEntity(platformFile, toUrl(platformFile), '堆垛机');
+  m1.components.modelAsset.dataPlatformModel = { sourceKey, kind: 'model', resourceId: '2080101858762530818', modelPath: 'stacker.glb' };
+  const m2 = docMod.createModelEntity(localFile, toUrl(localFile), '输送机');
+  scene1.entities[m1.id] = m1;
+  scene1.entities[m2.id] = m2;
+  scene1.entityIds.push(m1.id, m2.id);
+
+  const captured = compMod.captureComposition(scene1, [m1.id, m2.id], '产线组合');
+  const packagePath = 'D:/workspace/SharedResources/Assets/Compositions/comp-1/rev-1';
+  const contentSha256 = 'b'.repeat(64);
+  const materializedDef = structuredClone(captured.definition);
+  materializedDef.nodes.forEach((node, index) => {
+    const asset = node.components.modelAsset;
+    const originModel = identityMod.resolveCompositionOriginModelIdentity(asset);
+    const fileName = index === 0 ? 'stacker.glb' : 'conveyor.glb';
+    const packedPath = `${packagePath}/models/${index}/${fileName}`;
+    delete asset.dataPlatformModel;
+    asset.sourcePath = packedPath;
+    asset.sourceUrl = toUrl(packedPath);
+    asset.sourceSnapshot = {
+      contentSha256,
+      composition: true,
+      compositionResource: { schemaVersion: 1, resourceType: 'ENV_MODEL', libraryId: 'comp-1', revision: 'rev-1', packagePath },
+      ...(originModel ? { originModel } : {}),
+    };
+  });
+
+  // 场景二：放置两份组合实例并解除组合
+  const placed1 = compMod.instantiateComposition(materializedDef, { x: 0, y: 0, z: 0 }, {
+    libraryId: 'comp-1', revision: 'rev-1', resourceType: 'ENV_MODEL', packagePath, contentSha256,
+  });
+  const placed2 = compMod.instantiateComposition(materializedDef, { x: 10, y: 0, z: 0 }, {
+    libraryId: 'comp-1', revision: 'rev-1', resourceType: 'ENV_MODEL', packagePath, contentSha256,
+  });
+  let scene2 = docMod.createEmptySceneDocument('场景二');
+  for (const e of [placed1.root, ...placed1.entities, placed2.root, ...placed2.entities]) {
+    scene2.entities[e.id] = e;
+    scene2.entityIds.push(e.id);
+  }
+  const unrelated = docMod.createModelEntity(unrelatedFile, toUrl(unrelatedFile), '无关设备');
+  scene2.entities[unrelated.id] = unrelated;
+  scene2.entityIds.push(unrelated.id);
+
+  scene2 = hierarchyMod.ungroupFoldersInScene(scene2, [placed1.root.id, placed2.root.id]);
+  for (const id of [...placed1.entities, ...placed2.entities].map((e) => e.id)) {
+    assert.equal(scene2.entities[id].parentId, null);
+    assert.equal(scene2.entities[id].compositionNodeId, undefined, '解组后必须清理残留 compositionNodeId');
+  }
+  // 解组后的两份同源组合实例再次选中重新组合不报重复节点错误，且保留 originModel
+  const regrouped = compMod.captureComposition(scene2, [placed1.entities[0].id, placed2.entities[0].id], '二次组合');
+  assert.deepEqual(
+    identityMod.resolveCompositionOriginModelIdentity(regrouped.definition.nodes[0].components.modelAsset),
+    materializedDef.nodes[0].components.modelAsset.sourceSnapshot.originModel,
+  );
+
+  // 添加来自模型库的点击事件绑定（中台模型 + 本地模型）
+  const binding = docMod.createClickEventBindingEntity();
+  binding.components.clickEventBinding = {
+    deviceSlots: [
+      { id: 'slot-1', deviceType: clickMod.createClickEventBindingDeviceTypeFromAsset({
+        id: 'asset-platform', name: 'stacker.glb', path: platformFile, sourceUrl: toUrl(platformFile),
+        kind: 'model', libraryKind: 'model', dataPlatformSourceKey: sourceKey, dataPlatformResourceId: '2080101858762530818',
+      }) },
+      { id: 'slot-2', deviceType: clickMod.createClickEventBindingDeviceTypeFromAsset({
+        id: 'asset-local', name: 'conveyor.glb', path: localFile, sourceUrl: toUrl(localFile),
+        kind: 'model', libraryKind: 'model',
+      }) },
+    ],
+    events: [{ id: 'ev-1', eventType: 'click', effects: ['highlight', 'focus'] }],
+  };
+  scene2.entities[binding.id] = binding;
+  scene2.entityIds.push(binding.id);
+
+  // 保存重载后仍能正常命中
+  const reloaded = serializerMod.deserializeScene(serializerMod.serializeScene(scene2));
+  assert.equal(clickMod.resolveClickEventBindingClick(reloaded, placed1.entities[0].id).kind, 'trigger', '解组后的中台模型必须触发点击事件');
+  assert.equal(clickMod.resolveClickEventBindingClick(reloaded, placed1.entities[1].id).kind, 'trigger', '解组后的本地模型必须触发点击事件');
+  assert.equal(clickMod.resolveClickEventBindingClick(reloaded, unrelated.id).kind, 'ignore', '未绑定模型仍保持 ignore');
+});
