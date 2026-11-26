@@ -21,7 +21,7 @@ try {
   if (path.dirname(moduleRoot) !== path.resolve('node_modules') || !path.basename(moduleRoot).startsWith('.publish-model-recovery-')) throw new Error('测试目录无效');
   await rm(moduleRoot, { recursive: true, force: true });
 }
-const [{ repairPublishSceneModels }, document, { serializeScene, deserializeScene }, click] = modules;
+const [{ repairPublishSceneModels, applyCompositionOriginBackfills }, document, { serializeScene, deserializeScene }, click] = modules;
 const { applyPublishModelIdentityReplacements } = modules[4];
 const { assertPublishSceneParameterTemplates, assertPublishSceneInstanceStatePreserved } = modules[5];
 const { planSceneModelUpdates } = modules[6];
@@ -473,5 +473,55 @@ test('跨中台 sourceKey 组合固定包成员不阻断点击设备补齐校验
     () => assertPublishSceneInstanceStatePreserved(serializeScene(sameSourceScene), serializeScene(repaired.scene)),
     /未经原点击/,
   );
+});
+
+test('旧场景中已解组且缺 originModel 的组合模型通过回填绑定点击事件，不在原点新增模型', () => {
+  const { scene, binding } = fixture(false);
+  const sourceKey = 'd'.repeat(64);
+  const compUrl = 'editor-asset://local/' + encodeURIComponent('C:/shared/Assets/Compositions/c9/r9/models/0/model.glb');
+  const ungrouped = document.createModelEntity('C:/shared/Assets/Compositions/c9/r9/models/0/model.glb', compUrl, '已解组堆垛机');
+  ungrouped.components.transform.position = { x: 18, y: 0, z: -7 };
+  ungrouped.components.modelAsset!.assetCode = 'STACKER-09';
+  ungrouped.components.modelAsset!.sourceSnapshot = {
+    contentSha256: 'e'.repeat(64),
+    composition: true,
+  };
+  scene.entities[ungrouped.id] = ungrouped;
+  scene.entityIds.push(ungrouped.id);
+  binding.components.clickEventBinding!.deviceSlots[0].deviceType!.dataPlatformModel = {
+    sourceKey,
+    kind: 'model',
+    resourceId: '12',
+    modelPath: 'model.glb',
+  };
+
+  // 回填前缺少 originModel 且无高熵 revision 时点击不命中；回填后直接绑定解组模型，不新增实体。
+  assert.equal(click.findClickEventBindingForEntity(scene, ungrouped.id), null);
+  const previous = serializeScene(scene);
+  const originModel = {
+    dataPlatformModel: { sourceKey, kind: 'model' as const, resourceId: '12', modelPath: 'model.glb' },
+    resourceKey: 'model:12:model.glb',
+  };
+  const repaired = repairPublishSceneModels(scene, {
+    replacements: [],
+    compositionOriginBackfills: [{ entityId: ungrouped.id, originModel }],
+  });
+  assert.equal(repaired.addedCount, 0);
+  assert.equal(repaired.restoredCount, 0);
+  assert.equal(repaired.reboundCount, 0);
+  assert.equal(repaired.backfilledCount, 1);
+  assert.equal(repaired.scene.entityIds.length, scene.entityIds.length);
+  assert.deepEqual(repaired.scene.entities[ungrouped.id].components.transform.position, { x: 18, y: 0, z: -7 });
+  assert.equal(repaired.scene.entities[ungrouped.id].components.modelAsset?.assetCode, 'STACKER-09');
+  assert.equal(click.findClickEventBindingForEntity(repaired.scene, ungrouped.id)?.bindingEntityId, binding.id);
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(previous, serializeScene(repaired.scene)));
+
+  // 独立 applyCompositionOriginBackfills 同样用于非入口场景且幂等。
+  const once = applyCompositionOriginBackfills(scene, [{ entityId: ungrouped.id, originModel }]);
+  assert.equal(once.backfilledCount, 1);
+  assert.equal(click.findClickEventBindingForEntity(once.scene, ungrouped.id)?.bindingEntityId, binding.id);
+  const twice = applyCompositionOriginBackfills(once.scene, [{ entityId: ungrouped.id, originModel }]);
+  assert.equal(twice.backfilledCount, 0);
+  assert.equal(twice.scene, once.scene);
 });
 

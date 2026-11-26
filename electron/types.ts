@@ -303,6 +303,7 @@ export type DigitalTwinModelRecoveryRequest = {
 export type DigitalTwinModelRecoveryResult = {
   replacements: Array<{ sourceUrls: string[]; asset: ProjectModelAssetEntry }>;
   skyboxReplacements?: Array<{ entityId: string | null; sourceUrl: string; skybox: Record<string, unknown> }>;
+  compositionOriginBackfills?: Array<{ entityId: string; originModel: import('./shared/clickEventModelIdentity.js').CompositionOriginModelIdentity }>;
 };
 
 export type DigitalTwinPublishCancelRequest = {

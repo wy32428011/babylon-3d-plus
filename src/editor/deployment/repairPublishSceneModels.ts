@@ -1,6 +1,6 @@
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../../../electron/types';
 import { collectPublishModelReferences, publishModelMatchKey } from '../../../electron/shared/publishModelRecovery';
-import { matchesClickEventModelIdentity } from '../../../electron/shared/clickEventModelIdentity';
+import { matchesClickEventModelIdentity, normalizeCompositionOriginModelIdentity } from '../../../electron/shared/clickEventModelIdentity';
 import { createModelEntity, type SceneDocument } from '../model/SceneDocument';
 import { normalizeModelParameterConfig, restoreModelParameterValues } from '../model/modelParameters';
 import { createModelLengthUnitInfo } from '../model/sceneUnits';
@@ -42,16 +42,43 @@ function replaceResourcePaths(owner: Record<string, unknown>, asset: ProjectMode
   }
 }
 
+/** 仅向缺少 originModel 的组合固定包成员补齐原始模型身份，不改动实例变换、资产编号或新增实体。 */
+export function applyCompositionOriginBackfills(
+  scene: SceneDocument,
+  backfills: DigitalTwinModelRecoveryResult['compositionOriginBackfills'],
+): { scene: SceneDocument; backfilledCount: number } {
+  if (!backfills?.length) return { scene, backfilledCount: 0 };
+  let next: SceneDocument | null = null;
+  let backfilledCount = 0;
+  for (const item of backfills) {
+    const normalized = normalizeCompositionOriginModelIdentity(item?.originModel);
+    if (!normalized || typeof item?.entityId !== 'string') continue;
+    const entity = (next ?? scene).entities[item.entityId];
+    const snapshot = entity?.components.modelAsset?.sourceSnapshot;
+    if (!snapshot?.composition || snapshot.originModel) continue;
+    if (!next) next = structuredClone(scene);
+    next.entities[item.entityId].components.modelAsset!.sourceSnapshot = {
+      ...next.entities[item.entityId].components.modelAsset!.sourceSnapshot!,
+      originModel: normalized,
+    };
+    backfilledCount += 1;
+  }
+  return { scene: next ?? scene, backfilledCount };
+}
+
 /** 保留实例 ID、位置、参数和事件；只有没有场景目标的设备类型才新增一个真实模型。 */
 export function repairPublishSceneModels(scene: SceneDocument, recovery: DigitalTwinModelRecoveryResult): {
-  scene: SceneDocument; restoredCount: number; addedCount: number; reboundCount: number; warnings: string[];
+  scene: SceneDocument; restoredCount: number; addedCount: number; reboundCount: number; backfilledCount: number; warnings: string[];
 } {
+  const backfilled = applyCompositionOriginBackfills(scene, recovery.compositionOriginBackfills);
+  const baseScene = backfilled.scene;
+  const backfilledCount = backfilled.backfilledCount;
   const identityReplacements = recovery.replacements.filter(({ sourceUrls, asset }) => sourceUrls.some(url => {
     const oldKey = publishModelMatchKey(url).split(':').slice(0, 2).join(':');
     const newKey = publishModelMatchKey(asset.sourceUrl).split(':').slice(0, 2).join(':');
     return oldKey !== newKey;
   }));
-  const identitySource = identityReplacements.length ? structuredClone(scene) : scene;
+  const identitySource = identityReplacements.length ? structuredClone(baseScene) : baseScene;
   if (identityReplacements.length) {
     const migratedUrls = new Set(identityReplacements.flatMap(item => item.sourceUrls));
     for (const reference of collectPublishModelReferences(identitySource).models) {
@@ -65,7 +92,7 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
   }
   const next: SceneDocument = identityReplacements.length
     ? JSON.parse(applyPublishModelIdentityReplacements(JSON.stringify({ scene: identitySource }), { replacements: identityReplacements })).scene
-    : structuredClone(scene);
+    : structuredClone(baseScene);
   const { models, devices } = collectPublishModelReferences(next);
   const byOriginalUrl = new Map(recovery.replacements.flatMap(item => [
     ...item.sourceUrls, ...(identityReplacements.includes(item) ? [item.asset.sourceUrl] : []),
@@ -158,5 +185,12 @@ export function repairPublishSceneModels(scene: SceneDocument, recovery: Digital
       reboundCount += 1;
     }
   }
-  return { scene: restoredCount || addedCount || reboundCount ? next : scene, restoredCount, addedCount, reboundCount, warnings: [...warnings] };
+  return {
+    scene: restoredCount || addedCount || reboundCount || backfilledCount ? next : scene,
+    restoredCount,
+    addedCount,
+    reboundCount,
+    backfilledCount,
+    warnings: [...warnings],
+  };
 }

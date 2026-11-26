@@ -1,5 +1,7 @@
 const EDITOR_ASSET_URL_PREFIX = 'editor-asset://local/';
 const LOWERCASE_SHA256 = /^[0-9a-f]{64}$/;
+const HEX_SHA256 = /^[0-9a-f]{64}$/i;
+const PROJECT_IMPORT_ASSET_REVISION = /^[0-9a-z]{1,24}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const RESOURCE_ID_PATTERN = /^[1-9]\d{0,63}$/;
 const INVALID_MODEL_PATH_CHARS = '#:?\\';
 
@@ -27,6 +29,7 @@ export type CompositionOriginModelIdentity = {
   dataPlatformModel?: CompositionOriginDataPlatformModel;
   resourceKey?: string;
   localPathSha256?: string;
+  portablePathSha256?: string;
 };
 
 const SHA256_K = new Uint32Array([
@@ -159,6 +162,35 @@ export function getLocalModelPathSha256(sourceUrl: unknown): string | null {
   return sha256Utf8Hex(modelPath.toLowerCase());
 }
 
+/** 跨项目/共享库复用的本地模型相对路径（Assets/Models/...）SHA-256，不含盘符与项目根路径。 */
+export function getPortableLocalModelPathSha256(sourceUrl: unknown): string | null {
+  if (getClickEventModelResourceKey(sourceUrl) !== null) return null;
+  const modelPath = decodeAuthorizedAssetPath(sourceUrl);
+  if (!modelPath || /(?:^|\/)assets\/compositions\//i.test(modelPath)) return null;
+  const match = /(?:^|\/)(assets\/models\/.+\.(?:glb|gltf))$/i.exec(modelPath);
+  return match ? sha256Utf8Hex(match[1].toLowerCase()) : null;
+}
+
+/** 判断模型资产是否来自组合固定包（含已解组的成员，以及 DIST 导出后保留 composition: true 标记的成员）。 */
+export function isCompositionMemberAsset(asset: unknown): boolean {
+  if (!isPlainObject(asset)) return false;
+  const snapshot = isPlainObject(asset.sourceSnapshot) ? asset.sourceSnapshot : null;
+  if (snapshot?.composition === true) return true;
+  const decodedPath = decodeAuthorizedAssetPath(asset.sourceUrl);
+  return Boolean(decodedPath && /(?:^|\/)assets\/compositions\//i.test(decodedPath));
+}
+
+/** 规范化可用于历史组合无 originModel 兜底对齐的高熵版本标识（64 位内容 SHA-256 或带 UUID 的导入修订）。 */
+export function normalizeStableClickEventAssetRevision(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (HEX_SHA256.test(trimmed) || PROJECT_IMPORT_ASSET_REVISION.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return null;
+}
+
 /** 校验并规范化组合固定包成员的原始模型类型标识。 */
 export function normalizeCompositionOriginModelIdentity(value: unknown): CompositionOriginModelIdentity | null {
   if (!isPlainObject(value)) return null;
@@ -179,14 +211,20 @@ export function normalizeCompositionOriginModelIdentity(value: unknown): Composi
     if (typeof value.localPathSha256 !== 'string' || !LOWERCASE_SHA256.test(value.localPathSha256)) return null;
     localPathSha256 = value.localPathSha256;
   }
+  let portablePathSha256: string | undefined;
+  if (value.portablePathSha256 !== undefined) {
+    if (typeof value.portablePathSha256 !== 'string' || !LOWERCASE_SHA256.test(value.portablePathSha256)) return null;
+    portablePathSha256 = value.portablePathSha256;
+  }
   if (dataPlatformModel && resourceKey && formatDataPlatformResourceKey(dataPlatformModel) !== resourceKey) {
     return null;
   }
-  if (!dataPlatformModel && !resourceKey && !localPathSha256) return null;
+  if (!dataPlatformModel && !resourceKey && !localPathSha256 && !portablePathSha256) return null;
   return {
     ...(dataPlatformModel ? { dataPlatformModel } : {}),
     ...(resourceKey ? { resourceKey } : {}),
     ...(localPathSha256 ? { localPathSha256 } : {}),
+    ...(portablePathSha256 ? { portablePathSha256 } : {}),
   };
 }
 
@@ -207,12 +245,17 @@ export function resolveCompositionOriginModelIdentity(asset: unknown): Compositi
       ...(resourceKey ? { resourceKey } : {}),
     };
   }
-  if (existing?.localPathSha256) {
-    return { localPathSha256: existing.localPathSha256 };
-  }
   const decodedPath = decodeAuthorizedAssetPath(asset.sourceUrl);
-  if (decodedPath && !/(?:^|\/)assets\/compositions\//i.test(decodedPath)) {
-    return { localPathSha256: sha256Utf8Hex(decodedPath.toLowerCase()) };
+  const isDirectLocal = Boolean(decodedPath && !/(?:^|\/)assets\/compositions\//i.test(decodedPath));
+  const localPathSha256 = existing?.localPathSha256
+    ?? (isDirectLocal ? sha256Utf8Hex(decodedPath!.toLowerCase()) : undefined);
+  const portablePathSha256 = existing?.portablePathSha256
+    ?? (isDirectLocal ? getPortableLocalModelPathSha256(asset.sourceUrl) ?? undefined : undefined);
+  if (localPathSha256 || portablePathSha256) {
+    return {
+      ...(localPathSha256 ? { localPathSha256 } : {}),
+      ...(portablePathSha256 ? { portablePathSha256 } : {}),
+    };
   }
   return null;
 }
@@ -237,15 +280,27 @@ type ClickEventComparableIdentity = {
   dataPlatformModel: CompositionOriginDataPlatformModel | null;
   resourceKey: string | null;
   localPathSha256: string | null;
+  portablePathSha256: string | null;
+  assetRevision: string | null;
+  isCompositionMember: boolean;
 };
 
 function readClickEventComparableIdentity(asset: unknown, isDeviceType: boolean): ClickEventComparableIdentity {
   if (!isPlainObject(asset)) {
-    return { sourceUrl: null, dataPlatformModel: null, resourceKey: null, localPathSha256: null };
+    return {
+      sourceUrl: null,
+      dataPlatformModel: null,
+      resourceKey: null,
+      localPathSha256: null,
+      portablePathSha256: null,
+      assetRevision: null,
+      isCompositionMember: false,
+    };
   }
   const sourceUrl = typeof asset.sourceUrl === 'string' && asset.sourceUrl ? asset.sourceUrl : null;
   const snapshot = !isDeviceType && isPlainObject(asset.sourceSnapshot) ? asset.sourceSnapshot : null;
   const origin = snapshot ? normalizeCompositionOriginModelIdentity(snapshot.originModel) : null;
+  const isCompositionMember = !isDeviceType && isCompositionMemberAsset(asset);
   const dataPlatformModel = normalizeOriginDataPlatformModel(asset.dataPlatformModel) ?? origin?.dataPlatformModel ?? null;
   const explicitResourceKey = isDeviceType ? normalizeClickEventModelResourceKey(asset.resourceKey) : null;
   const resourceKey = getClickEventModelResourceKey(sourceUrl)
@@ -256,10 +311,21 @@ function readClickEventComparableIdentity(asset: unknown, isDeviceType: boolean)
   const explicitLocalSha = isDeviceType && typeof asset.localPathSha256 === 'string' && LOWERCASE_SHA256.test(asset.localPathSha256)
     ? asset.localPathSha256
     : null;
-  const localPathSha256 = resourceKey === null
-    ? (isDeviceType ? (explicitLocalSha ?? getLocalModelPathSha256(sourceUrl)) : (origin?.localPathSha256 ?? getLocalModelPathSha256(sourceUrl)))
+  const explicitPortableSha = isDeviceType && typeof asset.portablePathSha256 === 'string' && LOWERCASE_SHA256.test(asset.portablePathSha256)
+    ? asset.portablePathSha256
     : null;
-  return { sourceUrl, dataPlatformModel, resourceKey, localPathSha256 };
+  const localPathSha256 = resourceKey === null
+    ? (isDeviceType
+      ? (explicitLocalSha ?? getLocalModelPathSha256(sourceUrl))
+      : (origin?.localPathSha256 ?? (isCompositionMember ? null : getLocalModelPathSha256(sourceUrl))))
+    : null;
+  const portablePathSha256 = resourceKey === null
+    ? (isDeviceType
+      ? (explicitPortableSha ?? getPortableLocalModelPathSha256(sourceUrl))
+      : (origin?.portablePathSha256 ?? (isCompositionMember ? null : getPortableLocalModelPathSha256(sourceUrl))))
+    : null;
+  const assetRevision = normalizeStableClickEventAssetRevision(asset.assetRevision);
+  return { sourceUrl, dataPlatformModel, resourceKey, localPathSha256, portablePathSha256, assetRevision, isCompositionMember };
 }
 
 /**
@@ -267,7 +333,8 @@ function readClickEventComparableIdentity(asset: unknown, isDeviceType: boolean)
  * 1) 双方均有中台来源键且不同 → 拒绝跨中台误匹配；
  * 2) 精确 sourceUrl 一致 → 命中；
  * 3) 中台资源键（含组合固定包保留的 originModel）一致 → 命中；
- * 4) 非中台本地模型通过组合固定包保留的规范路径 SHA-256 对齐 → 命中。
+ * 4) 非中台本地模型通过组合固定包保留的规范路径或相对 Assets/Models 路径 SHA-256 对齐 → 命中；
+ * 5) 修复前已保存/已解组且缺少 originModel 的组合固定包成员，通过高熵内容修订（64 位 SHA-256 或带 UUID 导入修订）对齐 → 命中。
  */
 export function matchesClickEventModelIdentity(modelAsset: unknown, deviceType: unknown): boolean {
   const model = readClickEventComparableIdentity(modelAsset, false);
@@ -278,8 +345,16 @@ export function matchesClickEventModelIdentity(modelAsset: unknown, deviceType: 
   }
   if (model.sourceUrl && device.sourceUrl && model.sourceUrl === device.sourceUrl) return true;
   if (model.resourceKey !== null && device.resourceKey !== null && model.resourceKey === device.resourceKey) return true;
-  if (model.resourceKey === null && device.resourceKey === null
-    && model.localPathSha256 !== null && model.localPathSha256 === device.localPathSha256) {
+  if (model.resourceKey === null && device.resourceKey === null) {
+    if (model.localPathSha256 !== null && model.localPathSha256 === device.localPathSha256) return true;
+    if (model.portablePathSha256 !== null && model.portablePathSha256 === device.portablePathSha256) return true;
+  }
+  if (model.isCompositionMember
+    && model.resourceKey === null
+    && model.localPathSha256 === null
+    && model.portablePathSha256 === null
+    && model.assetRevision !== null
+    && model.assetRevision === device.assetRevision) {
     return true;
   }
   return false;

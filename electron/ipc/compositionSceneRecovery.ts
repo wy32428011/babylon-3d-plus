@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { CompositionLibraryEntry, CompositionInstance } from '../shared/compositionTypes.js';
-import { compositionHash, compositionRoot, materializeComposition, readCompositionIndex } from './compositionPackage.js';
+import { compositionHash, compositionRoot, materializeComposition, readCompositionIndex, resolveLegacyCompositionMemberOriginModels } from './compositionPackage.js';
 import { extractCompositionArchive, readCompositionResponse } from './compositionRemote.js';
 import { normalizeDataPlatformSourceUrl } from './dataPlatformEnvironmentContract.js';
 import { decodeAssetUrl, encodeAssetUrl } from './assetRegistry.js';
@@ -125,6 +125,14 @@ export async function recoverSceneCompositions(scene:unknown,sharedRoot:string,p
         currentSnapshot.compositionResource={schemaVersion:1,resourceType:'ENV_MODEL',libraryId:target.libraryId,resourceId:target.resourceId,revision:target.revision,sourceKey:target.sourceKey,packagePath:target.packagePath};
       }
     }catch(error){signal.throwIfAborted();issues.push({resourceKind:'other',resourceId:source.resourceId,message:'组合“'+String(root.name)+'”：'+(error instanceof Error?error.message:String(error))});}
+  }
+  const originBackfills = await resolveLegacyCompositionMemberOriginModels(result, { sharedResourcesRoot: sharedRoot, projectRoot });
+  for (const { entityId, originModel } of originBackfills) {
+    const entity = entities[entityId];
+    const parts = object(entity?.components) ? entity.components as Json : null;
+    const model = object(parts?.modelAsset) ? parts.modelAsset as Json : null;
+    const saved = object(model?.sourceSnapshot) ? model.sourceSnapshot as Json : null;
+    if (saved && saved.composition === true && !saved.originModel) saved.originModel = originModel;
   }
   if(restoreLighting&&issues.length===0&&!restoreLighting(result))issues.push({resourceKind:'other',message:'组合资源恢复后与原光照烘焙不等价，旧结果已保留为过期。'});
   return {scene:result,issues};

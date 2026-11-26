@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   getClickEventModelResourceKey,
   getLocalModelPathSha256,
+  getPortableLocalModelPathSha256,
   matchesClickEventModelIdentity,
   normalizeCompositionOriginModelIdentity,
   sha256Utf8Hex,
@@ -87,4 +88,66 @@ test('组合固定包 originModel 校验与点击事件匹配（中台、跨中�
     { sourceUrl: compUrl, sourceSnapshot: { contentSha256: 'e'.repeat(64), composition: true, originModel: { resourceKey: 'model:123:parts/stacker.glb' } } },
     { sourceUrl: url('project/assets/models/0-111111/stacker.glb'), resourceKey: 'model:123:parts/stacker.glb' },
   ), true, 'DIST 导出的旧版中台槽位应通过 resourceKey 命中其他组合副本');
+});
+
+test('跨工程本地模型 portablePathSha256 与旧版缺 originModel 解组成员高熵 assetRevision 对齐', () => {
+  const compUrl = url('D:/workspace/SharedResources/Assets/Compositions/comp-2/rev-2/models/0/conveyor.glb');
+  const projectAUrl = url('D:/workspace/Projects/ProjectA/Assets/Models/Line/conveyor.glb');
+  const projectBUrl = url('E:/other/Projects/ProjectB/Assets/Models/Line/conveyor.glb');
+  const portableSha = getPortableLocalModelPathSha256(projectAUrl);
+  assert.ok(portableSha);
+  assert.equal(portableSha, getPortableLocalModelPathSha256(projectBUrl));
+
+  // 场景 1 组合保存在 ProjectA，场景 2 在 ProjectB 解组后绑定本地模型库同相对路径模型。
+  const compPortableAsset = {
+    sourceUrl: compUrl,
+    sourceSnapshot: {
+      contentSha256: 'f'.repeat(64),
+      composition: true,
+      originModel: {
+        localPathSha256: getLocalModelPathSha256(projectAUrl)!,
+        portablePathSha256: portableSha,
+      },
+    },
+  };
+  assert.equal(matchesClickEventModelIdentity(compPortableAsset, { sourceUrl: projectBUrl }), true);
+  assert.equal(matchesClickEventModelIdentity(compPortableAsset, {
+    sourceUrl: url('project/assets/models/Line-123456/conveyor.glb'),
+    portablePathSha256: portableSha,
+  }), true, 'DIST 导出的本地槽位应通过 portablePathSha256 命中跨工程同源组合副本');
+
+  // 旧版已解组组合固定包成员缺少 originModel 时，允许按高熵内容修订对齐，但拒绝低熵版本字符串与非组合成员误匹配。
+  const shaRevision = '1234567890abcdef'.repeat(4);
+  const uuidRevision = 'm8x1k2-123e4567-e89b-12d3-a456-426614174000';
+  const legacyCompMemberSha = {
+    sourceUrl: compUrl,
+    assetRevision: shaRevision,
+    sourceSnapshot: { contentSha256: '9'.repeat(64), composition: true },
+  };
+  const legacyCompMemberUuid = {
+    sourceUrl: compUrl,
+    assetRevision: uuidRevision,
+    sourceSnapshot: { contentSha256: '8'.repeat(64), composition: true },
+  };
+  const legacyCompMemberWeak = {
+    sourceUrl: compUrl,
+    assetRevision: 'v1',
+    sourceSnapshot: { contentSha256: '7'.repeat(64), composition: true },
+  };
+  assert.equal(matchesClickEventModelIdentity(legacyCompMemberSha, {
+    sourceUrl: url('D:/workspace/SharedResources/Assets/Models/Model-88/conveyor.glb'),
+    assetRevision: shaRevision,
+  }), true);
+  assert.equal(matchesClickEventModelIdentity(legacyCompMemberUuid, {
+    sourceUrl: projectBUrl,
+    assetRevision: uuidRevision,
+  }), true);
+  assert.equal(matchesClickEventModelIdentity(legacyCompMemberWeak, {
+    sourceUrl: projectBUrl,
+    assetRevision: 'v1',
+  }), false, '低熵 revision 不得用于点击事件兜底匹配');
+  assert.equal(matchesClickEventModelIdentity(
+    { sourceUrl: url('D:/workspace/Projects/P1/Assets/Models/A/a.glb'), assetRevision: shaRevision },
+    { sourceUrl: url('D:/workspace/Projects/P1/Assets/Models/B/b.glb'), assetRevision: shaRevision },
+  ), false, '非组合固定包普通模型不得仅凭 assetRevision 跨路径误匹配');
 });

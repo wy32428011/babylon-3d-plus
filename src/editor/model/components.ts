@@ -494,6 +494,8 @@ export type ClickEventBindingDeviceType = {
   resourceKey?: string;
   /** 发布导出场景同时存在普通本地模型与同源组合固定包副本时，保留原本地路径摘要供运行态对齐。 */
   localPathSha256?: string;
+  /** 跨项目或工程/共享库复用的本地模型保留相对 Assets/Models 路径摘要供运行态对齐。 */
+  portablePathSha256?: string;
 };
 
 /** 设备类型列表单元；deviceType 为 null 表示待配置的空槽，从模型库拖入后填充。 */
