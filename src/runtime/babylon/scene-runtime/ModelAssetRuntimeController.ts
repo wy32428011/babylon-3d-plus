@@ -521,6 +521,9 @@ export class ModelAssetRuntimeController {
     this.syncModelAssetExternalScripts(modelAsset, model, (current) => this.dependencies.readiness.loadDiagnostics.measure('modelScriptRefresh', () => {
       const latestEntity = current.entitySnapshot ?? entity;
       this.refreshModelEntityMeshes(latestEntity, current);
+      if (!this.dependencies.telemetry.telemetryPreviewActive) {
+        this.dependencies.telemetry.specializedTelemetryRuntime.applyRobotJointCalibration(current);
+      }
       this.dependencies.arrays.syncModelArrayBatch(latestEntity, current);
       this.dependencies.arrays.syncModelArrayTelemetryProxies();
       this.applyModelInteractivity(current, latestEntity.id);

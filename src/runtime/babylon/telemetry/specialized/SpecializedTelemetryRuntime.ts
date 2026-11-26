@@ -90,6 +90,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     return { moving: [], fixed: [], known: false };
   }
 
+  applyRobotJointCalibration(model: ModelRuntimeEntry): void {
+    if (isRobotRuntimeModel(model)) this.robotDriver.applyCalibrationToModel(model);
+  }
+
   readonly scene: Scene;
   readonly state: SpecializedTelemetrySharedState;
   readonly host: SpecializedTelemetryHost;

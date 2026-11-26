@@ -18,8 +18,8 @@ import {
   parseDeviceTelemetryMessage,
   type DeviceTelemetrySnapshot,
 } from '../../src/runtime/mqtt/deviceTelemetry';
-import { RobotTelemetryDriver, readRobotArmAngles } from '../../src/runtime/babylon/telemetry/specialized/robotDriver';
-import { RobotJointDebugSystem, ROBOT_JOINT_DEBUG_HOLD_SECONDS, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS, ROBOT_JOINT_DEBUG_ZERO_SECONDS } from '../../src/runtime/babylon/telemetry/specialized/robotJointDebugSystem';
+import { RobotTelemetryDriver, readRobotArmAngles, readRobotJointAngles } from '../../src/runtime/babylon/telemetry/specialized/robotDriver';
+import { RobotJointDebugSystem, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS } from '../../src/runtime/babylon/telemetry/specialized/robotJointDebugSystem';
 import { robotJointDebugSession } from '../../src/runtime/robotJointDebugSession';
 import { isRobotRuntimeModel } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
@@ -44,6 +44,7 @@ const RIGHT_NODES = [
   'youshouyuandian06',
   'youshouyuandian07',
 ];
+const WAIST_NODE = 'shentiyuandian';
 const AXIS_NAMES = ['z', 'x', 'z', 'x', 'z', 'x', 'z'];
 const AXES = [new Vector3(0, 0, 1), new Vector3(1, 0, 0), new Vector3(0, 0, 1), new Vector3(1, 0, 0), new Vector3(0, 0, 1), new Vector3(1, 0, 0), new Vector3(0, 0, 1)];
 const RIGHT_SAMPLE = [-1.25, -0.62, -0.14, -0.48, -0.16, -0.12, -0.1];
@@ -69,6 +70,7 @@ function createRobotEntity() {
           L: { field: 'armJointL', nodes: LEFT_NODES, axes: AXIS_NAMES, signs: [1, 1, 1, 1, 1, 1, 1] },
           R: { field: 'armJointR', nodes: RIGHT_NODES, axes: AXIS_NAMES, signs: [1, 1, 1, 1, 1, 1, 1] },
         },
+        waist: { field: 'waistJoint', nodes: [WAIST_NODE], axes: ['z'], signs: [1] },
       },
       fixedNodes: ['shenti'],
     },
@@ -84,8 +86,12 @@ function createRobotModel(scene: Scene) {
   const contentRoot = new TransformNode('robot-content', scene);
   contentRoot.parent = root;
   const joints = new Map<string, TransformNode>();
+  const waist = new TransformNode(WAIST_NODE, scene);
+  waist.parent = contentRoot;
+  waist.rotationQuaternion = Quaternion.RotationAxis(Vector3.Up(), 0.12);
+  joints.set(WAIST_NODE, waist);
   for (const names of [LEFT_NODES, RIGHT_NODES]) {
-    let parent = contentRoot;
+    let parent = waist;
     names.forEach((name, index) => {
       const node = new TransformNode(name, scene);
       node.parent = parent;
@@ -159,11 +165,13 @@ test('robot 模型包声明生成默认 MQTT 绑定并保留关节配置', () =>
     robotJointCalibration: {
       L: { offsetsDeg: [30, 'invalid'], axes: ['-y', 'x'] },
       R: { offsetsDeg: [0, 0, 0, 0, 0, 0, 0], signs: [1, 1, 1, 1, 1, 1, -1] },
+      waist: { offsetsDeg: [-15], axes: ['-z'] },
     },
   });
   assert.deepEqual(binding?.robotJointCalibration, {
     L: { offsetsDeg: [30, 0, 0, 0, 0, 0, 0], axes: ['-y', 'x', 'z', 'z', 'z', 'z', 'z'] },
     R: { offsetsDeg: [0, 0, 0, 0, 0, 0, 0], signs: [1, 1, 1, 1, 1, 1, -1] },
+    waist: { offsetsDeg: [-15], axes: ['-z'] },
   });
 });
 
@@ -184,6 +192,8 @@ test('EPV 平铺关节字段和直接数组都按 0 到 6 读取', () => {
   assert.deepEqual(readRobotArmAngles(snapshot.fields, 'armJointR'), RIGHT_SAMPLE);
   assert.deepEqual(readRobotArmAngles({ armJointL: [0, 1, 2, 3, 4, 5, 6] }, 'armJointL'), [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(readRobotArmAngles({ armJointL: [0, 1], 'armJointL.1': 9 }, 'armJointL'), [0, 9, null, null, null, null, null]);
+  assert.deepEqual(readRobotJointAngles({ waistJoint: [0.25] }, 'waistJoint', 1), [0.25]);
+  assert.deepEqual(readRobotJointAngles({ 'waistJoint.0': -0.5 }, 'waistJoint', 1), [-0.5]);
 });
 
 test('缺少模型包节点声明时不使用编辑器硬编码回退', t => {
@@ -234,6 +244,23 @@ test('双臂 7 轴保留导入基线并按局部 Z/X 交替轴叠加弧度', t =
   assert.ok(joints.get(RIGHT_NODES[2])!.rotationQuaternion!.equalsWithEpsilon(beforeFault));
 });
 
+test('腰部 waistJoint 驱动 shentiyuandian 并纳入运动节点', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const { model, joints } = createRobotModel(scene);
+  const driver = new RobotTelemetryDriver();
+  const waist = joints.get(WAIST_NODE)!;
+  const baseline = waist.rotationQuaternion!.clone();
+
+  assert.ok(driver.getLightingMotionNodes(model).moving.includes(waist));
+  driver.applyToModel(model, createSnapshot({ 'waistJoint.0': Math.PI / 2 }, Date.now(), 1000), 0);
+  assertJointAngle(waist, baseline, Vector3.Forward(), Math.PI / 2);
+
+  driver.applyToModel(model, createSnapshot({ waistJoint: [-0.25] }, Date.now(), 2000), 1);
+  assertJointAngle(waist, baseline, Vector3.Forward(), -0.25);
+});
+
 test('实例级零位偏置和正负转向轴参与校准，旧方向配置保持兼容', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
@@ -268,7 +295,33 @@ test('实例级零位偏置和正负转向轴参与校准，旧方向配置保�
   assertJointAngle(right, rightBaseline, Vector3.Up(), 0.5 + Math.PI / 3);
 });
 
-test('零位偏置为 0 时跳过预置和停留，直接开始往返动画', t => {
+test('编辑零位偏置和转向轴后立即呈现校准姿态且重复修改不累积', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  t.after(() => { scene.dispose(); engine.dispose(); });
+  const { entity, model, joints } = createRobotModel(scene);
+  entity.components.telemetryBinding!.robotJointCalibration = {
+    L: { offsetsDeg: [45, 0, 0, 0, 0, 0, 0], axes: ['z', 'z', 'z', 'z', 'z', 'z', 'z'] },
+    waist: { offsetsDeg: [20], axes: ['-z'] },
+  };
+  const driver = new RobotTelemetryDriver();
+  const left = joints.get(LEFT_NODES[0])!;
+  const waist = joints.get(WAIST_NODE)!;
+  const leftBaseline = left.rotationQuaternion!.clone();
+  const waistBaseline = waist.rotationQuaternion!.clone();
+
+  driver.applyCalibrationToModel(model);
+  assertJointAngle(left, leftBaseline, Vector3.Forward(), Math.PI / 4);
+  assertJointAngle(waist, waistBaseline, Vector3.Forward(), -Math.PI / 9);
+
+  entity.components.telemetryBinding!.robotJointCalibration.L!.offsetsDeg[0] = 30;
+  entity.components.telemetryBinding!.robotJointCalibration.waist!.axes![0] = 'y';
+  driver.applyCalibrationToModel(model);
+  assertJointAngle(left, leftBaseline, Vector3.Forward(), Math.PI / 6);
+  assertJointAngle(waist, waistBaseline, Vector3.Up(), Math.PI / 9);
+});
+
+test('调试不再前置归零，直接从零位姿态开始往返动画', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const { entity, model } = createRobotModel(scene);
@@ -288,7 +341,7 @@ test('零位偏置为 0 时跳过预置和停留，直接开始往返动画', t 
   assert.ok(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg > 0);
 });
 
-test('单关节调试先到数据零位，再平滑往返并恢复模型原位', t => {
+test('单关节调试从当前零位平滑往返，结束或停止后恢复校准姿态', t => {
   const engine = new NullEngine();
   const scene = new Scene(engine);
   const { entity, model, joints } = createRobotModel(scene);
@@ -298,9 +351,11 @@ test('单关节调试先到数据零位，再平滑往返并恢复模型原位',
       axes: ['-y', 'x', 'z', 'x', 'z', 'x', 'z'],
     },
   };
-  const system = new RobotJointDebugSystem();
   const node = joints.get(RIGHT_NODES[0])!;
   const baseline = node.rotationQuaternion!.clone();
+  new RobotTelemetryDriver().applyCalibrationToModel(model);
+  const calibrated = baseline.multiply(Quaternion.RotationAxis(Vector3.Up(), -Math.PI / 6));
+  const system = new RobotJointDebugSystem();
   const models = [{ entityId: entity.id, model }];
   t.after(() => {
     system.dispose();
@@ -315,16 +370,9 @@ test('单关节调试先到数据零位，再平滑往返并恢复模型原位',
   };
 
   robotJointDebugSession.start(entity.id, 'R', 0);
-  advance(ROBOT_JOINT_DEBUG_ZERO_SECONDS / 2);
-  assert.equal(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg, -15);
-  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 12);
-  advance(ROBOT_JOINT_DEBUG_ZERO_SECONDS / 2);
+  system.tick(models, false, 0);
   assert.equal(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg, 0);
-  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 6);
-  advance(ROBOT_JOINT_DEBUG_HOLD_SECONDS / 2);
-  assert.equal(robotJointDebugSession.getSnapshot(entity.id).message, '数据 0 位停留');
-  assertJointAngle(node, baseline, Vector3.Up(), -Math.PI / 6);
-  advance(ROBOT_JOINT_DEBUG_HOLD_SECONDS / 2);
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(calibrated), '编辑态已显示的零位不能在调试开始时重复叠加');
 
   const expectedDegrees = [90, 180, 90, 0, -90, -180, -90, 0];
   for (const [index, degrees] of expectedDegrees.entries()) {
@@ -336,20 +384,49 @@ test('单关节调试先到数据零位，再平滑往返并恢复模型原位',
     }
   }
   assert.equal(robotJointDebugSession.getSnapshot(entity.id).running, false);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '动画完成后恢复模型原位');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(calibrated), '动画完成后恢复当前零位姿态');
 
   robotJointDebugSession.start(entity.id, 'R', 0);
   system.tick(models, false, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 2);
-  assert.ok(!node.rotationQuaternion!.equalsWithEpsilon(baseline));
+  assert.ok(!node.rotationQuaternion!.equalsWithEpsilon(calibrated));
   robotJointDebugSession.stop(entity.id);
   system.tick(models, false, 0);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '中途停止也恢复模型原位');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(calibrated), '中途停止也恢复当前零位姿态');
 
   robotJointDebugSession.start(entity.id, 'R', 0);
   system.tick(models, false, ROBOT_JOINT_DEBUG_SEGMENT_SECONDS / 3);
   system.tick(models, true, 0);
-  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(baseline), '进入 MQTT 预览前恢复模型原位');
+  assert.ok(node.rotationQuaternion!.equalsWithEpsilon(calibrated), '进入 MQTT 预览前恢复当前零位姿态');
   assert.equal(robotJointDebugSession.getSnapshot(entity.id).request, null);
+});
+
+test('腰部使用同一套独立调试和零位恢复流程', t => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const { entity, model, joints } = createRobotModel(scene);
+  entity.components.telemetryBinding!.robotJointCalibration = {
+    waist: { offsetsDeg: [20], axes: ['-z'] },
+  };
+  const waist = joints.get(WAIST_NODE)!;
+  const baseline = waist.rotationQuaternion!.clone();
+  new RobotTelemetryDriver().applyCalibrationToModel(model);
+  const calibrated = baseline.multiply(Quaternion.RotationAxis(Vector3.Forward(), -Math.PI / 9));
+  const system = new RobotJointDebugSystem();
+  const models = [{ entityId: entity.id, model }];
+  t.after(() => {
+    system.dispose();
+    robotJointDebugSession.clear();
+    scene.dispose();
+    engine.dispose();
+  });
+
+  robotJointDebugSession.start(entity.id, 'waist', 0);
+  system.tick(models, false, 0.25);
+  assert.ok(robotJointDebugSession.getSnapshot(entity.id).currentAngleDeg > 0);
+  assert.ok(!waist.rotationQuaternion!.equalsWithEpsilon(calibrated));
+  robotJointDebugSession.stop(entity.id);
+  system.tick(models, false, 0);
+  assert.ok(waist.rotationQuaternion!.equalsWithEpsilon(calibrated));
 });
 
 test('关节按相邻样本时间差线性平滑，新目标从当前角度承接', t => {

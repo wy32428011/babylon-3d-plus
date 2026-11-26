@@ -5,11 +5,13 @@ import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import { findModelNodesByName } from '../../runtimeNodeGeometry';
 
 export const ROBOT_ARM_JOINT_COUNT = 7;
+export const ROBOT_WAIST_JOINT_COUNT = 1;
 
 export type RobotArmSide = 'L' | 'R';
+export type RobotJointTarget = RobotArmSide | 'waist';
 export type RobotJointAxis = 'x' | 'y' | 'z';
 
-export type RobotArmMotionConfig = {
+export type RobotJointMotionConfig = {
   field: string;
   nodes: string[];
   axes: RobotJointAxis[];
@@ -19,9 +21,12 @@ export type RobotArmMotionConfig = {
 
 export type RobotMotionConfig = {
   angleUnit: 'rad' | 'deg';
-  arms: Record<RobotArmSide, RobotArmMotionConfig>;
+  arms: Record<RobotArmSide, RobotJointMotionConfig>;
+  waist: RobotJointMotionConfig;
 };
 
+const ROBOT_ARM_SIDES: readonly RobotArmSide[] = ['L', 'R'];
+const ROBOT_JOINT_TARGETS: readonly RobotJointTarget[] = ['L', 'R', 'waist'];
 const DEFAULT_AXES: RobotJointAxis[] = ['z', 'x', 'z', 'x', 'z', 'x', 'z'];
 const DEFAULT_SIGNS = [1, 1, 1, 1, 1, 1, 1];
 const DEFAULT_OFFSETS = [0, 0, 0, 0, 0, 0, 0];
@@ -44,6 +49,13 @@ const DEFAULT_ROBOT_MOTION_CONFIG: RobotMotionConfig = {
       offsets: [...DEFAULT_OFFSETS],
     },
   },
+  waist: {
+    field: 'waistJoint',
+    nodes: [],
+    axes: ['z'],
+    signs: [1],
+    offsets: [0],
+  },
 };
 
 const AXIS_VECTORS = {
@@ -60,7 +72,7 @@ type RobotJointRuntime = {
   offset: number;
 };
 
-type RobotArmRuntime = {
+type RobotJointGroupRuntime = {
   joints: (RobotJointRuntime | null)[];
   active: boolean;
   currentAngles: number[];
@@ -71,38 +83,40 @@ type RobotArmRuntime = {
 type RobotModelRuntime = {
   signature: string;
   config: RobotMotionConfig;
-  arms: Record<RobotArmSide, RobotArmRuntime>;
+  groups: Record<RobotJointTarget, RobotJointGroupRuntime>;
   lastSnapshot: DeviceTelemetrySnapshot | null;
   lastSampleTimeMs: number;
   elapsedSeconds: number;
   durationSeconds: number;
 };
 
+const baselineRotations = new WeakMap<TransformNode, Quaternion>();
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function readStringArray(value: unknown, fallback: string[]): string[] {
-  if (!Array.isArray(value) || value.length !== ROBOT_ARM_JOINT_COUNT) return [...fallback];
+function readStringArray(value: unknown, fallback: string[], length: number): string[] {
+  if (!Array.isArray(value) || value.length !== length) return [...fallback];
   return value.every(item => typeof item === 'string' && item.trim().length > 0)
     ? value.map(item => (item as string).trim())
     : [...fallback];
 }
 
-function readAxes(value: unknown, fallback: RobotJointAxis[]): RobotJointAxis[] {
-  if (!Array.isArray(value) || value.length !== ROBOT_ARM_JOINT_COUNT) return [...fallback];
+function readAxes(value: unknown, fallback: RobotJointAxis[], length: number): RobotJointAxis[] {
+  if (!Array.isArray(value) || value.length !== length) return [...fallback];
   return value.every(item => item === 'x' || item === 'y' || item === 'z')
     ? [...value] as RobotJointAxis[]
     : [...fallback];
 }
 
-function readSigns(value: unknown, fallback: number[]): number[] {
-  if (!Array.isArray(value) || value.length !== ROBOT_ARM_JOINT_COUNT) return [...fallback];
+function readSigns(value: unknown, fallback: number[], length: number): number[] {
+  if (!Array.isArray(value) || value.length !== length) return [...fallback];
   return value.map(item => Number(item) < 0 ? -1 : 1);
 }
 
-function readOffsets(value: unknown, fallback: number[]): number[] {
-  if (!Array.isArray(value) || value.length !== ROBOT_ARM_JOINT_COUNT) return [...fallback];
+function readOffsets(value: unknown, fallback: number[], length: number): number[] {
+  if (!Array.isArray(value) || value.length !== length) return [...fallback];
   return value.map((item, index) => {
     const offset = Number(item);
     return Number.isFinite(offset) ? offset : fallback[index];
@@ -117,36 +131,55 @@ function mergeRobotMotionConfig(value: unknown): RobotMotionConfig {
   const config = cloneDefaultMotionConfig();
   if (!isRecord(value)) return config;
   config.angleUnit = value.angleUnit === 'deg' ? 'deg' : 'rad';
-  if (!isRecord(value.arms)) return config;
-
-  for (const side of ['L', 'R'] as const) {
-    const arm = value.arms[side];
-    if (!isRecord(arm)) continue;
-    const fallback = DEFAULT_ROBOT_MOTION_CONFIG.arms[side];
-    config.arms[side] = {
-      field: typeof arm.field === 'string' && arm.field.trim() ? arm.field.trim() : fallback.field,
-      nodes: readStringArray(arm.nodes, fallback.nodes),
-      axes: readAxes(arm.axes, fallback.axes),
-      signs: readSigns(arm.signs, fallback.signs),
-      offsets: readOffsets(arm.offsets, fallback.offsets),
+  if (isRecord(value.arms)) {
+    for (const side of ROBOT_ARM_SIDES) {
+      const arm = value.arms[side];
+      if (!isRecord(arm)) continue;
+      const fallback = DEFAULT_ROBOT_MOTION_CONFIG.arms[side];
+      config.arms[side] = {
+        field: typeof arm.field === 'string' && arm.field.trim() ? arm.field.trim() : fallback.field,
+        nodes: readStringArray(arm.nodes, fallback.nodes, ROBOT_ARM_JOINT_COUNT),
+        axes: readAxes(arm.axes, fallback.axes, ROBOT_ARM_JOINT_COUNT),
+        signs: readSigns(arm.signs, fallback.signs, ROBOT_ARM_JOINT_COUNT),
+        offsets: readOffsets(arm.offsets, fallback.offsets, ROBOT_ARM_JOINT_COUNT),
+      };
+    }
+  }
+  if (isRecord(value.waist)) {
+    const fallback = DEFAULT_ROBOT_MOTION_CONFIG.waist;
+    config.waist = {
+      field: typeof value.waist.field === 'string' && value.waist.field.trim() ? value.waist.field.trim() : fallback.field,
+      nodes: readStringArray(value.waist.nodes, fallback.nodes, ROBOT_WAIST_JOINT_COUNT),
+      axes: readAxes(value.waist.axes, fallback.axes, ROBOT_WAIST_JOINT_COUNT),
+      signs: readSigns(value.waist.signs, fallback.signs, ROBOT_WAIST_JOINT_COUNT),
+      offsets: readOffsets(value.waist.offsets, fallback.offsets, ROBOT_WAIST_JOINT_COUNT),
     };
   }
   return config;
 }
 
+function getMotionGroup(config: RobotMotionConfig, target: RobotJointTarget): RobotJointMotionConfig {
+  return target === 'waist' ? config.waist : config.arms[target];
+}
+
+function getRuntimeGroup(state: RobotModelRuntime, target: RobotJointTarget): RobotJointGroupRuntime {
+  return state.groups[target];
+}
+
 function applyJointCalibration(model: ModelRuntimeEntry, config: RobotMotionConfig): RobotMotionConfig {
   const calibration = model.telemetryBinding?.robotJointCalibration;
   if (!calibration) return config;
-  for (const side of ['L', 'R'] as const) {
-    const arm = calibration[side];
-    if (!arm) continue;
-    if (arm.axes) {
-      config.arms[side].axes = arm.axes.map(axis => axis.replace('-', '') as RobotJointAxis);
-      config.arms[side].signs = arm.axes.map(axis => axis.startsWith('-') ? -1 : 1);
-    } else if (arm.signs) {
-      config.arms[side].signs = [...arm.signs];
+  for (const target of ROBOT_JOINT_TARGETS) {
+    const jointCalibration = calibration[target];
+    if (!jointCalibration) continue;
+    const group = getMotionGroup(config, target);
+    if (jointCalibration.axes) {
+      group.axes = jointCalibration.axes.map(axis => axis.replace('-', '') as RobotJointAxis);
+      group.signs = jointCalibration.axes.map(axis => axis.startsWith('-') ? -1 : 1);
+    } else if (jointCalibration.signs) {
+      group.signs = [...jointCalibration.signs];
     }
-    config.arms[side].offsets = arm.offsetsDeg.map(value => (
+    group.offsets = jointCalibration.offsetsDeg.map(value => (
       config.angleUnit === 'deg' ? value : value * Math.PI / 180
     ));
   }
@@ -173,16 +206,24 @@ function readAngle(value: unknown): number | null {
   return Number.isFinite(angle) ? angle : null;
 }
 
+export function readRobotJointAngles(
+  fields: DeviceTelemetryFields,
+  field: string,
+  count: number,
+): (number | null)[] {
+  const direct = fields[field];
+  const array = Array.isArray(direct) ? direct : null;
+  return Array.from({ length: count }, (_, index) => {
+    const indexed = readAngle(fields[`${field}.${index}`]);
+    return indexed ?? readAngle(array?.[index]);
+  });
+}
+
 export function readRobotArmAngles(
   fields: DeviceTelemetryFields,
   field: string,
 ): (number | null)[] {
-  const direct = fields[field];
-  const array = Array.isArray(direct) ? direct : null;
-  return Array.from({ length: ROBOT_ARM_JOINT_COUNT }, (_, index) => {
-    const indexed = readAngle(fields[`${field}.${index}`]);
-    return indexed ?? readAngle(array?.[index]);
-  });
+  return readRobotJointAngles(fields, field, ROBOT_ARM_JOINT_COUNT);
 }
 
 function captureBaselineRotation(node: TransformNode): Quaternion {
@@ -211,11 +252,10 @@ function resolveSegmentDuration(
 
 export class RobotTelemetryDriver {
   private modelStates = new WeakMap<ModelRuntimeEntry, RobotModelRuntime>();
-  private baselineRotations = new WeakMap<TransformNode, Quaternion>();
 
   getLightingMotionNodes(model: ModelRuntimeEntry): { moving: TransformNode[]; fixed: TransformNode[] } {
     const config = readRobotMotionConfig(model);
-    const names = [...config.arms.L.nodes, ...config.arms.R.nodes];
+    const names = [...config.arms.L.nodes, ...config.arms.R.nodes, ...config.waist.nodes];
     const fixedNames = model.entitySnapshot?.components.modelAsset?.dataDrivenConfig?.fixedNodes
       ?? model.resolvedModelAsset?.dataDrivenConfig?.fixedNodes
       ?? [];
@@ -229,32 +269,33 @@ export class RobotTelemetryDriver {
     if (snapshot.faulted) return;
     const state = this.resolveModelState(model);
     if (state.lastSnapshot !== snapshot) {
-      const values = {
+      const values: Record<RobotJointTarget, (number | null)[]> = {
         L: readRobotArmAngles(snapshot.fields, state.config.arms.L.field),
         R: readRobotArmAngles(snapshot.fields, state.config.arms.R.field),
+        waist: readRobotJointAngles(snapshot.fields, state.config.waist.field, ROBOT_WAIST_JOINT_COUNT),
       };
-      if (values.L.some(value => value !== null) || values.R.some(value => value !== null)) {
+      if (Object.values(values).some(group => group.some(value => value !== null))) {
         const firstSnapshot = state.lastSnapshot === null;
         const sampleTimeMs = readSnapshotTime(snapshot);
-        for (const side of ['L', 'R'] as const) {
-          if (!values[side].some(value => value !== null)) continue;
-          const arm = state.arms[side];
-          const firstArmSample = !arm.active;
-          arm.active = true;
-          for (let index = 0; index < ROBOT_ARM_JOINT_COUNT; index++) {
-            const value = values[side][index];
+        for (const target of ROBOT_JOINT_TARGETS) {
+          if (!values[target].some(value => value !== null)) continue;
+          const group = getRuntimeGroup(state, target);
+          const firstGroupSample = !group.active;
+          group.active = true;
+          for (let index = 0; index < values[target].length; index++) {
+            const value = values[target][index];
             if (value === null) continue;
             const angle = state.config.angleUnit === 'deg' ? value * Math.PI / 180 : value;
-            arm.targetAngles[index] = angle;
-            if (firstSnapshot || firstArmSample) {
-              arm.currentAngles[index] = angle;
-              arm.startAngles[index] = angle;
+            group.targetAngles[index] = angle;
+            if (firstSnapshot || firstGroupSample) {
+              group.currentAngles[index] = angle;
+              group.startAngles[index] = angle;
             }
           }
         }
         if (!firstSnapshot) {
-          for (const arm of Object.values(state.arms)) {
-            arm.startAngles = [...arm.currentAngles];
+          for (const group of Object.values(state.groups)) {
+            group.startAngles = [...group.currentAngles];
           }
           state.elapsedSeconds = 0;
           state.durationSeconds = resolveSegmentDuration(model, state.lastSampleTimeMs, sampleTimeMs);
@@ -267,39 +308,45 @@ export class RobotTelemetryDriver {
     if (state.elapsedSeconds < state.durationSeconds) {
       state.elapsedSeconds = Math.min(state.durationSeconds, state.elapsedSeconds + Math.max(0, deltaSeconds));
       const progress = state.elapsedSeconds / state.durationSeconds;
-      for (const arm of Object.values(state.arms)) {
-        if (!arm.active) continue;
-        for (let index = 0; index < ROBOT_ARM_JOINT_COUNT; index++) {
-          arm.currentAngles[index] = arm.startAngles[index]
-            + (arm.targetAngles[index] - arm.startAngles[index]) * progress;
+      for (const group of Object.values(state.groups)) {
+        if (!group.active) continue;
+        for (let index = 0; index < group.joints.length; index++) {
+          group.currentAngles[index] = group.startAngles[index]
+            + (group.targetAngles[index] - group.startAngles[index]) * progress;
         }
       }
     }
-    for (const arm of Object.values(state.arms)) this.applyCurrentAngles(arm);
+    for (const group of Object.values(state.groups)) this.applyCurrentAngles(group);
   }
 
-  getDebugJointOffset(model: ModelRuntimeEntry, side: RobotArmSide, jointIndex: number): number | null {
-    const joint = this.resolveModelState(model).arms[side].joints[jointIndex];
+  getDebugJointOffset(model: ModelRuntimeEntry, target: RobotJointTarget, jointIndex: number): number | null {
+    const joint = getRuntimeGroup(this.resolveModelState(model), target).joints[jointIndex];
     return joint && !joint.node.isDisposed() ? joint.offset : null;
   }
 
   applyDebugToModel(
     model: ModelRuntimeEntry,
-    side: RobotArmSide,
+    target: RobotJointTarget,
     jointIndex: number,
     angle: number,
   ): boolean {
-    const joint = this.resolveModelState(model).arms[side].joints[jointIndex];
+    const joint = getRuntimeGroup(this.resolveModelState(model), target).joints[jointIndex];
     if (!joint || joint.node.isDisposed()) return false;
-    const delta = Quaternion.RotationAxis(AXIS_VECTORS[joint.axis], (angle + joint.offset) * joint.sign);
-    joint.node.rotationQuaternion = joint.baselineRotation.multiply(delta);
+    this.applyJointAngle(joint, angle);
     return true;
   }
 
-  restoreDebugJoint(model: ModelRuntimeEntry, side: RobotArmSide, jointIndex: number): void {
-    const joint = this.modelStates.get(model)?.arms[side].joints[jointIndex];
+  restoreDebugJoint(model: ModelRuntimeEntry, target: RobotJointTarget, jointIndex: number): void {
+    const joint = getRuntimeGroup(this.resolveModelState(model), target).joints[jointIndex];
     if (!joint || joint.node.isDisposed()) return;
-    joint.node.rotationQuaternion = joint.baselineRotation.clone();
+    this.applyJointAngle(joint, 0);
+  }
+
+  applyCalibrationToModel(model: ModelRuntimeEntry): void {
+    const state = this.resolveModelState(model);
+    for (const group of Object.values(state.groups)) {
+      for (const joint of group.joints) if (joint) this.applyJointAngle(joint, 0);
+    }
   }
 
   hasPendingMotion(model: ModelRuntimeEntry): boolean {
@@ -309,19 +356,18 @@ export class RobotTelemetryDriver {
 
   resetMotionStates(): void {
     this.modelStates = new WeakMap<ModelRuntimeEntry, RobotModelRuntime>();
-    this.baselineRotations = new WeakMap<TransformNode, Quaternion>();
   }
 
-  private applyCurrentAngles(arm: RobotArmRuntime): void {
-    if (!arm.active) return;
-    for (let index = 0; index < ROBOT_ARM_JOINT_COUNT; index++) {
-      const joint = arm.joints[index];
-      if (!joint) continue;
-      const delta = Quaternion.RotationAxis(
-        AXIS_VECTORS[joint.axis],
-        (arm.currentAngles[index] + joint.offset) * joint.sign,
-      );
-      joint.node.rotationQuaternion = joint.baselineRotation.multiply(delta);
+  private applyJointAngle(joint: RobotJointRuntime, angle: number): void {
+    const delta = Quaternion.RotationAxis(AXIS_VECTORS[joint.axis], (angle + joint.offset) * joint.sign);
+    joint.node.rotationQuaternion = joint.baselineRotation.multiply(delta);
+  }
+
+  private applyCurrentAngles(group: RobotJointGroupRuntime): void {
+    if (!group.active) return;
+    for (let index = 0; index < group.joints.length; index++) {
+      const joint = group.joints[index];
+      if (joint) this.applyJointAngle(joint, group.currentAngles[index]);
     }
   }
 
@@ -330,16 +376,17 @@ export class RobotTelemetryDriver {
     const signature = JSON.stringify(config);
     const cached = this.modelStates.get(model);
     if (cached?.signature === signature
-      && !Object.values(cached.arms).some(arm => arm.joints.some(joint => joint?.node.isDisposed()))) {
+      && !Object.values(cached.groups).some(group => group.joints.some(joint => joint?.node.isDisposed()))) {
       return cached;
     }
 
     const state: RobotModelRuntime = {
       signature,
       config,
-      arms: {
-        L: this.createArmRuntime(model, config.arms.L, config.angleUnit),
-        R: this.createArmRuntime(model, config.arms.R, config.angleUnit),
+      groups: {
+        L: this.createJointGroupRuntime(model, config.arms.L, config.angleUnit),
+        R: this.createJointGroupRuntime(model, config.arms.R, config.angleUnit),
+        waist: this.createJointGroupRuntime(model, config.waist, config.angleUnit),
       },
       lastSnapshot: null,
       lastSampleTimeMs: 0,
@@ -350,20 +397,20 @@ export class RobotTelemetryDriver {
     return state;
   }
 
-  private createArmRuntime(
+  private createJointGroupRuntime(
     model: ModelRuntimeEntry,
-    config: RobotArmMotionConfig,
+    config: RobotJointMotionConfig,
     angleUnit: RobotMotionConfig['angleUnit'],
-  ): RobotArmRuntime {
+  ): RobotJointGroupRuntime {
     const nodes = findModelNodesByName(model, model.root.getScene(), config.nodes);
     return {
       joints: config.nodes.map((name, index) => {
         const node = nodes.find(candidate => candidate.name === name);
         if (!node) return null;
-        let baselineRotation = this.baselineRotations.get(node);
+        let baselineRotation = baselineRotations.get(node);
         if (!baselineRotation) {
           baselineRotation = captureBaselineRotation(node);
-          this.baselineRotations.set(node, baselineRotation);
+          baselineRotations.set(node, baselineRotation);
         }
         return {
           node,
@@ -374,9 +421,9 @@ export class RobotTelemetryDriver {
         };
       }),
       active: false,
-      currentAngles: Array.from({ length: ROBOT_ARM_JOINT_COUNT }, () => 0),
-      startAngles: Array.from({ length: ROBOT_ARM_JOINT_COUNT }, () => 0),
-      targetAngles: Array.from({ length: ROBOT_ARM_JOINT_COUNT }, () => 0),
+      currentAngles: Array.from({ length: config.nodes.length }, () => 0),
+      startAngles: Array.from({ length: config.nodes.length }, () => 0),
+      targetAngles: Array.from({ length: config.nodes.length }, () => 0),
     };
   }
 }

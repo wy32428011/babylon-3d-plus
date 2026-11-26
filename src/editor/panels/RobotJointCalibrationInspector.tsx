@@ -8,8 +8,7 @@ import {
 import { robotJointDebugSession } from '../../runtime/robotJointDebugSession';
 import { useEditorStore } from '../store/editorStore';
 
-const JOINT_COUNT = 7;
-const DEFAULT_AXES = ['Z', 'X', 'Z', 'X', 'Z', 'X', 'Z'];
+const ARM_AXES = ['Z', 'X', 'Z', 'X', 'Z', 'X', 'Z'];
 const SIGNED_AXES: { value: RobotSignedJointAxis; label: string }[] = [
   { value: 'x', label: '+X' },
   { value: '-x', label: '−X' },
@@ -18,12 +17,11 @@ const SIGNED_AXES: { value: RobotSignedJointAxis; label: string }[] = [
   { value: 'z', label: '+Z' },
   { value: '-z', label: '−Z' },
 ];
-const SIDES = [
-  { key: 'L', label: '左臂' },
-  { key: 'R', label: '右臂' },
+const JOINT_GROUPS = [
+  { key: 'L', label: '左臂', field: 'armJointL', count: 7 },
+  { key: 'R', label: '右臂', field: 'armJointR', count: 7 },
+  { key: 'waist', label: '腰部', field: 'waistJoint', count: 1 },
 ] as const;
-
-type ArmSide = (typeof SIDES)[number]['key'];
 
 type Props = {
   entityId: string;
@@ -74,39 +72,40 @@ export function RobotJointCalibrationInspector(props: Props) {
 
   useEffect(() => () => robotJointDebugSession.stop(props.entityId), [props.entityId, sceneSessionId, runtimeMode]);
 
-  function readArm(side: ArmSide) {
-    const arm = isRecord(arms[side]) ? arms[side] : {};
-    const nodes = Array.isArray(arm.nodes) ? arm.nodes : [];
-    const axes = Array.isArray(arm.axes) ? arm.axes : [];
-    const signs = Array.isArray(arm.signs) ? arm.signs : [];
-    const offsets = Array.isArray(arm.offsets) ? arm.offsets : [];
-    const configuredNodes = Array.from({ length: JOINT_COUNT }, (_, index) => readString(nodes[index]));
+  function readGroup(target: (typeof JOINT_GROUPS)[number]) {
+    const source = target.key === 'waist' ? motion?.waist : arms[target.key];
+    const group = isRecord(source) ? source : {};
+    const nodes = Array.isArray(group.nodes) ? group.nodes : [];
+    const axes = Array.isArray(group.axes) ? group.axes : [];
+    const signs = Array.isArray(group.signs) ? group.signs : [];
+    const offsets = Array.isArray(group.offsets) ? group.offsets : [];
+    const configuredNodes = Array.from({ length: target.count }, (_, index) => readString(nodes[index]));
     return {
       hasCompleteNodes: configuredNodes.every(node => node !== undefined),
       nodes: configuredNodes.map(node => node ?? '未配置'),
-      axes: Array.from({ length: JOINT_COUNT }, (_, index) => readString(axes[index])?.toUpperCase() ?? DEFAULT_AXES[index]),
-      signs: Array.from({ length: JOINT_COUNT }, (_, index) => readNumber(signs[index], 1) < 0 ? -1 : 1),
-      offsetsDeg: Array.from({ length: JOINT_COUNT }, (_, index) => {
+      axes: Array.from({ length: target.count }, (_, index) => readString(axes[index])?.toUpperCase() ?? (target.key === 'waist' ? 'Z' : ARM_AXES[index])),
+      signs: Array.from({ length: target.count }, (_, index) => readNumber(signs[index], 1) < 0 ? -1 : 1),
+      offsetsDeg: Array.from({ length: target.count }, (_, index) => {
         const offset = readNumber(offsets[index], 0);
         return angleUnit === 'deg' ? offset : offset * 180 / Math.PI;
       }),
     };
   }
 
-  function commitJoint(side: ArmSide, index: number, patch: { offsetDeg?: number; axis?: RobotSignedJointAxis }): void {
-    const defaults = readArm(side);
-    const current = props.calibration?.[side];
-    const offsetsDeg = Array.from({ length: JOINT_COUNT }, (_, jointIndex) => (
+  function commitJoint(target: (typeof JOINT_GROUPS)[number], index: number, patch: { offsetDeg?: number; axis?: RobotSignedJointAxis }): void {
+    const defaults = readGroup(target);
+    const current = props.calibration?.[target.key];
+    const offsetsDeg = Array.from({ length: target.count }, (_, jointIndex) => (
       current?.offsetsDeg[jointIndex] ?? defaults.offsetsDeg[jointIndex]
     ));
-    const axes = Array.from({ length: JOINT_COUNT }, (_, jointIndex) => (
+    const axes = Array.from({ length: target.count }, (_, jointIndex) => (
       readEffectiveAxis(current, defaults, jointIndex)
     ));
     if (patch.offsetDeg !== undefined) offsetsDeg[index] = patch.offsetDeg;
     if (patch.axis !== undefined) axes[index] = patch.axis;
     props.onChange({
       ...props.calibration,
-      [side]: { offsetsDeg, axes },
+      [target.key]: { offsetsDeg, axes },
     });
   }
 
@@ -124,20 +123,21 @@ export function RobotJointCalibrationInspector(props: Props) {
           恢复模型默认
         </button>
       </div>
-      <p className="muted">模型关节角 =（MQTT 角度 + 零位偏置）× 转向轴方向。单关节调试执行约 10 秒的 0° → 180° → 0° → −180° → 0°，结束后恢复模型原位；零位偏置非 0 时先移动到数据 0 位并停留 1 秒，偏置为 0 时直接开始动画。</p>
-      {SIDES.map(({ key: side, label }) => {
-        const defaults = readArm(side);
-        const calibration = props.calibration?.[side];
+      <p className="muted">模型关节角 =（MQTT 角度 + 零位偏置）× 转向轴方向。编辑零位或转向轴后立即显示校准姿态；单关节调试直接执行约 10 秒的 0° → 180° → 0° → −180° → 0°，完成后恢复当前零位姿态。</p>
+      {JOINT_GROUPS.map(target => {
+        const { key, label, field } = target;
+        const defaults = readGroup(target);
+        const calibration = props.calibration?.[key];
         return (
-          <fieldset className="transform-fieldset robot-arm-calibration" key={side}>
-            <legend>{label}（armJoint{side}）</legend>
+          <fieldset className="transform-fieldset robot-arm-calibration" key={key}>
+            <legend>{label}（{field}）</legend>
             {!defaults.hasCompleteNodes ? <p className="telemetry-runtime-error">未读取到模型包关节节点配置，请重新导入或同步模型包。</p> : null}
             {defaults.nodes.map((node, index) => {
               const offsetDeg = calibration?.offsetsDeg[index] ?? defaults.offsetsDeg[index];
               const axis = readEffectiveAxis(calibration, defaults, index);
-              const jointDebugging = debugSnapshot.request?.side === side && debugSnapshot.request.jointIndex === index;
+              const jointDebugging = debugSnapshot.request?.side === key && debugSnapshot.request.jointIndex === index;
               return (
-                <div className="model-generator-rule-card" key={`${side}-${index}`}>
+                <div className="model-generator-rule-card" key={`${key}-${index}`}>
                   <div className="model-generator-card-header">
                     <span>关节 {index + 1}</span>
                   </div>
@@ -156,7 +156,7 @@ export function RobotJointCalibrationInspector(props: Props) {
                       onChange={(event) => {
                         if (event.target.value === '') return;
                         const value = Number(event.target.value);
-                        if (Number.isFinite(value)) commitJoint(side, index, { offsetDeg: value });
+                        if (Number.isFinite(value)) commitJoint(target, index, { offsetDeg: value });
                       }}
                     />
                   </label>
@@ -166,7 +166,7 @@ export function RobotJointCalibrationInspector(props: Props) {
                       aria-label={`${label}关节${index + 1}转向轴`}
                       disabled={props.disabled}
                       value={axis}
-                      onChange={(event) => commitJoint(side, index, { axis: event.target.value as RobotSignedJointAxis })}
+                      onChange={(event) => commitJoint(target, index, { axis: event.target.value as RobotSignedJointAxis })}
                     >
                       {SIGNED_AXES.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
                     </select>
@@ -178,7 +178,7 @@ export function RobotJointCalibrationInspector(props: Props) {
                       aria-pressed={jointDebugging && debugSnapshot.running}
                       onClick={() => {
                         if (jointDebugging && debugSnapshot.running) robotJointDebugSession.stop(props.entityId);
-                        else robotJointDebugSession.start(props.entityId, side, index);
+                        else robotJointDebugSession.start(props.entityId, key, index);
                       }}
                     >
                       {jointDebugging && debugSnapshot.running ? '停止调试' : jointDebugging ? '重新调试' : '调试'}

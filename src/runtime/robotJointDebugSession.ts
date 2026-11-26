@@ -1,7 +1,7 @@
 export type RobotJointDebugRequest = {
   id: number;
   entityId: string;
-  side: 'L' | 'R';
+  side: 'L' | 'R' | 'waist';
   jointIndex: number;
 };
 
@@ -41,7 +41,7 @@ export const robotJointDebugSession = {
   hasActive(): boolean {
     return currentSnapshot.running;
   },
-  start(entityId: string, side: 'L' | 'R', jointIndex: number): void {
+  start(entityId: string, side: 'L' | 'R' | 'waist', jointIndex: number): void {
     nextRequestId += 1;
     currentSnapshot = {
       request: { id: nextRequestId, entityId, side, jointIndex },
@@ -60,7 +60,7 @@ export const robotJointDebugSession = {
   },
   finish(requestId: number): void {
     if (currentSnapshot.request?.id !== requestId || !currentSnapshot.running) return;
-    currentSnapshot = { ...currentSnapshot, currentAngleDeg: 0, running: false, message: '调试完成，已恢复原姿态' };
+    currentSnapshot = { ...currentSnapshot, currentAngleDeg: 0, running: false, message: '调试完成，已恢复当前零位姿态' };
     notify();
   },
   stop(entityId?: string): void {

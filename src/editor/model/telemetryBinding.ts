@@ -72,7 +72,7 @@ export type RobotJointArmCalibration = {
   signs?: (1 | -1)[];
 };
 
-export type RobotJointCalibration = Partial<Record<'L' | 'R', RobotJointArmCalibration>>;
+export type RobotJointCalibration = Partial<Record<'L' | 'R' | 'waist', RobotJointArmCalibration>>;
 
 export type TelemetryBindingComponent = {
   enabled: boolean;
@@ -95,7 +95,7 @@ export type TelemetryBindingComponent = {
   trajectoryDirection?: 'x' | '-x' | 'z' | '-z';
   /** AGV 专用：模型局部车头轴；遥测 r=0 指向场景 +X，顺时针为正。 */
   modelForwardAxis?: 'x' | '-x' | 'z' | '-z';
-  /** 机器人专用：当前实例的双臂零位偏置和方向覆盖；缺省沿用模型包配置。 */
+  /** 机器人专用：当前实例的双臂和腰部零位偏置与方向覆盖；缺省沿用模型包配置。 */
   robotJointCalibration?: RobotJointCalibration;
   /** 输送线专用：实例表面箭头配置；缺省不启用，实时方向和编辑预览不保存在此处。 */
   surfaceArrows?: ConveyorSurfaceArrowsConfig;
@@ -225,20 +225,20 @@ function normalizeColumnBindings(value: unknown): Record<string, string[]> | und
 function normalizeRobotJointCalibration(value: unknown): RobotJointCalibration | undefined {
   if (!isPlainObject(value)) return undefined;
   const result: RobotJointCalibration = {};
-  for (const side of ['L', 'R'] as const) {
-    const arm = value[side];
-    if (!isPlainObject(arm) || (!Array.isArray(arm.offsetsDeg) && !Array.isArray(arm.axes) && !Array.isArray(arm.signs))) continue;
-    const offsetsDeg = Array.isArray(arm.offsetsDeg) ? arm.offsetsDeg : [];
-    const axes = Array.isArray(arm.axes) ? arm.axes : [];
-    const signs = Array.isArray(arm.signs) ? arm.signs : [];
-    const normalizedAxes = Array.from({ length: 7 }, (_, index) => (
+  for (const target of [{ key: 'L', count: 7 }, { key: 'R', count: 7 }, { key: 'waist', count: 1 }] as const) {
+    const group = value[target.key];
+    if (!isPlainObject(group) || (!Array.isArray(group.offsetsDeg) && !Array.isArray(group.axes) && !Array.isArray(group.signs))) continue;
+    const offsetsDeg = Array.isArray(group.offsetsDeg) ? group.offsetsDeg : [];
+    const axes = Array.isArray(group.axes) ? group.axes : [];
+    const signs = Array.isArray(group.signs) ? group.signs : [];
+    const normalizedAxes = Array.from({ length: target.count }, (_, index) => (
       ['x', '-x', 'y', '-y', 'z', '-z'].includes(String(axes[index])) ? axes[index] : 'z'
     )) as RobotSignedJointAxis[];
-    result[side] = {
-      offsetsDeg: Array.from({ length: 7 }, (_, index) => normalizeFiniteNumber(offsetsDeg[index], 0, -36000, 36000)),
-      ...(Array.isArray(arm.axes)
+    result[target.key] = {
+      offsetsDeg: Array.from({ length: target.count }, (_, index) => normalizeFiniteNumber(offsetsDeg[index], 0, -36000, 36000)),
+      ...(Array.isArray(group.axes)
         ? { axes: normalizedAxes }
-        : { signs: Array.from({ length: 7 }, (_, index) => signs[index] === -1 ? -1 : 1) as (1 | -1)[] }),
+        : { signs: Array.from({ length: target.count }, (_, index) => signs[index] === -1 ? -1 : 1) as (1 | -1)[] }),
     };
   }
   return Object.keys(result).length > 0 ? result : undefined;

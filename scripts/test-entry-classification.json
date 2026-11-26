@@ -12213,6 +12213,49 @@
       ]
     },
     {
+      "file": "tests/runtime/robotJointCalibration.test.mjs",
+      "sha256": "7ee06668c6c77ffab91866cc4e3e398b7f25307281379eff7caad8ba67dd61a8",
+      "disposition": "node-contract",
+      "domain": "motion",
+      "command": "node --test tests/runtime/robotJointCalibration.test.mjs",
+      "purpose": "验证机器人腰部零位在 SceneDocument 更新后通过真实 SceneRuntime 立即生效，无需调试或 MQTT 预览",
+      "prerequisites": [
+        "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
+        "Vite SSR 加载正式运行时代码；保留 watcher 关闭、服务和 SceneRuntime 的 teardown",
+        "NullEngine 仅验证 CPU/节点姿态与文档同步契约，不证明 GPU 像素或 FPS"
+      ],
+      "evidence": [
+        {
+          "line": 1,
+          "text": "import assert from 'node:assert/strict';"
+        },
+        {
+          "line": 12,
+          "text": "const { SceneRuntime } = await server.ssrLoadModule('/src/runtime/babylon/SceneRuntime.ts');"
+        },
+        {
+          "line": 16,
+          "text": "test('SceneRuntime 文档校准更新后立即显示腰部零位，无需启动调试', async t => {"
+        },
+        {
+          "line": 17,
+          "text": "t.after(() => server.close());"
+        },
+        {
+          "line": 52,
+          "text": "runtime.sync(documentModel);"
+        },
+        {
+          "line": 68,
+          "text": "runtime.sync({ ...documentModel, entities: { ...documentModel.entities, [entity.id]: nextEntity } });"
+        },
+        {
+          "line": 70,
+          "text": "const expected = baseline.multiply(Quaternion.RotationAxis(Vector3.Forward(), Math.PI / 6));"
+        }
+      ]
+    },
+    {
       "file": "tests/runtime/stackerFocusBounds.test.ts",
       "sha256": "43fb94b0805799238d4b8849aba03c5b1494a9c7b9b6d63eefde8529c61b2729",
       "disposition": "node-contract",
