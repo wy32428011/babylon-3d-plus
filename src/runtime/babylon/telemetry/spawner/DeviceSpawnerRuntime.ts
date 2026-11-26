@@ -38,7 +38,7 @@ function createSpawnerRegistryKey(spawnerCode: string, deviceType: string): stri
 
 /**
  * 动态实例的运行时合成实体 id：实例不写入场景文档，用它与真实实体 id 区分开，
- * 高亮、聚焦与生成器产物点击都按这个 id 寻址。
+ * 高亮、聚焦、跟随与生成器产物点击都按这个 id 寻址。
  */
 export function createSpawnedDeviceEntityId(spawnerCode: string, assetCode: string): string {
   return `spawned:${createSpawnedDeviceKey(spawnerCode, assetCode)}`;

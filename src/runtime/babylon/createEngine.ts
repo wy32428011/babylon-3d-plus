@@ -45,6 +45,7 @@ import {
   EDITOR_CAMERA_DEFAULT_BETA,
   EDITOR_CAMERA_DEFAULT_RADIUS,
   type CameraNavigationMode,
+  type CameraFollowCenterProvider,
   type CameraTransitionCancelReason,
   type CameraViewApplicationOptions,
   type CameraViewTransitionOptions,
@@ -123,6 +124,7 @@ export type BabylonViewport = {
   scene: Scene;
   camera: ArcRotateCamera;
   focusOnBounds: (bounds: EditorWorldBounds, options?: BabylonFocusOptions) => void;
+  followOnBounds: (getBounds: () => EditorWorldBounds | null, options?: BabylonFocusOptions) => boolean;
   cancelCameraTransition: (reason?: CameraTransitionCancelReason) => boolean;
   setViewDistance: (meters: number) => void;
   setSensitivity: (settings: SceneSensitivitySettings) => void;
@@ -314,6 +316,26 @@ export function focusArcRotateCameraViewOnBounds(
     return;
   }
   cameraViewController.applyCameraPose(pose, transitionOptions);
+}
+
+export function followArcRotateCameraViewOnBounds(
+  cameraViewController: ArcRotateCameraViewController,
+  camera: ArcRotateCamera,
+  engine: AbstractEngine,
+  getBounds: () => EditorWorldBounds | null,
+  options?: BabylonFocusOptions,
+): boolean {
+  const initialBounds = getBounds();
+  if (!initialBounds) return false;
+  const getCenter: CameraFollowCenterProvider = () => getBounds()?.center ?? null;
+  focusArcRotateCameraViewOnBounds(cameraViewController, camera, engine, initialBounds, {
+    ...options,
+    onCompleted: () => {
+      cameraViewController.startFollowing(getCenter, initialBounds.center);
+      options?.onCompleted?.();
+    },
+  });
+  return true;
 }
 
 const CAMERA_FLY_KEY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'KeyC']);
@@ -749,6 +771,9 @@ function createViewportResources(
     focusOnBounds: (bounds, transitionOptions) => {
       focusArcRotateCameraViewOnBounds(cameraViewController, camera, engine, bounds, transitionOptions);
     },
+    followOnBounds: (getBounds, transitionOptions) => (
+      followArcRotateCameraViewOnBounds(cameraViewController, camera, engine, getBounds, transitionOptions)
+    ),
     cancelCameraTransition: (reason) => cameraViewController.cancelTransition(reason),
     setViewDistance: (meters) => {
       const viewDistance = sanitizeSceneViewDistance(meters);

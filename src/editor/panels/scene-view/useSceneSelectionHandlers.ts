@@ -86,6 +86,7 @@ export function useSceneSelectionHandlers({
     });
     if (clickSnapshotRef.current) return;
 
+    viewportRef.current?.cancelCameraTransition('manual-input');
     pauseHistoryReplay();
     autoPatrolPlaybackRef.current?.notifyManualInput();
     autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
@@ -100,6 +101,7 @@ export function useSceneSelectionHandlers({
     clickSnapshotRef.current = nextSnapshot;
     const clickTolerancePx = DIGITAL_TWIN_CAMERA_CONTROL_STANDARD.selection.clickTolerancePx;
     if (snapshot.maxTravelDistancePx <= clickTolerancePx && nextSnapshot.maxTravelDistancePx > clickTolerancePx) {
+      viewportRef.current?.cancelCameraTransition('manual-input');
       pauseHistoryReplay();
       autoPatrolPlaybackRef.current?.notifyManualInput();
       autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();
@@ -226,6 +228,7 @@ export function useSceneSelectionHandlers({
         ?? (spawnedDeviceId
           ? { kind: 'ignore' as const }
           : resolveClickEventBindingClick(state.scene, pickedEntityId, pickedCell));
+      if (resolution.kind !== 'ignore') viewportRef.current?.cancelCameraTransition('replaced');
       if (resolution.kind !== 'pass-through') {
         // 命中 show-chart 效果时向宿主页面发送点击事件；编辑器无握手流程，用固定会话标识 + 通配 origin（仅开发预览）。
         const assetClickedPayload = buildClickEventAssetClickedPayload(state.scene, resolution);
@@ -263,7 +266,15 @@ export function useSceneSelectionHandlers({
           } else {
             runtimeRef.current?.setLocalSlotHighlight('', null);
           }
-          if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
+          if (resolution.effects.includes('follow') && !manualRoamRef.current?.getSnapshot().enabled) {
+            autoPatrolPlaybackRef.current?.stop();
+            manualRoamRef.current?.setEnabled(false);
+            viewportRef.current?.followOnBounds(
+              () => runtimeRef.current?.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell) ?? null,
+              { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS, useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE },
+            );
+          } else if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
+            autoPatrolPlaybackRef.current?.stop();
             const bounds = runtimeRef.current?.getLocatorCellWorldBounds(resolution.locatorEntityId, resolution.cell);
             if (bounds) {
               manualRoamRef.current?.setEnabled(false);
@@ -290,7 +301,15 @@ export function useSceneSelectionHandlers({
               if (generatedUnit?.unitKind !== 'spawned-device') state.selectEntity(null);
             }
           }
-          if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
+          if (resolution.effects.includes('follow') && !manualRoamRef.current?.getSnapshot().enabled) {
+            autoPatrolPlaybackRef.current?.stop();
+            manualRoamRef.current?.setEnabled(false);
+            viewportRef.current?.followOnBounds(
+              () => runtimeRef.current?.getEntitiesFocusBounds([resolution.entityId]) ?? null,
+              { animate: true, durationMs: CLICK_EVENT_FOCUS_DURATION_MS },
+            );
+          } else if (resolution.effects.includes('focus') && !manualRoamRef.current?.getSnapshot().enabled) {
+            autoPatrolPlaybackRef.current?.stop();
             if (hasEntityTarget) {
               state.requestSceneFocusForSelection([resolution.entityId], {
                 animate: true,
@@ -352,6 +371,7 @@ export function useSceneSelectionHandlers({
 
   /** 滚轮缩放属于手动相机接管，立即暂停自动巡检。 */
   function handleCanvasWheel(_event: WheelEvent<HTMLCanvasElement>): void {
+    viewportRef.current?.cancelCameraTransition('manual-input');
     pauseHistoryReplay();
     autoPatrolPlaybackRef.current?.notifyManualInput();
     autoPatrolPlaybackRef.current?.notifyCameraChangedWhilePaused();

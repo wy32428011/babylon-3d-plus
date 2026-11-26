@@ -30,6 +30,12 @@ export type CameraViewTransitionOptions = {
   onCancelled?: (reason: CameraTransitionCancelReason) => void;
 };
 
+export type CameraFollowCenterProvider = () => {
+  x: number;
+  y: number;
+  z: number;
+} | null;
+
 export type CameraViewApplicationOptions = CameraViewTransitionOptions & {
   lockStandardOrientation?: boolean;
 };
@@ -70,6 +76,12 @@ type CameraTransition = {
   finalize: () => void;
   onCompleted?: () => void;
   onCancelled?: (reason: CameraTransitionCancelReason) => void;
+};
+
+type CameraFollow = {
+  getCenter: CameraFollowCenterProvider;
+  lastCenter: Vector3;
+  lastPose: SceneCameraPose;
 };
 
 /** 读取当前 ArcRotateCamera 位姿，保存为可写入场景文件的纯数据。 */
@@ -172,6 +184,7 @@ export class ArcRotateCameraViewController {
   private readonly transitionObserver: Observer<Scene>;
   private orthographicObserver: Observer<Scene> | null = null;
   private cameraControlSuspended = false;
+  private follow: CameraFollow | null = null;
   private disposed = false;
 
   constructor(
@@ -180,7 +193,10 @@ export class ArcRotateCameraViewController {
     private readonly scene: Scene,
     private readonly options: ArcRotateCameraViewControllerOptions = {},
   ) {
-    this.transitionObserver = scene.onBeforeRenderObservable.add(() => this.updateTransition());
+    this.transitionObserver = scene.onBeforeRenderObservable.add(() => {
+      this.updateTransition();
+      this.updateFollow();
+    });
   }
 
   getCameraOrientation(): SceneCameraOrientation {
@@ -320,7 +336,9 @@ export class ArcRotateCameraViewController {
 
   cancelTransition(reason: CameraTransitionCancelReason = 'cancelled'): boolean {
     const transition = this.transition;
-    if (!transition) return false;
+    const following = this.follow !== null;
+    this.follow = null;
+    if (!transition) return following;
     this.transition = null;
     try {
       transition.onCancelled?.(reason);
@@ -328,6 +346,16 @@ export class ArcRotateCameraViewController {
       this.resumeCameraControl();
     }
     return true;
+  }
+
+  startFollowing(getCenter: CameraFollowCenterProvider, initialCenter: { x: number; y: number; z: number }): void {
+    if (this.disposed) return;
+    clearCameraMovement(this.camera);
+    this.follow = {
+      getCenter,
+      lastCenter: new Vector3(initialCenter.x, initialCenter.y, initialCenter.z),
+      lastPose: this.getCameraPose(),
+    };
   }
 
   dispose(): void {
@@ -449,6 +477,49 @@ export class ArcRotateCameraViewController {
     } finally {
       this.resumeCameraControl();
     }
+  }
+
+  private updateFollow(): void {
+    const follow = this.follow;
+    if (!follow || this.transition) return;
+
+    const camera = this.camera;
+    const target = camera.getTarget();
+    const lastTarget = follow.lastPose.target;
+    const manuallyChanged = Math.abs(camera.alpha - follow.lastPose.alpha) > 0.0001
+      || Math.abs(camera.beta - follow.lastPose.beta) > 0.0001
+      || Math.abs(camera.radius - follow.lastPose.radius) > 0.0001
+      || Vector3.DistanceSquared(target, new Vector3(lastTarget.x, lastTarget.y, lastTarget.z)) > 0.000001
+      || Boolean(
+        camera.inertialAlphaOffset || camera.inertialBetaOffset || camera.inertialRadiusOffset
+        || camera.inertialPanningX || camera.inertialPanningY
+      );
+    if (manuallyChanged) {
+      this.follow = null;
+      return;
+    }
+
+    let centerData: ReturnType<CameraFollowCenterProvider>;
+    try {
+      centerData = follow.getCenter();
+    } catch {
+      this.follow = null;
+      return;
+    }
+    if (!centerData || ![centerData.x, centerData.y, centerData.z].every(Number.isFinite)) {
+      this.follow = null;
+      return;
+    }
+
+    const center = new Vector3(centerData.x, centerData.y, centerData.z);
+    const movement = center.subtract(follow.lastCenter);
+    follow.lastCenter = center;
+    if (movement.lengthSquared() > 0) {
+      camera.position.addInPlace(movement);
+      camera.setTarget(target.add(movement), false, false, true);
+      syncDigitalTwinCameraPanScale(camera);
+    }
+    follow.lastPose = this.getCameraPose();
   }
 
   private applyTransitionPose(alpha: number, beta: number, radius: number, target: Vector3): void {

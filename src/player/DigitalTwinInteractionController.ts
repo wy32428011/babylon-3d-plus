@@ -497,6 +497,7 @@ export class DigitalTwinInteractionController {
     try {
       if (cleared) {
         this.clearHighlight();
+        this.runtime.cancelCameraTransition('replaced');
         this.runtime.clearSelection();
         this.selectionRevision++;
       }

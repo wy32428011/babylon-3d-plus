@@ -13,6 +13,15 @@ const server = await createServer({
 });
 after(() => server.close());
 const { createViewerModelClickHandler } = await server.ssrLoadModule('/src/player/viewerModelClick.ts') as typeof import('../../src/player/viewerModelClick.ts');
+const { sanitizeClickEventBindingComponent } = await server.ssrLoadModule('/src/editor/model/clickEventBinding.ts') as typeof import('../../src/editor/model/clickEventBinding.ts');
+
+test('跟随移动效果通过场景序列化清洗后仍然保留', () => {
+  const component = sanitizeClickEventBindingComponent({
+    deviceSlots: [],
+    events: [{ id: 'follow-click', eventType: 'click', effects: ['highlight', 'focus', 'follow'] }],
+  });
+  assert.deepEqual(component.events[0].effects, ['highlight', 'focus', 'follow']);
+});
 
 function fixture(effects?: ClickEventBindingEffect[], cellEvent = false) {
   const sourceUrl = 'editor-asset://local/shelf.glb';
@@ -205,6 +214,7 @@ function generatorFixture(events: unknown[] | null) {
   } as unknown as SceneDocument;
   const selections: string[][] = [];
   const focuses: unknown[] = [];
+  const follows: unknown[] = [];
   const emitted: unknown[] = [];
   const contexts: (DigitalTwinDeviceContext | null)[] = [];
   const handler = createViewerModelClickHandler(scene, {
@@ -212,12 +222,31 @@ function generatorFixture(events: unknown[] | null) {
     updateSelection: (ids) => selections.push([...ids]),
     setSlotHighlight: () => {},
     focusTarget: (id, cell) => focuses.push({ id, cell }),
+    followTarget: (id, cell) => follows.push({ id, cell }),
     triggerManualEvents: () => {},
     setHighlightExcludeTrack: () => {},
     emitAssetClicked: (payload) => emitted.push(payload),
   });
-  return { handler, selections, focuses, emitted, contexts, scene };
+  return { handler, selections, focuses, follows, emitted, contexts, scene };
 }
+
+test('AGV 与输送线货箱的跟随效果使用产物运行时 id，且不与聚焦重复执行', () => {
+  for (const generatedUnit of [
+    {
+      bindingEntityId: 'generator', assetCode: 'AGV-77', highlightEntityId: 'spawned:agv-77',
+      unitKind: 'spawned-device' as const,
+    },
+    {
+      bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: 'runtime_conveyor_cargo:1',
+      unitKind: 'cargo' as const, containerCode: '000317', hostEntityId: 'host',
+    },
+  ]) {
+    const f = generatorFixture([{ eventType: 'click', effects: ['focus', 'follow'] }]);
+    f.handler(null, null, { generatedUnit });
+    assert.deepEqual(f.focuses, []);
+    assert.deepEqual(f.follows, [{ id: generatedUnit.highlightEntityId, cell: undefined }]);
+  }
+});
 
 test('生成器产物命中：货箱高亮产物自身，事件载荷说明箱号与承运设备', () => {
   const f = generatorFixture([{

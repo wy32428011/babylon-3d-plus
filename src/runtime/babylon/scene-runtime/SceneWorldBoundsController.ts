@@ -225,6 +225,11 @@ export class SceneWorldBoundsController {
       );
     }
 
+    const generatedOwner = this.dependencies.outputs.generatedOutputOwners.get(entityId);
+    if (generatedOwner) {
+      return collectGeneratedOutputMeshes(generatedOwner.output).some(isMeasurableModelMesh);
+    }
+
     const modelGenerator = this.dependencies.outputs.modelGenerators.get(entityId);
     if (modelGenerator) return true;
 
@@ -265,7 +270,7 @@ export class SceneWorldBoundsController {
     const model = this.dependencies.document.resolveRuntimeModelByEntityId(entityId);
     if (model) return this.getModelWorldBounds(model);
 
-    // 生成货物的输出宿主：聚焦目标为产物自身全部网格的合并包围盒。
+    // 生成货物的输出宿主：聚焦/跟随目标为产物自身全部网格的合并包围盒。
     const generatedOwner = this.dependencies.outputs.generatedOutputOwners.get(entityId);
     if (generatedOwner) {
       let mergedBounds: RuntimeWorldBounds | null = null;

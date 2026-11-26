@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'vite';
-import { MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
+import { ArcRotateCamera, MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 // 与运行时就绪测试一致，预编译大模块图，避免 SSR 按需传输超时。
 const output = await mkdtemp(path.resolve('node_modules/.stacker-focus-'));
@@ -15,10 +15,18 @@ after(async () => {
 });
 await build({ configFile: false, logLevel: 'error', ssr: { noExternal: ['@linkiez/dxf-renew', /^lodash\//] },
   build: { ssr: true, outDir: output, rollupOptions: {
-    input: 'src/runtime/babylon/SceneRuntime.ts', output: { entryFileNames: 'runtime.mjs' },
+    input: {
+      runtime: 'src/runtime/babylon/SceneRuntime.ts',
+      engine: 'src/runtime/babylon/createEngine.ts',
+      controller: 'src/runtime/babylon/ArcRotateCameraViewController.ts',
+      click: 'src/player/viewerModelClick.ts',
+    },
+    output: { entryFileNames: '[name].mjs' },
   } },
 });
-const { SceneRuntime } = await import(pathToFileURL(path.join(output, 'runtime.mjs')).href);
+const [{ SceneRuntime }, { ArcRotateCameraViewController }, camera, { createViewerModelClickHandler }] = await Promise.all(
+  (['runtime', 'controller', 'engine', 'click'] as const).map(async name => import(pathToFileURL(path.join(output, `${name}.mjs`)).href)),
+);
 
 function fixture() {
   const engine = new NullEngine();
@@ -58,6 +66,106 @@ function fixture() {
   return { engine, scene, runtime, root, body, mast, base, rail, model, box,
     close: () => { scene.dispose(); engine.dispose(); } };
 }
+
+test('AGV 动态实例与输送线货箱从真实点击决议进入聚焦和移动跟随', () => {
+  const f = fixture();
+  let controller: InstanceType<typeof ArcRotateCameraViewController> | null = null;
+  try {
+    const agvRoot = new TransformNode('agv-root', f.scene);
+    const agvMesh = MeshBuilder.CreateBox('agv-body', { size: 2 }, f.scene);
+    agvMesh.parent = agvRoot;
+    const spawnedKey = 'agv-spawner\0AGV-01';
+    const agvModel = {
+      root: agvRoot, contentRoot: agvRoot, meshes: [agvMesh], stackerCapable: false,
+      entitySnapshot: { components: { modelAsset: { dataDrivenConfig: { device: { devType: 'agv' } } } } },
+      externalScriptRuntime: null, externalScriptStarting: false,
+      assetHandle: {}, stackerTelemetryReady: true, measurementReady: true,
+    };
+    f.runtime.outputs.spawnedDeviceModels.set(spawnedKey, agvModel);
+    const agvId = `spawned:${spawnedKey}`;
+    const agvInitial = f.runtime.getEntitiesFocusBounds([agvId]);
+    assert.equal(agvInitial.geometryReady, true);
+    agvRoot.position.x = 12;
+    assert.equal(f.runtime.getEntitiesFocusBounds([agvId]).center.x, agvInitial.center.x + 12);
+
+    const cargoRoot = new TransformNode('cargo-root', f.scene);
+    const cargoMesh = MeshBuilder.CreateBox('cargo-box', { size: 1 }, f.scene);
+    cargoMesh.parent = cargoRoot;
+    const cargoId = 'runtime_conveyor_cargo:000317';
+    f.runtime.outputs.generatedOutputOwners.set(cargoId, {
+      entityId: cargoId,
+      root: cargoRoot,
+      output: { kind: 'mesh', mesh: cargoMesh },
+    });
+    const cargoInitial = f.runtime.getEntitiesFocusBounds([cargoId]);
+    assert.equal(cargoInitial.geometryReady, true, '真实货箱网格必须被识别为几可就绪');
+    cargoRoot.position.z = 8;
+    const cargoMoved = f.runtime.getEntitiesFocusBounds([cargoId]);
+    assert.equal(cargoMoved.center.z, cargoInitial.center.z + 8);
+    assert.equal(cargoMoved.geometryReady, true);
+
+    let now = 0;
+    const sceneCamera = new ArcRotateCamera('click-follow-camera', 0.5, 1, 20, Vector3.Zero(), f.scene);
+    f.scene.activeCamera = sceneCamera;
+    controller = new ArcRotateCameraViewController(sceneCamera, f.engine, f.scene, {
+      now: () => now,
+      prefersReducedMotion: () => false,
+    });
+    const clickEventBinding = {
+      deviceSlots: [],
+      events: [{ id: 'generator-click', eventType: 'click', effects: ['focus'] }],
+    };
+    const document = {
+      entities: {
+        generator: { id: 'generator', components: { clickEventBinding } },
+        host: { id: 'host', name: '输送线', components: { modelAsset: { assetCode: '001005' } } },
+      },
+    };
+    const handleClick = createViewerModelClickHandler(document, {
+      updateSelection: () => {},
+      setSlotHighlight: () => {},
+      focusTarget: (entityId: string) => {
+        const bounds = f.runtime.getEntitiesFocusBounds([entityId]);
+        if (bounds) camera.focusArcRotateCameraViewOnBounds(controller, sceneCamera, f.engine, bounds, {
+          animate: true, durationMs: 600,
+        });
+      },
+      followTarget: (entityId: string) => {
+        camera.followArcRotateCameraViewOnBounds(
+          controller, sceneCamera, f.engine,
+          () => f.runtime.getEntitiesFocusBounds([entityId]),
+          { animate: true, durationMs: 600 },
+        );
+      },
+      triggerManualEvents: () => {},
+      setHighlightExcludeTrack: () => {},
+    });
+    handleClick(null, null, { generatedUnit: {
+      bindingEntityId: 'generator', assetCode: 'AGV-01', highlightEntityId: agvId,
+      unitKind: 'spawned-device',
+    } });
+    now = 600;
+    f.scene.render();
+    const agvFocus = f.runtime.getEntitiesFocusBounds([agvId]);
+    assert.ok(Vector3.Distance(sceneCamera.target, new Vector3(
+      agvFocus.center.x, agvFocus.center.y, agvFocus.center.z,
+    )) < 1e-6, 'AGV 聚焦动画必须到达动态实例中心');
+
+    clickEventBinding.events[0].effects = ['follow'];
+    handleClick(null, null, { generatedUnit: {
+      bindingEntityId: 'generator', assetCode: '001005', highlightEntityId: cargoId,
+      unitKind: 'cargo', containerCode: '000317', hostEntityId: 'host',
+    } });
+    now = 1200;
+    f.scene.render();
+    const beforeFollowTarget = sceneCamera.target.clone();
+    const beforeFollowPosition = sceneCamera.position.clone();
+    cargoRoot.position.z += 4;
+    f.scene.render();
+    assert.ok(Vector3.Distance(sceneCamera.target, beforeFollowTarget.add(new Vector3(0, 0, 4))) < 1e-6);
+    assert.ok(Vector3.Distance(sceneCamera.position, beforeFollowPosition.add(new Vector3(0, 0, 4))) < 1e-6);
+  } finally { controller?.dispose(); f.close(); }
+});
 
 test('堆垛机聚焦中心在机身，轨道加长不改变聚焦范围且完整尺寸仍包含轨道', () => {
   const f = fixture();

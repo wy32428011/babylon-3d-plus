@@ -31,7 +31,7 @@ import { DataPlatformScreenOverlay } from '../runtime/babylon/DataPlatformScreen
 import { DataPlatformViewportScreenOverlay } from '../runtime/babylon/DataPlatformViewportScreenOverlay';
 import type { DataPlatformScreenOverlayItem } from '../runtime/babylon/SceneRuntime';
 import { findDigitalTwinAsset, buildDigitalTwinAssetIndex, type DigitalTwinAssetIndex } from '../shared/digitalTwinAssetCodes';
-import { buildDigitalTwinSlotIndex } from '../shared/digitalTwinSlotCodes';
+import { buildDigitalTwinSlotIndex, type DigitalTwinSlotCoordinate } from '../shared/digitalTwinSlotCodes';
 import { bindSceneModelSelectionPointer } from '../shared/sceneModelSelectionPointer';
 import { readUtf8ResponseText } from '../shared/text/strictUtf8';
 import {
@@ -850,6 +850,7 @@ export function PlayerApp() {
           cancelOpeningForCommand();
           pauseHistoryReplay();
           interactionController?.notifyManualCameraInput();
+          viewport?.cancelCameraTransition('manual-input');
           autoPatrolPlayback?.notifyManualInput();
           autoPatrolPlayback?.notifyCameraChangedWhilePaused();
         };
@@ -893,8 +894,21 @@ export function PlayerApp() {
           runtime?.clearLocalHighlight();
           runtime?.clearExternalHighlight();
         };
+        const getClickTargetBounds = (entityId: string, cell?: DigitalTwinSlotCoordinate) => (
+          cell
+            ? runtime!.getLocatorCellWorldBounds(entityId, cell)
+            : runtime!.getEntitiesFocusBounds([entityId])
+        );
+        const prepareClickCamera = (): void => {
+          cancelOpeningForCommand();
+          autoPatrolPlayback?.stop();
+          manualRoam?.setEnabled(false);
+        };
         const handleModelClick = createViewerModelClickHandler(sceneDocument, {
-          beginSelection: () => interactionController?.beginSelection(),
+          beginSelection: () => {
+            viewport?.cancelCameraTransition('replaced');
+            interactionController?.beginSelection();
+          },
           updateSelection: (entityIds) => {
             const nextEntityIds = [...entityIds];
             localHighlightedEntityIds = nextEntityIds;
@@ -904,9 +918,8 @@ export function PlayerApp() {
           setHighlightExcludeTrack: (entityIds) => runtime!.setClickHighlightTrackExclusion(entityIds),
           setSlotHighlight: (entityId, cell) => runtime!.setLocalSlotHighlight(entityId, cell),
           focusTarget: (entityId, cell) => {
-            const bounds = cell
-              ? runtime!.getLocatorCellWorldBounds(entityId, cell)
-              : runtime!.getEntitiesFocusBounds([entityId]);
+            prepareClickCamera();
+            const bounds = getClickTargetBounds(entityId, cell);
             if (bounds && viewport) {
               viewport.focusOnBounds(bounds, {
                 animate: true,
@@ -914,6 +927,14 @@ export function PlayerApp() {
                 ...(cell ? { useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE } : {}),
               });
             }
+          },
+          followTarget: (entityId, cell) => {
+            prepareClickCamera();
+            viewport?.followOnBounds(() => getClickTargetBounds(entityId, cell), {
+              animate: true,
+              durationMs: CLICK_EVENT_FOCUS_DURATION_MS,
+              ...(cell ? { useModelFocusAngle: false, radiusScale: CLICK_EVENT_FOCUS_RADIUS_SCALE } : {}),
+            });
           },
           triggerManualEvents: (entityId) => { autoPatrolPlayback?.triggerManualEventsForTarget(entityId); },
           emitAssetClicked: (payload) => interactionController?.notifyAssetClicked(payload),

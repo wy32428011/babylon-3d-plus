@@ -69,9 +69,15 @@ function getFocusOptions(entry: 'preview' | 'viewer', cell = false, focusBounds?
     captured = options;
   } };
   const js = ts.transpile(`return ${expression}`, { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext });
-  const result = new Function('runtime', 'viewport', 'cell', 'CLICK_EVENT_FOCUS_DURATION_MS', 'CLICK_EVENT_FOCUS_RADIUS_SCALE', js)(
+  const result = new Function(
+    'runtime', 'viewport', 'cell', 'CLICK_EVENT_FOCUS_DURATION_MS', 'CLICK_EVENT_FOCUS_RADIUS_SCALE',
+    'prepareClickCamera', 'getClickTargetBounds', js,
+  )(
     runtime, viewport, cell ? { row: 1, column: 1, layer: 1 } : undefined,
     CLICK_EVENT_FOCUS_DURATION_MS, CLICK_EVENT_FOCUS_RADIUS_SCALE,
+    () => {}, (entityId: string, coordinate: unknown) => coordinate
+      ? runtime.getLocatorCellWorldBounds()
+      : runtime.getEntitiesFocusBounds(),
   );
   return entry === 'preview' ? result : captured;
 }
@@ -213,6 +219,8 @@ for (const target of ['model', 'cell', 'generated'] as const) {
     const manualRoamRef: { current: typeof roam | undefined } = { current: undefined };
     const click = getClickCallback('preview', {
       manualRoamRef,
+      generatedUnit: null,
+      autoPatrolPlaybackRef: { current: { stop: () => {} } },
       runtimeRef: { current: {
         setLocalSlotHighlight: (id: string, value: unknown) => { if (value) highlights.push({ id, cell: value }); },
         setLocalHighlightEntityIds: (ids: string[]) => { if (ids.length) highlights.push(ids); },
@@ -225,6 +233,7 @@ for (const target of ['model', 'cell', 'generated'] as const) {
       state: {
         scene: { entities: { model: {} } },
         setEnvironmentAdjustmentActive: () => {},
+        selectSpawnedDevice: () => {},
         selectEntity: (id: string | null) => { if (id) highlights.push([id]); },
         requestSceneFocusForSelection: (ids: string[]) => focuses.push(ids),
       },

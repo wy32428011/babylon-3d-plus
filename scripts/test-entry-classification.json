@@ -12214,11 +12214,11 @@
     },
     {
       "file": "tests/runtime/stackerFocusBounds.test.ts",
-      "sha256": "aeb9ee0fec6eb3583ba1e059a131de1f34b6cc31fca5722ff1885435997b17e9",
+      "sha256": "43fb94b0805799238d4b8849aba03c5b1494a9c7b9b6d63eefde8529c61b2729",
       "disposition": "node-contract",
       "domain": "motion",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/runtime/stackerFocusBounds.test.ts",
-      "purpose": "堆垛机聚焦中心在机身，轨道加长不改变聚焦范围且完整尺寸仍包含轨道",
+      "purpose": "验证堆垛机机身聚焦范围，以及 AGV 动态实例和输送线货箱从点击决议进入真实相机聚焦与移动跟随",
       "prerequisites": [
         "安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过",
         "Vite 构建或 SSR；保留源码模块图、临时目录与 teardown",
@@ -12251,11 +12251,15 @@
         },
         {
           "line": 7,
-          "text": "import { MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';"
+          "text": "import { ArcRotateCamera, MeshBuilder, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';"
         },
         {
-          "line": 39,
+          "line": 47,
           "text": "const root = new TransformNode('stacker-root', scene);"
+        },
+        {
+          "line": 70,
+          "text": "test('AGV 动态实例与输送线货箱从真实点击决议进入聚焦和移动跟随', () => {"
         }
       ]
     },

@@ -36,6 +36,7 @@ type ClickEventBindingInspectorProps = {
 const EFFECT_OPTIONS: readonly { value: ClickEventBindingEffect; label: string }[] = [
   { value: 'highlight', label: '高亮选中' },
   { value: 'focus', label: '聚焦动画' },
+  { value: 'follow', label: '跟随移动' },
   { value: 'show-chart', label: '展示图表' },
   { value: 'open-inspection-detail', label: '打开设备详情' },
 ];
@@ -72,7 +73,7 @@ function readChartFromDrop(event: DragEvent<HTMLElement>): ClickEventBindingEven
   };
 }
 
-/** 渲染并编辑点击事件绑定；运行/发布态命中的设备执行高亮、聚焦和大屏展示效果。 */
+/** 渲染并编辑点击事件绑定；运行/发布态命中的设备执行高亮、聚焦、跟随和大屏展示效果。 */
 export function ClickEventBindingInspector({
   component,
   disabled = false,

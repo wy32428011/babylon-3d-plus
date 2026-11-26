@@ -44,7 +44,7 @@ const CLICK_EVENT_BINDING_ID_MAX_LENGTH = 128;
 const DATA_PLATFORM_SCREEN_CHART_ID_PREFIX = 'data-platform-screen:';
 
 const CLICK_EVENT_BINDING_EVENT_TYPES: readonly ClickEventBindingEventType[] = ['click', 'click-cell'];
-const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'show-chart', 'open-inspection-detail'];
+const CLICK_EVENT_BINDING_EFFECTS: readonly ClickEventBindingEffect[] = ['highlight', 'focus', 'follow', 'show-chart', 'open-inspection-detail'];
 
 /** 判断值是否为普通 JSON 对象，避免带原型对象进入场景状态。 */
 function isPlainObject(value: unknown): value is Record<string, unknown> {

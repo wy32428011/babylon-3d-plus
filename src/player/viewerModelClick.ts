@@ -16,6 +16,7 @@ type ViewerModelClickEffects = {
   updateSelection: (entityIds: readonly string[]) => void;
   setSlotHighlight: (entityId: string, cell: DigitalTwinSlotCoordinate | null) => void;
   focusTarget: (entityId: string, cell?: DigitalTwinSlotCoordinate) => void;
+  followTarget?: (entityId: string, cell?: DigitalTwinSlotCoordinate) => void;
   triggerManualEvents: (entityId: string) => void;
   /** 整体替换「忽略固定轨道」的高亮排除集合；非点击事件触发的高亮路径应传空数组。 */
   setHighlightExcludeTrack: (entityIds: readonly string[]) => void;
@@ -85,7 +86,9 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
       } else {
         effects.setSlotHighlight('', null);
       }
-      if (options.focus !== false && resolution.effects.includes('focus')) {
+      if (options.focus !== false && resolution.effects.includes('follow')) {
+        effects.followTarget?.(resolution.locatorEntityId, resolution.cell);
+      } else if (options.focus !== false && resolution.effects.includes('focus')) {
         effects.focusTarget(resolution.locatorEntityId, resolution.cell);
       }
       return;
@@ -96,7 +99,9 @@ export function createViewerModelClickHandler(scene: SceneDocument, effects: Vie
       effects.updateSelection([resolution.entityId]);
       effects.triggerManualEvents(resolution.entityId);
     }
-    if (options.focus !== false && resolution.effects.includes('focus')) {
+    if (options.focus !== false && resolution.effects.includes('follow')) {
+      effects.followTarget?.(resolution.entityId);
+    } else if (options.focus !== false && resolution.effects.includes('focus')) {
       effects.focusTarget(resolution.entityId);
     }
   };

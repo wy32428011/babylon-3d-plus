@@ -2152,6 +2152,7 @@ export function SceneViewPanel(props: SceneViewPanelProps) {
     // 运行模式只切换脚本、动画和遥测生命周期，保留已完成的 Geometry 合批及逻辑实体参数。
     if (!isRuntimePreview) {
       manualRoamRef.current?.setEnabled(false);
+      viewportRef.current?.cancelCameraTransition('replaced');
       client.dispose();
       gizmo.cancelActiveDrag();
       runtime.endTelemetryPreview();

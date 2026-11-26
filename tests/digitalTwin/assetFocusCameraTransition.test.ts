@@ -76,6 +76,83 @@ function assertCameraAtFortyFiveDegreeElevation(camera: ArcRotateCamera, target:
   );
 }
 
+test('跟随移动在聚焦后保持观察角度和距离，并同步平移相机与观察中心', async () => {
+  const { followArcRotateCameraViewOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const f = fixture();
+  let center = { x: 8, y: 2, z: -5 };
+  let completed = 0;
+  try {
+    const started = followArcRotateCameraViewOnBounds(
+      f.controller,
+      f.camera,
+      f.engine,
+      () => ({ center, radiusMeters: 2 }),
+      { animate: true, durationMs: 450, onCompleted: () => { completed += 1; } },
+    );
+    assert.equal(started, true);
+    f.setNow(450);
+    f.scene.render();
+    assert.equal(completed, 1);
+
+    const initial = {
+      target: f.camera.target.clone(),
+      position: f.camera.position.clone(),
+      alpha: f.camera.alpha,
+      beta: f.camera.beta,
+      radius: f.camera.radius,
+    };
+    center = { x: 11, y: 4, z: -3 };
+    f.scene.render();
+    assert.deepEqual(f.camera.target.asArray(), [initial.target.x + 3, initial.target.y + 2, initial.target.z + 2]);
+    assert.deepEqual(f.camera.position.asArray(), [initial.position.x + 3, initial.position.y + 2, initial.position.z + 2]);
+    assert.equal(f.camera.alpha, initial.alpha);
+    assert.equal(f.camera.beta, initial.beta);
+    assert.equal(f.camera.radius, initial.radius);
+
+    const followedTarget = f.camera.target.clone();
+    f.camera.alpha += 0.2;
+    center = { x: 20, y: 4, z: -3 };
+    f.scene.render();
+    assert.deepEqual(f.camera.target.asArray(), followedTarget.asArray(), '手动旋转后必须退出跟随');
+  } finally {
+    f.dispose();
+  }
+});
+
+test('跟随可通过统一取消入口停止，目标消失或初始几何缺失时不移动相机', async () => {
+  const { followArcRotateCameraViewOnBounds } = await import(pathToFileURL(path.join(output, 'engine.mjs')).href) as typeof import('../../src/runtime/babylon/createEngine.ts');
+  const f = fixture();
+  let bounds: { center: { x: number; y: number; z: number }; radiusMeters: number } | null = {
+    center: { x: 2, y: 1, z: 3 }, radiusMeters: 1,
+  };
+  try {
+    assert.equal(followArcRotateCameraViewOnBounds(f.controller, f.camera, f.engine, () => null), false);
+    const originalTarget = f.camera.target.clone();
+    f.scene.render();
+    assert.deepEqual(f.camera.target.asArray(), originalTarget.asArray());
+
+    assert.equal(followArcRotateCameraViewOnBounds(
+      f.controller, f.camera, f.engine, () => bounds, { animate: false },
+    ), true);
+    assert.equal(f.controller.cancelTransition('replaced'), true);
+    bounds.center = { x: 5, y: 1, z: 3 };
+    const cancelledTarget = f.camera.target.clone();
+    f.scene.render();
+    assert.deepEqual(f.camera.target.asArray(), cancelledTarget.asArray());
+
+    assert.equal(followArcRotateCameraViewOnBounds(
+      f.controller, f.camera, f.engine, () => bounds, { animate: false },
+    ), true);
+    bounds = null;
+    const missingTarget = f.camera.target.clone();
+    f.scene.render();
+    assert.deepEqual(f.camera.target.asArray(), missingTarget.asArray());
+    assert.equal(f.controller.cancelTransition('cancelled'), false, '目标消失后跟随已自动停止');
+  } finally {
+    f.dispose();
+  }
+});
+
 test('单次相机调用可覆盖 450ms 时长并在完成后通知和恢复控件', () => {
   const f = fixture();
   let completed = 0;
