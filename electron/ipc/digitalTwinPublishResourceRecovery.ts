@@ -60,5 +60,9 @@ export async function recoverPublishSceneResources(
       entityId: reference.entityId, sourceUrl: String(reference.skybox.sourceUrl ?? ''), skybox: recovered.skybox,
     });
   }
-  return { replacements, ...(skyboxReplacements.length ? { skyboxReplacements } : {}) };
+  return {
+    replacements,
+    ...(skyboxReplacements.length ? { skyboxReplacements } : {}),
+    ...(result.compositionOriginBackfills?.length ? { compositionOriginBackfills: result.compositionOriginBackfills } : {}),
+  };
 }

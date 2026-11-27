@@ -60,6 +60,22 @@ export type RoamKinematicStep = {
   jumped: boolean;
 };
 
+export type ManualRoamCameraNearPlaneInput = {
+  viewMode: ManualRoamViewMode;
+  config: Readonly<ManualRoamConfig>;
+  cameraDistanceMeters?: number;
+  obstructionClearanceMeters?: number | null;
+};
+
+export const MANUAL_ROAM_CAMERA_NEAR_PLANE = Object.freeze({
+  minMeters: 0.025,
+  firstPersonMaxMeters: 0.1,
+  thirdPersonMaxMeters: 0.2,
+  firstPersonRadiusRatio: 0.4,
+  firstPersonHeadClearanceRatio: 0.8,
+  thirdPersonClearanceRatio: 0.5,
+});
+
 const DEFAULT_CONFIG: Readonly<ManualRoamConfig> = Object.freeze({
   walkSpeed: 1.6,
   runSpeed: 3.2,
@@ -273,6 +289,49 @@ export function resolveRoamKinematicStep(
     horizontalSpeed,
     jumped,
   };
+}
+
+/**
+ * 计算手动漫游相机近裁剪面距离：
+ * - 第三人称常规跟随抬升至最高 0.2 m（与轨道视口深度精度补偿对齐），遇遮挡或近距拉回时按净空收紧；
+ * - 第一人称依据胶囊半径与头顶净空保持在 0.025–0.1 m，兼顾深度精度与贴墙防裁切。
+ */
+export function resolveManualRoamCameraNearPlane(
+  input: Readonly<ManualRoamCameraNearPlaneInput>,
+): number {
+  const config = sanitizeManualRoamConfig(input.config);
+  const {
+    minMeters,
+    firstPersonMaxMeters,
+    thirdPersonMaxMeters,
+    firstPersonRadiusRatio,
+    firstPersonHeadClearanceRatio,
+    thirdPersonClearanceRatio,
+  } = MANUAL_ROAM_CAMERA_NEAR_PLANE;
+
+  if (input.viewMode === 'firstPerson') {
+    const wallLimit = config.capsuleRadius * firstPersonRadiusRatio;
+    const headClearanceLimit = Math.max(0, config.capsuleHeight - config.eyeHeight) * firstPersonHeadClearanceRatio;
+    const raw = Math.min(firstPersonMaxMeters, wallLimit, headClearanceLimit);
+    return clamp(roundNearPlaneMeters(raw), minMeters, firstPersonMaxMeters);
+  }
+
+  const cameraDistance = typeof input.cameraDistanceMeters === 'number' && Number.isFinite(input.cameraDistanceMeters)
+    ? Math.max(0, input.cameraDistanceMeters)
+    : config.thirdPersonDistance;
+  const avatarClearanceLimit = Math.max(0, cameraDistance - config.capsuleRadius) * thirdPersonClearanceRatio;
+  let candidate = Math.min(thirdPersonMaxMeters, avatarClearanceLimit);
+
+  if (input.obstructionClearanceMeters !== null && input.obstructionClearanceMeters !== undefined) {
+    const obstructionClearance = Math.max(0, finiteOrZero(input.obstructionClearanceMeters));
+    candidate = Math.min(candidate, obstructionClearance * thirdPersonClearanceRatio);
+  }
+
+  return clamp(roundNearPlaneMeters(candidate), minMeters, thirdPersonMaxMeters);
+}
+
+function roundNearPlaneMeters(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 function finiteInRange(

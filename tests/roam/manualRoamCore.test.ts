@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
+  MANUAL_ROAM_CAMERA_NEAR_PLANE,
+  resolveManualRoamCameraNearPlane,
   resolveRoamHorizontalSpeed,
   resolveRoamKinematicStep,
   sanitizeManualRoamConfig,
@@ -212,4 +214,66 @@ test('异常或超长帧间隔不会产生无界位移', () => {
 
   const invalidFrame = resolveRoamKinematicStep(state, input, config, Number.NaN, 'ground');
   assert.deepEqual(invalidFrame.displacement, { x: 0, y: 0, z: 0 });
+});
+
+test('手动漫游近裁剪面按人称视角、跟随距离与遮挡净空自适应调整', () => {
+  const config = createDefaultManualRoamConfig();
+
+  assert.equal(
+    resolveManualRoamCameraNearPlane({ viewMode: 'thirdPerson', config }),
+    MANUAL_ROAM_CAMERA_NEAR_PLANE.thirdPersonMaxMeters,
+    '第三人称无遮挡常规跟随应抬升至 0.2 m 对齐轨道深度精度',
+  );
+  assert.equal(
+    resolveManualRoamCameraNearPlane({
+      viewMode: 'thirdPerson',
+      config,
+      cameraDistanceMeters: 0.5,
+      obstructionClearanceMeters: null,
+    }),
+    0.11,
+    '第三人称近距跟随应按人物净空收紧近裁剪面，避免裁切人物背部',
+  );
+  assert.equal(
+    resolveManualRoamCameraNearPlane({
+      viewMode: 'thirdPerson',
+      config,
+      cameraDistanceMeters: 1.5,
+      obstructionClearanceMeters: 0.16,
+    }),
+    0.08,
+    '第三人称命中防穿墙遮挡时应按遮挡净空降低近裁剪面',
+  );
+  assert.equal(
+    resolveManualRoamCameraNearPlane({
+      viewMode: 'thirdPerson',
+      config,
+      cameraDistanceMeters: 0.3,
+      obstructionClearanceMeters: 0.03,
+    }),
+    MANUAL_ROAM_CAMERA_NEAR_PLANE.minMeters,
+    '极端紧贴遮挡时保留 0.025 m 下限',
+  );
+
+  assert.equal(
+    resolveManualRoamCameraNearPlane({ viewMode: 'firstPerson', config }),
+    0.08,
+    '第一人称默认配置依据胶囊半径和头顶净空应抬升至 0.08 m',
+  );
+  assert.equal(
+    resolveManualRoamCameraNearPlane({
+      viewMode: 'firstPerson',
+      config: { ...config, capsuleHeight: 1.8, eyeHeight: 1.6 },
+    }),
+    MANUAL_ROAM_CAMERA_NEAR_PLANE.firstPersonMaxMeters,
+    '第一人称净空充足时不超过 0.1 m 上限',
+  );
+  assert.equal(
+    resolveManualRoamCameraNearPlane({
+      viewMode: 'firstPerson',
+      config: { ...config, eyeHeight: config.capsuleHeight },
+    }),
+    MANUAL_ROAM_CAMERA_NEAR_PLANE.minMeters,
+    '第一人称头顶净空不足时回退到 0.025 m 下限',
+  );
 });

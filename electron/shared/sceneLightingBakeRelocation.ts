@@ -52,7 +52,7 @@ export function normalizeLightingBakeResourceLocations(value: unknown, field = '
     const snapshot = object(value);
     const fixedComposition = field === 'sourceSnapshot' && snapshot.composition === true
       && typeof snapshot.contentSha256 === 'string' && /^[a-f\d]{64}$/i.test(snapshot.contentSha256);
-    return Object.fromEntries(Object.entries(value).filter(([key]) => !fixedComposition || key !== 'compositionResource').map(([key, child]) => [
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !fixedComposition || (key !== 'compositionResource' && key !== 'originModel')).map(([key, child]) => [
       key, normalizeLightingBakeResourceLocations(child, key, parameterValue || key === 'parameterValues'),
     ]));
   }
@@ -104,6 +104,8 @@ export function restoreSceneLightingBakeAfterMappedRewrite(
       && source.sourceUrl) delete target.resourceKey;
     if (!parameterValue && source.localPathSha256 === undefined && target.localPathSha256 !== undefined
       && source.sourceUrl) delete target.localPathSha256;
+    if (!parameterValue && source.portablePathSha256 === undefined && target.portablePathSha256 !== undefined
+      && source.sourceUrl) delete target.portablePathSha256;
     const sourceSnapshot = object(source.sourceSnapshot), targetSnapshot = object(target.sourceSnapshot);
     if (sourceSnapshot.compositionResource !== undefined && targetSnapshot.compositionResource === undefined
       && sourceSnapshot.contentSha256 === targetSnapshot.contentSha256) targetSnapshot.compositionResource = sourceSnapshot.compositionResource;

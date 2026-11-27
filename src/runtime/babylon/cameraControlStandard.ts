@@ -72,8 +72,9 @@ const previousNearPlaneByCamera = new WeakMap<ArcRotateCamera, number>();
 /** 漫游接管近裁剪面期间，轨道相机仍更新平移灵敏度。释放时还原接管前的裁剪距离。 */
 export function setDigitalTwinCameraNearPlaneOverride(camera: ArcRotateCamera, near: number | null): void {
   if (near !== null) {
+    if (!Number.isFinite(near) || near <= 0) return;
     if (!previousNearPlaneByCamera.has(camera)) previousNearPlaneByCamera.set(camera, camera.minZ);
-    camera.minZ = near;
+    if (camera.minZ !== near) camera.minZ = near;
     return;
   }
   const previous = previousNearPlaneByCamera.get(camera);
@@ -82,7 +83,7 @@ export function setDigitalTwinCameraNearPlaneOverride(camera: ArcRotateCamera, n
   previousNearPlaneByCamera.delete(camera);
 }
 
-/** 编辑器与 Viewer 的轨道视口可启用有限的深度精度补偿，人物漫游保持原裁剪规则。 */
+/** 编辑器与 Viewer 的轨道视口可启用有限的深度精度补偿，人物漫游由漫游运行时动态控制近裁剪面。 */
 export function setDigitalTwinCameraDepthPrecision(camera: ArcRotateCamera, enabled: boolean): void {
   if (enabled) depthPrecisionCameras.add(camera);
   else depthPrecisionCameras.delete(camera);

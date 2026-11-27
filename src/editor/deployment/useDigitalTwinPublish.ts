@@ -5,7 +5,7 @@ import { beginSceneModelAssetRefresh, settleSceneModelAssetRefresh } from '../lo
 import { preparePublishSceneSnapshot } from './preparePublishSceneSnapshots';
 import { acquireSceneModelPublishOperation } from '../assets/sceneModelSyncTransaction';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { repairPublishSceneModels } from './repairPublishSceneModels';
+import { applyCompositionOriginBackfills, repairPublishSceneModels } from './repairPublishSceneModels';
 import { repairPublishSceneSkyboxes } from './repairPublishSceneSkyboxes';
 import { serializeScene } from '../project/SceneSerializer';
 import { useEditorStore } from '../store/editorStore';
@@ -189,11 +189,16 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
           }
           if (repaired.scene !== originalScene) {
             for (const warning of repaired.warnings ?? []) pushLog(warning);
-            pushLog(
-              '发布前已恢复 ' + repaired.restoredCount + ' 个模型引用，新增 ' + repaired.addedCount
-              + ' 个场景模型，重新关联 ' + repaired.reboundCount + ' 个点击设备槽位。'
-              + (repaired.addedCount ? ' 新模型放在场景原点，可调整位置与业务资产编号。' : ''),
-            );
+            if (repaired.restoredCount || repaired.addedCount || repaired.reboundCount) {
+              pushLog(
+                '发布前已恢复 ' + repaired.restoredCount + ' 个模型引用，新增 ' + repaired.addedCount
+                + ' 个场景模型，重新关联 ' + repaired.reboundCount + ' 个点击设备槽位。'
+                + (repaired.addedCount ? ' 新模型放在场景原点，可调整位置与业务资产编号。' : ''),
+              );
+            }
+            if (repaired.backfilledCount > 0) {
+              pushLog('发布前已为 ' + repaired.backfilledCount + ' 个组合解组模型补齐点击事件身份绑定。');
+            }
           }
           if (repairedSkyboxes.restoredCount) pushLog(`发布前已恢复 ${repairedSkyboxes.restoredCount} 个天空盒引用，保留原有强度和旋转参数。`);
           await waitForPublishRuntime(prepared.sceneSessionId, assertCurrent);
@@ -217,7 +222,8 @@ export function useDigitalTwinPublish(): DigitalTwinPublishController {
                 const recovery = await window.editorApi!.recoverDigitalTwinModels({ requestId, targetToken,
                   projectId: options.projectId, sceneContent: serializeScene(scene) });
                 assertEntryCurrent();
-                return repairPublishSceneSkyboxes(scene, recovery).scene;
+                const backfilled = applyCompositionOriginBackfills(scene, recovery.compositionOriginBackfills).scene;
+                return repairPublishSceneSkyboxes(backfilled, recovery).scene;
               }, skyboxPreparation.signal);
             preparedScenes.push({ sceneId: item.sceneId, sceneContent: content });
           }

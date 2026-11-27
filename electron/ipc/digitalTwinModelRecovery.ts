@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { DigitalTwinModelRecoveryResult, ProjectModelAssetEntry } from '../types.js';
 import { collectPublishModelReferences, planPublishModelRecovery, type PublishModelRecoveryItem } from '../shared/publishModelRecovery.js';
 import { getClickEventModelResourceKey } from '../shared/clickEventModelIdentity.js';
+import { resolveLegacyCompositionMemberOriginModels } from './compositionPackage.js';
 import { authorizeAssetFile, decodeAssetUrl, isAuthorizedAssetFile, isPathInsideAuthorizedAssetRoot } from './assetRegistry.js';
 import { isPathInsideOrEqual } from './deploymentExportFileSystem.js';
 import { createDataPlatformModelSourceKey, recoverDataPlatformModelAssets } from './dataPlatformModelIncrementalSync.js';
@@ -24,8 +25,13 @@ export async function recoverPublishSceneModels(
   onProgress('正在检查场景模型和点击事件绑定…');
   const context = await resolveContext();
   signal.throwIfAborted();
-  const { plan, scene } = await inspectPublishSceneModels(sceneContent, signal, context);
-  if (!plan.length) return { replacements: [] };
+  const { plan, scene, compositionOriginBackfills } = await inspectPublishSceneModels(sceneContent, signal, context);
+  if (!plan.length) {
+    return {
+      replacements: [],
+      ...(compositionOriginBackfills.length ? { compositionOriginBackfills } : {}),
+    };
+  }
   if (plan.length > 256) throw new Error('一次发布最多自动恢复 256 种模型，请先同步模型资源库。');
   const references = collectPublishModelReferences(scene);
   const local: DigitalTwinModelRecoveryResult['replacements'] = [];
@@ -67,6 +73,7 @@ export async function recoverPublishSceneModels(
         dataPlatformSourceKey: sourceKey, dataPlatformResourceId: item.resourceId,
       } };
     })],
+    ...(compositionOriginBackfills.length ? { compositionOriginBackfills } : {}),
   };
 }
 
@@ -77,11 +84,25 @@ async function inspectPublishSceneModels(sceneContent: string, signal: AbortSign
   }
   const parsed = JSON.parse(sceneContent) as { version?: number; scene?: unknown };
   if (!isSupportedSceneFileVersion(parsed?.version) || !parsed.scene) throw new Error('发布前模型恢复的场景格式无效。');
+  const compositionOriginBackfills = await resolveLegacyCompositionMemberOriginModels(parsed.scene, {
+    sharedResourcesRoot: scope?.sharedResourcesRoot,
+    projectRoot: scope?.projectRoot,
+    extraRoots: [scope?.legacyWorkspaceRoot],
+  });
+  const sceneEntities = (parsed.scene as { entities?: Record<string, { components?: { modelAsset?: { sourceSnapshot?: Record<string, unknown> } } }> }).entities;
+  if (sceneEntities) {
+    for (const { entityId, originModel } of compositionOriginBackfills) {
+      const snapshot = sceneEntities[entityId]?.components?.modelAsset?.sourceSnapshot;
+      if (snapshot && snapshot.composition === true && !snapshot.originModel) {
+        snapshot.originModel = originModel;
+      }
+    }
+  }
   const plan = await planPublishModelRecovery(parsed.scene, async (asset, reference) => {
     signal.throwIfAborted();
     return areModelReferencePathsAvailable(asset, reference?.target, signal, scope);
   });
-  return { plan, scene: parsed.scene };
+  return { plan, scene: parsed.scene, compositionOriginBackfills };
 }
 
 /** 主发布入口也必须检查，防止绕过 renderer 预处理发布无点击目标的包。 */

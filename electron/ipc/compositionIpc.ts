@@ -39,7 +39,11 @@ export function registerCompositionIpc() {
     const sourceKey = config.baseUrl ? createHash('sha256').update(normalizeDataPlatformSourceUrl(config.baseUrl)).digest('hex') : '';
     return (await listCompositionSummaries(root)).filter(e => !e.sourceKey || e.sourceKey === sourceKey);
   });
-  ipcMain.handle('composition:load', async (_event, id: string, revision?: string) => loadCompositionPackage((await context()).root, id, revision));
+  ipcMain.handle('composition:load', async (_event, id: string, revision?: string) => {
+    const { root } = await context();
+    const assetIndexRoots = [getCurrentProjectRoot(), getSharedProjectAssetRoot(), root].filter((value): value is string => Boolean(value));
+    return loadCompositionPackage(root, id, revision, assetIndexRoots);
+  });
   ipcMain.handle('composition:save', async (_event, request: CompositionSaveRequest) => {
     const { root, config } = await context();
     if (request?.targetId) {
@@ -52,7 +56,11 @@ export function registerCompositionIpc() {
     const packageHints = (await Promise.all(roots.map(value => readProjectAssetIndex(value)))).flatMap(index => index.assets);
     return saveCompositionPackage(root, request, sourceKey, packageHints);
   });
-  ipcMain.handle('composition:restore', async (_event, id: string, revision: string) => restoreCompositionPackage((await context()).root, id, revision));
+  ipcMain.handle('composition:restore', async (_event, id: string, revision: string) => {
+    const { root } = await context();
+    const assetIndexRoots = [getCurrentProjectRoot(), getSharedProjectAssetRoot(), root].filter((value): value is string => Boolean(value));
+    return restoreCompositionPackage(root, id, revision, assetIndexRoots);
+  });
   ipcMain.handle('composition:sync', async () => { const { root, config } = await context(); const binding = getCurrentDataPlatformBinding(), scope = getScenePublishScope();
     const projectId = scope.kind === 'bound-project' && binding && scope.projectRoot === binding.projectRoot ? binding.metadata.projectId : undefined;
     return syncCompositionLibrary(root, config.baseUrl, projectId); });

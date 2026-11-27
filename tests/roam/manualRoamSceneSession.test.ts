@@ -45,3 +45,14 @@ test('备用地面跟随大坐标场景的相机目标定位', () => {
     /this\.fallbackGround\.position\.copyFromFloats\(\s*cameraTarget\.x,\s*cameraTarget\.y - 0\.002,\s*cameraTarget\.z,\s*\);/,
   );
 });
+
+test('手动漫游运行时在视角更新中动态同步近裁剪面而非锁死 0.025m', () => {
+  assert.doesNotMatch(
+    runtimeSource,
+    /setDigitalTwinCameraNearPlaneOverride\(this\.options\.camera,\s*0\.025\)/,
+  );
+  assert.match(
+    runtimeSource,
+    /private updateCamera\(deltaSeconds: number\): void \{[\s\S]*?resolveManualRoamCameraNearPlane\(\{[\s\S]*?viewMode:\s*'firstPerson'[\s\S]*?resolveManualRoamCameraNearPlane\(\{[\s\S]*?viewMode:\s*'thirdPerson'[\s\S]*?cameraDistanceMeters:\s*Vector3\.Distance\(target,\s*position\),[\s\S]*?obstructionClearanceMeters,/,
+  );
+});

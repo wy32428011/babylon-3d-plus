@@ -25,6 +25,7 @@ import { resolveRuntimeAssetUrl } from '../assets/editorAssetUrl';
 import {
   createDefaultManualRoamConfig,
   createInitialRoamKinematicState,
+  resolveManualRoamCameraNearPlane,
   resolveRoamKinematicStep,
   sanitizeManualRoamConfig,
   sanitizeManualRoamSpawnPose,
@@ -313,7 +314,13 @@ export class ManualRoamRuntime {
       }
       this.previousCameraMode = this.options.camera.mode;
       this.options.camera.mode = Camera.PERSPECTIVE_CAMERA;
-      setDigitalTwinCameraNearPlaneOverride(this.options.camera, 0.025);
+      setDigitalTwinCameraNearPlaneOverride(
+        this.options.camera,
+        resolveManualRoamCameraNearPlane({
+          viewMode: this.snapshot.viewMode,
+          config: this.snapshot.config,
+        }),
+      );
       this.options.setOrbitControlsEnabled(false);
       this.collider.setEnabled(true);
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
@@ -1029,6 +1036,13 @@ export class ManualRoamRuntime {
     if (this.snapshot.viewMode === 'firstPerson') {
       this.options.camera.setTarget(head.add(lookDirection));
       this.options.camera.setPosition(head);
+      setDigitalTwinCameraNearPlaneOverride(
+        this.options.camera,
+        resolveManualRoamCameraNearPlane({
+          viewMode: 'firstPerson',
+          config,
+        }),
+      );
       return;
     }
 
@@ -1042,11 +1056,13 @@ export class ManualRoamRuntime {
       (mesh) => this.isCollisionCandidate(mesh),
       false,
     );
+    let obstructionClearanceMeters: number | null = null;
     if (cameraHit?.hit && cameraHit.distance < desiredDistance) {
       const collisionPadding = Math.min(
         THIRD_PERSON_CAMERA_PADDING_METERS,
         Math.max(0, cameraHit.distance) * 0.5,
       );
+      obstructionClearanceMeters = collisionPadding;
       desiredPosition.copyFrom(target).addInPlace(cameraRayDirection.scale(
         Math.max(0, cameraHit.distance - collisionPadding),
       ));
@@ -1056,6 +1072,15 @@ export class ManualRoamRuntime {
     const position = Vector3.Lerp(this.options.camera.position, desiredPosition, blend);
     this.options.camera.setTarget(target);
     this.options.camera.setPosition(position);
+    setDigitalTwinCameraNearPlaneOverride(
+      this.options.camera,
+      resolveManualRoamCameraNearPlane({
+        viewMode: 'thirdPerson',
+        config,
+        cameraDistanceMeters: Vector3.Distance(target, position),
+        obstructionClearanceMeters,
+      }),
+    );
   }
 
   /** 用实际水平速度驱动程序化步态或内置走/跑片段，使步频与位移同步。 */

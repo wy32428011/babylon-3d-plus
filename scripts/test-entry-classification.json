@@ -7542,7 +7542,7 @@
     },
     {
       "file": "tests/editor/compositionPackage.test.ts",
-      "sha256": "c37c12e92e2e99d5c3d3c2463dd8c6bcb0c463ce0424aa86ab7e561e44d2d076",
+      "sha256": "6aeab3730902d537591ab757d2e30b48400f87c1f9d6f4121faaa78a7b38d853",
       "disposition": "node-contract",
       "domain": "resources",
       "command": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/compositionPackage.test.ts",
@@ -7573,19 +7573,15 @@
           "text": "import path from 'node:path';"
         },
         {
-          "line": 6,
-          "text": "import { saveCompositionPackage, listCompositionPackages, restoreCompositionPackage } from '../../dist-electron/ipc/compositionPackage.js';"
-        },
-        {
-          "line": 7,
+          "line": 13,
           "text": "import { authorizeAssetRoot } from '../../dist-electron/ipc/assetRegistry.js';"
         },
         {
-          "line": 8,
+          "line": 14,
           "text": "import type { CompositionDefinition } from '../../electron/shared/compositionTypes.ts';"
         },
         {
-          "line": 11,
+          "line": 17,
           "text": "const root=await fs.mkdtemp(path.join(os.tmpdir(),'composition-package-'));"
         }
       ]

@@ -140,6 +140,9 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
   const localPathSha256 = typeof value.localPathSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.localPathSha256)
     ? value.localPathSha256
     : undefined;
+  const portablePathSha256 = typeof value.portablePathSha256 === 'string' && /^[0-9a-f]{64}$/.test(value.portablePathSha256)
+    ? value.portablePathSha256
+    : undefined;
 
   return {
     id,
@@ -151,6 +154,7 @@ function sanitizeClickEventBindingDeviceType(value: unknown): ClickEventBindingD
     ...(identity ? { dataPlatformModel: identity } : {}),
     ...(resourceKey ? { resourceKey } : {}),
     ...(localPathSha256 ? { localPathSha256 } : {}),
+    ...(portablePathSha256 ? { portablePathSha256 } : {}),
     ...(thumbnailUrl && thumbnailUrl.startsWith(AUTHORIZED_CLICK_EVENT_ASSET_URL_PREFIX) ? { thumbnailUrl } : {}),
   };
 }

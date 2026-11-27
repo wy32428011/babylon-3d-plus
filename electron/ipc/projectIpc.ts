@@ -22,6 +22,8 @@ import { readUtf8File } from '../shared/strictUtf8.js';
 import { registerOpeningPackageIpc } from './openingPackageIpc.js';
 import { prepareOpeningSceneContent } from './openingPackageResources.js';
 import { prepareLightingSceneSave, prepareLightingSceneContent } from './sceneLightingBakeResources.js';
+import { captureSceneLightingBakeRelocation } from '../shared/sceneLightingBakeRelocation.js';
+import { resolveLegacyCompositionMemberOriginModels } from './compositionPackage.js';
 import { preserveLegacyLightingSceneBeforeWrite } from './sceneLightingMigrationSave.js';
 import { beginScenePublishScopeUpdate, cancelScenePublishScopeFile, confirmScenePublishScopeFile, getScenePublishScope, stageScenePublishScopeFile } from './scenePublishScope.js';
 import { isDigitalTwinPublishActive } from './digitalTwinPublishIpc.js';
@@ -30,6 +32,7 @@ import {
   commitRecentProjectActivation,
   getProjectAssetStoreStateSnapshot,
   getCurrentProjectRoot,
+  getSharedProjectAssetRoot,
   getRecentWorkspaceStateSnapshot,
   getRecentWorkspaces,
   listProjectAssets,
@@ -290,6 +293,37 @@ export function registerProjectIpc(): void {
 
 
 /** 完整校验场景伴随资产后再授权；仅移动地址不改变有效烘焙内容。 */
+async function backfillLegacyCompositionOriginsOnSceneLoad(content: string): Promise<string> {
+  try {
+    const parsed = JSON.parse(content) as { version?: unknown; scene?: Record<string, unknown> };
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return content;
+    if (!isSupportedSceneFileVersion(parsed.version) || !parsed.scene || typeof parsed.scene !== 'object' || Array.isArray(parsed.scene)) {
+      return content;
+    }
+    const backfills = await resolveLegacyCompositionMemberOriginModels(parsed.scene, {
+      sharedResourcesRoot: getSharedProjectAssetRoot(),
+      projectRoot: getCurrentProjectRoot(),
+    });
+    if (backfills.length === 0) return content;
+    const restoreLighting = captureSceneLightingBakeRelocation(parsed.scene);
+    const entities = parsed.scene.entities as Record<string, { components?: { modelAsset?: { sourceSnapshot?: Record<string, unknown> } } }> | undefined;
+    if (!entities || typeof entities !== 'object' || Array.isArray(entities)) return content;
+    let changed = false;
+    for (const { entityId, originModel } of backfills) {
+      const snapshot = entities[entityId]?.components?.modelAsset?.sourceSnapshot;
+      if (snapshot && snapshot.composition === true && !snapshot.originModel) {
+        snapshot.originModel = originModel;
+        changed = true;
+      }
+    }
+    if (!changed) return content;
+    restoreLighting?.(parsed.scene);
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  } catch {
+    return content;
+  }
+}
+
 async function prepareSceneResourceContent(content: string, filePath: string, canCommit?: () => boolean, warnings?: string[]): Promise<string> {
   const opening = await prepareOpeningSceneContent(content, filePath);
   // 打开准备跨越异步边界后再次校验；发布开始或会话关闭时不能授权迟到的光照资源。
@@ -298,7 +332,9 @@ async function prepareSceneResourceContent(content: string, filePath: string, ca
   if (canCommit && !canCommit()) return prepared.content;
   for (const file of prepared.files) authorizeAssetFile(file);
   if (prepared.warning) warnings?.push(prepared.warning);
-  return prepared.content;
+  const backfilled = await backfillLegacyCompositionOriginsOnSceneLoad(prepared.content);
+  if (canCommit && !canCommit()) return prepared.content;
+  return backfilled;
 }
 
 function validateSaveSceneRequest(request: SaveSceneRequest): SaveSceneRequest {
