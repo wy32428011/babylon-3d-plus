@@ -102,7 +102,7 @@ export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }:
   const hideSelectedEntities = useEditorStore((state) => state.hideSelectedEntities);
   const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
   const copySelectedEntities = useEditorStore((state) => state.copySelectedEntities);
-  const pasteEntityClipboard = useEditorStore((state) => state.pasteEntityClipboard);
+  const pasteEntityClipboardFromSystem = useEditorStore((state) => state.pasteEntityClipboardFromSystem);
   const groupSelectedEntities = useEditorStore((state) => state.groupSelectedEntities);
   const ungroupSelectedEntities = useEditorStore((state) => state.ungroupSelectedEntities);
   const requestSceneFocusForSelection = useEditorStore((state) => state.requestSceneFocusForSelection);
@@ -212,7 +212,7 @@ export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }:
 
         if (key === 'v') {
           event.preventDefault();
-          pasteEntityClipboard();
+          void pasteEntityClipboardFromSystem();
           return;
         }
 
@@ -273,7 +273,7 @@ export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }:
     groupSelectedEntities,
     hideSelectedEntities,
     lockSelectedEntities,
-    pasteEntityClipboard,
+    pasteEntityClipboardFromSystem,
     handleToggleSceneFullscreen,
     requestSceneFocusForSelection,
     sceneFullscreen,
@@ -336,6 +336,16 @@ export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }:
     updateFetchConfig(config);
   }
 
+  /** 启动独立的新编辑器窗口，方便并排打开另一场景并跨窗口复制模型。 */
+  const handleOpenNewEditorInstance = useCallback((): void => {
+    const openNewWindow = window.editorApi?.openNewEditorInstance;
+    if (!openNewWindow) return;
+    void openNewWindow().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLog(`新开编辑器窗口失败：${message}`);
+    });
+  }, [pushLog]);
+
   /** 忙碌任务未结束时留在编辑器；允许返回时先退出场景全屏，避免首页仍占着系统全屏。 */
   async function handleBackToHome(cancelRuntimeLoading = false): Promise<void> {
     if (returningHomeRef.current) return;
@@ -396,6 +406,7 @@ export function EditorLayout({ onBackToHome, appUpdateState, onCheckForUpdate }:
         onRedo={redo}
         onSaveScene={() => void saveScene()}
         onLoadScene={() => void loadScene()}
+        onOpenNewEditorInstance={window.editorApi?.openNewEditorInstance ? handleOpenNewEditorInstance : undefined}
         onOpenDigitalTwinPublish={() => setDigitalTwinPublishDialogOpen(true)}
         digitalTwinPublishBusy={digitalTwinPublish.isBusy}
         digitalTwinPublishProgress={digitalTwinPublish.state.progress}

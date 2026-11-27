@@ -355,6 +355,20 @@ export function HomePage({
     }
   }
 
+  /** 启动独立的新编辑器窗口，方便并排打开另一场景并跨窗口复制模型。 */
+  async function handleOpenNewEditorInstance(): Promise<void> {
+    if (!window.editorApi?.openNewEditorInstance) {
+      setStatus({ kind: 'error', message: '新开编辑器窗口需要 Electron 桌面环境。' });
+      return;
+    }
+
+    try {
+      await window.editorApi.openNewEditorInstance();
+    } catch (error) {
+      setStatus({ kind: 'error', message: `新开编辑器窗口失败：${getHomeErrorMessage(error)}` });
+    }
+  }
+
   /** 从最近列表移除场景记录，不删除磁盘上的真实文件。 */
   async function handleRemoveRecentScene(filePath: string): Promise<void> {
     if (!window.editorApi?.removeRecentWorkspaceItem) {
@@ -631,6 +645,15 @@ export function HomePage({
             </button>
           ) : null}
           <button disabled={isOpeningDataPlatformProject} onClick={onEnterBlankEditor} type="button">进入空白编辑器</button>
+          {window.editorApi?.openNewEditorInstance ? (
+            <button
+              disabled={isOpeningDataPlatformProject}
+              onClick={() => void handleOpenNewEditorInstance()}
+              type="button"
+            >
+              新开编辑器窗口
+            </button>
+          ) : null}
         </div>
       </header>
 

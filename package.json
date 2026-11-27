@@ -125,6 +125,7 @@
     "test:local-scene-recovery": "node --experimental-strip-types --test --test-concurrency=1 tests/dataPlatform/localSceneResourceRecovery.test.ts tests/dataPlatform/localSceneRecoveryService.test.ts tests/dataPlatform/localSceneRemoteRecovery.test.ts tests/dataPlatform/editorAssetFileError.test.ts tests/editor/localSceneRecoveryTransaction.test.ts tests/editor/localSceneEnvironmentChoice.test.ts tests/runtime/sceneResourceRetry.test.ts tests/editor/sceneStartupResourceGate.test.ts tests/editor/sceneModelLibrarySync.test.ts",
     "test:builtin-slot-rows": "node --experimental-strip-types --test tests/editor/builtInSlotRowReconcile.test.ts",
     "test:dev-asset-paths": "node --experimental-strip-types --test tests/devAssetPaths.test.ts",
+    "test:cross-scene-clipboard": "node --experimental-transform-types --test --test-concurrency=1 tests/editor/crossSceneClipboard.test.ts tests/editor/crossSceneClipboardIpc.test.ts",
     "test": "node scripts/test-groups.mjs core",
     "test:integration": "node scripts/test-groups.mjs integration",
     "test:smoke": "node scripts/test-groups.mjs smoke",

@@ -36,7 +36,8 @@ import { sanitizeSceneName, sanitizeVector3, cloneTransform, normalizeTransformF
 import { isRuntimePreviewState, guardRuntimePreviewMutation, prependLog } from './editorMutationGuard';
 import { createLoadedSceneState } from './sceneSessionState';
 import { resolveSelectionTransformMode, isRuntimeEntityEditable, getSelectedEntity, sanitizeHierarchySelection, getUnlockedSelectionIds, getActiveHierarchySelectionIds, resolvePasteParentId, getSelectedRuntimeEntityIds, sanitizeSelectedAutoPatrolWaypointId } from './selectionOperations';
-import { createNextAutoPatrolName, createNextModelGeneratorName, createNextEntityName, createNextFolderName, createEntityClipboardSnapshot, formatEntityClipboardCount, prepareEntityClipboardPaste, copyLightingGroupRules, hasEntityAssetNumber } from './entityClipboardOperations';
+import { createNextAutoPatrolName, createNextModelGeneratorName, createNextEntityName, createNextFolderName, createEntityClipboardSnapshot, formatEntityClipboardCount, prepareEntityClipboardPaste, copyLightingGroupRules, collectLightingGroupRulesForClipboard, mergeCrossSceneLightingGroupRules, hasEntityAssetNumber } from './entityClipboardOperations';
+import { ENTITY_CLIPBOARD_SCHEMA_VERSION, type CrossSceneEntityClipboardPayload } from '../../../../electron/shared/entityClipboardTransfer';
 import { areJsonValuesEqual } from './projectAssetRefresh';
 import { setEntitiesVisibleInScene, collectVisibilityShowTargetIds, setEntitiesLockedInScene, collectLockUnlockTargetIds, insertClipboardEntitiesInScene, groupEntitiesInScene, ungroupFoldersInScene, deleteEntitiesInScene, applyLayerChangePlatformSideEffects, applyBuiltInSlotSideEffects } from './sceneHierarchyOperations';
 import { ENTITY_ARRAY_DIRECTION_VECTORS, prepareResolvedEntityArray, createResolvedEntityArrayCommand } from './sceneEntityArrayOperations';
@@ -59,6 +60,7 @@ export const createSceneDocumentSlice: EditorSlice<
   "history" |
   "entityClipboard" |
   "entityArrayRequest" |
+  "projectAssetsRefreshVersion" |
   "logs" |
   "renameScene" |
   "resetSceneToBlank" |
@@ -88,6 +90,7 @@ export const createSceneDocumentSlice: EditorSlice<
   "lockSelectedEntities" |
   "copySelectedEntities" |
   "pasteEntityClipboard" |
+  "pasteEntityClipboardFromSystem" |
   "requestEntityArray" |
   "resolveEntityArrayRequest" |
   "commitResolvedEntityArray" |
@@ -146,6 +149,7 @@ export const createSceneDocumentSlice: EditorSlice<
   history: createCommandHistory(),
   entityClipboard: null,
   entityArrayRequest: null,
+  projectAssetsRefreshVersion: 0,
   logs: [{ id: 'log_boot', message: '编辑器已启动。' }],
   renameScene: (name) => {
     const nextName = sanitizeSceneName(name);
@@ -677,6 +681,7 @@ export const createSceneDocumentSlice: EditorSlice<
     });
   },
   copySelectedEntities: () => {
+    const pendingSystemWrite: { payload: CrossSceneEntityClipboardPayload | null } = { payload: null };
     set((state) => {
       if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '复制对象');
       const selectedIds = getActiveHierarchySelectionIds(state);
@@ -697,9 +702,29 @@ export const createSceneDocumentSlice: EditorSlice<
       const snapshot = createEntityClipboardSnapshot(state.scene, selectedIds);
       if (snapshot.entries.length === 0) return state;
 
+      const clipboardId = createId('clipboard');
+      const lightingGroupRules = collectLightingGroupRulesForClipboard(state.scene, snapshot.entries);
+      pendingSystemWrite.payload = {
+        schemaVersion: ENTITY_CLIPBOARD_SCHEMA_VERSION,
+        clipboardId,
+        copiedAt: new Date().toISOString(),
+        sourceContext: {
+          sceneSessionId: state.sceneSessionId,
+          sceneFilePath: state.sceneSourceFilePath,
+          projectRoot: null,
+          dataPlatformBaseUrl: null,
+          dataPlatformProjectId: null,
+        },
+        entries: snapshot.entries.map((entry) => ({
+          rootId: entry.rootId,
+          entities: entry.entities as unknown as Record<string, unknown>[],
+        })),
+        ...(lightingGroupRules.length > 0 ? { lightingGroupRules } : {}),
+      };
+
       return {
         entityClipboard: {
-          id: createId('clipboard'),
+          id: clipboardId,
           entries: snapshot.entries,
         },
         logs: prependLog(
@@ -708,6 +733,14 @@ export const createSceneDocumentSlice: EditorSlice<
         ),
       };
     });
+
+    const writeClipboard = typeof window !== 'undefined' ? window.editorApi?.writeEntityClipboard : undefined;
+    if (writeClipboard && pendingSystemWrite.payload) {
+      void writeClipboard({ payload: pendingSystemWrite.payload }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        get().pushLog(`写入系统剪贴板失败：${message}`);
+      });
+    }
   },
   pasteEntityClipboard: (targetFolderId) => {
     set((state) => {
@@ -748,6 +781,133 @@ export const createSceneDocumentSlice: EditorSlice<
           state.logs,
           `${command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}`,
         ),
+      };
+    });
+  },
+  pasteEntityClipboardFromSystem: async (targetFolderId) => {
+    const initialState = get();
+    if (isRuntimePreviewState(initialState)) {
+      set((state) => (isRuntimePreviewState(state) ? guardRuntimePreviewMutation(state, '粘贴对象') : state));
+      return;
+    }
+
+    const readClipboard = typeof window !== 'undefined' ? window.editorApi?.readEntityClipboard : undefined;
+    if (!readClipboard) {
+      get().pasteEntityClipboard(targetFolderId);
+      return;
+    }
+
+    const expectedSessionId = initialState.sceneSessionId;
+    let clipboardResult: import('../../../../electron/types').ReadEntityClipboardResult;
+    try {
+      clipboardResult = await readClipboard();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set((state) => ({ logs: prependLog(state.logs, `读取系统剪贴板失败：${message}`) }));
+      return;
+    }
+
+    const afterReadState = get();
+    if (afterReadState.sceneSessionId !== expectedSessionId) return;
+    if (isRuntimePreviewState(afterReadState)) {
+      set((state) => (isRuntimePreviewState(state) ? guardRuntimePreviewMutation(state, '粘贴对象') : state));
+      return;
+    }
+
+    if (!clipboardResult.available || !clipboardResult.payload) {
+      for (const warning of clipboardResult.warnings) {
+        get().pushLog(`系统剪贴板提示：${warning}`);
+      }
+      if (afterReadState.entityClipboard?.entries.length) {
+        get().pasteEntityClipboard(targetFolderId);
+      }
+      return;
+    }
+
+    const systemPayload = clipboardResult.payload;
+    const isCrossScene = systemPayload.sourceContext.sceneSessionId !== expectedSessionId;
+    if (!isCrossScene && afterReadState.entityClipboard?.id === systemPayload.clipboardId) {
+      get().pasteEntityClipboard(targetFolderId);
+      return;
+    }
+
+    let targetDataPlatformProjectId: string | null = null;
+    if (isCrossScene && window.editorApi?.getDigitalTwinPublishContext) {
+      try {
+        const publishContext = await window.editorApi.getDigitalTwinPublishContext();
+        targetDataPlatformProjectId = publishContext.projectId;
+      } catch {
+        targetDataPlatformProjectId = null;
+      }
+    }
+    if (get().sceneSessionId !== expectedSessionId) return;
+
+    set((state) => {
+      if (state.sceneSessionId !== expectedSessionId) return state;
+      if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '粘贴对象');
+      const clipboardEntries = systemPayload.entries as unknown as import('./editorStoreTypes').EntityClipboard['entries'];
+      if (clipboardEntries.length === 0) return state;
+      if (clipboardEntries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.skybox)))) {
+        return { logs: prependLog(state.logs, '剪贴板包含天空背景，已拒绝创建重复天空盒。') };
+      }
+      if (clipboardEntries.some((entry) => entry.entities.some((entity) => Boolean(entity.components.manualRoamSpawn)))) {
+        return { logs: prependLog(state.logs, '剪贴板包含手动漫游初始位置，已拒绝创建重复出生点。') };
+      }
+
+      const selectedEntity = getSelectedEntity(state);
+      const inferredTargetFolderId =
+        targetFolderId === undefined
+          ? selectedEntity?.isFolder
+            ? selectedEntity.id
+            : selectedEntity?.parentId ?? null
+          : targetFolderId;
+      const parentId = resolvePasteParentId(state.scene, inferredTargetFolderId);
+      const parentFolder = parentId ? state.scene.entities[parentId] : null;
+      if (parentFolder && isEntityEffectivelyLocked(state.scene.entities, parentFolder)) return state;
+
+      const prepared = prepareEntityClipboardPaste(
+        state.scene,
+        { id: systemPayload.clipboardId, entries: clipboardEntries },
+        parentId,
+        undefined,
+        {
+          crossScene: isCrossScene,
+          sourceProjectId: systemPayload.sourceContext.dataPlatformProjectId,
+          targetProjectId: targetDataPlatformProjectId,
+        },
+      );
+
+      const command = updateSceneDocumentCommand('粘贴对象', (scene) => {
+        const inserted = insertClipboardEntitiesInScene(scene, prepared.entities, prepared.rootEntityIds);
+        return isCrossScene
+          ? mergeCrossSceneLightingGroupRules(inserted, systemPayload.lightingGroupRules, prepared.duplicatedIdBySourceId)
+          : copyLightingGroupRules(inserted, [prepared.duplicatedIdBySourceId]);
+      });
+      const result = executeCommand(state.scene, state.history, command);
+
+      const hierarchySelectionIds = sanitizeHierarchySelection(result.scene, prepared.rootEntityIds);
+      let nextLogs = prependLog(
+        state.logs,
+        `${isCrossScene ? '跨场景粘贴对象' : command.label}: ${formatEntityClipboardCount(prepared.folderCount, prepared.entityCount)}`,
+      );
+      for (const warning of [...clipboardResult.warnings, ...prepared.warnings]) {
+        nextLogs = prependLog(nextLogs, warning);
+      }
+      for (const missing of clipboardResult.missingResources) {
+        nextLogs = prependLog(
+          nextLogs,
+          `资源缺失（${missing.entityName}）：${missing.reason}${missing.sourcePath ? ` [${missing.sourcePath}]` : ''}`,
+        );
+      }
+
+      return {
+        ...result,
+        hierarchySelectionIds,
+        ...resolveSelectionTransformMode(state, result.scene, hierarchySelectionIds),
+        ...(clipboardResult.projectAssetsUpdated
+          ? { projectAssetsRefreshVersion: state.projectAssetsRefreshVersion + 1 }
+          : {}),
+        logs: nextLogs,
       };
     });
   },

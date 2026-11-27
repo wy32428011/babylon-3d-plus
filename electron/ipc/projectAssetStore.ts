@@ -4,6 +4,7 @@ import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type {
   AssetEntry,
   ImportModelFolderSkippedEntry,
@@ -230,9 +231,44 @@ async function readRecentWorkspaceIndex(): Promise<RecentWorkspaceIndex> {
   }
 }
 
+const RECENT_WRITE_RETRY_DELAYS_MS = [20, 40, 60, 80, 120] as const;
+const TRANSIENT_WRITE_CODES = new Set(['EPERM', 'EACCES', 'EBUSY', 'EEXIST']);
+let recentWorkspaceWriteQueue: Promise<void> = Promise.resolve();
+
+async function writeJsonFileAtomically(filePath: string, content: string): Promise<void> {
+  const normalizedPath = normalizeFilePath(filePath);
+  const directory = path.dirname(normalizedPath);
+  await fs.mkdir(directory, { recursive: true });
+
+  for (let attempt = 0; attempt <= RECENT_WRITE_RETRY_DELAYS_MS.length; attempt += 1) {
+    const temporaryPath = path.join(directory, `.${path.basename(normalizedPath)}.tmp-${randomUUID()}`);
+    try {
+      await fs.writeFile(temporaryPath, content, { encoding: 'utf8', flag: 'wx' });
+      await fs.rename(temporaryPath, normalizedPath);
+      return;
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+      const code = isNodeError(error) ? error.code : undefined;
+      if (code && TRANSIENT_WRITE_CODES.has(code) && attempt < RECENT_WRITE_RETRY_DELAYS_MS.length) {
+        await delay(RECENT_WRITE_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/** 原子写入最近工作区索引，防止双开编辑器同时保存时写坏或竞争锁失败。 */
+export async function writeRecentWorkspaceIndexFile(filePath: string, index: RecentWorkspaceIndex): Promise<void> {
+  const task = recentWorkspaceWriteQueue.catch(() => undefined).then(() =>
+    writeJsonFileAtomically(filePath, `${JSON.stringify(index, null, 2)}\n`),
+  );
+  recentWorkspaceWriteQueue = task.catch(() => undefined);
+  await task;
+}
+
 async function writeRecentWorkspaceIndex(index: RecentWorkspaceIndex): Promise<void> {
-  await fs.mkdir(path.dirname(getRecentWorkspacesFilePath()), { recursive: true });
-  await fs.writeFile(getRecentWorkspacesFilePath(), `${JSON.stringify(index, null, 2)}\n`, 'utf-8');
+  await writeRecentWorkspaceIndexFile(getRecentWorkspacesFilePath(), index);
 }
 
 function sortRecentEntries<T extends { lastOpenedAt: string }>(entries: T[]): T[] {
@@ -344,8 +380,7 @@ async function loadRecentProjectRoot(): Promise<string | null> {
 }
 
 async function persistCurrentProjectRoot(projectRoot: string): Promise<void> {
-  await fs.mkdir(path.dirname(getRecentProjectFilePath()), { recursive: true });
-  await fs.writeFile(getRecentProjectFilePath(), JSON.stringify({ projectRoot }, null, 2), 'utf-8');
+  await writeJsonFileAtomically(getRecentProjectFilePath(), JSON.stringify({ projectRoot }, null, 2));
 }
 
 function assertString(value: unknown): string {
@@ -795,7 +830,10 @@ export async function readProjectAssetIndex(projectRoot: string): Promise<Projec
 export async function writeProjectAssetIndex(projectRoot: string, index: ProjectAssetIndex): Promise<void> {
   const normalizedIndex = normalizeProjectAssetIndex(index);
   await ensureProjectDirectories(projectRoot);
-  await fs.writeFile(getProjectAssetIndexPath(projectRoot), `${JSON.stringify(normalizedIndex, null, 2)}\n`, 'utf-8');
+  await writeJsonFileAtomically(
+    getProjectAssetIndexPath(projectRoot),
+    `${JSON.stringify(normalizedIndex, null, 2)}\n`,
+  );
 }
 
 export function toSafePackageDirectoryName(name: string): string {
@@ -1245,6 +1283,69 @@ export async function importModelPackagesIntoProject(
   });
 
   return { importedAssets, projectAssets, skipped };
+}
+
+/** 将跨项目复制进目标项目的模型包扫描并原子写入项目资产索引，已存在的包或主模型跳过。 */
+export async function registerModelPackagesInProjectIndex(
+  projectRoot: string,
+  packageDirs: readonly string[],
+): Promise<number> {
+  if (packageDirs.length === 0) return 0;
+
+  const normalizedProjectRoot = normalizeFilePath(projectRoot);
+  await ensureProjectDirectories(normalizedProjectRoot);
+  authorizeProjectAssetRoots(normalizedProjectRoot);
+
+  const uniquePackageDirs: string[] = [];
+  for (const dir of packageDirs) {
+    const normalizedDir = normalizeFilePath(dir);
+    if (!uniquePackageDirs.some((existing) => isSameLocalPath(existing, normalizedDir))) {
+      uniquePackageDirs.push(normalizedDir);
+    }
+  }
+  if (uniquePackageDirs.length === 0) return 0;
+
+  const currentIndex = await readProjectAssetIndex(normalizedProjectRoot);
+  const nextAssets = [...currentIndex.assets];
+  let addedCount = 0;
+
+  for (const packageDir of uniquePackageDirs) {
+    const alreadyIndexedByPackage = nextAssets.some(
+      (asset) => asset.packagePath && isSameLocalPath(asset.packagePath, packageDir),
+    );
+    if (alreadyIndexedByPackage) continue;
+
+    const scanned = await scanModelPackage(packageDir);
+    if (!scanned.asset) continue;
+
+    if (nextAssets.some((asset) => isSameLocalPath(asset.path, scanned.asset!.path))) {
+      continue;
+    }
+
+    const entry: ProjectModelAssetEntry = {
+      ...scanned.asset,
+      assetRevision: createProjectAssetRevision(),
+      kind: 'model',
+      libraryKind: 'model',
+    };
+    nextAssets.push(entry);
+    addedCount += 1;
+
+    authorizeAssetFile(entry.path);
+    if (entry.thumbnailPath) authorizeAssetFile(entry.thumbnailPath);
+    for (const scriptAsset of entry.scriptAssets ?? []) {
+      authorizeAssetFile(scriptAsset.path);
+    }
+  }
+
+  if (addedCount > 0) {
+    await writeProjectAssetIndex(normalizedProjectRoot, {
+      version: 2,
+      assets: nextAssets,
+    });
+  }
+
+  return addedCount;
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

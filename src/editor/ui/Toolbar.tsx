@@ -158,6 +158,7 @@ type ToolbarProps = {
   onRedo: () => void;
   onSaveScene: () => void;
   onLoadScene: () => void;
+  onOpenNewEditorInstance?: () => void;
   onOpenDigitalTwinPublish: () => void;
   digitalTwinPublishBusy: boolean;
   digitalTwinPublishProgress: DigitalTwinPublishProgress | null;
@@ -782,6 +783,13 @@ export function Toolbar(props: ToolbarProps) {
       ) : null}
       <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy || Boolean(props.cadImportProgress?.active)} icon={TOOLBAR_ICONS.save} label="保存场景" onClick={props.onSaveScene} />
       <ToolbarIconButton disabled={props.readOnly || props.digitalTwinPublishBusy || Boolean(props.cadImportProgress?.active)} icon={TOOLBAR_ICONS.load} label="加载场景" onClick={props.onLoadScene} />
+      {props.onOpenNewEditorInstance ? (
+        <ToolbarIconButton
+          icon="⧉"
+          label="新开编辑器窗口（可跨场景复制模型）"
+          onClick={props.onOpenNewEditorInstance}
+        />
+      ) : null}
       <ToolbarIconButton
         disabled={isPreview || Boolean(props.cadImportProgress?.active) || props.deploymentExportBusy || props.digitalTwinPublishBusy}
         icon={TOOLBAR_ICONS.publish}

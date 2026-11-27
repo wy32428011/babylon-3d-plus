@@ -1,7 +1,16 @@
 import { configureModelScriptPersistentCache, precompileModelScriptBytes } from './ipc/modelScriptCompiler.js';
 import { assertLightingBakeResourceFile } from './ipc/sceneLightingBakeResources.js';
 import { registerCompositionIpc } from './ipc/compositionIpc.js';
+import { registerAppInstanceIpc } from './ipc/appInstanceIpc.js';
+import { registerEntityClipboardIpc } from './ipc/entityClipboardIpc.js';
+import {
+  EDITOR_NEW_INSTANCE_ARG,
+  resolveEditorInstanceMode,
+  shouldPrimaryFocusOnSecondInstance,
+} from './shared/editorInstanceLaunch.js';
 import { app, BrowserWindow, dialog, protocol, safeStorage, shell } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createAssetFileByteStream } from './shared/assetFileByteStream.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -41,19 +50,28 @@ const ENABLE_UNSAFE_SWIFTSHADER_SWITCH = 'enable-unsafe-swiftshader';
 const DISABLE_GPU_SANDBOX_SWITCH = 'disable-gpu-sandbox';
 const FAILURE_PAGE_BACKGROUND = '#1e1e1e';
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+const explicitSecondaryLaunch = process.argv.includes(EDITOR_NEW_INSTANCE_ARG);
+const startupDeepLink = findDataPlatformDeepLink(process.argv);
+const hasSingleInstanceLock = explicitSecondaryLaunch ? false : app.requestSingleInstanceLock();
+const instanceMode = resolveEditorInstanceMode({
+  argv: process.argv,
+  hasSingleInstanceLock,
+  hasDeepLink: Boolean(startupDeepLink),
+});
+let secondarySessionDataDir: string | null = null;
 let mainWindowReference: BrowserWindow | null = null;
 let mainWindowCloseGuard: ReturnType<typeof guardEditorWindowClose> | null = null;
 let quitAfterWindowClose = false;
 const devServerUrl = !app.isPackaged ? process.env.VITE_DEV_SERVER_URL : undefined;
 const rendererEntryUrl = devServerUrl || pathToFileURL(path.join(__dirname, '../dist/index.html')).href;
-let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = findDataPlatformDeepLink(process.argv);
+let pendingDataPlatformDeepLink: DataPlatformDeepLink | null = instanceMode === 'quit-for-deep-link' ? null : startupDeepLink;
 
-if (!hasSingleInstanceLock) {
+if (instanceMode === 'quit-for-deep-link') {
   app.quit();
-} else {
+} else if (instanceMode === 'primary') {
   app.on('second-instance', (_event, argv) => {
     const deepLink = findDataPlatformDeepLink(argv);
+    if (!shouldPrimaryFocusOnSecondInstance(Boolean(deepLink))) return;
     if (deepLink) dispatchDataPlatformDeepLink(deepLink);
     if (mainWindowReference && !mainWindowReference.isDestroyed()) {
       if (mainWindowReference.isMinimized()) mainWindowReference.restore();
@@ -66,6 +84,13 @@ if (!hasSingleInstanceLock) {
     const deepLink = parseDataPlatformDeepLink(url);
     if (deepLink) dispatchDataPlatformDeepLink(deepLink);
   });
+} else {
+  secondarySessionDataDir = path.join(
+    app.getPath('temp'),
+    'zending-3d-editor-sessions',
+    `instance-${process.pid}-${randomUUID()}`,
+  );
+  app.setPath('sessionData', secondarySessionDataDir);
 }
 
 function dispatchDataPlatformDeepLink(deepLink: DataPlatformDeepLink): void {
@@ -260,7 +285,9 @@ function createMainWindow(): void {
     if (quitAfterWindowClose) { quitAfterWindowClose = false; app.quit(); }
   });
   mainWindow.webContents.on('did-finish-load', () => {
-    scheduleStartupAppUpdateCheck();
+    if (instanceMode === 'primary') {
+      scheduleStartupAppUpdateCheck();
+    }
     if (!pendingDataPlatformDeepLink || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('data-platform:deepLinkOpen', pendingDataPlatformDeepLink);
     pendingDataPlatformDeepLink = null;
@@ -317,7 +344,7 @@ function registerEditorAssetProtocol(): void {
   });
 }
 
-if (hasSingleInstanceLock) app.whenReady().then(() => {
+if (instanceMode !== 'quit-for-deep-link') app.whenReady().then(() => {
   app.on('child-process-gone', (_event, details) => {
     console.error(`[electron] 子进程退出：type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`);
   });
@@ -327,6 +354,8 @@ if (hasSingleInstanceLock) app.whenReady().then(() => {
   } : undefined);
   registerWindowCloseIpc();
   registerEditorAssetProtocol();
+  registerAppInstanceIpc();
+  registerEntityClipboardIpc();
   registerProjectIpc();
   registerCompositionIpc();
   registerEffectDataIpc();
@@ -380,6 +409,7 @@ app.on('before-quit', (event) => {
     disposeAllDigitalTwinPublishTasks(),
     disposeDataPlatformChartSync(),
     disposeDataPlatformProjectTasks(),
+    secondarySessionDataDir ? fs.rm(secondarySessionDataDir, { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
   ]).then((results) => {
     for (const result of results) {
       if (result.status === 'rejected') console.error('[electron] 退出任务清理失败。', result.reason);
