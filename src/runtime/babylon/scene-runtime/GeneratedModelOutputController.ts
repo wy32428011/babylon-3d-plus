@@ -12,7 +12,7 @@ import { createModelAssetCode } from '../../../editor/model/SceneDocument';
 import { createId } from '../../../shared/ids';
 import { createDefaultTelemetryBinding, isAgvTelemetryDeviceType, type TelemetryBindingComponent } from '../../../editor/model/telemetryBinding';
 import { isAgvSpawnerTemplateEntity, resolveDeviceSpawnerTemplateDeviceType } from '../../../editor/model/deviceSpawner';
-import { createModelGeneratorTargetSignature, createRuntimeModelAssetFromTarget, sanitizeModelAssetTemplate } from '../../../editor/model/modelGenerator';
+import { createModelGeneratorTargetSignature, createRuntimeModelAssetFromTarget, resolveModelGeneratorCargoContactSupport, sanitizeModelAssetTemplate } from '../../../editor/model/modelGenerator';
 import { resolveModelGeneratorTargetFromSnapshot } from '../modelGeneratorRuntime';
 import { buildCompositionNodeTree, readCompositionNodeArraySourceId, readCompositionNodeMeshRenderer, type CompositionNodeTree } from '../composition/compositionCargoBuilder';
 import { clearCompositionCache, getCompositionLibraryEntry } from '../composition/compositionCargoCache';
@@ -455,7 +455,22 @@ export class GeneratedModelOutputController {
 
         if (candidate) this.generatedCargoInstancePool.activate(candidate, model.contentRoot);
         this.dependencies.assets.refreshModelGeneratorModelMeshes(activeEntry);
-        this.dependencies.assets.normalizeModelContentOrigin(model);
+        const contactSupport = resolveModelGeneratorCargoContactSupport(target);
+        const hasContactSelection = Boolean(target.cargoContact);
+        const originResult = this.dependencies.assets.normalizeModelContentOrigin(model, contactSupport?.nodes);
+        if (hasContactSelection && originResult !== 'template-node') {
+          const issueKey = `${activeEntry.entityId}:${targetSignature}:${originResult}`;
+          if (!this.reportedCargoIssues.has(issueKey)) {
+            this.reportedCargoIssues.add(issueKey);
+            const reason = contactSupport
+              ? originResult === 'ambiguous-node' ? '存在重名节点' : '节点不存在或没有有效网格'
+              : '不存在或已失效';
+            const supportLabel = contactSupport?.alias ?? target.cargoContact?.supportId ?? '';
+            Reflect.apply(this.context.pushLog, this.context.callbackReceiver, [
+              `货物模板“${target.displayName}”的接触支撑位“${supportLabel}”${reason}，已回退整体包围盒底面。`,
+            ]);
+          }
+        }
         this.dependencies.parameters.applyModelAssetParameters(modelAsset, model);
         this.dependencies.assets.syncModelGeneratorExternalScripts(activeEntry, modelAsset, model);
         this.applyGeneratedOutputPresentation(activeEntry);
@@ -835,7 +850,7 @@ export class GeneratedModelOutputController {
     const runtimeId = createId(`runtime_${kind}_cargo`);
     const owner: GeneratedOutputOwnerRuntimeEntry = {
       entityId: runtimeId,
-      entityName: `${kind === 'stacker' ? '堆垛机' : '输送机'} ${cargo.assetCode} 货物 ${cargo.containerCode}`,
+      entityName: `${kind === 'stacker' ? '堆垛机' : kind === 'agv' ? 'AGV' : '输送机'} ${cargo.assetCode} 货物 ${cargo.containerCode}`,
       editorEntityId: null,
       // 匿名货物（无 containerCode）回退设备编号：生成器模型目标要求 runtimeAssetCode 非空，否则判定快照无效回退内置 Box
       runtimeAssetCode: cargo.containerCode || cargo.assetCode,
@@ -1498,6 +1513,8 @@ export class GeneratedModelOutputController {
       this.spawnedDeviceHiddenLayerMasks.delete(mesh.uniqueId);
     }
     model.loadToken += 1;
+    runSceneRuntimeCleanup(this.context, `动态设备货物 ${key}`,
+      () => this.dependencies.telemetry.specializedTelemetryRuntime.disposeCargoForAssetCode(model.assetCode));
     runSceneRuntimeCleanup(this.context, `动态设备脚本 ${key}`, () => model.externalScriptRuntime?.dispose());
     for (const texture of model.textureCache.values()) {
       runSceneRuntimeCleanup(this.context, `动态设备纹理 ${key}`, () => texture.dispose());

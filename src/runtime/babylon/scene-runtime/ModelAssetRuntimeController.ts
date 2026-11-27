@@ -11,7 +11,7 @@ import type { ModelAssetComponent } from '../../../editor/model/components';
 import { ExternalModelScriptRuntime } from '../ExternalModelScriptRuntime';
 import type { SceneAssetTrace, SceneLoadTraceScope } from '../SceneLoadDiagnostics.ts';
 import { isMeasurableModelMesh } from '../modelMeasurement';
-import { getMeshesWorldBottomCenter } from '../runtimeNodeGeometry';
+import { getMeshesWorldBottomCenter, getNodeMeshes } from '../runtimeNodeGeometry';
 import { resolveRuntimeAssetUrl } from '../../assets/editorAssetUrl';
 import { AssetLoadScheduler } from '../AssetLoadScheduler';
 import { SceneShaderWarmup } from '../SceneShaderWarmup';
@@ -817,17 +817,45 @@ export class ModelAssetRuntimeController {
     }
   }
 
-  /** 将导入模型内容的底部中心归一到实体根节点，避免源模型巨大坐标偏移影响场景放置。 */
-  public normalizeModelContentOrigin(model: ModelRuntimeEntry): void {
+  /** 将导入模型内容的底部中心归一到实体根节点；可选节点集合只用于生成货物的特殊接触面。 */
+  public normalizeModelContentOrigin(
+    model: ModelRuntimeEntry,
+    contactNodeNames?: readonly string[],
+  ): 'bounds-bottom' | 'template-node' | 'missing-node' | 'ambiguous-node' | 'empty-node' {
     model.root.computeWorldMatrix(true);
 
-    // 只测量模型自身内容：绑定货格等外来子节点可能在异步加载完成前就挂到 root 下，
-    // 参与测量会把归一化原点带偏（粘贴含内置货格的货架时原点跑到整排中点）。
-    const childMeshes = model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
-    if (childMeshes.length === 0) return;
+    let result: 'bounds-bottom' | 'template-node' | 'missing-node' | 'ambiguous-node' | 'empty-node' = 'bounds-bottom';
+    let bottomCenter: Vector3 | null = null;
+    if (contactNodeNames?.length) {
+      const contactMeshes = new Set<AbstractMesh>();
+      for (const nodeName of contactNodeNames) {
+        const contactNodes = model.contentRoot.getDescendants(false).filter(
+          (node): node is TransformNode => node instanceof TransformNode && node.name === nodeName,
+        );
+        if (contactNodes.length !== 1) {
+          result = contactNodes.length === 0 ? 'missing-node' : 'ambiguous-node';
+          break;
+        }
+        const nodeMeshes = getNodeMeshes(contactNodes[0]).filter(isMeasurableModelMesh);
+        if (nodeMeshes.length === 0) {
+          result = 'empty-node';
+          break;
+        }
+        for (const mesh of nodeMeshes) contactMeshes.add(mesh);
+      }
+      if (result === 'bounds-bottom') {
+        bottomCenter = getMeshesWorldBottomCenter([...contactMeshes]);
+        result = bottomCenter ? 'template-node' : 'empty-node';
+      }
+    }
 
-    const bottomCenter = getMeshesWorldBottomCenter(childMeshes);
-    if (!bottomCenter) return;
+    if (!bottomCenter) {
+      // 只测量模型自身内容：绑定货格等外来子节点可能在异步加载完成前就挂到 root 下，
+      // 参与测量会把归一化原点带偏（粘贴含内置货格的货架时原点跑到整排中点）。
+      const childMeshes = model.contentRoot.getChildMeshes(false).filter(isMeasurableModelMesh);
+      bottomCenter = getMeshesWorldBottomCenter(childMeshes);
+    }
+    if (!bottomCenter) return result;
 
     const inverseRootMatrix = model.root.getWorldMatrix().clone().invert();
     const localBottomCenter = Vector3.TransformCoordinates(bottomCenter, inverseRootMatrix);
@@ -837,6 +865,7 @@ export class ModelAssetRuntimeController {
         child.position.subtractInPlace(localBottomCenter);
       }
     }
+    return result;
   }
 
   /** 通过统一并发调度器加载 Babylon 资产容器，限制批量模型解析和 GPU 上传峰值。 */

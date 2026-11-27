@@ -135,7 +135,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.shuttleDriver = new ShuttleTelemetryDriver(this);
     this.liftDriver = new LiftTelemetryDriver(this);
     this.hcliftDriver = new HcliftTelemetryDriver(this);
-    this.agvDriver = new AgvTelemetryDriver();
+    this.agvDriver = new AgvTelemetryDriver(this);
     this.robotDriver = new RobotTelemetryDriver();
     this.drivers = [
       {
@@ -351,6 +351,10 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       this.host.disposeGeneratedCargo(cargo);
     }
     this.state.liftCargoMeshes.clear();
+    for (const cargo of this.state.agvCargoMeshes.values()) {
+      this.host.disposeGeneratedCargo(cargo);
+    }
+    this.state.agvCargoMeshes.clear();
     for (const entry of this.state.slotRetainedCargoMeshes.values()) {
       this.host.disposeGeneratedCargo(entry.cargo);
     }
@@ -365,6 +369,7 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
     this.rgvNlDriver.disposeRgvNlCargoForAssetCode(assetCode);
     this.shuttleDriver.disposeShuttleCargoForAssetCode(assetCode);
     this.liftDriver.disposeLiftCargoForAssetCode(assetCode);
+    this.agvDriver.disposeCargoForAssetCode(assetCode);
     this.disposeRetainedSlotCargo((entry) => entry.cargo.assetCode === assetCode);
   }
 
@@ -399,6 +404,11 @@ export class SpecializedTelemetryRuntime implements SpecializedTelemetryDriverCo
       if (cargo.generatorEntityId !== generatorEntityId) continue;
       this.host.disposeGeneratedCargo(cargo);
       this.state.liftCargoMeshes.delete(key);
+    }
+    for (const [key, cargo] of this.state.agvCargoMeshes.entries()) {
+      if (cargo.generatorEntityId !== generatorEntityId) continue;
+      this.host.disposeGeneratedCargo(cargo);
+      this.state.agvCargoMeshes.delete(key);
     }
     this.disposeRetainedSlotCargo((entry) => entry.cargo.generatorEntityId === generatorEntityId);
   }

@@ -353,6 +353,7 @@ type ModelScriptAsset = import('./editor/model/components').ModelScriptAsset;
 type ModelDataDrivenConfig = import('./editor/model/telemetryBinding').ModelDataDrivenConfig;
 type BuiltInSlotBindingConfig = import('./editor/model/builtInSlotBinding').BuiltInSlotBindingConfig;
 type LayerChangePlatformBindingConfig = import('./editor/model/builtInSlotBinding').LayerChangePlatformBindingConfig;
+type CargoContactSupport = import('./editor/model/cargoContact').CargoContactSupport;
 
 type AssetEntry = {
   /** 中台设备类型编码，不是显示标签或模型分类。 */
@@ -382,6 +383,7 @@ type AssetEntry = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
+  cargoContact?: CargoContactSupport[];
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';

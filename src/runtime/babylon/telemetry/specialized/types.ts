@@ -173,7 +173,7 @@ export type StackerForkNodeGroups = {
   backStageTwoNodes: TransformNode[];
 };
 
-export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'rgv_nl' | 'shuttle' | 'lift';
+export type GeneratedCargoKind = 'stacker' | 'conveyor' | 'rgv' | 'rgv_nl' | 'shuttle' | 'lift' | 'agv';
 
 export type GeneratedCargoFallbackRuntimeEntry = {
   mesh: Mesh;
@@ -784,6 +784,7 @@ export type SpecializedTelemetrySharedState = {
   rgvNlCargoMeshes: Map<string, RgvNlCargoRuntimeEntry>;
   shuttleCargoMeshes: Map<string, ShuttleCargoRuntimeEntry>;
   liftCargoMeshes: Map<string, LiftCargoRuntimeEntry>;
+  agvCargoMeshes: Map<string, GeneratedCargoRuntimeEntry>;
   /** hclift 载货台状态（key=hclift entityId）：每帧发布供多穿小车 x=-2 上台/换层跟随（巷道号匹配优先，其次 assetCode 命中站台 deviceAssetCode）；updatedAtMs 供跟随方丢弃失联设备的滞留值。 */
   hcliftPlatformSurfaces: Map<string, HcliftPlatformSurfaceState>;
   /** hclift 载货台占位（key=hclift entityId）：shuttle 驶入/停稳时刷新，hclift 升降门控读取。 */
@@ -807,6 +808,7 @@ export function createSpecializedTelemetrySharedState(): SpecializedTelemetrySha
     rgvNlCargoMeshes: new Map(),
     shuttleCargoMeshes: new Map(),
     liftCargoMeshes: new Map(),
+    agvCargoMeshes: new Map(),
     hcliftPlatformSurfaces: new Map(),
     hcliftDeckOccupancies: new Map(),
     slotRetainedCargoMeshes: new Map(),

@@ -514,6 +514,7 @@ export type AssetEntry = {
   dataDrivenConfig?: unknown;
   builtInSlotBindingConfig?: unknown;
   layerChangePlatformBindingConfig?: unknown;
+  cargoContact?: Array<{ id: string; alias: string; nodes: string[] }>;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
   dataPlatformResourceId?: string;

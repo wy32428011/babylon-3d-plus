@@ -87,6 +87,8 @@ export function applySceneModelUpdates(
       reference.target.packagePath = asset.packagePath;
       if (asset.thumbnailUrl) reference.target.thumbnailUrl = asset.thumbnailUrl;
       else delete reference.target.thumbnailUrl;
+      if (asset.cargoContact) reference.target.cargoContactSupports = structuredClone(asset.cargoContact);
+      else delete reference.target.cargoContactSupports;
     }
     if (JSON.stringify(reference.asset) !== before) updatedCount++;
   }

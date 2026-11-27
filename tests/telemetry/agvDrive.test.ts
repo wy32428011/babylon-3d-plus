@@ -3,6 +3,7 @@ import test from 'node:test';
 import { NullEngine } from '@babylonjs/core/Engines/nullEngine.js';
 import { Scene } from '@babylonjs/core/scene.js';
 import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
+import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 
 import { createModelEntity } from '../../src/editor/model/SceneDocument';
@@ -80,9 +81,10 @@ test('AGV 模型创建和旧场景恢复都带默认绑定，正方向轴可持�
   const legacy = deserializeScene(serializeScene({ ...scene, entities: { [entity.id]: entity } }));
   assert.equal(legacy.entities[entity.id].components.telemetryBinding?.deviceType, 'agv');
   assert.equal(legacy.entities[entity.id].components.telemetryBinding?.modelForwardAxis, 'x');
-  assert.equal(normalizeTelemetryBindingComponent({
+  const normalized = normalizeTelemetryBindingComponent({
     deviceType: 'agv', modelForwardAxis: 'y',
-  })?.modelForwardAxis, undefined);
+  });
+  assert.equal(normalized?.modelForwardAxis, undefined);
 });
 
 test('模型包 dataDriven 提供默认车头轴，模板绑定可覆盖且恢复时回到包默认值', () => {
@@ -691,4 +693,82 @@ test('AGV 触及不同节点后从该节点向原任务终点重规划，触及�
   assert.equal(driver.getTaskRoute(model)?.distance, 0);
   assert.equal(scene.meshes.some(mesh => mesh.metadata?.agvTaskRouteHighlight && !mesh.isDisposed()), false, '触及终点后不得保留高亮');
   driver.resetMotionStates();
+});
+
+
+test('AGV signalBits=1 按模板生成器刷货并跟随载货节点集合，缺失信号保持，0 销货', t => {
+  const deckNodeNames = ['Box002.002', 'Box003.002', 'Box004.002', 'Box005.002', 'Box006.002'];
+  const entity = createAgvEntity({
+    device: { devType: 'agv', modelForwardAxis: 'x' },
+    cargo: { nodes: deckNodeNames },
+    fixedNodes: [],
+  });
+  entity.components.telemetryBinding!.cargoGeneratorId = 'generator-agv';
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const root = new TransformNode('agv-cargo-runtime', scene);
+  const contentRoot = new TransformNode('agv-cargo-content', scene);
+  contentRoot.parent = root;
+  deckNodeNames.forEach((name, index) => {
+    const mesh = MeshBuilder.CreateBox(name, { size: 0.2 }, scene);
+    mesh.parent = contentRoot;
+    mesh.position.set((index - 2) * 0.1, 0.2, 0);
+  });
+  const model = {
+    root,
+    contentRoot,
+    meshes: contentRoot.getChildMeshes(false),
+    assetCode: 'AGV-01',
+    assetHandle: {},
+    stackerTelemetryReady: true,
+    entitySnapshot: entity,
+    telemetryBinding: entity.components.telemetryBinding,
+    resolvedModelAsset: entity.components.modelAsset,
+    externalScriptRuntime: null,
+  } as unknown as ModelRuntimeEntry;
+  const generator = { entityId: 'generator-agv' };
+  const visualCalls: Array<{ kind: string; generator: unknown }> = [];
+  const logs: string[] = [];
+  const host = {
+    collectModels: () => [{ entityId: entity.id, model }],
+    pushLog: (message: string) => logs.push(message),
+    updateExternalScriptContext: () => false,
+    resolveCargoGeneratorForModel: () => generator,
+    syncGeneratedCargoVisual: (_cargo: unknown, kind: string, _snapshot: unknown, resolved: unknown) => {
+      visualCalls.push({ kind, generator: resolved });
+    },
+    setGeneratedCargoRootPose: (cargo: { root: TransformNode }, position: Vector3, rotation: import('@babylonjs/core').Quaternion) => {
+      cargo.root.position.copyFrom(position);
+      cargo.root.rotationQuaternion = rotation.clone();
+    },
+    disposeGeneratedCargo: (cargo: { root: TransformNode }) => cargo.root.dispose(),
+  } as unknown as SpecializedTelemetryHost;
+  const runtime = new SpecializedTelemetryRuntime(scene, host);
+  t.after(() => {
+    runtime.dispose();
+    deviceTelemetryStore.clear();
+    scene.dispose();
+    engine.dispose();
+  });
+
+  const now = Date.now();
+  deviceTelemetryStore.upsert(createSnapshot({
+    x: 3, y: 5, r: 0, mode: 2, signalBits: 1, containerCode: 'CTN-005', task: 3005,
+  }, now));
+  runtime.applyFrame(0);
+  const cargo = runtime.state.agvCargoMeshes.get('AGV-01');
+  assert.ok(cargo, logs.join('\n'));
+  assert.equal(cargo.containerCode, 'CTN-005');
+  assert.equal(cargo.task, '3005');
+  assert.ok(Vector3.Distance(cargo.root.position, new Vector3(3, 0.3, 5)) < 1e-6);
+  assert.deepEqual(visualCalls, [{ kind: 'agv', generator }]);
+
+  deviceTelemetryStore.upsert(createSnapshot({ x: 3, y: 5, r: 0, mode: 2 }, now + 1));
+  runtime.applyFrame(0.016);
+  assert.equal(runtime.state.agvCargoMeshes.get('AGV-01'), cargo);
+
+  deviceTelemetryStore.upsert(createSnapshot({ x: 3, y: 5, r: 0, mode: 2, signalBits: 0 }, now + 2));
+  runtime.applyFrame(0.016);
+  assert.equal(runtime.state.agvCargoMeshes.size, 0);
+  assert.equal(cargo.root.isDisposed(), true);
 });

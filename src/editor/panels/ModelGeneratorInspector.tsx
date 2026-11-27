@@ -179,6 +179,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         : '项目模型';
 
     return (
+      <>
       <div className="model-generator-target-row">
         <span className="model-generator-target-label">{label}</span>
         <div
@@ -233,6 +234,31 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
           )}
         </div>
       </div>
+      {target?.kind === 'model' && (target.cargoContactSupports?.length || target.cargoContact) ? (
+        <label className="inspector-row">
+          <span>接触支撑位（可选）</span>
+          <select
+            disabled={disabled}
+            value={target.cargoContact?.supportId ?? ''}
+            onChange={(event) => {
+              const supportId = event.target.value;
+              const nextTarget = { ...target };
+              if (supportId) nextTarget.cargoContact = { supportId };
+              else delete nextTarget.cargoContact;
+              onTargetChange(nextTarget);
+            }}
+          >
+            <option value="">不指定，使用整体包围盒底面</option>
+            {target.cargoContactSupports?.map(support => (
+              <option key={support.id} value={support.id}>{support.alias}</option>
+            ))}
+            {target.cargoContact && !target.cargoContactSupports?.some(support => support.id === target.cargoContact?.supportId) ? (
+              <option value={target.cargoContact.supportId}>已失效支撑位（{target.cargoContact.supportId}）</option>
+            ) : null}
+          </select>
+        </label>
+      ) : null}
+      </>
     );
   }
 
@@ -248,7 +274,7 @@ export function ModelGeneratorInspector({ component, disabled = false }: ModelGe
         component.defaultTarget,
         (target) => commitComponent({ ...component, defaultTarget: target }, '更新共享生成模板'),
       )}
-      <p className="muted model-generator-unit-hint">模板仅保存配置，编辑态不会显示；未命中规则时运行态使用共享模板。</p>
+      <p className="muted model-generator-unit-hint">模板仅保存配置，编辑态不会显示；未命中规则时运行态使用共享模板。选择接触支撑位后，合并其全部节点及子网格的底面作为货物支撑点；不同接触方式可使用不同模型生成器。</p>
 
       <div className="model-generator-section-header">
         <span>生成规则</span>

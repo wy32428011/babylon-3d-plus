@@ -8,6 +8,7 @@ import { findBuiltInImageAssetByReference, type BuiltInImageAsset } from '../../
 import { findSyncedImageAssetByReference } from '../../assets/syncedImageAssets';
 import { normalizeModelDataDrivenConfig, type ModelDataDrivenConfig } from '../model/telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig, type BuiltInSlotBindingConfig, type LayerChangePlatformBindingConfig } from '../model/builtInSlotBinding';
+import { normalizeCargoContactSupports, type CargoContactSupport } from '../model/cargoContact';
 import { isPoiEffectKind } from '../model/poiEffect';
 import type { SourceModelDensity } from '../../../electron/shared/modelDensityTypes';
 
@@ -44,6 +45,7 @@ export type AssetEntry = {
   dataDrivenConfig?: ModelDataDrivenConfig;
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
+  cargoContact?: CargoContactSupport[];
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
@@ -231,6 +233,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     const dataDrivenConfig = normalizeModelDataDrivenConfig(payload.dataDrivenConfig);
     const builtInSlotBindingConfig = normalizeBuiltInSlotBindingConfig(payload.builtInSlotBindingConfig);
     const layerChangePlatformBindingConfig = normalizeLayerChangePlatformBindingConfig(payload.layerChangePlatformBindingConfig);
+    const cargoContact = normalizeCargoContactSupports(payload.cargoContact);
 
     if (packagePath) asset.packagePath = packagePath;
     if (assetRevision) asset.assetRevision = assetRevision;
@@ -253,6 +256,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (dataDrivenConfig) asset.dataDrivenConfig = dataDrivenConfig;
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
     if (layerChangePlatformBindingConfig) asset.layerChangePlatformBindingConfig = layerChangePlatformBindingConfig;
+    if (cargoContact?.length) asset.cargoContact = cargoContact;
     const source = payload.source === 'project' || payload.source === 'data-platform' ? payload.source : undefined;
     const availability = payload.availability === 'active' || payload.availability === 'stale'
       || payload.availability === 'unavailable' || payload.availability === 'deleted'

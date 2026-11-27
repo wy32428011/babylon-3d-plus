@@ -60,6 +60,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   dataDrivenConfig?: unknown;
   builtInSlotBinding?: unknown;
   layerChangePlatformBinding?: unknown;
+  cargoContact?: Array<{ id: string; alias: string; nodes: string[] }>;
   defaultAssetCode?: string;
   scriptFileNames?: string[];
 };
@@ -539,6 +540,17 @@ function extractJsonObjectFromMetadata(metadata: unknown, key: string): unknown 
   }
 }
 
+function extractCargoContactFromMetadata(
+  metadata: unknown,
+): Array<{ id: string; alias: string; nodes: string[] }> | undefined {
+  const value = extractJsonObjectFromMetadata(metadata, 'cargoContact');
+  if (!Array.isArray(value)) return undefined;
+  if (value.some(item => !isPlainObject(item) || typeof item.id !== 'string' || typeof item.alias !== 'string'
+    || !Array.isArray(item.nodes) || item.nodes.some(node => typeof node !== 'string'))) return undefined;
+  return (value as Array<{ id: string; alias: string; nodes: string[] }>)
+    .map(item => ({ id: item.id, alias: item.alias, nodes: [...item.nodes] }));
+}
+
 function readFieldConfiguration(field: Record<string, unknown>): Record<string, unknown> {
   return isPlainObject(field.configuration) ? field.configuration : {};
 }
@@ -683,6 +695,7 @@ async function readModelPackageMetadata(
       dataDrivenConfig: extractDataDrivenConfigFromMetadata(parsed),
       builtInSlotBinding: extractJsonObjectFromMetadata(parsed, 'builtInSlotBinding'),
       layerChangePlatformBinding: extractJsonObjectFromMetadata(parsed, 'layerChangePlatformBinding'),
+      cargoContact: extractCargoContactFromMetadata(parsed),
       scriptFileNames: extractScriptFileNamesFromMetadata(parsed),
       ...unitInfo,
     };
@@ -795,6 +808,7 @@ export async function scanModelPackage(
       dataDrivenConfig: metadata.dataDrivenConfig,
       builtInSlotBindingConfig: metadata.builtInSlotBinding,
       layerChangePlatformBindingConfig: metadata.layerChangePlatformBinding,
+      cargoContact: metadata.cargoContact,
     },
   };
 }

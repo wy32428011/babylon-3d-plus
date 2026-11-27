@@ -1,4 +1,5 @@
 import { Matrix, Quaternion, Vector3 } from '@babylonjs/core/Maths/math.vector.js';
+import { TransformNode } from '@babylonjs/core/Meshes/transformNode.js';
 import {
   AGV_MAP_NODE_RADIUS_DEFAULT,
   findAgvMapNodeWithinRadius,
@@ -16,6 +17,9 @@ import { readIntegerField, readNumberField, readStringField, type DeviceTelemetr
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import type { AgvMapPlacement } from '../../scene-runtime/sceneRuntimeTypes';
 import { AgvTaskRouteHighlight } from '../../agv/AgvTaskRouteHighlight';
+import { findModelNodesByName, getNodesWorldBounds } from '../../runtimeNodeGeometry';
+import { readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
+import { normalizeCargoTask, type GeneratedCargoRuntimeEntry, type SpecializedTelemetryDriverContext } from './types';
 
 export type AgvModelForwardAxis = NonNullable<TelemetryBindingComponent['modelForwardAxis']>;
 
@@ -125,6 +129,9 @@ type AgvMotionState = {
 export class AgvTelemetryDriver {
   private motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
   private readonly routeHighlights = new Set<AgvTaskRouteHighlight>();
+  private readonly reportedCargoIssues = new Set<string>();
+
+  constructor(private readonly context?: SpecializedTelemetryDriverContext) {}
 
   public applyToModel(
     model: ModelRuntimeEntry,
@@ -138,7 +145,10 @@ export class AgvTelemetryDriver {
     const heading = readNumberField(snapshot.fields, 'r');
     let state = this.motionStates.get(model);
     if (!state) {
-      if (x === null && y === null && heading === null) return;
+      if (x === null && y === null && heading === null) {
+        this.updateCargo(model, snapshot);
+        return;
+      }
       const targetYaw = heading === null ? null : this.resolveModelYaw(model, heading);
       model.root.position.copyFrom(resolveAgvMapPosition(model, x, y, model.root.position));
       if (targetYaw !== null) {
@@ -168,6 +178,7 @@ export class AgvTelemetryDriver {
       });
       this.updateTaskRoute(model, snapshot, state);
       this.updateTaskRouteHighlight(model, state, 0);
+      this.updateCargo(model, snapshot);
       return;
     }
 
@@ -204,6 +215,7 @@ export class AgvTelemetryDriver {
       }
     }
     this.updateTaskRouteHighlight(model, state, deltaSeconds);
+    this.updateCargo(model, snapshot);
   }
 
   public hasPendingMotion(model: ModelRuntimeEntry): boolean {
@@ -218,6 +230,100 @@ export class AgvTelemetryDriver {
     if (startNodeId !== undefined && endNodeId !== undefined
       && state.taskRouteKey !== `${startNodeId}\0${endNodeId}`) return null;
     return state.taskRoute;
+  }
+
+  public disposeCargoForAssetCode(assetCode: string): void {
+    if (!this.context) return;
+    const cargo = this.context.state.agvCargoMeshes.get(assetCode);
+    if (cargo) this.context.host.disposeGeneratedCargo(cargo);
+    this.context.state.agvCargoMeshes.delete(assetCode);
+  }
+
+  private updateCargo(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+    if (!this.context) return;
+    const signalBits = readIntegerField(snapshot.fields, 'signalBits');
+    if (signalBits === 0) {
+      this.disposeCargoForAssetCode(model.assetCode);
+      return;
+    }
+
+    const existing = this.context.state.agvCargoMeshes.get(model.assetCode) ?? null;
+    if (signalBits !== 1 && !existing) return;
+    const supportPosition = this.resolveCargoSupportPosition(model);
+    if (!supportPosition) return;
+    const cargo = existing ?? this.createCargo(model.assetCode);
+    const containerCode = readStringField(snapshot.fields, 'containerCode');
+    const task = readIntegerField(snapshot.fields, 'task');
+    if (containerCode !== null) cargo.containerCode = containerCode.trim();
+    if (task !== null) cargo.task = normalizeCargoTask(task);
+
+    this.context.host.syncGeneratedCargoVisual(
+      cargo,
+      'agv',
+      snapshot,
+      this.context.host.resolveCargoGeneratorForModel(model),
+      model.entitySnapshot?.id ?? '',
+    );
+    model.root.computeWorldMatrix(true);
+    const rotation = Quaternion.Identity();
+    model.root.getWorldMatrix().decompose(undefined, rotation);
+    this.context.host.setGeneratedCargoRootPose(cargo, supportPosition, rotation);
+    cargo.lockedWorldRotation = rotation.clone();
+  }
+
+  private createCargo(assetCode: string): GeneratedCargoRuntimeEntry {
+    const context = this.context!;
+    const root = new TransformNode(`agv_cargo_root_${sanitizeBabylonName(assetCode)}`, context.scene);
+    const cargo: GeneratedCargoRuntimeEntry = {
+      assetCode,
+      containerCode: '',
+      task: '',
+      root,
+      outputOwner: null,
+      fallback: null,
+      generatorEntityId: null,
+      handoff: null,
+      axialLengthCache: null,
+      lockedWorldRotation: null,
+    };
+    context.state.agvCargoMeshes.set(assetCode, cargo);
+    return cargo;
+  }
+
+  private resolveCargoSupportPosition(model: ModelRuntimeEntry): Vector3 | null {
+    const nodeNames = this.readCargoPlatformNodeNames(model);
+    const nodes = findModelNodesByName(model, this.context!.scene, nodeNames);
+    if (nodeNames.length > 0 && nodes.length === new Set(nodeNames).size) {
+      const bounds = getNodesWorldBounds(nodes);
+      if (bounds) {
+        const position = bounds.minimum.add(bounds.maximum).scale(0.5);
+        position.y = bounds.maximum.y;
+        return position;
+      }
+    }
+
+    const issueKey = `agv-cargo-deck:${model.assetCode}`;
+    if (!this.reportedCargoIssues.has(issueKey)) {
+      this.reportedCargoIssues.add(issueKey);
+      this.context!.host.pushLog(
+        `AGV ${model.assetCode} 无法生成货物：请完整配置 dataDriven.cargo.nodes 载货节点，并确认节点存在。`,
+      );
+    }
+    return null;
+  }
+
+  private readCargoPlatformNodeNames(model: ModelRuntimeEntry): string[] {
+    const documentConfig = model.resolvedModelAsset?.dataDrivenConfig
+      ?? model.entitySnapshot?.components.modelAsset?.dataDrivenConfig;
+    const configs = [
+      ...(documentConfig ? [documentConfig] : []),
+      ...(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []),
+    ];
+    for (const dataDriven of configs) {
+      const nodes = readStringArrayPath(dataDriven, ['cargo', 'nodes']);
+      if (nodes.length > 0) return nodes;
+    }
+    return [];
   }
 
   public resetMotionStates(): void {

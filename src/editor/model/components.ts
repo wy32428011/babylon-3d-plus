@@ -13,6 +13,7 @@ import type { ModelDataDrivenConfig, TelemetryBindingComponent } from './telemet
 import type { CompositeDeviceFolderComponent, DevicePartBindingComponent } from './devicePartBinding';
 import type { EntityLightingSettings } from '../../../electron/shared/sceneLightingBakeContract';
 import type { AgvMapDefinition, AgvMapPoint, AgvMapSceneAxis, AgvRouteHighlightConfig } from './agvMap';
+import type { CargoContactSelection, CargoContactSupport } from './cargoContact';
 
 export type TransformComponent = {
   position: Vector3Data;
@@ -213,6 +214,10 @@ export type ModelGeneratorModelTarget = {
   packagePath?: string;
   thumbnailUrl?: string;
   modelAsset: ModelAssetTemplate;
+  /** 模型包提供的可选支撑位定义；随目标保存，供场景独立配置。 */
+  cargoContactSupports?: CargoContactSupport[];
+  /** 当前选择的支撑位；选择后替代整体包围盒底面，未选择时保持原行为。 */
+  cargoContact?: CargoContactSelection;
 };
 
 /** 模型生成器的内置 Mesh 目标，保存创建基础几何体所需字段。 */

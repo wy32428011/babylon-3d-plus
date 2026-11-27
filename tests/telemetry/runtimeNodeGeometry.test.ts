@@ -4,6 +4,12 @@ import test from 'node:test';
 import { Matrix, MeshBuilder, Node, NullEngine, Scene, TransformNode, Vector3 } from '@babylonjs/core';
 
 import { computeRootRelativeWorldMatrix, filterTopLevelMotionNodes, getMeshesWorldBottomCenter, getMeshWorldBounds } from '../../src/runtime/babylon/runtimeNodeGeometry';
+import { ModelAssetRuntimeController } from '../../src/runtime/babylon/scene-runtime/ModelAssetRuntimeController';
+import {
+  createModelGeneratorTargetFromAsset,
+  createModelGeneratorTargetSignature,
+  sanitizeModelGeneratorTarget,
+} from '../../src/editor/model/modelGenerator';
 
 test('getMeshWorldBounds 排除 thin instances 扩展，只返回 mesh 自身几何包围盒', () => {
   const engine = new NullEngine();
@@ -364,6 +370,123 @@ test('filterTopLevelMotionNodes 大量原生同级节点不执行平方级候选
     } finally { Array.prototype.some = originalSome; }
     assert.deepEqual(result, nodes);
     assert.ok(candidateChecks <= nodes.length * 4, '同级节点不应为每一对候选调用后代判断，实际检查 ' + candidateChecks + ' 次');
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+
+test('生成货物可将 TM 节点底面归一到支撑点，节点异常时回退整体包围盒', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const root = new TransformNode('cargo-root', scene);
+    const contentRoot = new TransformNode('cargo-content', scene);
+    contentRoot.parent = root;
+    const contact = MeshBuilder.CreateBox('TM', { width: 2, height: 0.01, depth: 2 }, scene);
+    contact.parent = contentRoot;
+    contact.position.set(2, 0.405, -1);
+    const foot = MeshBuilder.CreateBox('YD', { size: 0.1 }, scene);
+    foot.parent = contentRoot;
+    foot.position.set(2, 0.05, -1);
+    const controller = Object.create(ModelAssetRuntimeController.prototype) as ModelAssetRuntimeController;
+    const model = { root, contentRoot };
+
+    assert.equal(controller.normalizeModelContentOrigin(model as never, ['TM']), 'template-node');
+    const contactBottom = getMeshesWorldBottomCenter([contact]);
+    assert.ok(contactBottom);
+    assert.ok(Vector3.Distance(contactBottom, new Vector3(0, 0, 0)) < 1e-6);
+
+    contentRoot.position.setAll(0);
+    assert.equal(controller.normalizeModelContentOrigin(model as never, ['missing']), 'missing-node');
+    assert.ok(Math.abs(getMeshesWorldBottomCenter([foot])!.y) < 1e-6);
+
+    const duplicate = MeshBuilder.CreateBox('TM', { size: 0.2 }, scene);
+    duplicate.parent = contentRoot;
+    duplicate.position.copyFrom(contact.position);
+    contentRoot.position.setAll(0);
+    assert.equal(controller.normalizeModelContentOrigin(model as never, ['TM']), 'ambiguous-node');
+    assert.ok(Math.abs(getMeshesWorldBottomCenter([foot])!.y) < 1e-6);
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
+});
+
+
+test('模型包支撑位数组复制到生成目标，按 ID 选择并兼容旧节点配置', () => {
+  const imported = createModelGeneratorTargetFromAsset({
+    id: 'rack', name: 'rack.glb', displayName: 'AGV工装架', kind: 'model', libraryKind: 'model',
+    path: 'rack.glb', sourceUrl: 'editor-asset://local/rack.glb',
+    cargoContact: [
+      { id: 'agv-latent', alias: ' 潜伏式 AGV 顶升面 ', nodes: [' TM ', 'HJ', 'TM'] },
+      { id: 'ground', alias: '支脚落地', nodes: ['YD', 'YT', 'YZ'] },
+    ],
+  });
+  assert.ok(imported);
+  assert.equal(imported.cargoContact, undefined);
+  assert.deepEqual(imported.cargoContactSupports?.[0], {
+    id: 'agv-latent', alias: '潜伏式 AGV 顶升面', nodes: ['TM', 'HJ'],
+  });
+  const selected = { ...imported, cargoContact: { supportId: 'agv-latent' } };
+  assert.deepEqual(sanitizeModelGeneratorTarget(selected), selected);
+  assert.notEqual(
+    createModelGeneratorTargetSignature(imported),
+    createModelGeneratorTargetSignature(selected),
+  );
+
+  const legacy = {
+    kind: 'model' as const,
+    assetId: 'legacy',
+    displayName: 'legacy',
+    modelAsset: {
+      sourcePath: 'legacy.glb',
+      sourceUrl: 'editor-asset://local/legacy.glb',
+      lengthUnit: 'meter' as const,
+      unitScaleToMeters: 1,
+    },
+  };
+  assert.deepEqual(sanitizeModelGeneratorTarget(legacy), legacy);
+  assert.equal(
+    createModelGeneratorTargetSignature(legacy),
+    createModelGeneratorTargetSignature(structuredClone(legacy)),
+  );
+  const legacyContact = sanitizeModelGeneratorTarget({ ...legacy, cargoContact: { nodeName: 'TM' } });
+  assert.deepEqual(legacyContact?.kind === 'model' ? legacyContact.cargoContact : null, {
+    supportId: '__legacy_node__',
+  });
+  assert.equal(sanitizeModelGeneratorTarget({ ...imported, cargoContact: { supportId: '' } }), null);
+});
+
+
+test('接触支撑位合并多个节点的底面中心，任一节点缺失时回退整体包围盒', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  try {
+    const root = new TransformNode('cargo-root', scene);
+    const contentRoot = new TransformNode('cargo-content', scene);
+    contentRoot.parent = root;
+    const first = MeshBuilder.CreateBox('TM', { width: 2, height: 0.2, depth: 2 }, scene);
+    first.parent = contentRoot;
+    first.position.set(0, 0.5, 0);
+    const second = MeshBuilder.CreateBox('HJ', { width: 2, height: 0.2, depth: 2 }, scene);
+    second.parent = contentRoot;
+    second.position.set(4, 0.7, 0);
+    const foot = MeshBuilder.CreateBox('YD', { size: 0.1 }, scene);
+    foot.parent = contentRoot;
+    foot.position.set(0, 0.05, 0);
+    const controller = Object.create(ModelAssetRuntimeController.prototype) as ModelAssetRuntimeController;
+    const model = { root, contentRoot };
+
+    assert.equal(controller.normalizeModelContentOrigin(model as never, ['TM', 'HJ']), 'template-node');
+    const contactBottom = getMeshesWorldBottomCenter([first, second]);
+    assert.ok(contactBottom);
+    assert.ok(Vector3.Distance(contactBottom, new Vector3(0, 0, 0)) < 1e-6);
+
+    contentRoot.position.setAll(0);
+    assert.equal(controller.normalizeModelContentOrigin(model as never, ['TM', 'missing']), 'missing-node');
+    assert.ok(Math.abs(getMeshesWorldBottomCenter([foot])!.y) < 1e-6);
   } finally {
     scene.dispose();
     engine.dispose();

@@ -491,6 +491,7 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     dataDrivenConfig: isPlainObject(asset.dataDrivenConfig) ? asset.dataDrivenConfig : undefined,
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
     layerChangePlatformBindingConfig: isPlainObject(asset.layerChangePlatformBindingConfig) ? asset.layerChangePlatformBindingConfig : undefined,
+    cargoContact: Array.isArray(asset.cargoContact) ? asset.cargoContact : undefined,
     source,
     availability,
     dataPlatformResourceId,

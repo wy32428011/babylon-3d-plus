@@ -18,6 +18,11 @@ import { createModelLengthUnitInfo, normalizeModelLengthUnitInfo } from './scene
 import { normalizeModelDataDrivenConfig } from './telemetryBinding';
 import { normalizeBuiltInSlotBindingConfig, normalizeLayerChangePlatformBindingConfig } from './builtInSlotBinding';
 import { normalizeModelSourceSnapshot } from './modelSourceSnapshot';
+import {
+  normalizeCargoContactSelection,
+  normalizeCargoContactSupports,
+  type CargoContactSupport,
+} from './cargoContact';
 
 /** 模型生成器从项目资源库读取的最小资产快照，避免领域模型反向依赖带图片资源的 UI 资产模块。 */
 type ModelGeneratorSourceAsset = {
@@ -43,6 +48,7 @@ type ModelGeneratorSourceAsset = {
   dataDrivenConfig?: ModelAssetTemplate['dataDrivenConfig'];
   builtInSlotBindingConfig?: ModelAssetTemplate['builtInSlotBindingConfig'];
   layerChangePlatformBindingConfig?: ModelAssetTemplate['layerChangePlatformBindingConfig'];
+  cargoContact?: CargoContactSupport[];
 };
 
 /** 单个模型生成器允许保存的最大规则数。 */
@@ -230,6 +236,7 @@ export function createModelGeneratorTargetFromAsset(asset: ModelGeneratorSourceA
   if (asset.kind !== 'model' || asset.libraryKind !== 'model') return null;
   const modelAsset = createModelAssetTemplateFromAsset(asset);
   if (!modelAsset) return null;
+  const cargoContactSupports = asset.cargoContact ? normalizeCargoContactSupports(asset.cargoContact) : null;
 
   return {
     kind: 'model',
@@ -238,6 +245,7 @@ export function createModelGeneratorTargetFromAsset(asset: ModelGeneratorSourceA
     ...(asset.packagePath ? { packagePath: asset.packagePath } : {}),
     ...(asset.thumbnailUrl?.startsWith(AUTHORIZED_MODEL_GENERATOR_ASSET_URL_PREFIX) ? { thumbnailUrl: asset.thumbnailUrl } : {}),
     modelAsset,
+    ...(cargoContactSupports?.length ? { cargoContactSupports: cloneJsonValue(cargoContactSupports) } : {}),
   };
 }
 
@@ -288,6 +296,19 @@ export function sanitizeModelGeneratorTarget(value: unknown): ModelGeneratorTarg
     if (!assetId || !modelAsset) return null;
     const thumbnailUrl = sanitizeText(value.thumbnailUrl, 1024);
     const packagePath = sanitizeText(value.packagePath, 1024);
+    let cargoContactSupports = value.cargoContactSupports === undefined
+      ? null
+      : normalizeCargoContactSupports(value.cargoContactSupports);
+    if (value.cargoContactSupports !== undefined && !cargoContactSupports) return null;
+    let cargoContact = value.cargoContact === undefined ? null : normalizeCargoContactSelection(value.cargoContact);
+    const legacyNodeName = isPlainObject(value.cargoContact)
+      ? sanitizeText(value.cargoContact.nodeName, 256)
+      : '';
+    if (legacyNodeName && value.cargoContactSupports === undefined) {
+      cargoContactSupports = [{ id: '__legacy_node__', alias: legacyNodeName, nodes: [legacyNodeName] }];
+      cargoContact = { supportId: '__legacy_node__' };
+    }
+    if (value.cargoContact !== undefined && !cargoContact) return null;
 
     return {
       kind: 'model',
@@ -296,6 +317,8 @@ export function sanitizeModelGeneratorTarget(value: unknown): ModelGeneratorTarg
       ...(packagePath ? { packagePath } : {}),
       ...(thumbnailUrl && isAuthorizedEditorAssetUrl(thumbnailUrl) ? { thumbnailUrl } : {}),
       modelAsset,
+      ...(cargoContactSupports?.length ? { cargoContactSupports } : {}),
+      ...(cargoContact ? { cargoContact } : {}),
     };
   }
 
@@ -358,7 +381,16 @@ export function sanitizeModelGeneratorComponent(value: unknown): ModelGeneratorC
   };
 }
 
-/** 为目标生成稳定签名，供外部缓存和调试识别同一目标。 */
+export function resolveModelGeneratorCargoContactSupport(
+  target: ModelGeneratorModelTarget,
+): CargoContactSupport | null {
+  const supportId = target.cargoContact?.supportId;
+  return supportId
+    ? target.cargoContactSupports?.find(support => support.id === supportId) ?? null
+    : null;
+}
+
+/** 为目标生成稳定签名；支撑位只影响生成实例原点，不改变共享资产身份。 */
 export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget): string {
   if (target.kind === 'mesh') {
     return JSON.stringify({
@@ -385,6 +417,7 @@ export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget
     deviceType: target.modelAsset.deviceType ?? null,
     sourceSnapshot: target.modelAsset.sourceSnapshot ?? null,
     dataPlatformModel: target.modelAsset.dataPlatformModel ?? null,
+    cargoContact: resolveModelGeneratorCargoContactSupport(target),
     // 生成输出在签名相同时直接复用；声明撤销或配置换代必须先释放旧共享实例再重新准入。
     ...(target.modelAsset.runtimeCapabilities ? {
       runtimeCapabilities: target.modelAsset.runtimeCapabilities,
