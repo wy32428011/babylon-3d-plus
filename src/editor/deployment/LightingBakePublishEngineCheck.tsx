@@ -83,7 +83,10 @@ export function LightingBakePublishEngineCheck({ open, scene, error, disabled = 
         <span>{checking ? '正在检测' : engine?.available ? '引擎就绪' : '需要配置'}</span>
       </div>
       <p aria-live="polite" role="status">{status}</p>
-      {!engine?.available && !checking ? <p className="digital-twin-publish-message">{requirement}</p> : null}
+      {!engine?.available && !checking ? <>
+        <p className="digital-twin-publish-message">{requirement}</p>
+        <p className="deployment-export-resource-detail">提示：若使用智慧仓储等纯实时光影方案，可在场景属性「光照与阴影」中选择“明亮洁净仓”等实时预设（或关闭“间接光烘焙”）后直接发布，无需安装 Blender。</p>
+      </> : null}
       {engine?.available && !checking ? <p className="deployment-export-resource-detail">Blender {engine.version ?? ''}{engine.path ? ` · ${engine.path}` : ''}</p> : null}
       {!checking && (checkError || configuration?.configurationError || (!engine?.available && engine?.message)) ? (
         <p className="deployment-export-error" role="alert">{checkError ?? configuration?.configurationError ?? engine?.message}</p>

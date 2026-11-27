@@ -1,0 +1,7 @@
+ZENDING 3D EDITOR Built-in Warehouse Environments (warehouseBright.env, warehouseDark.env)
+
+License: CC0 1.0 Universal (Public Domain Dedication)
+
+These prefiltered Babylon.js `.env` cube environment textures were procedurally generated
+by `scripts/prepare-warehouse-builtin-env.mjs` specifically for smart warehouse and
+logistics digital twin scenes in ZENDING 3D EDITOR.

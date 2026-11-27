@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
+import { isPlainMetaRecord, normalizeModelMetaExtensions } from '../../../electron/shared/modelMetaExtensions.ts';
 import { normalizeHistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { collectSceneSkyboxReferences } from '../../../electron/shared/sceneResourceTraversal.ts';
@@ -1222,6 +1223,11 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ? null
     : normalizeLayerChangePlatformBindingConfig(modelAsset.layerChangePlatformBindingConfig);
   if ('layerChangePlatformBindingConfig' in modelAsset && !layerChangePlatformBindingConfig) throwUnsupportedSceneFileError();
+  let metaExtensions: ReturnType<typeof normalizeModelMetaExtensions>;
+  if ('metaExtensions' in modelAsset && modelAsset.metaExtensions !== undefined) {
+    if (!isPlainMetaRecord(modelAsset.metaExtensions)) throwUnsupportedSceneFileError();
+    metaExtensions = normalizeModelMetaExtensions(modelAsset.metaExtensions);
+  }
 
   return {
     assetCode,
@@ -1242,6 +1248,7 @@ function normalizeModelAsset(value: unknown, entityId: string): EntityComponents
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
     ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig } : {}),
+    ...(metaExtensions ? { metaExtensions } : {}),
   };
 }
 

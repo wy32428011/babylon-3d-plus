@@ -3,7 +3,7 @@ import { SKYBOX_ENVIRONMENT_RECIPE } from '../shared/sceneSkyboxContract.ts';
 import { CURRENT_SCENE_FILE_VERSION } from '../shared/sceneFileVersion.ts';
 import { createHash } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
-import { normalizeSceneLightingConfig } from '../shared/sceneLightingConfig.ts';
+import { normalizeSceneAppearanceConfig, normalizeSceneLightingConfig } from '../shared/sceneLightingConfig.ts';
 import { getRequestedLightingLightmapEncoding, getRequestedLightingLightmapMipLevels, getLightingLightmapBaseEncoding, LIGHTING_LIGHTMAP_MIP_RECIPE } from '../shared/sceneLightingTextureCodec.ts';
 import { isLightingLightmapMipEncoding } from '../shared/sceneLightingLightmapMips.ts';
 
@@ -32,6 +32,8 @@ type ViewerTemplateCapabilities = {
   openingPackages?: { runtimeApiVersion: number; renderers: string[]; isolatedPlayback?: boolean };
   lightingCodecs?: { configVersions: number[]; lightmapEncodings: string[]; mipRecipes?: string[] };
   shadowModes?: string[];
+  appearanceFeatures?: string[];
+  builtinEnvironments?: string[];
 };
 
 function invalidManifest(): Error {
@@ -81,6 +83,10 @@ function parseCapabilities(value: unknown): ViewerTemplateCapabilities {
     || !value.sceneFileVersions.every(version => Number.isSafeInteger(version) && version > 0))) throw invalidManifest();
   if (value.shadowModes !== undefined && (!Array.isArray(value.shadowModes)
     || !value.shadowModes.every(mode => typeof mode === 'string' && /^[a-z0-9-]{1,64}$/.test(mode)))) throw invalidManifest();
+  if (value.appearanceFeatures !== undefined && (!Array.isArray(value.appearanceFeatures)
+    || !value.appearanceFeatures.every(feature => typeof feature === 'string' && /^[a-z0-9-]{1,64}$/.test(feature)))) throw invalidManifest();
+  if (value.builtinEnvironments !== undefined && (!Array.isArray(value.builtinEnvironments)
+    || !value.builtinEnvironments.every(env => typeof env === 'string' && /^[a-z0-9-]{1,64}$/.test(env)))) throw invalidManifest();
   if (value.skybox !== undefined && (!isRecord(value.skybox) || value.skybox.presentation !== 'infinite'
     || !Array.isArray(value.skybox.resourceVersions) || !value.skybox.resourceVersions.every(version => Number.isSafeInteger(version) && version > 0)
     || !Array.isArray(value.skybox.runtimeFormats) || !value.skybox.runtimeFormats.every(format => typeof format === 'string')
@@ -109,7 +115,9 @@ export function createViewerTemplateCapabilities(
     },
     openingPackages: { runtimeApiVersion: 1, renderers: ['reference-huishan', 'timeline', 'prismatic-genesis'], isolatedPlayback: true },
     lightingCodecs: { configVersions: [2, 3], lightmapEncodings: ['rgbm', 'rgbm-gamma', 'rgbm-linear-mips-v1', 'rgbm-gamma-mips-v1'], mipRecipes: [LIGHTING_LIGHTMAP_MIP_RECIPE] },
-    shadowModes: ['automatic-v1'],
+    shadowModes: ['automatic-v1', 'warehouse-shadow-filters-v1'],
+    appearanceFeatures: ['ssao2-v1'],
+    builtinEnvironments: ['sandbox-default-v1', 'warehouse-bright-v1', 'warehouse-dark-v1'],
   });
 }
 
@@ -132,19 +140,44 @@ async function checkTemplate(
   const opening = settings && isRecord(settings.openingAnimation) ? settings.openingAnimation : null;
   const openingEnabled = opening?.enabled === true;
   const lighting = settings && isRecord(settings.lighting) ? normalizeSceneLightingConfig(settings.lighting) : null;
+  const appearance = settings && isRecord(settings.appearance) ? normalizeSceneAppearanceConfig(settings.appearance) : null;
   const needsLightingCodecs = lighting?.version === 3;
   const needsAutomaticShadows = lighting?.shadows.managementMode === 'automatic';
+  const needsWarehouseShadowFilters = Boolean(
+    lighting?.shadows.receiverScope
+    || lighting?.shadows.skipSmallCastersMeters
+    || lighting?.shadows.skipGeneratedCargoCasters
+    || lighting?.shadows.respectEntityShadowOverrides
+    || lighting?.shadows.mobileBlobShadows,
+  );
+  const needsSsao = appearance?.ssaoMode === 'balanced' || appearance?.ssaoMode === 'high';
+  const builtinEnvPreset = lighting?.environment?.source === 'sandbox' ? lighting.environment.preset : undefined;
+  const requiredBuiltinEnvId = builtinEnvPreset === 'warehouse-bright'
+    ? 'warehouse-bright-v1'
+    : builtinEnvPreset === 'warehouse-dark'
+      ? 'warehouse-dark-v1'
+      : null;
   const needsSkybox = collectSceneSkyboxReferences(scene).length > 0;
   const sceneVersion = isRecord(sceneFile) && typeof sceneFile.version === 'number' ? sceneFile.version : 0;
   const needsSceneVersion = sceneVersion >= 7;
-  if (!coreOnly && !openingEnabled && !needsLightingCodecs && !needsAutomaticShadows && !needsSkybox && !needsSceneVersion) return;
+  if (
+    !coreOnly
+    && !openingEnabled
+    && !needsLightingCodecs
+    && !needsAutomaticShadows
+    && !needsWarehouseShadowFilters
+    && !needsSsao
+    && !requiredBuiltinEnvId
+    && !needsSkybox
+    && !needsSceneVersion
+  ) return;
   if (!coreOnly && openingEnabled && opening && opening.template !== undefined && opening.template !== OPENING_TEMPLATE && opening.template !== 'globe-huishan' && opening.template !== 'package') {
     throw new Error(`Viewer 模板不支持场景配置的开场动画。${REBUILD_HINT}`);
   }
   const filesByPath = new Map(templateFiles.map(file => [file.destinationRelativePath, file]));
   const manifestFile = filesByPath.get(VIEWER_TEMPLATE_CAPABILITIES_PATH);
   if (!manifestFile && coreOnly) return;
-  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前${needsSkybox || needsSceneVersion ? '场景版本或天空环境' : needsAutomaticShadows ? '全场景自动阴影' : needsLightingCodecs ? '光照配置或贴图编码' : '开场动画'}。${REBUILD_HINT}`);
+  if (!manifestFile) throw new Error(`Viewer 模板尚不支持当前${needsSkybox || needsSceneVersion || requiredBuiltinEnvId ? '场景版本或环境资源' : needsAutomaticShadows || needsWarehouseShadowFilters ? '全场景自动阴影' : needsSsao ? '实时接触暗影（SSAO2）' : needsLightingCodecs ? '光照配置或贴图编码' : '开场动画'}。${REBUILD_HINT}`);
   if (manifestFile.size <= 0 || manifestFile.size > MAX_MANIFEST_BYTES) throw invalidManifest();
   let manifest: ViewerTemplateCapabilities;
   try {
@@ -163,6 +196,15 @@ async function checkTemplate(
   }
   if (needsAutomaticShadows && !manifest.shadowModes?.includes('automatic-v1')) {
     throw new Error(`Viewer 模板不支持全场景自动阴影。${REBUILD_HINT}`);
+  }
+  if (needsWarehouseShadowFilters && !manifest.shadowModes?.includes('warehouse-shadow-filters-v1')) {
+    throw new Error(`Viewer 模板不支持仓储分层阴影过滤配置。${REBUILD_HINT}`);
+  }
+  if (needsSsao && !manifest.appearanceFeatures?.includes('ssao2-v1')) {
+    throw new Error(`Viewer 模板不支持实时接触暗影（SSAO2）。${REBUILD_HINT}`);
+  }
+  if (requiredBuiltinEnvId && !manifest.builtinEnvironments?.includes(requiredBuiltinEnvId)) {
+    throw new Error(`Viewer 模板不包含内置仓储环境贴图（${requiredBuiltinEnvId}）。${REBUILD_HINT}`);
   }
   if (needsSkybox && (!manifest.skybox?.resourceVersions.includes(1) || !manifest.skybox.runtimeFormats.includes('env')
     || manifest.skybox.presentation !== 'infinite' || !manifest.skybox.recipes.includes(SKYBOX_ENVIRONMENT_RECIPE))) {

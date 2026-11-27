@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../../../../electron/shared/modelDeviceType.ts';
+import { modelMetaExtensionsField } from '../../../../electron/shared/modelMetaExtensions.ts';
 import { modelRuntimeCapabilitiesField } from '../../../../electron/shared/modelRuntimeCapabilities.ts';
 import { mergeSceneModelAssetUpdate as mergeModelAssetUpdate } from '../../assets/mergeModelAssetUpdate';
 import type { AssetEntry } from '../../assets/AssetDatabase';
@@ -32,6 +33,7 @@ export function createRefreshedModelAsset(modelAsset: ModelAssetComponent, asset
     ...(asset.dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(asset.dataDrivenConfig) } : {}),
     ...(asset.builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(asset.builtInSlotBindingConfig) } : {}),
     ...(asset.layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: cloneJsonValue(asset.layerChangePlatformBindingConfig) } : {}),
+    ...modelMetaExtensionsField(asset.metaExtensions),
     ...(parameterConfig
       ? {
           parameterConfig,
@@ -64,6 +66,7 @@ function areModelAssetsEqual(left: ModelAssetComponent, right: ModelAssetCompone
     areJsonValuesEqual(left.dataDrivenConfig, right.dataDrivenConfig) &&
     areJsonValuesEqual(left.builtInSlotBindingConfig, right.builtInSlotBindingConfig) &&
     areJsonValuesEqual(left.layerChangePlatformBindingConfig, right.layerChangePlatformBindingConfig) &&
+    areJsonValuesEqual(left.metaExtensions, right.metaExtensions) &&
     areJsonValuesEqual(left.parameterConfig, right.parameterConfig) &&
     areModelParameterValuesEqual(left.parameterValues ?? {}, right.parameterValues ?? {})
   );
@@ -98,8 +101,18 @@ function refreshModelGeneratorTargetFromImportedAssets(
 
   const refreshedTarget = createModelGeneratorTargetFromAsset(importedAsset);
   if (!refreshedTarget) return { target, refreshedCount: 0 };
-  const merged = { ...target, ...refreshedTarget, displayName: target.displayName,
-    modelAsset: mergeModelAssetUpdate(target.modelAsset, refreshedTarget.modelAsset, target.displayName) };
+  const {
+    thumbnailUrl: _oldThumbnailUrl,
+    cargoContactSupports: _oldCargoContactSupports,
+    packagePath: _oldPackagePath,
+    ...preservedTarget
+  } = target;
+  const merged = {
+    ...preservedTarget,
+    ...refreshedTarget,
+    displayName: target.displayName,
+    modelAsset: mergeModelAssetUpdate(target.modelAsset, refreshedTarget.modelAsset, target.displayName),
+  };
   if (areJsonValuesEqual(target, merged)) return { target, refreshedCount: 0 };
   return { target: merged, refreshedCount: 1 };
 }

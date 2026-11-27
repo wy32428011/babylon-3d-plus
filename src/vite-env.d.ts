@@ -384,6 +384,8 @@ type AssetEntry = {
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
   cargoContact?: CargoContactSupport[];
+  metaExtensions?: import('../electron/shared/modelMetaExtensions').ModelMetaExtensions;
+  metadataSchemaVersion?: number;
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';

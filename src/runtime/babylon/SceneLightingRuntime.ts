@@ -45,6 +45,7 @@ import { LightingShadowInstanceRuntime } from './LightingShadowInstanceRuntime.t
 import { LightingInvalidationDiagnostics, type LightingChangeKind, type LightingInvalidationEntry, type LightingInvalidationDiagnosticsSnapshot } from './lightingInvalidation.ts';
 import { LightingProbeOcclusionQuery } from './lightingProbeOcclusion.ts';
 import { getLightingRuntimeDiagnostic, type LightingRuntimeDiagnostic } from './lightingRuntimeDiagnostic.ts';
+import { resolveAutomaticShadowRole } from './warehouseShadowFilters.ts';
 
 type ShadowRole = { mobility: 'static' | 'dynamic'; castShadows: boolean; receiveShadows: boolean };
 type LightingInstanceBatch = NonNullable<LightingRuntimeSource['instance']>['batch'];
@@ -1183,11 +1184,11 @@ export class SceneLightingRuntime {
   }
 
   private updateShadowRoles(): void {
-    const automatic = getSceneLightingConfig(this.document).shadows.managementMode === 'automatic';
+    const lightingConfig = getSceneLightingConfig(this.document);
+    const automatic = lightingConfig.shadows.managementMode === 'automatic';
     // 独立于 GI 的条目计算阴影角色，旧分类及烘焙资产不因切换阴影模式而改写。
     const shadowSources = automatic ? this.sources.map(source => ({ ...source,
-      entry: { ...source.entry, mobility: source.automaticShadowMobility ?? 'dynamic' as const,
-        castShadows: true, receiveShadows: true } })) : this.sources;
+      entry: { ...source.entry, ...resolveAutomaticShadowRole(source, lightingConfig.shadows) } })) : this.sources;
     const shadowByKey = new Map(shadowSources.map(source => [source.entry.key, source]));
     let shadowInstancesChanged: boolean;
     this.creatingDerived = true;

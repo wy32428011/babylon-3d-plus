@@ -336,12 +336,17 @@ function computeSceneLightingBakeSignature(value: unknown, reuseEntityFragments:
   const skybox = lighting.environment?.source === 'sandbox' ? undefined : settings.skybox
     ? Object.fromEntries(Object.entries(object(skyboxLightingIdentity(settings.skybox))).filter(([key]) => key !== 'intensity')) : settings.skybox;
   const resolvedSkybox = sandboxEnvironment ? null : resolveSceneSkyboxReference(scene);
+  const environmentLightingId = lighting.environment?.preset === 'warehouse-bright'
+    ? 'warehouse-bright-v1'
+    : lighting.environment?.preset === 'warehouse-dark'
+      ? 'warehouse-dark-v1'
+      : GLB_STANDARD_ENVIRONMENT_ID;
   return `lighting-v2-${lightingContentHash({
     entities: entries, environment: settings.environment, skybox,
     light: { main, fill: { intensity: lighting.fill.intensity, color: lighting.fill.color, groundColor: lighting.fill.groundColor },
       // 旧实体天空捕获曾退化为平均辐照度；方向性原图输入必须使该旧结果过期，而非重签成有效。
       ...(resolvedSkybox?.entityId !== null && resolvedSkybox?.visible ? { skyboxSourceCapture: 1 } : {}),
-      ...(lighting.environment?.source === 'sandbox' ? { environmentLighting: { ...lighting.environment, resourceRevision: GLB_STANDARD_ENVIRONMENT_ID } } : {}),
+      ...(lighting.environment?.source === 'sandbox' ? { environmentLighting: { ...lighting.environment, resourceRevision: environmentLightingId } } : {}),
       environmentIntensity: lighting.environmentIntensity, disabledLightIds: [...lighting.disabledLightIds].sort(), allowDayNightCycle: lighting.allowDayNightCycle,
       ...(lighting.allowDayNightCycle ? { dayNightSources: dayNightLightingSources(scene, entities) } : {}) },
     bake: { quality: bake.quality, atlasSize: bake.atlasSize, texelsPerMeter: bake.texelsPerMeter, probeSpacing: bake.probeSpacing,

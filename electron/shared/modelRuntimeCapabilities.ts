@@ -48,14 +48,15 @@ export function modelRuntimeCapabilitiesField(value: unknown): { runtimeCapabili
 export function modelRuntimeConfigurationKey(asset: {
   lengthUnit?: unknown; unitScaleToMeters?: unknown; parameterConfig?: unknown;
   parameterScriptMetadata?: unknown; animationScriptMetadata?: unknown; dataDrivenConfig?: unknown;
-  builtInSlotBindingConfig?: unknown; layerChangePlatformBindingConfig?: unknown;
+  builtInSlotBindingConfig?: unknown; layerChangePlatformBindingConfig?: unknown; metaExtensions?: unknown;
 }): string {
-  const value = {
+  const value: Record<string, unknown> = {
     lengthUnit: asset.lengthUnit ?? 'meter', unitScaleToMeters: asset.unitScaleToMeters ?? 1,
     parameterConfig: asset.parameterConfig ?? null, parameterScriptMetadata: asset.parameterScriptMetadata ?? [],
     animationScriptMetadata: asset.animationScriptMetadata ?? [], dataDrivenConfig: asset.dataDrivenConfig ?? null,
     builtInSlotBindingConfig: asset.builtInSlotBindingConfig ?? null, layerChangePlatformBindingConfig: asset.layerChangePlatformBindingConfig ?? null,
   };
+  if (asset.metaExtensions !== undefined) value.metaExtensions = asset.metaExtensions;
   return JSON.stringify(value, (_key, item: unknown) => {
     if (!plain(item)) return item;
     return Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]]));

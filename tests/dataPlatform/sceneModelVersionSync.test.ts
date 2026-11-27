@@ -6,15 +6,16 @@ import path from 'node:path';
 import test from 'node:test';
 import { importIsolatedTypeScriptModules } from '../helpers/extensionlessTypeScriptTestBootstrap.ts';
 
-const [{ syncSceneDataPlatformModelAssets, syncInspectionModelVersion, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey,
+const [{ executeDataPlatformModelSync, syncSceneDataPlatformModelAssets, syncInspectionModelVersion, recoverDataPlatformModelAssets, createDataPlatformModelSourceKey,
   listRemoteInspectionModels, listRemoteInspectionModelVersions }, { createSourceResourcePlan }, { recoverLocalSceneResourcePaths },
-  { assertInspectionModelSelfContained, parseInspectionMetadata }] = await importIsolatedTypeScriptModules<[
+  { assertInspectionModelSelfContained, parseInspectionMetadata }, { MODEL_METADATA_SCHEMA_VERSION }] = await importIsolatedTypeScriptModules<[
   typeof import('../../electron/ipc/dataPlatformModelIncrementalSync'),
   typeof import('../../electron/ipc/digitalTwinSourceResourcePlan'),
   typeof import('../../electron/ipc/localSceneResourceRecovery'),
   typeof import('../../electron/ipc/inspectionModelResource'),
+  typeof import('../../electron/shared/modelMetaExtensions'),
 ]>(['electron/ipc/dataPlatformModelIncrementalSync.ts', 'electron/ipc/digitalTwinSourceResourcePlan.ts',
-  'electron/ipc/localSceneResourceRecovery.ts', 'electron/ipc/inspectionModelResource.ts']);
+  'electron/ipc/localSceneResourceRecovery.ts', 'electron/ipc/inspectionModelResource.ts', 'electron/shared/modelMetaExtensions.ts']);
 
 const baseUrl = 'https://example.com/platform';
 const resources = [{ kind: 'model' as const, resourceId: '9007199254740993' }];
@@ -438,4 +439,206 @@ test('共享缓存复用期间远端描述变化拒绝返回旧版，损坏共�
   delete context.record.metaFileUrl;
   await fs.writeFile(cached.path, 'tampered');
   await assert.rejects(syncSceneDataPlatformModelAssets(options), /内容与版本不一致/);
+}));
+
+function createMinimalSyncGlb(marker = 1): Buffer {
+  const json = Buffer.from(JSON.stringify({
+    asset: { version: '2.0' },
+    buffers: [{ byteLength: 4 }],
+    meshes: [{ primitives: [{}], extras: { marker } }],
+  }), 'utf8');
+  const jsonChunk = Buffer.alloc(Math.ceil(json.length / 4) * 4, 0x20);
+  json.copy(jsonChunk);
+  const binChunk = Buffer.alloc(4, marker);
+  const body = Buffer.alloc(8 + jsonChunk.length + 8 + binChunk.length);
+  body.writeUInt32LE(jsonChunk.length, 0);
+  body.writeUInt32LE(0x4e4f534a, 4);
+  jsonChunk.copy(body, 8);
+  const binOffset = 8 + jsonChunk.length;
+  body.writeUInt32LE(binChunk.length, binOffset);
+  body.writeUInt32LE(0x004e4942, binOffset + 4);
+  binChunk.copy(body, binOffset + 8);
+  const header = Buffer.alloc(12);
+  header.write('glTF', 0, 'ascii');
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(header.length + body.length, 8);
+  return Buffer.concat([header, body]);
+}
+
+function createFullSyncFixtureHarness() {
+  const modelId = '9007199254740995';
+  const downloads: string[] = [];
+  const state = {
+    currentVersionId: '101',
+    glbMarker: 1,
+    metaObject: {
+      lengthUnit: 'meter',
+      dataDriven: { device: { devType: 'agv', defaultAssetCode: 'AGV-' } },
+      customDocking: { offset: 1.25, tags: ['A', 'B'] },
+      customFlag: true,
+    } as Record<string, unknown>,
+    scriptText: 'export default class CustomRuntime { onStart() {} }\n',
+    metaFileUrl: '/files/meta-v1.json',
+    fileUrl: '/files/device-v1.glb',
+    scriptFileUrl: '/files/behavior-v1.ts',
+  };
+  const dependencies = {
+    requestJson: async (options: { endpointPath: string; body?: unknown }) => {
+      if (options.endpointPath.includes('combo-models')) {
+        return { success: true, data: { records: [], total: 0, pageNum: 1, pageSize: 100 } };
+      }
+      const record = {
+        id: modelId,
+        modelName: '全链路设备',
+        modelPurpose: 'SCENE',
+        deviceType: 'agv',
+        fileName: 'device.glb',
+        fileUrl: state.fileUrl,
+        metaFileUrl: state.metaFileUrl,
+        currentVersionId: state.currentVersionId,
+        scriptFiles: [{ fileName: 'behavior.ts', fileUrl: state.scriptFileUrl, sortOrder: 1 }],
+      };
+      if (options.endpointPath.endsWith('/detail')) {
+        return { success: true, data: record };
+      }
+      const pageNum = (options.body as { pageNum?: number })?.pageNum ?? 1;
+      return {
+        success: true,
+        data: { records: pageNum === 1 ? [record] : [], total: 1, pageNum, pageSize: 100 },
+      };
+    },
+    downloadFile: async (options: import('../../electron/ipc/dataPlatformTransfer').DownloadRemoteFileOptions) => {
+      downloads.push(options.remoteUrl);
+      const bytes = options.remoteUrl === state.fileUrl
+        ? createMinimalSyncGlb(state.glbMarker)
+        : options.remoteUrl === state.metaFileUrl
+          ? Buffer.from(JSON.stringify(state.metaObject), 'utf8')
+          : Buffer.from(state.scriptText, 'utf8');
+      await fs.mkdir(path.dirname(options.destinationPath), { recursive: true });
+      await fs.writeFile(options.destinationPath, bytes);
+      options.onBytes?.(bytes.byteLength);
+      return { bytes: bytes.byteLength, contentType: 'application/octet-stream', finalUrl: options.remoteUrl, etag: null, resumedBytes: 0 };
+    },
+    readAssetIndex: async (editorRoot: string): Promise<import('../../electron/types').ProjectAssetIndex> => {
+      try {
+        return JSON.parse(await fs.readFile(path.join(editorRoot, '.babylon-editor', 'asset-index.json'), 'utf8'));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 2, assets: [] };
+        throw error;
+      }
+    },
+  };
+  return { modelId, downloads, state, dependencies };
+}
+
+test('全库增量同步提取、更新和删除与 dataDriven 平级的 meta.json 扩展字段并响应脚本与模型修改', async () => fixture(async (context) => {
+  const harness = createFullSyncFixtureHarness();
+  const assetIndexPath = path.join(context.root, '.babylon-editor', 'asset-index.json');
+  const key = `model:${harness.modelId}`;
+
+  const first = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.equal(first.libraryChanged, true);
+  assert.deepEqual(first.runtimeChangedResourceKeys, [key]);
+  const firstAsset = JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).assets[0];
+  assert.equal(firstAsset.metadataSchemaVersion, MODEL_METADATA_SCHEMA_VERSION);
+  assert.deepEqual(firstAsset.metaExtensions, { customDocking: { offset: 1.25, tags: ['A', 'B'] }, customFlag: true });
+  assert.equal(Object.hasOwn(firstAsset.metaExtensions, 'dataDriven'), false);
+
+  // 更新 meta 扩展字段并同步修改脚本内容，应重新同步并推进 assetRevision
+  harness.state.currentVersionId = '102';
+  harness.state.metaFileUrl = '/files/meta-v2.json';
+  harness.state.scriptFileUrl = '/files/behavior-v2.ts';
+  harness.state.metaObject = {
+    lengthUnit: 'meter',
+    dataDriven: { device: { devType: 'agv', defaultAssetCode: 'AGV-' } },
+    customDocking: { offset: 2.5, tags: ['A', 'B'] },
+    newSibling: 'hi',
+  };
+  harness.state.scriptText = 'export default class CustomRuntime { onStart() { /* v2 */ } }\n';
+  const second = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.equal(second.libraryChanged, true);
+  assert.deepEqual(second.runtimeChangedResourceKeys, [key]);
+  const secondAsset = JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).assets[0];
+  assert.notEqual(secondAsset.assetRevision, firstAsset.assetRevision);
+  assert.deepEqual(secondAsset.metaExtensions, { customDocking: { offset: 2.5, tags: ['A', 'B'] }, newSibling: 'hi' });
+
+  // 修改主模型 GLB 字节并移除全部扩展字段，应触发同步更新并清除旧扩展字段
+  harness.state.currentVersionId = '103';
+  harness.state.fileUrl = '/files/device-v3.glb';
+  harness.state.metaFileUrl = '/files/meta-v3.json';
+  harness.state.glbMarker = 9;
+  harness.state.metaObject = {
+    lengthUnit: 'meter',
+    dataDriven: { device: { devType: 'agv', defaultAssetCode: 'AGV-' } },
+  };
+  const third = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.equal(third.libraryChanged, true);
+  assert.deepEqual(third.runtimeChangedResourceKeys, [key]);
+  const thirdAsset = JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).assets[0];
+  assert.notEqual(thirdAsset.assetRevision, secondAsset.assetRevision);
+  assert.equal(thirdAsset.metaExtensions, undefined);
+}));
+
+test('旧版无 metadataSchemaVersion 缓存免下载本地重扫扩展字段，本地磁盘被修改时重新下载恢复', async () => fixture(async (context) => {
+  const harness = createFullSyncFixtureHarness();
+  const assetIndexPath = path.join(context.root, '.babylon-editor', 'asset-index.json');
+  const key = `model:${harness.modelId}`;
+
+  await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  const initialIndex = JSON.parse(await fs.readFile(assetIndexPath, 'utf8'));
+  const legacyAsset = { ...initialIndex.assets[0] };
+  delete legacyAsset.metadataSchemaVersion;
+  delete legacyAsset.metaExtensions;
+  await fs.writeFile(assetIndexPath, `${JSON.stringify({ version: 2, assets: [legacyAsset] }, null, 2)}\n`, 'utf8');
+
+  harness.downloads.length = 0;
+  const rescanned = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.deepEqual(harness.downloads, [], '旧 schema 索引升级应本地重扫而不重复下载远端模型');
+  assert.equal(rescanned.libraryChanged, true);
+  assert.deepEqual(rescanned.runtimeChangedResourceKeys, [key]);
+  const upgradedAsset = JSON.parse(await fs.readFile(assetIndexPath, 'utf8')).assets[0];
+  assert.equal(upgradedAsset.metadataSchemaVersion, MODEL_METADATA_SCHEMA_VERSION);
+  assert.deepEqual(upgradedAsset.metaExtensions, { customDocking: { offset: 1.25, tags: ['A', 'B'] }, customFlag: true });
+
+  // 已升级到最新 schema 后再次同步，零下载且无变化
+  harness.downloads.length = 0;
+  const idle = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.deepEqual(harness.downloads, []);
+  assert.equal(idle.libraryChanged, false);
+  assert.deepEqual(idle.runtimeChangedResourceKeys, []);
+
+  // 篡改本地磁盘缓存中的 meta.json，即使远端版本指纹未变也能检出并重新下载恢复
+  await fs.writeFile(upgradedAsset.metadataPath, JSON.stringify({ lengthUnit: 'meter', tampered: true }), 'utf8');
+  const repaired = await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  assert.ok(harness.downloads.length > 0, '本地缓存与 runtimeRevision 不一致时必须重新下载');
+  assert.equal(repaired.libraryChanged, true);
+  assert.deepEqual(repaired.runtimeChangedResourceKeys, [key]);
+  const restoredMeta = JSON.parse(await fs.readFile(upgradedAsset.metadataPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(restoredMeta.tampered, undefined);
+  assert.deepEqual(restoredMeta.customDocking, { offset: 1.25, tags: ['A', 'B'] });
+}));
+
+test('syncSceneDataPlatformModelAssets 走共享固定路径命中老 schema 缓存时重扫返回扩展字段且不改写共享索引', async () => fixture(async (context) => {
+  const harness = createFullSyncFixtureHarness();
+  const assetIndexPath = path.join(context.root, '.babylon-editor', 'asset-index.json');
+  await executeDataPlatformModelSync({ baseUrl, editorRoot: context.root, dependencies: harness.dependencies });
+  const initialIndex = JSON.parse(await fs.readFile(assetIndexPath, 'utf8'));
+  const legacyAsset = { ...initialIndex.assets[0] };
+  delete legacyAsset.metadataSchemaVersion;
+  delete legacyAsset.metaExtensions;
+  const legacyJson = `${JSON.stringify({ version: 2, assets: [legacyAsset] }, null, 2)}\n`;
+  await fs.writeFile(assetIndexPath, legacyJson, 'utf8');
+
+  harness.downloads.length = 0;
+  const [pinned] = await syncSceneDataPlatformModelAssets({
+    baseUrl,
+    sharedResourcesRoot: context.root,
+    resources: [{ kind: 'model', resourceId: harness.modelId }],
+    libraryModelFilesOnly: true,
+    dependencies: harness.dependencies,
+  });
+  assert.deepEqual(harness.downloads, []);
+  assert.equal(pinned.metadataSchemaVersion, MODEL_METADATA_SCHEMA_VERSION);
+  assert.deepEqual(pinned.metaExtensions, { customDocking: { offset: 1.25, tags: ['A', 'B'] }, customFlag: true });
+  assert.equal(await fs.readFile(assetIndexPath, 'utf8'), legacyJson, '共享库索引不得被场景固定路径悄悄改写');
 }));

@@ -1,6 +1,7 @@
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer.js';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
+import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { VertexData } from '@babylonjs/core/Meshes/mesh.vertexData.js';
 import type { AbstractMesh, Geometry, Scene } from '@babylonjs/core';
@@ -28,6 +29,12 @@ type IndexedCollisionMesh = {
   revisionObserver: ReturnType<typeof acquireCollisionGeometryRevision> | null;
   indices: ReturnType<AbstractMesh['getIndices']>;
   visible: boolean;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
   worldPositions: Float32Array;
   cells: Map<string, number[]>;
 };
@@ -171,6 +178,7 @@ export class ManualRoamLocalTriangleCollider {
       }
       const proxy = this.getOrCreateProxy(meshIndex);
       if (applyWorldTriangles(proxy, currentPositions)) this.proxyUploadCount += 1;
+      proxy.isVisible = this.debugVisible;
       proxy.visibility = this.debugVisible ? 0.22 : 0;
       proxy.setEnabled(true);
       proxy.computeWorldMatrix(true);
@@ -226,8 +234,129 @@ export class ManualRoamLocalTriangleCollider {
   setDebugVisible(visible: boolean): void {
     this.debugVisible = visible;
     for (let index = 0; index < this.currentActiveCount; index += 1) {
-      this.proxies[index].visibility = visible ? 0.22 : 0;
+      const proxy = this.proxies[index];
+      proxy.isVisible = visible;
+      proxy.visibility = visible ? 0.22 : 0;
     }
+  }
+
+  /**
+   * 直接在世界坐标空间格子中求垂直向下射线的最高可行走交点，
+   * 避免脚部贴地探测和步阶检测反复调用全场景 pickWithRay。
+   */
+  probeVerticalRay(
+    x: number,
+    z: number,
+    originY: number,
+    length: number,
+    minNormalY: number,
+  ): { y: number; normal: Vector3 } | null {
+    if (
+      this.indexedMeshes.size === 0
+      || !Number.isFinite(x)
+      || !Number.isFinite(z)
+      || !Number.isFinite(originY)
+      || !Number.isFinite(length)
+      || length <= 0
+    ) {
+      return null;
+    }
+    const minRayY = originY - length;
+    const cellSize = this.cellSizeMeters;
+    const ix = Math.floor(x / cellSize);
+    const iz = Math.floor(z / cellSize);
+    const minIy = Math.floor(minRayY / cellSize);
+    const maxIy = Math.floor(originY / cellSize);
+    const rayTop = originY + 1e-5;
+    const rayBottom = minRayY - 1e-5;
+
+    let bestY = Number.NEGATIVE_INFINITY;
+    let bestNx = 0;
+    let bestNy = 1;
+    let bestNz = 0;
+
+    for (const indexed of this.indexedMeshes.values()) {
+      if (
+        indexed.mesh.isDisposed()
+        || !indexed.mesh.isEnabled()
+        || !indexed.mesh.isVisible
+        || indexed.mesh.visibility <= 0
+      ) continue;
+      if (
+        x < indexed.minX - 1e-5
+        || x > indexed.maxX + 1e-5
+        || z < indexed.minZ - 1e-5
+        || z > indexed.maxZ + 1e-5
+        || indexed.maxY < rayBottom
+        || indexed.minY > rayTop
+      ) continue;
+
+      const worldPositions = indexed.worldPositions;
+      for (let iy = maxIy; iy >= minIy; iy -= 1) {
+        const triangleIndexes = indexed.cells.get(makeCellKey(ix, iy, iz));
+        if (!triangleIndexes) continue;
+        for (let i = 0; i < triangleIndexes.length; i += 1) {
+          const offset = triangleIndexes[i] * 9;
+          const ax = worldPositions[offset];
+          const ay = worldPositions[offset + 1];
+          const az = worldPositions[offset + 2];
+          const bx = worldPositions[offset + 3];
+          const by = worldPositions[offset + 4];
+          const bz = worldPositions[offset + 5];
+          const cx = worldPositions[offset + 6];
+          const cy = worldPositions[offset + 7];
+          const cz = worldPositions[offset + 8];
+
+          const triMaxY = ay >= by ? (ay >= cy ? ay : cy) : (by >= cy ? by : cy);
+          if (triMaxY < rayBottom || triMaxY <= bestY) continue;
+          const triMinY = ay <= by ? (ay <= cy ? ay : cy) : (by <= cy ? by : cy);
+          if (triMinY > rayTop) continue;
+
+          const triMinX = ax <= bx ? (ax <= cx ? ax : cx) : (bx <= cx ? bx : cx);
+          const triMaxX = ax >= bx ? (ax >= cx ? ax : cx) : (bx >= cx ? bx : cx);
+          if (x < triMinX - 1e-5 || x > triMaxX + 1e-5) continue;
+          const triMinZ = az <= bz ? (az <= cz ? az : cz) : (bz <= cz ? bz : cz);
+          const triMaxZ = az >= bz ? (az >= cz ? az : cz) : (bz >= cz ? bz : cz);
+          if (z < triMinZ - 1e-5 || z > triMaxZ + 1e-5) continue;
+
+          const e1x = bx - ax;
+          const e1y = by - ay;
+          const e1z = bz - az;
+          const e2x = cx - ax;
+          const e2y = cy - ay;
+          const e2z = cz - az;
+          // Babylon 左手系正面法线为 cross(e2, e1)，垂直分量即 det。
+          const det = e2z * e1x - e2x * e1z;
+          if (det <= 1e-12) continue;
+
+          const dx = x - ax;
+          const dz = z - az;
+          const uNum = dx * e2z - dz * e2x;
+          const vNum = e1x * dz - e1z * dx;
+          const eps = 1e-6 * det;
+          if (uNum < -eps || vNum < -eps || uNum + vNum > det + eps) continue;
+
+          const hitY = ay + (uNum * e1y + vNum * e2y) / det;
+          if (hitY > rayTop || hitY < rayBottom || hitY <= bestY) continue;
+
+          const nx = e2y * e1z - e2z * e1y;
+          const nz = e2x * e1y - e2y * e1x;
+          const normalLength = Math.hypot(nx, det, nz);
+          if (normalLength <= 1e-12) continue;
+          const invLen = 1 / normalLength;
+          const nyNorm = det * invLen;
+          if (nyNorm < minNormalY) continue;
+
+          bestY = hitY;
+          bestNx = nx * invLen;
+          bestNy = nyNorm;
+          bestNz = nz * invLen;
+        }
+      }
+    }
+
+    if (!Number.isFinite(bestY)) return null;
+    return { y: bestY, normal: new Vector3(bestNx, bestNy, bestNz) };
   }
 
   deactivate(): void {
@@ -310,11 +439,21 @@ export class ManualRoamLocalTriangleCollider {
     const cells = new Map<string, number[]>();
     const cellSize = this.cellSizeMeters;
     const m = worldMatrix;
+    const determinant = m[0] * (m[5] * m[10] - m[6] * m[9])
+      - m[1] * (m[4] * m[10] - m[6] * m[8])
+      + m[2] * (m[4] * m[9] - m[5] * m[8]);
+    const invertWinding = determinant < 0;
     let packedTriangleCount = 0;
+    let meshMinX = Number.POSITIVE_INFINITY;
+    let meshMaxX = Number.NEGATIVE_INFINITY;
+    let meshMinY = Number.POSITIVE_INFINITY;
+    let meshMaxY = Number.NEGATIVE_INFINITY;
+    let meshMinZ = Number.POSITIVE_INFINITY;
+    let meshMaxZ = Number.NEGATIVE_INFINITY;
     for (let index = 0; index + 2 < indices.length; index += 3) {
       const i0 = indices[index] * 3;
-      const i1 = indices[index + 1] * 3;
-      const i2 = indices[index + 2] * 3;
+      const i1 = indices[invertWinding ? index + 2 : index + 1] * 3;
+      const i2 = indices[invertWinding ? index + 1 : index + 2] * 3;
       const ax = positions[i0];
       const ay = positions[i0 + 1];
       const az = positions[i0 + 2];
@@ -326,15 +465,42 @@ export class ManualRoamLocalTriangleCollider {
       const cz = positions[i2 + 2];
       if (![ax, ay, az, bx, by, bz, cx, cy, cz].every(Number.isFinite)) continue;
       const packedIndex = packedTriangleCount * 9;
-      worldPositions[packedIndex] = ax * m[0] + ay * m[4] + az * m[8] + m[12];
-      worldPositions[packedIndex + 1] = ax * m[1] + ay * m[5] + az * m[9] + m[13];
-      worldPositions[packedIndex + 2] = ax * m[2] + ay * m[6] + az * m[10] + m[14];
-      worldPositions[packedIndex + 3] = bx * m[0] + by * m[4] + bz * m[8] + m[12];
-      worldPositions[packedIndex + 4] = bx * m[1] + by * m[5] + bz * m[9] + m[13];
-      worldPositions[packedIndex + 5] = bx * m[2] + by * m[6] + bz * m[10] + m[14];
-      worldPositions[packedIndex + 6] = cx * m[0] + cy * m[4] + cz * m[8] + m[12];
-      worldPositions[packedIndex + 7] = cx * m[1] + cy * m[5] + cz * m[9] + m[13];
-      worldPositions[packedIndex + 8] = cx * m[2] + cy * m[6] + cz * m[10] + m[14];
+      const wax = ax * m[0] + ay * m[4] + az * m[8] + m[12];
+      const way = ax * m[1] + ay * m[5] + az * m[9] + m[13];
+      const waz = ax * m[2] + ay * m[6] + az * m[10] + m[14];
+      const wbx = bx * m[0] + by * m[4] + bz * m[8] + m[12];
+      const wby = bx * m[1] + by * m[5] + bz * m[9] + m[13];
+      const wbz = bx * m[2] + by * m[6] + bz * m[10] + m[14];
+      const wcx = cx * m[0] + cy * m[4] + cz * m[8] + m[12];
+      const wcy = cx * m[1] + cy * m[5] + cz * m[9] + m[13];
+      const wcz = cx * m[2] + cy * m[6] + cz * m[10] + m[14];
+      worldPositions[packedIndex] = wax;
+      worldPositions[packedIndex + 1] = way;
+      worldPositions[packedIndex + 2] = waz;
+      worldPositions[packedIndex + 3] = wbx;
+      worldPositions[packedIndex + 4] = wby;
+      worldPositions[packedIndex + 5] = wbz;
+      worldPositions[packedIndex + 6] = wcx;
+      worldPositions[packedIndex + 7] = wcy;
+      worldPositions[packedIndex + 8] = wcz;
+      if (wax < meshMinX) meshMinX = wax;
+      if (wbx < meshMinX) meshMinX = wbx;
+      if (wcx < meshMinX) meshMinX = wcx;
+      if (wax > meshMaxX) meshMaxX = wax;
+      if (wbx > meshMaxX) meshMaxX = wbx;
+      if (wcx > meshMaxX) meshMaxX = wcx;
+      if (way < meshMinY) meshMinY = way;
+      if (wby < meshMinY) meshMinY = wby;
+      if (wcy < meshMinY) meshMinY = wcy;
+      if (way > meshMaxY) meshMaxY = way;
+      if (wby > meshMaxY) meshMaxY = wby;
+      if (wcy > meshMaxY) meshMaxY = wcy;
+      if (waz < meshMinZ) meshMinZ = waz;
+      if (wbz < meshMinZ) meshMinZ = wbz;
+      if (wcz < meshMinZ) meshMinZ = wcz;
+      if (waz > meshMaxZ) meshMaxZ = waz;
+      if (wbz > meshMaxZ) meshMaxZ = wbz;
+      if (wcz > meshMaxZ) meshMaxZ = wcz;
       const triangle = worldPositions.subarray(packedIndex, packedIndex + 9);
       for (const key of collectTriangleCellKeys(triangle, cellSize)) {
         const bucket = cells.get(key);
@@ -354,6 +520,12 @@ export class ManualRoamLocalTriangleCollider {
       revisionObserver,
       indices,
       visible,
+      minX: meshMinX,
+      maxX: meshMaxX,
+      minY: meshMinY,
+      maxY: meshMaxY,
+      minZ: meshMinZ,
+      maxZ: meshMaxZ,
       worldPositions: packedTriangleCount === triangleCount
         ? worldPositions
         : worldPositions.slice(0, packedTriangleCount * 9),
@@ -400,12 +572,25 @@ export class ManualRoamLocalTriangleCollider {
       cell.triangleCount += triangleIndexes.length;
     };
 
+    const qMinX = position.x - radiusMeters;
+    const qMaxX = position.x + radiusMeters;
+    const qMinY = position.y - radiusMeters;
+    const qMaxY = position.y + radiusMeters;
+    const qMinZ = position.z - radiusMeters;
+    const qMaxZ = position.z + radiusMeters;
+
     for (const indexed of this.indexedMeshes.values()) {
       if (
         indexed.mesh.isDisposed()
         || !indexed.mesh.isEnabled()
         || !indexed.mesh.isVisible
         || indexed.mesh.visibility <= 0
+        || indexed.maxX < qMinX
+        || indexed.minX > qMaxX
+        || indexed.maxY < qMinY
+        || indexed.minY > qMaxY
+        || indexed.maxZ < qMinZ
+        || indexed.minZ > qMaxZ
       ) continue;
       if (queryCells) {
         for (const cell of queryCells) append(indexed, cell.key, cell.ix, cell.iy, cell.iz);
@@ -429,8 +614,8 @@ export class ManualRoamLocalTriangleCollider {
     const proxy = new Mesh(`${MANUAL_ROAM_LOCAL_TRIANGLE_COLLIDER_PREFIX}_${index}`, this.scene);
     proxy.checkCollisions = true;
     proxy.isPickable = true;
-    proxy.isVisible = true;
-    proxy.visibility = 0;
+    proxy.isVisible = this.debugVisible;
+    proxy.visibility = this.debugVisible ? 0.22 : 0;
     proxy.doNotSerialize = true;
     proxy.material = this.material;
     proxy.metadata = { manualRoamLocalTriangleCollider: true };

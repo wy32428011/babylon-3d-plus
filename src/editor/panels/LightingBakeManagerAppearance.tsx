@@ -21,6 +21,20 @@ export function LightingBakeManagerAppearance({ appearance, disabled, onChange, 
     <LightingManagerToggle label="色调映射" checked={appearance.toneMappingEnabled} disabled={disabled} onChange={toneMappingEnabled => patch({ toneMappingEnabled })} />
     <LightingManagerNumberField label="对比度" value={appearance.contrast} min={0.1} max={3} step={0.05} disabled={disabled} onChange={contrast => patch({ contrast })} />
     <LightingManagerNumberField label="特效光晕" value={appearance.glowIntensity} min={0} max={3} step={0.05} disabled={disabled} onChange={glowIntensity => patch({ glowIntensity })} />
+    <label className="lighting-manager-field"><span>接触暗影（SSAO）</span><select aria-label="接触暗影" value={appearance.ssaoMode ?? 'off'} disabled={disabled}
+      onChange={event => {
+        const value = event.target.value as 'off' | 'balanced' | 'high';
+        if (value === 'off') {
+          const next = { ...appearance };
+          delete next.ssaoMode;
+          onChange(next);
+        } else patch({ ssaoMode: value });
+      }}>
+      <option value="off">关闭</option>
+      <option value="balanced">标准（半分辨率）</option>
+      <option value="high">高清</option>
+    </select></label>
+    <p className="lighting-manager-note">无需 Blender，实时在货架、托盘和设备底部生成接触暗影；WebGL2 不支持时安全跳过。</p>
     <LightingManagerToggle label="柔和泛光" checked={appearance.bloomEnabled} disabled={disabled} onChange={bloomEnabled => patch({ bloomEnabled })} />
     <LightingManagerNumberField label="泛光强度" value={appearance.bloomWeight} min={0} max={1} step={0.05} disabled={disabled || !appearance.bloomEnabled}
       onChange={bloomWeight => patch({ bloomWeight })} />

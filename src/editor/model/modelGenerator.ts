@@ -1,4 +1,10 @@
 import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
+import {
+  isPlainMetaRecord,
+  modelMetaExtensionsField,
+  normalizeModelMetaExtensions,
+  type ModelMetaExtensions,
+} from '../../../electron/shared/modelMetaExtensions.ts';
 import { modelRuntimeCapabilitiesField, modelRuntimeConfigurationKey } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { createModelTypeIdentityFromAsset } from '../../../electron/shared/modelTypeIdentity';
 import { normalizeDataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
@@ -49,6 +55,7 @@ type ModelGeneratorSourceAsset = {
   builtInSlotBindingConfig?: ModelAssetTemplate['builtInSlotBindingConfig'];
   layerChangePlatformBindingConfig?: ModelAssetTemplate['layerChangePlatformBindingConfig'];
   cargoContact?: CargoContactSupport[];
+  metaExtensions?: ModelMetaExtensions;
 };
 
 /** 单个模型生成器允许保存的最大规则数。 */
@@ -159,6 +166,10 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     ? null
     : normalizeLayerChangePlatformBindingConfig(value.layerChangePlatformBindingConfig);
   if (value.layerChangePlatformBindingConfig !== undefined && !layerChangePlatformBindingConfig) return null;
+  if (value.metaExtensions !== undefined && !isPlainMetaRecord(value.metaExtensions)) return null;
+  const metaExtensions = value.metaExtensions === undefined
+    ? undefined
+    : normalizeModelMetaExtensions(value.metaExtensions);
   const scriptAssets = sanitizeModelScriptAssets(value.scriptAssets);
   const parameterScriptMetadata = sanitizeJsonArray(value.parameterScriptMetadata);
   const animationScriptMetadata = sanitizeJsonArray(value.animationScriptMetadata);
@@ -188,6 +199,7 @@ export function sanitizeModelAssetTemplate(value: unknown): ModelAssetTemplate |
     ...(dataDrivenConfig ? { dataDrivenConfig } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig } : {}),
     ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig } : {}),
+    ...(metaExtensions ? { metaExtensions } : {}),
   };
 }
 
@@ -220,6 +232,7 @@ function createModelAssetTemplateFromAsset(asset: ModelGeneratorSourceAsset): Mo
     ...(dataDrivenConfig ? { dataDrivenConfig: cloneJsonValue(dataDrivenConfig) } : {}),
     ...(builtInSlotBindingConfig ? { builtInSlotBindingConfig: cloneJsonValue(builtInSlotBindingConfig) } : {}),
     ...(layerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: cloneJsonValue(layerChangePlatformBindingConfig) } : {}),
+    ...modelMetaExtensionsField(asset.metaExtensions),
   };
 }
 
@@ -418,6 +431,7 @@ export function createModelGeneratorTargetSignature(target: ModelGeneratorTarget
     sourceSnapshot: target.modelAsset.sourceSnapshot ?? null,
     dataPlatformModel: target.modelAsset.dataPlatformModel ?? null,
     cargoContact: resolveModelGeneratorCargoContactSupport(target),
+    ...(target.modelAsset.metaExtensions ? { metaExtensions: target.modelAsset.metaExtensions } : {}),
     // 生成输出在签名相同时直接复用；声明撤销或配置换代必须先释放旧共享实例再重新准入。
     ...(target.modelAsset.runtimeCapabilities ? {
       runtimeCapabilities: target.modelAsset.runtimeCapabilities,

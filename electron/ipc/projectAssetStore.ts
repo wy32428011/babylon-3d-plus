@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
+import { modelMetaExtensionsField } from '../shared/modelMetaExtensions.ts';
 import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { app, dialog } from 'electron';
 import { promises as fs } from 'node:fs';
@@ -527,6 +528,12 @@ function normalizeIndexedAsset(value: unknown, version: 1 | 2): ProjectModelAsse
     builtInSlotBindingConfig: isPlainObject(asset.builtInSlotBindingConfig) ? asset.builtInSlotBindingConfig : undefined,
     layerChangePlatformBindingConfig: isPlainObject(asset.layerChangePlatformBindingConfig) ? asset.layerChangePlatformBindingConfig : undefined,
     cargoContact: Array.isArray(asset.cargoContact) ? asset.cargoContact : undefined,
+    ...modelMetaExtensionsField(asset.metaExtensions),
+    ...(typeof asset.metadataSchemaVersion === 'number'
+      && Number.isSafeInteger(asset.metadataSchemaVersion)
+      && asset.metadataSchemaVersion > 0
+      ? { metadataSchemaVersion: asset.metadataSchemaVersion }
+      : {}),
     source,
     availability,
     dataPlatformResourceId,

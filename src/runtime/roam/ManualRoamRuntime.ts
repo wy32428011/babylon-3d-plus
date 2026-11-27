@@ -6,7 +6,9 @@ import { Camera } from '@babylonjs/core/Cameras/camera.js';
 import { Ray } from '@babylonjs/core/Culling/ray.js';
 import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
 import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader.js';
+import { RawTexture } from '@babylonjs/core/Materials/Textures/rawTexture.js';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial.js';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector.js';
 import { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
@@ -52,6 +54,12 @@ import {
   isManualRoamPointNearWorldAabb,
   resolveManualRoamCollisionStyle,
 } from './manualRoamCollisionPolicy.ts';
+import {
+  buildSafeRadialCandidatePositions,
+  computeCollisionSubstepCount,
+  findOverlappingAabbBounds,
+  resolveCapsuleAabbDepenetration,
+} from './manualRoamCollisionRecovery.ts';
 import { ProceduralAvatarMorphAnimator } from './ProceduralAvatarMorphAnimator';
 import {
   createInitialProceduralGaitState,
@@ -114,7 +122,13 @@ const COLLIDER_NAME = '__manual_roam_character_collider__';
 const FALLBACK_GROUND_NAME = '__manual_roam_fallback_ground__';
 const AVATAR_ROOT_NAME = '__manual_roam_avatar_root__';
 const AVATAR_VISUAL_NAME = '__manual_roam_avatar_visual__';
-const FIXED_STEP_SECONDS = 1 / 60;
+const AVATAR_BLOB_SHADOW_NAME = '__manual_roam_avatar_blob_shadow__';
+const AVATAR_BLOB_SHADOW_TEXTURE_SIZE = 64;
+const AVATAR_BLOB_SHADOW_SIZE_METERS = 0.85;
+const AVATAR_BLOB_SHADOW_Y_OFFSET_METERS = 0.012;
+const AVATAR_BLOB_SHADOW_MAX_HEIGHT_METERS = 1.5;
+const FIXED_STEP_SECONDS = 1 / 30;
+const MAX_OUTER_KINEMATIC_STEPS = 2;
 const MAX_FRAME_SECONDS = 0.1;
 const RESET_DURATION_MS = 520;
 const FALL_RECOVERY_DISTANCE = 200;
@@ -122,6 +136,7 @@ const THIRD_PERSON_CAMERA_PADDING_METERS = 0.16;
 const GROUND_SLOPE_LIMIT_COSINE = Math.cos(Math.PI / 4);
 const CAMERA_FOLLOW_RESPONSE = 20;
 const COLLISION_PROXY_QUERY_RADIUS_METERS = 24;
+const MIN_COLLISION_QUERY_RADIUS_METERS = 10;
 const COLLISION_MESH_RECONCILE_INTERVAL_MS = 180;
 const KEYBOARD_CODES = new Set([
   'KeyW',
@@ -176,9 +191,15 @@ export class ManualRoamRuntime {
   private readonly collisionProxyPool: ManualRoamCollisionProxyPool | null;
   private readonly localTriangleCollider: ManualRoamLocalTriangleCollider;
   private collisionWorldDirty = false;
+  private nearbyNativeMeshes: AbstractMesh[] = [];
+  private lastSceneMeshSignature = '';
+  private readonly tempRay = new Ray(Vector3.Zero(), Vector3.Down(), 1);
   private readonly beforeAnimationsObserver: Nullable<Observer<Scene>>;
   private readonly afterAnimationsObserver: Nullable<Observer<Scene>>;
-  private readonly meshAddedObserver: Nullable<Observer<AbstractMesh>>;
+  private avatarBlobShadowMesh: Mesh | null = null;
+  private avatarBlobShadowMaterial: StandardMaterial | null = null;
+  private avatarBlobShadowTexture: RawTexture | null = null;
+  private lastGroundHeight: number | null = null;
   private snapshot = createInitialManualRoamSnapshot();
   private kinematicState: RoamKinematicState;
   private spawnPosition = Vector3.Zero();
@@ -218,6 +239,8 @@ export class ManualRoamRuntime {
   private previousSceneCollisionsEnabled: boolean;
   private fallbackGroundRequired = false;
   private lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
+  private readonly lastSafePosition = Vector3.Zero();
+  private hasLastSafePosition = false;
   private disposed = false;
 
   constructor(private readonly options: ManualRoamRuntimeOptions) {
@@ -262,8 +285,8 @@ export class ManualRoamRuntime {
       subdivisions: 1,
     }, scene);
     this.fallbackGround.position.y = -0.002;
-    // 保持渲染透明但允许内部向下射线拾取，空场景也能稳定判定落地。
-    this.fallbackGround.isVisible = true;
+    // 关闭渲染渲染标记但保留拾取与碰撞，空场景也能稳定判定落地且不进入渲染队列。
+    this.fallbackGround.isVisible = false;
     this.fallbackGround.visibility = 0;
     this.fallbackGround.isPickable = true;
     this.fallbackGround.checkCollisions = true;
@@ -276,11 +299,6 @@ export class ManualRoamRuntime {
 
     this.collider.setEnabled(false);
     this.facingRoot.setEnabled(false);
-    this.meshAddedObserver = scene.onNewMeshAddedObservable.add((mesh) => {
-      if (!this.snapshot.enabled) return;
-      this.observeCollisionMesh(mesh);
-      this.disableFallbackGroundWhenSceneFloorIsReady();
-    });
     // 先提交本帧动画，再由引擎混合，最后执行IK；避免骨骼修正被late binding覆盖。
     this.beforeAnimationsObserver = scene.onBeforeAnimationsObservable.add(() => this.update());
     this.afterAnimationsObserver = scene.onAfterAnimationsObservable.add(() => this.updateFootIK());
@@ -324,22 +342,32 @@ export class ManualRoamRuntime {
       this.options.setOrbitControlsEnabled(false);
       this.collider.setEnabled(true);
       this.applyAvatarVisibility(true, this.snapshot.viewMode);
-      this.embeddedAnimator?.resume();
-      this.skeletalAnimator?.sampleIdle();
-      this.skeletalAnimator?.resume();
+      if (this.snapshot.viewMode === 'thirdPerson') {
+        this.embeddedAnimator?.resume();
+        this.skeletalAnimator?.sampleIdle();
+        this.skeletalAnimator?.resume();
+      }
       this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
       this.footIK?.reset();
       this.options.onActivated?.();
-      this.publish({ enabled: true, statusMessage: this.resolveStatusMessage(true) });
+      this.publish({
+        enabled: true,
+        grounded: this.snapshot.locomotionMode === 'ground' && this.kinematicState.grounded,
+        statusMessage: this.resolveStatusMessage(true),
+      });
       this.updateCamera(1);
+      this.updateAvatarBlobShadow();
       return;
     }
 
     this.clearInputs();
     this.resetTransition = null;
+    this.hasLastSafePosition = false;
+    this.lastGroundHeight = null;
     this.exitPointerLock();
     this.collider.setEnabled(false);
     this.facingRoot.setEnabled(false);
+    this.avatarBlobShadowMesh?.setEnabled(false);
     this.skeletalAnimator?.pause();
     this.footIK?.reset();
     this.embeddedAnimator?.pause();
@@ -363,6 +391,7 @@ export class ManualRoamRuntime {
     this.spawnInitialized = false;
     this.spawnSource = null;
     this.fallbackGroundRequired = false;
+    this.hasLastSafePosition = false;
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
     this.fallbackGround.setEnabled(false);
     this.collisionProxyPool?.deactivate();
@@ -379,14 +408,32 @@ export class ManualRoamRuntime {
     if (this.snapshot.viewMode === viewMode) return;
     this.applyAvatarVisibility(this.snapshot.enabled, viewMode);
     this.publish({ viewMode });
-    if (this.snapshot.enabled) this.updateCamera(1);
+    if (this.snapshot.enabled) {
+      this.updateCamera(1);
+      this.updateAvatarBlobShadow();
+    }
   }
 
   setLocomotionMode(locomotionMode: ManualRoamLocomotionMode): void {
     if (this.snapshot.locomotionMode === locomotionMode) return;
     this.kinematicState.verticalVelocity = 0;
-    if (locomotionMode === 'ground') this.snapCharacterToGround(true);
+    if (locomotionMode === 'ground') {
+      if (this.snapshot.enabled) {
+        this.syncCollisionProxies(this.collider.position, true);
+        this.depenetrateFromActiveAabbProxies(true);
+      }
+      this.snapCharacterToGround(true);
+      if (this.snapshot.enabled) {
+        this.syncCollisionProxies(this.collider.position, true);
+        if (this.depenetrateFromActiveAabbProxies(true)) {
+          this.snapCharacterToGround(true);
+        }
+        this.recordSafePositionIfClean();
+      }
+      this.kinematicState.position = vectorToRoam(this.collider.position);
+    }
     this.publish({ locomotionMode, grounded: locomotionMode === 'ground' && this.kinematicState.grounded });
+    if (this.snapshot.enabled) this.updateAvatarBlobShadow();
   }
 
   updateConfig(patch: Partial<ManualRoamConfig>): void {
@@ -394,6 +441,11 @@ export class ManualRoamRuntime {
     this.collider.ellipsoid.copyFromFloats(config.capsuleRadius, config.capsuleHeight / 2, config.capsuleRadius);
     this.collider.ellipsoidOffset.copyFromFloats(0, config.capsuleHeight / 2, 0);
     this.publish({ config });
+    if (this.snapshot.enabled) {
+      this.depenetrateFromActiveAabbProxies(false);
+      this.kinematicState.position = vectorToRoam(this.collider.position);
+      this.recordSafePositionIfClean();
+    }
   }
 
   setDebugColliders(debugColliders: boolean): void {
@@ -472,8 +524,8 @@ export class ManualRoamRuntime {
     this.unbindInputEvents();
     this.options.scene.onBeforeAnimationsObservable.remove(this.beforeAnimationsObserver);
     this.options.scene.onAfterAnimationsObservable.remove(this.afterAnimationsObserver);
-    this.options.scene.onNewMeshAddedObservable.remove(this.meshAddedObserver);
     if (this.collisionMeshDefaults.size > 0) this.deactivateCollisionWorld();
+    this.disposeAvatarBlobShadow();
     this.stopCurrentAnimation();
     this.embeddedAnimator = null;
     this.skeletalAnimator?.dispose();
@@ -812,11 +864,16 @@ export class ManualRoamRuntime {
 
   private update(): void {
     if (!this.snapshot.enabled || this.disposed) return;
-    this.syncCollisionProxies(this.collider.position);
+    const proxiesChanged = this.syncCollisionProxies(this.collider.position);
     if (this.resetTransition) {
       this.updateResetTransition();
       this.updateCamera(this.options.engine.getDeltaTime() / 1000);
       return;
+    }
+    if (proxiesChanged) {
+      this.depenetrateFromActiveAabbProxies(false);
+      this.kinematicState.position = vectorToRoam(this.collider.position);
+      this.recordSafePositionIfClean();
     }
 
     const frameSeconds = Math.min(MAX_FRAME_SECONDS, Math.max(0, this.options.engine.getDeltaTime() / 1000));
@@ -824,16 +881,16 @@ export class ManualRoamRuntime {
     this.frameStartPosition.copyFrom(this.collider.position);
     this.frameJumped = false;
     this.motionResetThisFrame = false;
-    let remaining = frameSeconds;
-    let firstStep = true;
-    while (remaining > 1e-6) {
-      const delta = Math.min(FIXED_STEP_SECONDS, remaining);
-      const substepInput = firstStep
+    // 限制低帧率时的外层运动学子步数，防止帧率降低后子步放大引发性能雪崩。
+    const outerSteps = frameSeconds <= FIXED_STEP_SECONDS
+      ? 1
+      : Math.min(MAX_OUTER_KINEMATIC_STEPS, Math.ceil(frameSeconds / FIXED_STEP_SECONDS));
+    const stepDelta = frameSeconds / outerSteps;
+    for (let stepIndex = 0; stepIndex < outerSteps; stepIndex += 1) {
+      const substepInput = stepIndex === 0
         ? input
         : { ...input, lookX: 0, lookY: 0, jump: false };
-      this.stepCharacter(substepInput, delta);
-      remaining -= delta;
-      firstStep = false;
+      this.stepCharacter(substepInput, stepDelta);
     }
     // 碰撞与台阶修正之后采样；复位不属于人物运动，不能放大步频。
     if (frameSeconds > 1e-6 && !this.motionResetThisFrame) {
@@ -844,6 +901,7 @@ export class ManualRoamRuntime {
     }
     this.updateCamera(frameSeconds);
     this.updateAvatarAnimation(input, frameSeconds);
+    this.updateAvatarBlobShadow();
     const moving = Math.hypot(this.frameVelocity.x, this.frameVelocity.z,
       this.snapshot.locomotionMode === 'fly' ? this.frameVelocity.y : 0) > 0.03;
     this.publish({
@@ -923,13 +981,30 @@ export class ManualRoamRuntime {
     this.kinematicState.verticalVelocity = step.verticalVelocity;
     this.frameJumped ||= step.jumped;
 
-    const displacement = new Vector3(step.displacement.x, step.displacement.y, step.displacement.z);
-    if (this.snapshot.locomotionMode === 'ground' && this.kinematicState.grounded) {
-      this.applyStepAssist(displacement);
+    const totalDisplacement = new Vector3(step.displacement.x, step.displacement.y, step.displacement.z);
+    const substeps = computeCollisionSubstepCount(
+      totalDisplacement,
+      this.snapshot.config.capsuleRadius,
+    );
+    const substepDisplacement = substeps > 1
+      ? totalDisplacement.scale(1 / substeps)
+      : totalDisplacement;
+    for (let index = 0; index < substeps; index += 1) {
+      if (this.snapshot.locomotionMode === 'ground' && this.kinematicState.grounded) {
+        this.moveWithSafeStepAssist(substepDisplacement);
+      } else {
+        this.moveColliderWithCollisions(substepDisplacement);
+      }
     }
-    this.collider.moveWithCollisions(displacement);
+
     if (this.snapshot.locomotionMode === 'ground') this.snapCharacterToGround(false);
     else this.kinematicState.grounded = false;
+
+    if (this.depenetrateFromActiveAabbProxies(false) && this.snapshot.locomotionMode === 'ground') {
+      this.snapCharacterToGround(false);
+    }
+    this.recordSafePositionIfClean();
+
     this.kinematicState.position = vectorToRoam(this.collider.position);
     this.facingRoot.rotation.y = this.kinematicState.yaw;
 
@@ -938,21 +1013,108 @@ export class ManualRoamRuntime {
     }
   }
 
-  private applyStepAssist(displacement: Vector3): void {
-    if (Math.hypot(displacement.x, displacement.z) < 1e-5) return;
+  private moveColliderWithCollisions(displacement: Vector3): void {
+    this.collider.computeWorldMatrix(true);
+    this.collider.moveWithCollisions(displacement);
+    this.collider.computeWorldMatrix(true);
+  }
+
+  private moveWithSafeStepAssist(displacement: Vector3): void {
+    const requestedHoriz = Math.hypot(displacement.x, displacement.z);
+    const beforePos = this.collider.position.clone();
+    this.moveColliderWithCollisions(displacement);
+    if (requestedHoriz < 1e-5) return;
+
+    const actualHoriz = Math.hypot(
+      this.collider.position.x - beforePos.x,
+      this.collider.position.z - beforePos.z,
+    );
+    if (actualHoriz >= requestedHoriz * 0.9) return;
+
     const config = this.snapshot.config;
-    const targetX = this.collider.position.x + displacement.x;
-    const targetZ = this.collider.position.z + displacement.z;
+    const dirX = displacement.x / requestedHoriz;
+    const dirZ = displacement.z / requestedHoriz;
+    const probeRadiusOffset = config.capsuleRadius + requestedHoriz;
+    const probeOriginY = beforePos.y + config.stepHeight + 0.08;
+    const probeLength = config.stepHeight + config.groundProbeDistance + 0.08;
+
     const hit = this.pickGround(
-      targetX,
-      targetZ,
+      beforePos.x + dirX * probeRadiusOffset,
+      beforePos.z + dirZ * probeRadiusOffset,
+      probeOriginY,
+      probeLength,
+    );
+    let rise = hit ? hit.y - beforePos.y : 0;
+    if (!hit || rise <= 0.015 || rise > config.stepHeight) {
+      const fallbackHit = this.pickGround(
+        beforePos.x + displacement.x,
+        beforePos.z + displacement.z,
+        probeOriginY,
+        probeLength,
+      );
+      const fallbackRise = fallbackHit ? fallbackHit.y - beforePos.y : 0;
+      if (!fallbackHit || fallbackRise <= 0.015 || fallbackRise > config.stepHeight) return;
+      rise = fallbackRise;
+    }
+
+    const normalPos = this.collider.position.clone();
+    const liftHeight = rise + 0.015;
+    this.collider.position.copyFrom(beforePos);
+    this.collider.computeWorldMatrix(true);
+
+    this.moveColliderWithCollisions(new Vector3(0, liftHeight, 0));
+    const actualLift = this.collider.position.y - beforePos.y;
+    if (actualLift < rise * 0.85) {
+      this.collider.position.copyFrom(normalPos);
+      this.collider.computeWorldMatrix(true);
+      return;
+    }
+
+    this.moveColliderWithCollisions(new Vector3(displacement.x, 0, displacement.z));
+    const stepHoriz = Math.hypot(
+      this.collider.position.x - beforePos.x,
+      this.collider.position.z - beforePos.z,
+    );
+    if (stepHoriz <= actualHoriz + 1e-4) {
+      this.collider.position.copyFrom(normalPos);
+      this.collider.computeWorldMatrix(true);
+      return;
+    }
+
+    this.moveColliderWithCollisions(new Vector3(0, -liftHeight, 0));
+
+    const landedHit = this.pickGround(
+      this.collider.position.x,
+      this.collider.position.z,
       this.collider.position.y + config.stepHeight + 0.08,
       config.stepHeight + config.groundProbeDistance + 0.08,
     );
-    if (!hit) return;
-    const rise = hit.y - this.collider.position.y;
-    if (rise <= 0.015 || rise > config.stepHeight) return;
-    this.collider.moveWithCollisions(new Vector3(0, rise + 0.015, 0));
+    if (
+      !landedHit
+      || (landedHit.y - this.collider.position.y > 0.04)
+      || (
+        Math.abs(this.collider.position.y - landedHit.y) > Math.max(0.03, config.stepHeight * 0.25)
+        && !this.hasWalkableEdgeSupport(this.collider.position, config.groundProbeDistance)
+      )
+    ) {
+      this.collider.position.copyFrom(normalPos);
+      this.collider.computeWorldMatrix(true);
+      return;
+    }
+
+    const activeBounds = this.collisionProxyPool?.getActiveBounds() ?? [];
+    if (
+      activeBounds.length > 0
+      && findOverlappingAabbBounds(
+        vectorToRoam(this.collider.position),
+        config.capsuleRadius,
+        config.capsuleHeight,
+        activeBounds,
+      ).length > 0
+    ) {
+      this.collider.position.copyFrom(normalPos);
+      this.collider.computeWorldMatrix(true);
+    }
   }
 
   private snapCharacterToGround(force: boolean): void {
@@ -967,6 +1129,7 @@ export class ManualRoamRuntime {
       this.collider.position.y + config.stepHeight + 0.08,
       config.stepHeight + config.groundProbeDistance + 0.08,
     );
+    this.lastGroundHeight = hit ? hit.y : null;
     if (!hit || hit.y > this.collider.position.y + config.stepHeight) {
       this.kinematicState.grounded = false;
       return;
@@ -976,15 +1139,214 @@ export class ManualRoamRuntime {
       this.kinematicState.grounded = false;
       return;
     }
-    if(distance < -0.015) {
-      const ceiling=this.options.scene.pickWithRay(new Ray(
-        new Vector3(this.collider.position.x,this.collider.position.y+config.capsuleHeight-0.01,this.collider.position.z),
-        Vector3.Up(),-distance+0.03),mesh=>this.isCollisionCandidate(mesh,true),false);
-      if(ceiling?.hit){this.kinematicState.grounded=false;return;}
+    if (distance < -0.015) {
+      this.tempRay.origin.copyFromFloats(
+        this.collider.position.x,
+        this.collider.position.y + config.capsuleHeight - 0.01,
+        this.collider.position.z,
+      );
+      this.tempRay.direction.copyFromFloats(0, 1, 0);
+      this.tempRay.length = -distance + 0.03;
+      const ceiling = this.pickNearestCollisionRay(this.tempRay, true);
+      if (ceiling?.hit) {
+        this.kinematicState.grounded = false;
+        return;
+      }
     }
-    this.collider.position.y = hit.y;
-    this.kinematicState.verticalVelocity = 0;
-    this.kinematicState.grounded = true;
+    if (force) {
+      this.collider.position.y = hit.y;
+      this.collider.computeWorldMatrix(true);
+      this.kinematicState.verticalVelocity = 0;
+      this.kinematicState.grounded = true;
+      return;
+    }
+
+    const deltaY = hit.y - this.collider.position.y;
+    const snapTolerance = Math.max(0.03, config.stepHeight * 0.25);
+    if (Math.abs(deltaY) > 1e-4) {
+      const beforeY = this.collider.position.y;
+      this.moveColliderWithCollisions(new Vector3(0, deltaY, 0));
+      const movedY = this.collider.position.y - beforeY;
+      if (deltaY > 0.015 && movedY < deltaY * 0.5 && Math.abs(this.collider.position.y - hit.y) > snapTolerance) {
+        this.kinematicState.grounded = false;
+        return;
+      }
+    }
+
+    if (Math.abs(this.collider.position.y - hit.y) <= snapTolerance) {
+      this.kinematicState.verticalVelocity = 0;
+      this.kinematicState.grounded = true;
+      return;
+    }
+    if (deltaY < -1e-4 && this.hasWalkableEdgeSupport(this.collider.position, config.groundProbeDistance)) {
+      this.kinematicState.verticalVelocity = 0;
+      this.kinematicState.grounded = true;
+      return;
+    }
+    this.kinematicState.grounded = false;
+  }
+
+  private hasWalkableEdgeSupport(position: Readonly<Vector3>, maxProbeDistance: number): boolean {
+    const config = this.snapshot.config;
+    const offset = Math.max(0.08, config.capsuleRadius * 0.85);
+    const snapTolerance = Math.max(0.03, config.stepHeight * 0.25);
+    const originY = position.y + config.stepHeight + 0.08;
+    const length = config.stepHeight + Math.max(maxProbeDistance, config.groundProbeDistance) + 0.08;
+    const offsets: ReadonlyArray<[number, number]> = [
+      [offset, 0],
+      [-offset, 0],
+      [0, offset],
+      [0, -offset],
+    ];
+    for (const [dx, dz] of offsets) {
+      const hit = this.pickGround(position.x + dx, position.z + dz, originY, length);
+      if (hit && Math.abs(position.y - hit.y) <= snapTolerance) return true;
+    }
+    return false;
+  }
+
+  private depenetrateFromActiveAabbProxies(
+    allowRadialFallback: boolean,
+    locomotionMode: ManualRoamLocomotionMode = this.snapshot.locomotionMode,
+  ): boolean {
+    if (!this.collisionProxyPool) return false;
+    const activeBounds = this.collisionProxyPool.getActiveBounds();
+    if (activeBounds.length === 0) return false;
+
+    const config = this.snapshot.config;
+    const initialPos = vectorToRoam(this.collider.position);
+    const initialOverlaps = findOverlappingAabbBounds(
+      initialPos,
+      config.capsuleRadius,
+      config.capsuleHeight,
+      activeBounds,
+    );
+    if (initialOverlaps.length === 0) return false;
+
+    const result = resolveCapsuleAabbDepenetration({
+      position: initialPos,
+      capsuleRadius: config.capsuleRadius,
+      capsuleHeight: config.capsuleHeight,
+      bounds: activeBounds,
+      stepHeight: config.stepHeight,
+      allowVerticalExit: locomotionMode === 'fly',
+    });
+
+    if (result.overlappingIds.length > 0) {
+      const exitDelta = new Vector3(
+        result.position.x - this.collider.position.x,
+        result.position.y - this.collider.position.y,
+        result.position.z - this.collider.position.z,
+      );
+      if (exitDelta.lengthSquared() > 1e-8) {
+        const disabledProxies: Array<{ proxy: Mesh; checkCollisions: boolean }> = [];
+        try {
+          for (const id of result.overlappingIds) {
+            const proxy = this.collisionProxyPool.getActiveProxyById(id);
+            if (proxy && proxy.checkCollisions) {
+              disabledProxies.push({ proxy, checkCollisions: proxy.checkCollisions });
+              proxy.checkCollisions = false;
+            }
+          }
+          const substeps = computeCollisionSubstepCount(exitDelta, config.capsuleRadius);
+          const stepDelta = substeps > 1 ? exitDelta.scale(1 / substeps) : exitDelta;
+          for (let index = 0; index < substeps; index += 1) {
+            this.moveColliderWithCollisions(stepDelta);
+          }
+        } finally {
+          for (const entry of disabledProxies) {
+            entry.proxy.checkCollisions = entry.checkCollisions;
+          }
+        }
+      }
+    }
+
+    const remainingAfterMove = findOverlappingAabbBounds(
+      vectorToRoam(this.collider.position),
+      config.capsuleRadius,
+      config.capsuleHeight,
+      activeBounds,
+    );
+    if (remainingAfterMove.length === 0) return true;
+
+    const hasCleanLastSafe = this.hasLastSafePosition
+      && findOverlappingAabbBounds(
+        vectorToRoam(this.lastSafePosition),
+        config.capsuleRadius,
+        config.capsuleHeight,
+        activeBounds,
+      ).length === 0;
+
+    if (!allowRadialFallback && hasCleanLastSafe) {
+      this.collider.position.copyFrom(this.lastSafePosition);
+      this.collider.computeWorldMatrix(true);
+      return true;
+    }
+
+    if (allowRadialFallback || !hasCleanLastSafe) {
+      for (const candidate of buildSafeRadialCandidatePositions(initialPos)) {
+        if (
+          findOverlappingAabbBounds(
+            candidate,
+            config.capsuleRadius,
+            config.capsuleHeight,
+            activeBounds,
+          ).length > 0
+        ) {
+          continue;
+        }
+        if (locomotionMode === 'ground') {
+          const candidateGround = this.pickGround(
+            candidate.x,
+            candidate.z,
+            candidate.y + config.capsuleHeight,
+            config.capsuleHeight * 2 + config.groundProbeDistance,
+          );
+          if (!candidateGround) continue;
+          const groundedCandidate = { x: candidate.x, y: candidateGround.y, z: candidate.z };
+          if (
+            findOverlappingAabbBounds(
+              groundedCandidate,
+              config.capsuleRadius,
+              config.capsuleHeight,
+              activeBounds,
+            ).length > 0
+          ) {
+            continue;
+          }
+          this.collider.position.set(groundedCandidate.x, groundedCandidate.y, groundedCandidate.z);
+          this.collider.computeWorldMatrix(true);
+          return true;
+        }
+        this.collider.position.set(candidate.x, candidate.y, candidate.z);
+        this.collider.computeWorldMatrix(true);
+        return true;
+      }
+      if (result.resolved) {
+        this.collider.position.set(result.position.x, result.position.y, result.position.z);
+        this.collider.computeWorldMatrix(true);
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private recordSafePositionIfClean(): void {
+    const activeBounds = this.collisionProxyPool?.getActiveBounds() ?? [];
+    if (
+      activeBounds.length > 0
+      && findOverlappingAabbBounds(
+        vectorToRoam(this.collider.position),
+        this.snapshot.config.capsuleRadius,
+        this.snapshot.config.capsuleHeight,
+        activeBounds,
+      ).length > 0
+    ) {
+      return;
+    }
+    this.lastSafePosition.copyFrom(this.collider.position);
+    this.hasLastSafePosition = true;
   }
 
   private pickGround(
@@ -994,32 +1356,130 @@ export class ManualRoamRuntime {
     length: number,
     includeFallback = true,
   ): GroundHit | null {
-    const ray = new Ray(new Vector3(x, originY, z), Vector3.Down(), length);
-    const predicate = (mesh: AbstractMesh): boolean => this.isCollisionCandidate(mesh, includeFallback);
-    const firstHit = this.options.scene.pickWithRay(ray, predicate, false);
-    if (firstHit?.hit && firstHit.pickedPoint) {
-      const normal = firstHit.getNormal(true) ?? Vector3.Up();
-      if (normal.y >= GROUND_SLOPE_LIMIT_COSINE) {
-        return { y: firstHit.pickedPoint.y, normal };
-      }
+    if (!Number.isFinite(x) || !Number.isFinite(z) || !Number.isFinite(originY) || !Number.isFinite(length) || length <= 0) {
+      return null;
     }
-    if (!firstHit?.hit) return null;
+    const minY = originY - length;
+    const topMargin = originY + 1e-5;
+    const bottomMargin = minY - 1e-5;
+    let bestHit: GroundHit | null = this.localTriangleCollider.probeVerticalRay(
+      x,
+      z,
+      originY,
+      length,
+      GROUND_SLOPE_LIMIT_COSINE,
+    );
 
-    // 射线先碰到台阶侧面或陡坡时，再查找其后的可行走表面；普通地面只执行一次拾取。
-    const hits = this.options.scene.multiPickWithRay(
-      ray,
-      predicate,
-    ) ?? [];
-    let nearest: { distance: number; ground: GroundHit } | null = null;
-    for (const hit of hits) {
-      if (!hit.hit || !hit.pickedPoint) continue;
-      const normal = hit.getNormal(true) ?? Vector3.Up();
-      if (normal.y < GROUND_SLOPE_LIMIT_COSINE) continue;
-      if (!nearest || hit.distance < nearest.distance) {
-        nearest = { distance: hit.distance, ground: { y: hit.pickedPoint.y, normal } };
+    // AABB 代理盒（模型阵列、thin instance 与紧凑高模）解析求解顶面命中。
+    const activeBounds = this.collisionProxyPool?.getActiveBounds();
+    if (activeBounds) {
+      for (let index = 0; index < activeBounds.length; index += 1) {
+        const bound = activeBounds[index];
+        const maxY = bound.maximum.y;
+        if (maxY > topMargin || maxY < bottomMargin) continue;
+        if (bestHit && maxY <= bestHit.y) continue;
+        if (
+          x >= bound.minimum.x - 1e-5
+          && x <= bound.maximum.x + 1e-5
+          && z >= bound.minimum.z - 1e-5
+          && z <= bound.maximum.z + 1e-5
+        ) {
+          bestHit = { y: maxY, normal: Vector3.Up() };
+        }
       }
     }
-    return nearest?.ground ?? null;
+
+    // 备用地面解析求解（5000m×5000m 水平面）。
+    if (includeFallback && this.fallbackGround.isEnabled()) {
+      const fgPos = this.fallbackGround.position;
+      if (
+        fgPos.y <= topMargin
+        && fgPos.y >= bottomMargin
+        && (!bestHit || fgPos.y > bestHit.y)
+        && Math.abs(x - fgPos.x) <= 2500
+        && Math.abs(z - fgPos.z) <= 2500
+      ) {
+        bestHit = { y: fgPos.y, normal: Vector3.Up() };
+      }
+    }
+
+    // 邻域廉价网格（<=2048 顶点）：只对真正覆盖 (x, z) 列的网格做精确求交，不扫描全场景。
+    if (this.nearbyNativeMeshes.length > 0) {
+      const ray = this.tempRay;
+      ray.origin.copyFromFloats(x, originY, z);
+      ray.direction.copyFromFloats(0, -1, 0);
+      ray.length = length;
+
+      for (let index = 0; index < this.nearbyNativeMeshes.length; index += 1) {
+        const mesh = this.nearbyNativeMeshes[index];
+        if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.isVisible || !mesh.isPickable || !mesh.checkCollisions) {
+          continue;
+        }
+        if (!mesh.isSynchronized()) mesh.computeWorldMatrix(true);
+        const box = mesh.getBoundingInfo().boundingBox;
+        const min = box.minimumWorld;
+        const max = box.maximumWorld;
+        if (
+          x < min.x - 1e-5
+          || x > max.x + 1e-5
+          || z < min.z - 1e-5
+          || z > max.z + 1e-5
+          || max.y < bottomMargin
+          || min.y > topMargin
+          || (bestHit && max.y <= bestHit.y)
+        ) continue;
+
+        const hit = mesh.intersects(ray, false);
+        if (!hit.hit || !hit.pickedPoint) continue;
+        const hitY = hit.pickedPoint.y;
+        if (bestHit && hitY <= bestHit.y) continue;
+        const normal = hit.getNormal(true) ?? Vector3.Up();
+        if (normal.y >= GROUND_SLOPE_LIMIT_COSINE) {
+          bestHit = { y: hitY, normal };
+          continue;
+        }
+
+        // 射线先碰到该单个网格的陡坡/侧面时，只针对此网格再查找其后的可行走表面。
+        const hits = this.options.scene.multiPickWithRay(ray, (candidate) => candidate === mesh) ?? [];
+        for (const candidateHit of hits) {
+          if (!candidateHit.hit || !candidateHit.pickedPoint) continue;
+          const candidateY = candidateHit.pickedPoint.y;
+          if (bestHit && candidateY <= bestHit.y) continue;
+          const candidateNormal = candidateHit.getNormal(true) ?? Vector3.Up();
+          if (candidateNormal.y >= GROUND_SLOPE_LIMIT_COSINE) {
+            bestHit = { y: candidateY, normal: candidateNormal };
+          }
+        }
+      }
+    }
+
+    return bestHit;
+  }
+
+  private pickNearestCollisionRay(
+    ray: Ray,
+    includeFallback = true,
+  ): { hit: boolean; distance: number } | null {
+    const candidates = this.collider.surroundingMeshes;
+    if (!candidates || candidates.length === 0) return null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < candidates.length; index += 1) {
+      const mesh = candidates[index];
+      if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.checkCollisions) continue;
+      if (mesh === this.fallbackGround) {
+        if (!includeFallback) continue;
+      } else if (!this.collisionProxyPool?.has(mesh) && !this.localTriangleCollider.has(mesh)) {
+        if (!mesh.isVisible || !mesh.isPickable) continue;
+      }
+      if (!mesh.isSynchronized()) mesh.computeWorldMatrix(true);
+      const box = mesh.getBoundingInfo().boundingBox;
+      if (!ray.intersectsBoxMinMax(box.minimumWorld, box.maximumWorld)) continue;
+      const pick = mesh.intersects(ray, false);
+      if (pick.hit && pick.distance < bestDistance) {
+        bestDistance = pick.distance;
+      }
+    }
+    return Number.isFinite(bestDistance) ? { hit: true, distance: bestDistance } : null;
   }
 
   private updateCamera(deltaSeconds: number): void {
@@ -1051,11 +1511,10 @@ export class ManualRoamRuntime {
     const cameraRayDirection = desiredPosition.subtract(target);
     const desiredDistance = cameraRayDirection.length();
     if (desiredDistance > 1e-5) cameraRayDirection.scaleInPlace(1 / desiredDistance);
-    const cameraHit = this.options.scene.pickWithRay(
-      new Ray(target, cameraRayDirection, desiredDistance),
-      (mesh) => this.isCollisionCandidate(mesh),
-      false,
-    );
+    this.tempRay.origin.copyFrom(target);
+    this.tempRay.direction.copyFrom(cameraRayDirection);
+    this.tempRay.length = desiredDistance;
+    const cameraHit = this.pickNearestCollisionRay(this.tempRay, true);
     let obstructionClearanceMeters: number | null = null;
     if (cameraHit?.hit && cameraHit.distance < desiredDistance) {
       const collisionPadding = Math.min(
@@ -1085,6 +1544,7 @@ export class ManualRoamRuntime {
 
   /** 用实际水平速度驱动程序化步态或内置走/跑片段，使步频与位移同步。 */
   private updateAvatarAnimation(input: Readonly<RoamInputFrame>, deltaSeconds: number): void {
+    if (this.snapshot.viewMode !== 'thirdPerson') return;
     if (this.skeletalAnimator) {
       const horizontalSpeed=Math.hypot(this.frameVelocity.x,this.frameVelocity.z);
       const orientToMovement=(!!this.footIK || this.snapshot.avatarAnimationMode === 'auto-skeleton')&&this.snapshot.locomotionMode==='ground';
@@ -1148,7 +1608,9 @@ export class ManualRoamRuntime {
   }
 
   private updateFootIK(): void {
-    if(!this.snapshot.enabled||this.disposed||!this.skeletalAnimator)return;
+    if (!this.snapshot.enabled || this.disposed || this.snapshot.viewMode !== 'thirdPerson' || !this.skeletalAnimator) {
+      return;
+    }
     this.skeletalAnimator.applyUpperBodyOverlay();
     if(!this.footIK)return;
     const speed = Math.hypot(this.frameVelocity.x, this.frameVelocity.z);
@@ -1182,7 +1644,15 @@ export class ManualRoamRuntime {
     if (progress < 1) return;
     this.resetTransition = null;
     this.kinematicState.position = vectorToRoam(this.spawnPosition);
+    this.collider.computeWorldMatrix(true);
     this.snapCharacterToGround(true);
+    this.syncCollisionProxies(this.collider.position, true);
+    if (this.depenetrateFromActiveAabbProxies(true)) {
+      this.snapCharacterToGround(true);
+    }
+    this.collider.computeWorldMatrix(true);
+    this.kinematicState.position = vectorToRoam(this.collider.position);
+    this.recordSafePositionIfClean();
     this.publish({ grounded: this.kinematicState.grounded, statusMessage: this.resolveStatusMessage(true) });
   }
 
@@ -1192,12 +1662,21 @@ export class ManualRoamRuntime {
     this.embeddedAnimator?.reset();
     this.footIK?.reset();
     this.resetTransition = null;
+    this.hasLastSafePosition = false;
     this.collider.position.copyFrom(this.spawnPosition);
+    this.collider.computeWorldMatrix(true);
     this.kinematicState = createInitialRoamKinematicState(
       vectorToRoam(this.spawnPosition),
       { yaw: this.spawnYaw, pitch: this.spawnPitch },
     );
     this.snapCharacterToGround(true);
+    this.syncCollisionProxies(this.collider.position, true);
+    if (this.depenetrateFromActiveAabbProxies(true)) {
+      this.snapCharacterToGround(true);
+    }
+    this.collider.computeWorldMatrix(true);
+    this.kinematicState.position = vectorToRoam(this.collider.position);
+    this.recordSafePositionIfClean();
     this.turnState = createManualRoamTurnState(this.kinematicState.yaw);
     this.applyAvatarFacing(this.avatarBaseYaw);
   }
@@ -1239,8 +1718,18 @@ export class ManualRoamRuntime {
     this.spawnYaw = yaw;
     this.spawnPitch = pitch;
     this.collider.position.copyFrom(this.spawnPosition);
+    this.collider.computeWorldMatrix(true);
     this.kinematicState = createInitialRoamKinematicState(vectorToRoam(this.spawnPosition), { yaw, pitch });
     this.snapCharacterToGround(true);
+    this.syncCollisionProxies(this.collider.position, true);
+    if (this.depenetrateFromActiveAabbProxies(true)) {
+      this.syncCollisionProxies(this.collider.position, true);
+      this.snapCharacterToGround(true);
+    }
+    this.collider.computeWorldMatrix(true);
+    this.spawnPosition.copyFrom(this.collider.position);
+    this.kinematicState.position = vectorToRoam(this.collider.position);
+    this.recordSafePositionIfClean();
     this.spawnInitialized = true;
     this.spawnSource = 'camera';
   }
@@ -1270,12 +1759,22 @@ export class ManualRoamRuntime {
     this.spawnYaw = pose.yaw;
     this.spawnPitch = -0.2;
     this.collider.position.copyFrom(position);
+    this.collider.computeWorldMatrix(true);
     this.kinematicState = createInitialRoamKinematicState(
       vectorToRoam(position),
       { yaw: pose.yaw, pitch: this.spawnPitch },
     );
     this.facingRoot.rotation.y = pose.yaw;
     this.snapCharacterToGround(true);
+    this.syncCollisionProxies(this.collider.position, true);
+    if (this.depenetrateFromActiveAabbProxies(true)) {
+      this.syncCollisionProxies(this.collider.position, true);
+      this.snapCharacterToGround(true);
+    }
+    this.collider.computeWorldMatrix(true);
+    this.spawnPosition.copyFrom(this.collider.position);
+    this.kinematicState.position = vectorToRoam(this.collider.position);
+    this.recordSafePositionIfClean();
     this.spawnInitialized = true;
     this.spawnSource = 'explicit';
   }
@@ -1290,14 +1789,9 @@ export class ManualRoamRuntime {
     }
   }
 
-  private observeCollisionMesh(mesh: AbstractMesh): void {
-    this.localTriangleCollider.observe(mesh);
-    this.registerCollisionMesh(mesh);
-    this.collisionWorldDirty = true;
-  }
-
   private registerCollisionMesh(mesh: AbstractMesh): void {
     if (this.collisionMeshDefaults.has(mesh) || !this.shouldRegisterCollisionMesh(mesh)) return;
+    if (!mesh.isSynchronized()) mesh.computeWorldMatrix(true);
     this.collisionMeshDefaults.set(mesh, mesh.checkCollisions);
     mesh.checkCollisions = true;
     if (this.snapshot.debugColliders) {
@@ -1321,9 +1815,9 @@ export class ManualRoamRuntime {
     this.previousSceneCollisionsEnabled = this.options.scene.collisionsEnabled;
     this.options.scene.collisionsEnabled = true;
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
+    this.lastSceneMeshSignature = '';
     this.collisionWorldDirty = true;
-    this.localTriangleCollider.captureScene(this.options.scene.meshes);
-    for (const mesh of this.options.scene.meshes) this.registerCollisionMesh(mesh);
+    this.reconcileCollisionMeshes(nowMilliseconds(), true);
     if (this.fallbackGroundRequired) this.fallbackGround.setEnabled(true);
     this.disableFallbackGroundWhenSceneFloorIsReady();
   }
@@ -1332,6 +1826,8 @@ export class ManualRoamRuntime {
     this.collisionProxyPool?.deactivate();
     this.localTriangleCollider.deactivate();
     this.lastCollisionMeshReconcileMs = Number.NEGATIVE_INFINITY;
+    this.lastSceneMeshSignature = '';
+    this.nearbyNativeMeshes = [];
     this.restoreCollisionBoundingBoxes();
     for (const [mesh, original] of this.collisionMeshDefaults) {
       if (!mesh.isDisposed()) mesh.checkCollisions = original;
@@ -1342,31 +1838,29 @@ export class ManualRoamRuntime {
     this.options.scene.collisionsEnabled = this.previousSceneCollisionsEnabled;
   }
 
-  private shouldRegisterCollisionMesh(mesh: AbstractMesh): boolean {
-    if (mesh === this.collider || mesh === this.fallbackGround || this.avatarMeshes.has(mesh)) return false;
-    if (mesh.name.startsWith(MANUAL_ROAM_COLLISION_PROXY_PREFIX)) return false;
-    return resolveManualRoamCollisionStyle(mesh) === 'native-triangle';
+  private getCollisionQueryRadiusMeters(): number {
+    if (this.snapshot.viewMode === 'firstPerson') return MIN_COLLISION_QUERY_RADIUS_METERS;
+    return Math.max(
+      MIN_COLLISION_QUERY_RADIUS_METERS,
+      Math.min(COLLISION_PROXY_QUERY_RADIUS_METERS, Math.ceil(this.snapshot.config.thirdPersonDistance + 6)),
+    );
   }
 
-  private isCollisionCandidate(mesh: AbstractMesh, includeFallback = true): boolean {
-    if (includeFallback && mesh === this.fallbackGround && mesh.isEnabled()) return true;
-    if (this.collisionProxyPool?.has(mesh) && mesh.isEnabled()) return true;
-    if (this.localTriangleCollider.has(mesh) && mesh.isEnabled()) return true;
+  private getSceneMeshSignature(): string {
+    const meshes = this.options.scene.meshes;
+    const lastId = meshes.length > 0 ? meshes[meshes.length - 1].uniqueId : 0;
+    return `${meshes.length}:${lastId}`;
+  }
+
+  private shouldRegisterCollisionMesh(mesh: AbstractMesh): boolean {
     if (
       mesh === this.collider
       || mesh === this.fallbackGround
+      || mesh === this.avatarBlobShadowMesh
       || this.avatarMeshes.has(mesh)
-      || !this.collisionMeshDefaults.has(mesh)
-      || !mesh.checkCollisions
-      || !mesh.isEnabled()
     ) return false;
-    const box = mesh.getBoundingInfo().boundingBox;
-    return isManualRoamPointNearWorldAabb(
-      this.collider.position,
-      box.minimumWorld,
-      box.maximumWorld,
-      COLLISION_PROXY_QUERY_RADIUS_METERS,
-    );
+    if (mesh.name.startsWith(MANUAL_ROAM_COLLISION_PROXY_PREFIX)) return false;
+    return resolveManualRoamCollisionStyle(mesh) === 'native-triangle';
   }
 
   private disableFallbackGroundWhenSceneFloorIsReady(): void {
@@ -1393,42 +1887,75 @@ export class ManualRoamRuntime {
   }
 
   private reconcileCollisionMeshes(nowMs: number, force = false): void {
+    const sceneSignature = this.getSceneMeshSignature();
+    const sceneMeshesChanged = sceneSignature !== this.lastSceneMeshSignature;
     if (
       !force
+      && !sceneMeshesChanged
       && nowMs - this.lastCollisionMeshReconcileMs < COLLISION_MESH_RECONCILE_INTERVAL_MS
     ) return;
     this.lastCollisionMeshReconcileMs = nowMs;
-    this.localTriangleCollider.captureScene(this.options.scene.meshes);
-    for (const mesh of [...this.collisionMeshDefaults.keys()]) {
-      if (!this.shouldRegisterCollisionMesh(mesh)) this.unregisterCollisionMesh(mesh);
+
+    if (force || sceneMeshesChanged) {
+      this.lastSceneMeshSignature = sceneSignature;
+      const previousIndexed = this.localTriangleCollider.indexedCount;
+      this.localTriangleCollider.captureScene(this.options.scene.meshes);
+      if (this.localTriangleCollider.indexedCount !== previousIndexed) {
+        this.collisionWorldDirty = true;
+      }
+      for (const mesh of [...this.collisionMeshDefaults.keys()]) {
+        if (!this.shouldRegisterCollisionMesh(mesh)) {
+          this.unregisterCollisionMesh(mesh);
+          this.collisionWorldDirty = true;
+        }
+      }
+      for (const mesh of this.options.scene.meshes) {
+        if (!this.collisionMeshDefaults.has(mesh) && this.shouldRegisterCollisionMesh(mesh)) {
+          this.registerCollisionMesh(mesh);
+          this.collisionWorldDirty = true;
+        }
+      }
+      if (force) this.collisionWorldDirty = true;
+      return;
     }
-    for (const mesh of this.options.scene.meshes) this.registerCollisionMesh(mesh);
-    this.collisionWorldDirty = true;
+
+    for (const mesh of [...this.collisionMeshDefaults.keys()]) {
+      if (!this.shouldRegisterCollisionMesh(mesh)) {
+        this.unregisterCollisionMesh(mesh);
+        this.collisionWorldDirty = true;
+      }
+    }
   }
 
-  private syncCollisionProxies(position: Readonly<Vector3>, force = false): void {
+  private syncCollisionProxies(position: Readonly<Vector3>, force = false): boolean {
     const nowMs = nowMilliseconds();
     this.reconcileCollisionMeshes(nowMs, force);
+    const radiusMeters = this.getCollisionQueryRadiusMeters();
     const queryPosition = { x: position.x, y: position.y, z: position.z };
-    const proxyRefreshed = this.collisionProxyPool?.sync(
+    const proxySynced = this.collisionProxyPool?.sync(
       queryPosition,
-      COLLISION_PROXY_QUERY_RADIUS_METERS,
+      radiusMeters,
       nowMs,
       force,
     ) ?? false;
+    const proxyRefreshed = proxySynced && (this.collisionProxyPool?.lastSyncChanged ?? false);
     const triangleRefreshed = this.localTriangleCollider.sync(
       queryPosition,
-      COLLISION_PROXY_QUERY_RADIUS_METERS,
+      radiusMeters,
       nowMs,
       force,
     );
-    if (proxyRefreshed || triangleRefreshed || this.collisionWorldDirty) {
+    const changed = proxyRefreshed || triangleRefreshed || this.collisionWorldDirty;
+    if (changed) {
       this.updateColliderNeighborhood(queryPosition);
       this.collisionWorldDirty = false;
     }
     if ((proxyRefreshed || triangleRefreshed) && this.fallbackGround.isEnabled()) {
       this.disableFallbackGroundWhenSceneFloorIsReady();
+    } else if (changed && this.fallbackGround.isEnabled()) {
+      this.disableFallbackGroundWhenSceneFloorIsReady();
     }
+    return changed;
   }
 
   /**
@@ -1436,7 +1963,9 @@ export class ManualRoamRuntime {
    * Babylon 默认会遍历场景全部 checkCollisions 网格，厂区环境 GLB 会把 CPU 打满。
    */
   private updateColliderNeighborhood(position: { x: number; y: number; z: number }): void {
+    const radiusMeters = this.getCollisionQueryRadiusMeters();
     const nearby: AbstractMesh[] = [];
+    const nativeMeshes: AbstractMesh[] = [];
     if (this.fallbackGround.isEnabled()) nearby.push(this.fallbackGround);
     for (const mesh of this.collisionProxyPool?.getActiveMeshes() ?? []) {
       if (mesh.isEnabled()) nearby.push(mesh);
@@ -1446,12 +1975,15 @@ export class ManualRoamRuntime {
     }
     for (const mesh of this.collisionMeshDefaults.keys()) {
       if (mesh.isDisposed() || !mesh.isEnabled() || !mesh.checkCollisions) continue;
+      if (!mesh.isSynchronized()) mesh.computeWorldMatrix(true);
       const box = mesh.getBoundingInfo().boundingBox;
-      if (!isManualRoamPointNearWorldAabb(position, box.minimumWorld, box.maximumWorld, COLLISION_PROXY_QUERY_RADIUS_METERS)) {
+      if (!isManualRoamPointNearWorldAabb(position, box.minimumWorld, box.maximumWorld, radiusMeters)) {
         continue;
       }
       nearby.push(mesh);
+      nativeMeshes.push(mesh);
     }
+    this.nearbyNativeMeshes = nativeMeshes;
     this.collider.surroundingMeshes = nearby;
   }
 
@@ -1466,8 +1998,110 @@ export class ManualRoamRuntime {
   }
 
   private applyAvatarVisibility(enabled: boolean, viewMode: ManualRoamViewMode): void {
-    this.facingRoot.setEnabled(enabled && viewMode === 'thirdPerson');
+    const showAvatar = enabled && viewMode === 'thirdPerson';
+    this.facingRoot.setEnabled(showAvatar);
     this.collider.isVisible = enabled && this.snapshot.debugColliders;
+    if (showAvatar) {
+      this.skeletalAnimator?.resume();
+      this.embeddedAnimator?.resume();
+    } else {
+      this.skeletalAnimator?.pause();
+      this.embeddedAnimator?.pause();
+      this.footIK?.reset();
+      this.avatarBlobShadowMesh?.setEnabled(false);
+    }
+  }
+
+  private ensureAvatarBlobShadow(): Mesh | null {
+    if (this.disposed) return null;
+    if (this.avatarBlobShadowMesh && !this.avatarBlobShadowMesh.isDisposed()) {
+      return this.avatarBlobShadowMesh;
+    }
+    const { scene } = this.options;
+    const texture = RawTexture.CreateRGBATexture(
+      buildManualRoamBlobShadowPixels(AVATAR_BLOB_SHADOW_TEXTURE_SIZE),
+      AVATAR_BLOB_SHADOW_TEXTURE_SIZE,
+      AVATAR_BLOB_SHADOW_TEXTURE_SIZE,
+      scene,
+      false,
+      false,
+      Texture.BILINEAR_SAMPLINGMODE,
+    );
+    texture.name = `${AVATAR_BLOB_SHADOW_NAME}_texture`;
+    texture.hasAlpha = true;
+    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+
+    const material = new StandardMaterial(`${AVATAR_BLOB_SHADOW_NAME}_material`, scene);
+    material.diffuseTexture = texture;
+    material.opacityTexture = texture;
+    material.useAlphaFromDiffuseTexture = true;
+    material.disableLighting = true;
+    material.diffuseColor = Color3.Black();
+    material.emissiveColor = Color3.Black();
+    material.specularColor = Color3.Black();
+    material.ambientColor = Color3.Black();
+    material.backFaceCulling = false;
+    material.zOffset = -2;
+    material.freeze();
+
+    const mesh = MeshBuilder.CreateGround(
+      AVATAR_BLOB_SHADOW_NAME,
+      { width: 1, height: 1, subdivisions: 1 },
+      scene,
+    );
+    mesh.isPickable = false;
+    mesh.checkCollisions = false;
+    mesh.receiveShadows = false;
+    mesh.doNotSerialize = true;
+    mesh.material = material;
+    mesh.metadata = { manualRoamAvatarShadow: true, editorShadowCatcher: true };
+    mesh.setEnabled(false);
+
+    this.avatarBlobShadowTexture = texture;
+    this.avatarBlobShadowMaterial = material;
+    this.avatarBlobShadowMesh = mesh;
+    return mesh;
+  }
+
+  private updateAvatarBlobShadow(): void {
+    const visible = this.snapshot.enabled
+      && this.snapshot.viewMode === 'thirdPerson'
+      && this.snapshot.locomotionMode === 'ground'
+      && this.lastGroundHeight !== null
+      && Number.isFinite(this.lastGroundHeight);
+    if (!visible) {
+      this.avatarBlobShadowMesh?.setEnabled(false);
+      return;
+    }
+    const heightAboveGround = this.collider.position.y - this.lastGroundHeight!;
+    if (heightAboveGround < -0.1 || heightAboveGround > AVATAR_BLOB_SHADOW_MAX_HEIGHT_METERS) {
+      this.avatarBlobShadowMesh?.setEnabled(false);
+      return;
+    }
+    const mesh = this.ensureAvatarBlobShadow();
+    if (!mesh) return;
+    const attenuation = clampFinite(1 - Math.max(0, heightAboveGround) / AVATAR_BLOB_SHADOW_MAX_HEIGHT_METERS, 0, 1);
+    const footprint = AVATAR_BLOB_SHADOW_SIZE_METERS * (0.75 + 0.25 * attenuation);
+    mesh.position.set(
+      this.collider.position.x,
+      this.lastGroundHeight! + AVATAR_BLOB_SHADOW_Y_OFFSET_METERS,
+      this.collider.position.z,
+    );
+    mesh.scaling.set(footprint, 1, footprint);
+    mesh.visibility = attenuation;
+    mesh.setEnabled(true);
+  }
+
+  private disposeAvatarBlobShadow(): void {
+    if (this.avatarBlobShadowMesh && !this.avatarBlobShadowMesh.isDisposed()) {
+      this.avatarBlobShadowMesh.dispose(false, false);
+    }
+    this.avatarBlobShadowMesh = null;
+    this.avatarBlobShadowMaterial?.dispose();
+    this.avatarBlobShadowMaterial = null;
+    this.avatarBlobShadowTexture?.dispose();
+    this.avatarBlobShadowTexture = null;
   }
 
   private clearInputs(): void {
@@ -1504,6 +2138,24 @@ export class ManualRoamRuntime {
     this.snapshot = next;
     for (const listener of this.listeners) listener();
   }
+}
+
+function buildManualRoamBlobShadowPixels(size: number): Uint8Array {
+  const pixels = new Uint8Array(size * size * 4);
+  const half = size * 0.5;
+  for (let y = 0; y < size; y += 1) {
+    const dy = (y + 0.5 - half) / half;
+    for (let x = 0; x < size; x += 1) {
+      const dx = (x + 0.5 - half) / half;
+      const radius = Math.hypot(dx, dy);
+      let alpha = 0;
+      if (radius <= 0.15) alpha = 0.5;
+      else if (radius <= 0.55) alpha = 0.5 + ((radius - 0.15) / 0.4) * (0.24 - 0.5);
+      else if (radius < 0.96) alpha = 0.24 * (1 - (radius - 0.55) / 0.41);
+      pixels[(y * size + x) * 4 + 3] = Math.round(alpha * 255);
+    }
+  }
+  return pixels;
 }
 
 function splitAssetUrl(url: string): { rootUrl: string; fileName: string } {

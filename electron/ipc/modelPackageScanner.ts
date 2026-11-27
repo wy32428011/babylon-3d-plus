@@ -1,4 +1,10 @@
 import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
+import {
+  MODEL_METADATA_SCHEMA_VERSION,
+  extractModelMetaExtensions,
+  modelMetaExtensionsField,
+  type ModelMetaExtensions,
+} from '../shared/modelMetaExtensions.ts';
 import { modelRuntimeCapabilitiesField } from '../shared/modelRuntimeCapabilities.ts';
 import { trimTrailingNullAndSpaceCharacters } from '../shared/asciiControlCharacters.ts';
 import { precompileModelScriptFile } from './modelScriptCompiler.js';
@@ -61,6 +67,7 @@ type ModelPackageMetadata = ModelLengthUnitInfo & {
   builtInSlotBinding?: unknown;
   layerChangePlatformBinding?: unknown;
   cargoContact?: Array<{ id: string; alias: string; nodes: string[] }>;
+  metaExtensions?: ModelMetaExtensions;
   defaultAssetCode?: string;
   scriptFileNames?: string[];
 };
@@ -696,6 +703,7 @@ async function readModelPackageMetadata(
       builtInSlotBinding: extractJsonObjectFromMetadata(parsed, 'builtInSlotBinding'),
       layerChangePlatformBinding: extractJsonObjectFromMetadata(parsed, 'layerChangePlatformBinding'),
       cargoContact: extractCargoContactFromMetadata(parsed),
+      ...modelMetaExtensionsField(extractModelMetaExtensions(parsed)),
       scriptFileNames: extractScriptFileNamesFromMetadata(parsed),
       ...unitInfo,
     };
@@ -809,6 +817,8 @@ export async function scanModelPackage(
       builtInSlotBindingConfig: metadata.builtInSlotBinding,
       layerChangePlatformBindingConfig: metadata.layerChangePlatformBinding,
       cargoContact: metadata.cargoContact,
+      ...modelMetaExtensionsField(metadata.metaExtensions),
+      metadataSchemaVersion: MODEL_METADATA_SCHEMA_VERSION,
     },
   };
 }

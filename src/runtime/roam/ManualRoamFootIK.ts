@@ -111,6 +111,7 @@ export class ManualRoamFootIK {
   private wasMoving=false;
   private wasWalkingPose=false;
   private startLockIds: Record<'left' | 'right', number> = { left: 0, right: 0 };
+  private readonly frameProbeCache = new Map<string, ManualRoamGroundHit | null>();
 
   constructor(container: AssetContainer, options: ManualRoamFootIKOptions) {
     this.options = options;
@@ -156,6 +157,7 @@ export class ManualRoamFootIK {
 
   update(frame: ManualRoamFootIKFrame): void {
     if (this.disposed) return;
+    this.frameProbeCache.clear();
     if (!Number.isFinite(frame.dt) || frame.dt < 0 || frame.teleported) { this.reset(); return; }
     if(!frame.grounded||frame.fly){this.resetLegs();this.applyPelvis(0,frame.dt);this.wasMoving=false;this.wasWalkingPose=false;this.startLockIds={left:0,right:0};return;}
     const moving=(frame.speed??0)>0.03;
@@ -250,10 +252,24 @@ export class ManualRoamFootIK {
     return {offset,reference:points[lowest].subtract(offset),up:rotate(up),forward:rotate(footForward(leg))};
   }
 
+  private probeGroundCached(
+    x: number,
+    z: number,
+    originY: number,
+    length: number,
+  ): ManualRoamGroundHit | null {
+    const key = `${Math.round(x * 1000)}:${Math.round(z * 1000)}:${Math.round(originY * 100)}:${Math.round(length * 100)}`;
+    const cached = this.frameProbeCache.get(key);
+    if (cached !== undefined) return cached;
+    const hit = this.options.probeGround(x, z, originY, length);
+    this.frameProbeCache.set(key, hit);
+    return hit;
+  }
+
   private prepareLeg(leg:Leg,contact:number,moving:boolean,dt:number):void {
     const foot=position(leg.foot),pose=this.solePose(leg,Vector3.Up(),moving),at=leg.lock??foot.add(leg.strideOffset).add(pose.offset);
     // 地面射线对齐实际前掌/后跟接触点，返回后再换回平脚锚点，避免局部高差被错采到踝部下方。
-    const probe=at.add(pose.reference),hit=this.options.probeGround(probe.x,probe.z,foot.y+this.maxCorrection,this.maxCorrection*2+.2);
+    const probe=at.add(pose.reference),hit=this.probeGroundCached(probe.x,probe.z,foot.y+this.maxCorrection,this.maxCorrection*2+.2);
     if(!hit){this.release(leg,'no-ground');return;}
     const point='point'in hit?hit.point.clone():new Vector3(probe.x,hit.height,probe.z);
     if(!finiteVector(point)||!finiteVector(hit.normal)||hit.normal.lengthSquared()<1e-8){this.release(leg,'invalid-ground');return;}
@@ -376,10 +392,16 @@ export class ManualRoamFootIK {
   /** 平面先查4×4轮廓；发现不同地面平面时核查全部有界缓存点，避免窄高台落在分区内部。 */
   private terrainLift(points:Vector3[],originY:number,scale:number,normal:Vector3,allowDown=false):number {
     const depth=(p:Vector3)=>Vector3.Dot(p,normal),lowest=points.reduce((a,b)=>depth(a)<depth(b)?a:b),bottom=points.filter(p=>depth(p)<=depth(lowest)+.08*scale),cells=new Map<number,Vector3>();
-    const minX=Math.min(...bottom.map(p=>p.x)),maxX=Math.max(...bottom.map(p=>p.x)),minZ=Math.min(...bottom.map(p=>p.z)),maxZ=Math.max(...bottom.map(p=>p.z));
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of bottom) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
+    }
     for(const p of bottom){const x=Math.min(3,Math.floor((p.x-minX)/Math.max(1e-8,maxX-minX)*4)),z=Math.min(3,Math.floor((p.z-minZ)/Math.max(1e-8,maxZ-minZ)*4)),key=x+z*4,old=cells.get(key);if(!old||depth(p)<depth(old))cells.set(key,p);}
     let lift=-Infinity,minPlane=Infinity,maxPlane=-Infinity;const queried=new Map<string,number|null>();
-    const check=(p:Vector3)=>{const key=p.x+':'+p.z;let y=queried.get(key);if(y===undefined){const hit=this.options.probeGround(p.x,p.z,originY+this.maxCorrection,this.maxCorrection*2+.2);y=hit&&finiteVector(hit.normal)&&hit.normal.lengthSquared()>1e-8&&hit.normal.normalizeToNew().y>=this.minimumNormalY?('point'in hit?hit.point.y:hit.height):null;queried.set(key,y);}if(y===null||!Number.isFinite(y))return;lift=Math.max(lift,y-p.y);const plane=Vector3.Dot(new Vector3(p.x,y,p.z),normal);minPlane=Math.min(minPlane,plane);maxPlane=Math.max(maxPlane,plane);};
+    const check=(p:Vector3)=>{const key=p.x+':'+p.z;let y=queried.get(key);if(y===undefined){const hit=this.probeGroundCached(p.x,p.z,originY+this.maxCorrection,this.maxCorrection*2+.2);y=hit&&finiteVector(hit.normal)&&hit.normal.lengthSquared()>1e-8&&hit.normal.normalizeToNew().y>=this.minimumNormalY?('point'in hit?hit.point.y:hit.height):null;queried.set(key,y);}if(y===null||!Number.isFinite(y))return;lift=Math.max(lift,y-p.y);const plane=Vector3.Dot(new Vector3(p.x,y,p.z),normal);minPlane=Math.min(minPlane,plane);maxPlane=Math.max(maxPlane,plane);};
     for(const p of cells.values())check(p);
     if(this.options.automatic){
       // 坐标极值覆盖刚踏入台面的窄前/后掌，不能被分区里更低、但仍悬在台外的顶点取代。
@@ -419,8 +441,9 @@ export class ManualRoamFootIK {
     const result={before:0,after:0,iterations:0,correction:0,target:null as Vector3|null};
     if(!leg.ground)return result;
     const sample=()=>{const world=leg.foot.computeWorldMatrix(true),at=position(leg.foot);return leg.sole.sample().map(p=>Vector3.TransformNormal(p,world).add(at));};
+    let points = sample();
     for(let iteration=0;iteration<2;iteration++) {
-      const points=sample();let index=0;points.forEach((p,i)=>{if(Vector3.Dot(p,normal)<Vector3.Dot(points[index],normal))index=i;});
+      let index=0;points.forEach((p,i)=>{if(Vector3.Dot(p,normal)<Vector3.Dot(points[index],normal))index=i;});
       const base=leg.lock??leg.ground.point;
       const expected=leg.lock&&leg.plantOffsets?base.add(leg.plantOffsets[index]):points[index].clone();
       const error=expected.subtract(points[index]);error.y=this.terrainLift(points,fkFoot.y,Math.cbrt(Math.abs(leg.foot.getWorldMatrix().determinant())),normal,!!leg.lock);
@@ -433,6 +456,7 @@ export class ManualRoamFootIK {
       const next=sample(),remaining=Vector3.Distance(next[index],expected),penetration=-this.terrainLift(next,fkFoot.y,Math.cbrt(Math.abs(leg.foot.getWorldMatrix().determinant())),normal);
       if(remaining>=size-1e-5||penetration<Math.min(-.006,height)-1e-5){[leg.thigh,leg.knee,leg.foot].forEach((node,i)=>{node.rotationQuaternion=saved[i];node.computeWorldMatrix(true);});break;}
       result.after=remaining;result.iterations++;result.correction+=step.length();result.target=target;
+      points = next;
     }
     return result;
   }

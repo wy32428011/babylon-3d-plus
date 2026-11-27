@@ -21,13 +21,16 @@ const hooks = registerHooks({ resolve(specifier, context, next) {
     source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText };
   return next(url, context);
 } });
-let createEmptySceneDocument, createModelEntity, serializeScene, deserializeScene, createModelGeneratorTargetFromAsset, mergeSceneModelAssetUpdate, ExternalModelScriptRuntime;
+let createEmptySceneDocument, createModelEntity, serializeScene, deserializeScene, createModelGeneratorTargetFromAsset, mergeSceneModelAssetUpdate, ExternalModelScriptRuntime, hashModelRuntimeConfiguration, modelRuntimeConfigurationKey, ModelAssetRuntimeController, ModelParameterBindingController;
 try {
   ({ createEmptySceneDocument, createModelEntity } = await import('../../src/editor/model/SceneDocument.ts'));
   ({ serializeScene, deserializeScene } = await import('../../src/editor/project/SceneSerializer.ts'));
   ({ createModelGeneratorTargetFromAsset } = await import('../../src/editor/model/modelGenerator.ts'));
   ({ mergeSceneModelAssetUpdate } = await import('../../src/editor/assets/mergeModelAssetUpdate.ts'));
   ({ ExternalModelScriptRuntime } = await import('../../src/runtime/babylon/ExternalModelScriptRuntime.ts'));
+  ({ hashModelRuntimeConfiguration, modelRuntimeConfigurationKey } = await import('../../electron/shared/modelRuntimeCapabilities.ts'));
+  ({ ModelAssetRuntimeController } = await import('../../src/runtime/babylon/scene-runtime/ModelAssetRuntimeController.ts'));
+  ({ ModelParameterBindingController } = await import('../../src/runtime/babylon/scene-runtime/ModelParameterBindingController.ts'));
 } finally { hooks.deregister(); }
 
 const capability = { version: 1, geometry: 'shared-readonly', materials: 'owned', configurationSha256: 'a'.repeat(64), scripts: {} };
@@ -82,4 +85,37 @@ test('GLB新修订只增加声明，BIN与负零、节点名字和原始buffer�
   assert.equal(parsed.nodes[0].name, '梁'); assert.deepEqual(parsed.asset.extras.runtimeCapabilities, capability);
   assert.deepEqual(candidate.subarray(20 + size), original.subarray(20 + padded.length));
   assert.deepEqual(original, frozen);
+});
+
+test('扩展字段缺省不改变旧配置哈希，变更时触发运行时签名、能力哈希与节点 metadata 更新', async () => {
+  const baseAsset = {
+    assetCode: 'M-01',
+    sourcePath: 'F:/fixture/model.glb',
+    sourceUrl: 'editor-asset://local/fixture/model.glb',
+    lengthUnit: 'meter',
+    unitScaleToMeters: 1,
+  };
+  assert.equal(modelRuntimeConfigurationKey(baseAsset).includes('metaExtensions'), false);
+  const baseHash = await hashModelRuntimeConfiguration(baseAsset);
+  const withExt = { ...baseAsset, metaExtensions: { customDocking: { offset: 1 } } };
+  const extHash = await hashModelRuntimeConfiguration(withExt);
+  assert.notEqual(extHash, baseHash);
+
+  const signatureA = ModelAssetRuntimeController.prototype.createModelAssetSignature.call({}, baseAsset);
+  const signatureB = ModelAssetRuntimeController.prototype.createModelAssetSignature.call({}, withExt);
+  assert.notEqual(signatureA, signatureB);
+
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const node = new TransformNode('meta-owner', scene);
+  const bindingController = new ModelParameterBindingController({}, {});
+  try {
+    bindingController.syncModelScriptMetadata(node, withExt);
+    assert.deepEqual(node.metadata?.modelAsset?.metaExtensions, { customDocking: { offset: 1 } });
+    bindingController.syncModelScriptMetadata(node, baseAsset);
+    assert.equal('metaExtensions' in (node.metadata?.modelAsset ?? {}), false);
+  } finally {
+    scene.dispose();
+    engine.dispose();
+  }
 });

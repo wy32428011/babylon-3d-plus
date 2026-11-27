@@ -280,3 +280,68 @@ test('材质成本包含GI插件图集采样器而不只统计业务纹理', t =
     assert.ok(runtime.getValidationErrors().some(message => message.includes(f.material.name)), '正式应用验证和成本面板必须使用同一GI采样器预算');
   } finally { f.engine.getCaps().maxTexturesImageUnits = originalLimit; runtime.dispose(); f.scene.dispose(); f.engine.dispose(); }
 });
+
+test('漫游辅助碰撞网格和带骨骼人物不进入阴影投射集合，不破坏全厂静态阴影缓存', async () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const camera = new FreeCamera('camera', new Vector3(0, 10, -15), scene);
+  camera.setTarget(Vector3.Zero());
+  const floor = MeshBuilder.CreateGround('floor', { width: 30, height: 30 }, scene);
+  floor.metadata = { editorEnvironmentMesh: true };
+  const staticRack = MeshBuilder.CreateBox('static-rack', { size: 2 }, scene);
+  staticRack.position.set(0, 1, 0);
+  const material = new PBRMaterial('physical', scene);
+  floor.material = material;
+  staticRack.material = material;
+
+  const collider = MeshBuilder.CreateBox('roam-collider', { size: 1 }, scene);
+  collider.metadata = { manualRoamCollider: true };
+  const proxy = MeshBuilder.CreateBox('roam-proxy', { size: 1 }, scene);
+  proxy.metadata = { manualRoamCollisionProxy: true };
+  const localTri = MeshBuilder.CreateBox('roam-local-tri', { size: 1 }, scene);
+  localTri.metadata = { manualRoamLocalTriangleCollider: true };
+  const fallbackGround = MeshBuilder.CreateGround('roam-fallback', { width: 10, height: 10 }, scene);
+  fallbackGround.metadata = { manualRoamFallbackGround: true };
+  const blobShadow = MeshBuilder.CreateGround('roam-blob', { width: 1, height: 1 }, scene);
+  blobShadow.metadata = { manualRoamAvatarShadow: true };
+  const avatarMesh = MeshBuilder.CreateBox('roam-avatar', { size: 1 }, scene);
+  avatarMesh.skeleton = new Skeleton('avatar-skel', 'avatar-skel', scene);
+  avatarMesh.material = material;
+  avatarMesh.metadata = { manualRoamAvatar: true };
+
+  const runtime = new SceneShadowRuntime(scene);
+  const sun = new DirectionalLight('sun', new Vector3(-1, -2, 1), scene);
+  const roles = new Map([
+    [floor, staticRole],
+    [staticRack, staticRole],
+  ]);
+
+  try {
+    runtime.setHybridMeshRoles(roles);
+    runtime.applySettings(settings);
+    runtime.syncLight('sun', sun);
+    scene.render();
+    await scene.whenReadyAsync();
+    scene.render();
+
+    const renderList = sun.getShadowGenerator()!.getShadowMap()!.renderList!;
+    assert.ok(renderList.includes(floor));
+    assert.ok(renderList.includes(staticRack));
+    for (const roamMesh of [collider, proxy, localTri, fallbackGround, blobShadow, avatarMesh]) {
+      assert.equal(renderList.includes(roamMesh), false, `${roamMesh.name} 不应写入阴影贴图`);
+    }
+    assert.equal(avatarMesh.receiveShadows, true, '漫游人物仍可接收场景实时阴影');
+
+    const beforeHit = runtime.getHybridMetrics().cacheHits;
+    const beforeRenders = runtime.getHybridMetrics().nativeMapRenders;
+    avatarMesh.position.x += 2;
+    scene.render();
+    const after = runtime.getHybridMetrics();
+    assert.equal(after.cacheHits, beforeHit + 1, '人物移动不应使静态阴影缓存失效重绘');
+    assert.equal(after.nativeMapRenders, beforeRenders);
+  } finally {
+    runtime.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+});

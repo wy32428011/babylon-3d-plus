@@ -69,3 +69,19 @@ test('key为原型属性时也只创建自有参数，不污染其他实例', ()
   assert.equal(kept.parameterValues!.constructor, 8);
   assert.equal(Object.getPrototypeOf(kept.parameterValues), Object.prototype);
 });
+
+test('扩展字段 metaExtensions 随新版新增、修改或删除，同时保留 assetCode、场景值和原型安全', () => {
+  const previous = { ...asset(), assetCode: 'KEEP-01' };
+  const added = mergeModelAssetUpdate(previous, { ...asset(), metaExtensions: { customDocking: { offset: 1 } } });
+  assert.deepEqual(added.metaExtensions, { customDocking: { offset: 1 } });
+  assert.equal(added.assetCode, 'KEEP-01');
+
+  const polluted = JSON.parse('{"customDocking":{"offset":2},"__proto__":{"polluted":true}}');
+  const updated = mergeModelAssetUpdate(added, { ...asset(), metaExtensions: polluted });
+  assert.deepEqual(updated.metaExtensions, polluted);
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+
+  const removed = mergeModelAssetUpdate(updated, asset());
+  assert.equal('metaExtensions' in removed, false);
+  assert.equal(removed.assetCode, 'KEEP-01');
+});

@@ -3,18 +3,30 @@ import { DEFAULT_LIGHTING_BAKE_SETTINGS, normalizeSceneLightingBakeSettings, val
 import { LIGHTING_POLICY_FIELDS, normalizeSceneLightingPolicy, type SceneLightingPolicy } from './sceneLightingPolicy.ts';
 import { assertLightingLightmapVersion } from './sceneLightingTextureCodec.ts';
 
+export type BuiltinEnvironmentPresetId = 'sandbox' | 'warehouse-bright' | 'warehouse-dark';
+export type SceneSsaoMode = 'off' | 'balanced' | 'high';
 export type SceneLightingConfig = {
   version: 2 | 3;
   main: { source: 'managed' | 'scene'; enabled: boolean; color: string; azimuthDegrees: number; elevationDegrees: number; intensity: number };
   fill: { intensity: number; color: string; groundColor: string };
   environmentIntensity: number;
   /** 缺省沿用场景天空盒，仅显式选择或新场景启用内置预览环境。 */
-  environment?: { source: 'scene' | 'sandbox'; rotationDegrees: number };
+  environment?: { source: 'scene' | 'sandbox'; rotationDegrees: number; preset?: 'warehouse-bright' | 'warehouse-dark' };
   disabledLightIds: string[];
   allowDayNightCycle: boolean;
   shadows: { enabled: boolean; quality: 'performance' | 'balanced' | 'quality'; darkness: number; distanceMeters: number; bias: number; normalBias: number;
     /** 缺省沿用已有规则和例外；自动模式不改写原有策略。 */
-    managementMode?: 'automatic' | 'rules' };
+    managementMode?: 'automatic' | 'rules';
+    /** 仅自动模式生效：省略表示全场接收，ground-only 仅环境与地面接收阴影。 */
+    receiverScope?: 'ground-only';
+    /** 仅自动模式生效：忽略最大边长小于该阈值（米）的细小物体投影。 */
+    skipSmallCastersMeters?: number;
+    /** 仅自动模式生效：忽略运行期动态生成的货物/托盘投影。 */
+    skipGeneratedCargoCasters?: boolean;
+    /** 自动模式下是否仍尊重实体/部件显式设置的投射与接收阴影例外。 */
+    respectEntityShadowOverrides?: boolean;
+    /** 为移动设备（AGV/叉车/堆垛机等）叠加轻量地面接触软影贴片。 */
+    mobileBlobShadows?: boolean };
   bake: SceneLightingBakeSettings;
   policy?: SceneLightingPolicy;
   result?: SceneLightingBakeSnapshot | null;
@@ -31,6 +43,8 @@ export type SceneAppearanceConfig = {
   bloomWeight: number;
   /** 显式启用Bloom离屏管线MSAA；旧场景缺字段时保持原单采样+FXAA。 */
   bloomMsaaEnabled?: boolean;
+  /** 可选实时屏幕空间接触暗影（SSAO2）；缺省关闭，不影响旧场景。 */
+  ssaoMode?: 'balanced' | 'high';
   fogEnabled: boolean;
   fogColor: string;
   fogStart: number;
@@ -117,13 +131,23 @@ export function normalizeSceneLightingConfig(value: unknown): SceneLightingConfi
       elevationDegrees: finite(main.elevationDegrees, d.main.elevationDegrees, -90, 90), intensity: finite(main.intensity, d.main.intensity, 0, 20) },
     fill: { ...fill, intensity: finite(fill.intensity, d.fill.intensity, 0, 4), color: color(fill.color, d.fill.color), groundColor: color(fill.groundColor, d.fill.groundColor) },
     environmentIntensity: finite(raw.environmentIntensity, d.environmentIntensity, 0, 5), disabledLightIds,
-    ...(raw.environment !== undefined ? { environment: { ...object(raw.environment),
+    ...(raw.environment !== undefined ? { environment: { ...without(object(raw.environment), ['preset']),
       source: object(raw.environment).source === 'sandbox' ? 'sandbox' as const : 'scene' as const,
       rotationDegrees: finite(object(raw.environment).rotationDegrees, object(raw.environment).source === 'sandbox' ? 5.54 * 180 / Math.PI : 0, 0, 360),
+      ...(object(raw.environment).source === 'sandbox'
+        && (object(raw.environment).preset === 'warehouse-bright' || object(raw.environment).preset === 'warehouse-dark')
+        ? { preset: object(raw.environment).preset as 'warehouse-bright' | 'warehouse-dark' } : {}),
     } } : {}),
     allowDayNightCycle: boolean(raw.allowDayNightCycle, true),
-    shadows: { ...without(shadows, ['managementMode']), enabled: boolean(shadows.enabled, d.shadows.enabled),
+    shadows: { ...without(shadows, ['managementMode', 'receiverScope', 'skipSmallCastersMeters', 'skipGeneratedCargoCasters', 'respectEntityShadowOverrides', 'mobileBlobShadows']),
+      enabled: boolean(shadows.enabled, d.shadows.enabled),
       ...(shadows.managementMode === 'automatic' || shadows.managementMode === 'rules' ? { managementMode: shadows.managementMode } : {}),
+      ...(shadows.receiverScope === 'ground-only' ? { receiverScope: 'ground-only' as const } : {}),
+      ...(typeof shadows.skipSmallCastersMeters === 'number' && Number.isFinite(shadows.skipSmallCastersMeters) && shadows.skipSmallCastersMeters > 0
+        ? { skipSmallCastersMeters: Math.min(10, Math.round(shadows.skipSmallCastersMeters * 100) / 100) } : {}),
+      ...(shadows.skipGeneratedCargoCasters === true ? { skipGeneratedCargoCasters: true } : {}),
+      ...(shadows.respectEntityShadowOverrides === true ? { respectEntityShadowOverrides: true } : {}),
+      ...(shadows.mobileBlobShadows === true ? { mobileBlobShadows: true } : {}),
       quality: shadows.quality === 'performance' || shadows.quality === 'quality' ? shadows.quality : 'balanced',
       darkness: finite(shadows.darkness, d.shadows.darkness, 0, .85), distanceMeters: finite(shadows.distanceMeters, d.shadows.distanceMeters, 0, 800),
       bias: finite(shadows.bias, d.shadows.bias, 0, .02), normalBias: finite(shadows.normalBias, d.shadows.normalBias, 0, .2) },
@@ -148,6 +172,8 @@ export function normalizeSceneAppearanceConfig(value: unknown): SceneAppearanceC
   // 可选字段缺失时不补键，避免旧场景序列化和既有签名产生无关漂移。
   if (typeof raw.bloomMsaaEnabled === 'boolean') normalized.bloomMsaaEnabled = raw.bloomMsaaEnabled;
   else delete normalized.bloomMsaaEnabled;
+  if (raw.ssaoMode === 'balanced' || raw.ssaoMode === 'high') normalized.ssaoMode = raw.ssaoMode;
+  else delete normalized.ssaoMode;
   return normalized;
 }
 

@@ -276,3 +276,68 @@ test('缓存不得吞掉原 Float32 碰撞矩阵可表达的微小变换', () =>
     collider.dispose(); scene.dispose(); engine.dispose();
   }
 });
+
+test('负缩放镜像高模地面保持朝上的正确三角法线方向', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const floor = MeshBuilder.CreateGround('mirrored-floor', { width: 80, height: 80, subdivisions: 64 }, scene);
+  floor.scaling.x = -1;
+  const collider = new ManualRoamLocalTriangleCollider(scene, { refreshIntervalMs: 0 });
+  try {
+    collider.captureScene(scene.meshes);
+    collider.sync({ x: 0, y: 0, z: 0 }, 8, 0, true);
+    assert.ok(collider.activeCount > 0);
+    for (const proxy of collider.getActiveMeshes()) {
+      const normals = proxy.getVerticesData(VertexBuffer.NormalKind);
+      assert.ok(normals && normals.length >= 9);
+      for (let index = 1; index < normals.length; index += 3) {
+        assert.ok(normals[index] > 0.99, `镜像地面三角法线应朝上，得到 y=${normals[index]}`);
+      }
+    }
+  } finally {
+    collider.dispose(); scene.dispose(); engine.dispose();
+  }
+});
+
+test('probeVerticalRay 直接在空间格子内求得平地、斜坡与镜像高模地面且代理默认不可见', () => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const flatFloor = MeshBuilder.CreateGround('flat-high-poly', { width: 40, height: 40, subdivisions: 48 }, scene);
+  flatFloor.position.y = 1.25;
+  const mirroredRamp = MeshBuilder.CreateGround('mirrored-ramp', { width: 20, height: 20, subdivisions: 48 }, scene);
+  mirroredRamp.position.set(15, 2, 0);
+  mirroredRamp.rotation.z = 0.25;
+  mirroredRamp.scaling.x = -1;
+
+  const collider = new ManualRoamLocalTriangleCollider(scene, {
+    cellSizeMeters: 4,
+    refreshIntervalMs: 0,
+    refreshDistanceMeters: 0,
+  });
+  try {
+    collider.captureScene(scene.meshes);
+    collider.sync({ x: 0, y: 1.25, z: 0 }, 8, 0, true);
+    assert.ok(collider.getActiveMeshes().every((mesh) => mesh.isVisible === false));
+    collider.setDebugVisible(true);
+    assert.ok(collider.getActiveMeshes().every((mesh) => mesh.isVisible === true && mesh.visibility > 0));
+
+    const minNormalY = Math.cos(Math.PI / 4);
+    const flatHit = collider.probeVerticalRay(2.5, -3.2, 3, 5, minNormalY);
+    assert.ok(flatHit);
+    assert.ok(Math.abs(flatHit.y - 1.25) < 1e-4);
+    assert.ok(flatHit.normal.y > 0.99);
+
+    const rampHit = collider.probeVerticalRay(15, 0, 5, 6, minNormalY);
+    assert.ok(rampHit);
+    assert.ok(Math.abs(rampHit.y - 2) < 0.05);
+    assert.ok(rampHit.normal.y >= minNormalY);
+
+    assert.equal(collider.probeVerticalRay(100, 100, 5, 6, minNormalY), null);
+    flatFloor.isVisible = false;
+    assert.equal(collider.probeVerticalRay(2.5, -3.2, 3, 5, minNormalY), null);
+  } finally {
+    collider.dispose();
+    scene.dispose();
+    engine.dispose();
+  }
+});

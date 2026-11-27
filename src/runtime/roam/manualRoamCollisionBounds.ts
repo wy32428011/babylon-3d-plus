@@ -2,7 +2,10 @@ import { Matrix } from '@babylonjs/core/Maths/math.vector.js';
 import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import type { AbstractMesh } from '@babylonjs/core';
 import type { SceneDocument } from '../../editor/model/SceneDocument';
-import { resolveManualRoamCollisionStyle } from './manualRoamCollisionPolicy.ts';
+import {
+  MANUAL_ROAM_CHEAP_TRIANGLE_VERTEX_LIMIT,
+  resolveManualRoamCollisionStyle,
+} from './manualRoamCollisionPolicy.ts';
 
 export type ManualRoamPoint = { x: number; y: number; z: number };
 
@@ -247,14 +250,14 @@ export function createManualRoamCompactMeshCollisionBoundsResolver(
     const radiusSquared = radiusMeters * radiusMeters;
     const nearest: Array<{ bounds: ManualRoamCollisionBounds; distanceSquared: number }> = [];
     for (const mesh of options.getMeshes()) {
-      if (resolveManualRoamCollisionStyle(mesh) !== 'aabb-proxy') continue;
       if (
         mesh.isDisposed()
         || !mesh.isEnabled()
         || !mesh.isVisible
         || mesh.visibility <= 0
+        || mesh.getTotalVertices() <= MANUAL_ROAM_CHEAP_TRIANGLE_VERTEX_LIMIT
       ) continue;
-      mesh.computeWorldMatrix();
+      if (resolveManualRoamCollisionStyle(mesh) !== 'aabb-proxy') continue;
       const box = mesh.getBoundingInfo().boundingBox;
       const distanceSquared = distanceSquaredToBounds(position, box.minimumWorld, box.maximumWorld);
       if (distanceSquared > radiusSquared) continue;
@@ -301,6 +304,11 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
   let cachedEntityIds: SceneDocument['entityIds'] | null = null;
   let candidates: Candidate[] = [];
   let sourceBoundsProfiles = new Map<string, SourceBoundsProfile>();
+  let lastQueryPosition: ManualRoamPoint | null = null;
+  let lastQueryRadiusMeters = -1;
+  let lastQueryRuntime: ManualRoamBoundsRuntime | null = null;
+  let lastQueryResult: ManualRoamCollisionBounds[] = [];
+  let lastQueryAllReady = false;
 
   return (position, radiusMeters) => {
     const runtime = options.getRuntime();
@@ -311,6 +319,9 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
       cachedEntities = scene.entities;
       cachedEntityIds = scene.entityIds;
       sourceBoundsProfiles = new Map();
+      lastQueryPosition = null;
+      lastQueryResult = [];
+      lastQueryAllReady = false;
       const arraySourceIds = new Set(scene.entityIds.flatMap((entityId) => {
         const sourceEntityId = scene.entities[entityId]?.components.modelArrayInstance?.sourceEntityId;
         return sourceEntityId ? [sourceEntityId] : [];
@@ -331,6 +342,18 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
           sourceEntityId: entity.components.modelArrayInstance?.sourceEntityId ?? entityId,
         }];
       });
+    }
+
+    if (
+      lastQueryAllReady
+      && lastQueryRuntime === runtime
+      && lastQueryRadiusMeters === radiusMeters
+      && lastQueryPosition
+      && lastQueryPosition.x === position.x
+      && lastQueryPosition.y === position.y
+      && lastQueryPosition.z === position.z
+    ) {
+      return lastQueryResult;
     }
 
     const attemptedSourceIds = new Set<string>();
@@ -383,6 +406,7 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
     );
     const radiusSquared = radiusMeters * radiusMeters;
     const result: ManualRoamCollisionBounds[] = [];
+    let allReady = true;
 
     for (const candidate of nearby) {
       const bounds = runtime.getEntitiesWorldBounds([candidate.entityId]);
@@ -391,7 +415,10 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
         || bounds.resolvedEntityCount < 1
         || !isFinitePoint(bounds.center)
         || !isFinitePoint(bounds.sizeMeters)
-      ) continue;
+      ) {
+        allReady = false;
+        continue;
+      }
 
       const halfSize = {
         x: Math.max(MIN_COLLIDER_SIZE_METERS, Math.abs(bounds.sizeMeters.x)) / 2,
@@ -413,6 +440,11 @@ export function createManualRoamModelArrayCollisionBoundsResolver(
       result.push({ id: candidate.entityId, minimum, maximum });
       if (result.length >= maxColliders) break;
     }
+    lastQueryPosition = { x: position.x, y: position.y, z: position.z };
+    lastQueryRadiusMeters = radiusMeters;
+    lastQueryRuntime = runtime;
+    lastQueryResult = result;
+    lastQueryAllReady = allReady;
     return result;
   };
 }

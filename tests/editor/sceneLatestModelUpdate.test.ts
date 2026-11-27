@@ -10,7 +10,8 @@ import { pathToFileURL } from 'node:url';
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'scene-update-ssr-'));
 after(() => rm(temporary, { recursive: true, force: true }));
 const entries = ['src/editor/assets/applySceneModelUpdates.ts', 'src/editor/model/SceneDocument.ts',
-  'src/editor/project/SceneSerializer.ts', 'src/editor/store/editorStore.ts'];
+  'src/editor/project/SceneSerializer.ts', 'src/editor/store/editorStore.ts',
+  'src/editor/store/slices/projectAssetRefresh.ts'];
 const entryFile = path.join(temporary, 'input.ts');
 await writeFile(entryFile, entries.map((entry, index) =>
   `export * as module${index} from ${JSON.stringify(path.resolve(entry).replace(/\\/g, '/'))};`).join('\n'));
@@ -25,6 +26,7 @@ const loaded = await import(pathToFileURL(path.join(temporary, 'out/entry.mjs'))
 const { applySceneModelUpdates, applyAvailableSceneModelUpdates } = loaded.module0;
 const { createEmptySceneDocument, createModelEntity, createModelGeneratorEntity, createClickEventBindingEntity } = loaded.module1;
 const { serializeScene, deserializeScene } = loaded.module2;
+const { refreshSceneModelAssetsFromImportedAssets } = loaded.module4;
 const sourceKey = 'a'.repeat(64);
 const url = (root: string) => `editor-asset://local/${encodeURIComponent(`C:/${root}/Model-123-rack/model.glb`)}`;
 const config = { schema: 'babylon-editor.model-parameters', version: 1, parameters: [
@@ -158,4 +160,69 @@ test('局部失败保留成功更新且阻止发布，成功重试清除问题�
   assert.deepEqual(useEditorStore.getState().sceneResourceIssues, []);
   useEditorStore.getState().undo();
   assert.deepEqual(useEditorStore.getState().scene.entities, before.scene.entities);
+});
+
+test('场景实体、生成器目标与刷新链路全流程同步及清除 metaExtensions、cargoContactSupports 和缩略图', () => {
+  const scene = createEmptySceneDocument('扩展字段透传');
+  const oldUrl = url('old');
+  const entity = createModelEntity(
+    'C:/old/Model-123-rack/model.glb', oldUrl, '扩展设备',
+    undefined, undefined, config, undefined, undefined, undefined, undefined, 'rev-1',
+    undefined, undefined, undefined, undefined, undefined,
+    { customDocking: { offset: 1 }, tags: ['v1'] },
+  );
+  scene.entities[entity.id] = entity;
+  scene.entityIds.push(entity.id);
+
+  const generator = createModelGeneratorEntity();
+  generator.components.modelGenerator.defaultTarget = {
+    kind: 'model',
+    assetId: 'old',
+    displayName: '模板',
+    thumbnailUrl: 'editor-asset://local/C:/old/thumb.png',
+    cargoContactSupports: [{ id: 's1', alias: '顶升', nodes: ['TM'] }],
+    cargoContact: { supportId: 's1' },
+    modelAsset: { ...entity.components.modelAsset },
+  };
+  scene.entities[generator.id] = generator;
+  scene.entityIds.push(generator.id);
+
+  // 序列化往返保留 metaExtensions，并拒绝非对象值
+  const roundTripped = deserializeScene(serializeScene(scene));
+  assert.deepEqual(roundTripped.entities[entity.id].components.modelAsset.metaExtensions, { customDocking: { offset: 1 }, tags: ['v1'] });
+  assert.deepEqual(roundTripped.entities[generator.id].components.modelGenerator.defaultTarget.modelAsset.metaExtensions,
+    { customDocking: { offset: 1 }, tags: ['v1'] });
+  const corrupted = JSON.parse(serializeScene(scene));
+  corrupted.scene.entities[entity.id].components.modelAsset.metaExtensions = ['bad'];
+  assert.throws(() => deserializeScene(JSON.stringify(corrupted)));
+
+  // 仅 cargoContact 支撑位变化也必须计入 updatedCount，且同步更新 metaExtensions
+  const nextAsset: any = {
+    ...asset,
+    cargoContact: [{ id: 's1', alias: '新版顶升', nodes: ['TM', 'HJ'] }],
+    metaExtensions: { customDocking: { offset: 2 }, newKey: true },
+  };
+  const updated = applySceneModelUpdates(roundTripped, [{ sourceUrls: [oldUrl], asset: nextAsset }], sourceKey);
+  assert.ok(updated.updatedCount >= 2);
+  assert.deepEqual(updated.scene.entities[entity.id].components.modelAsset.metaExtensions, { customDocking: { offset: 2 }, newKey: true });
+  assert.deepEqual(updated.scene.entities[generator.id].components.modelGenerator.defaultTarget.cargoContactSupports, nextAsset.cargoContact);
+  assert.deepEqual(updated.scene.entities[generator.id].components.modelGenerator.defaultTarget.cargoContact, { supportId: 's1' });
+
+  const cargoOnlyChangedAsset = { ...nextAsset, cargoContact: [{ id: 's1', alias: '二次调整', nodes: ['HJ'] }] };
+  const cargoOnlyUpdated = applySceneModelUpdates(updated.scene, [{ sourceUrls: [nextAsset.sourceUrl], asset: cargoOnlyChangedAsset }], sourceKey);
+  assert.ok(cargoOnlyUpdated.updatedCount > 0, '仅生成器 target.cargoContactSupports 变化时也必须计入更新数');
+
+  // 新版移除 cargoContact、thumbnailUrl 与 metaExtensions 时，refreshSceneModelAssetsFromImportedAssets 也必须清除旧值并保留选中 supportId
+  const strippedAsset = { ...cargoOnlyChangedAsset, assetRevision: 'rev-3' };
+  delete strippedAsset.cargoContact;
+  delete strippedAsset.metaExtensions;
+  const refreshed = refreshSceneModelAssetsFromImportedAssets(cargoOnlyUpdated.scene, [strippedAsset]);
+  assert.ok(refreshed.refreshedCount > 0);
+  const refreshedEntity = refreshed.scene.entities[entity.id].components.modelAsset;
+  const refreshedTarget = refreshed.scene.entities[generator.id].components.modelGenerator.defaultTarget;
+  assert.equal(refreshedEntity.metaExtensions, undefined);
+  assert.equal(refreshedTarget.modelAsset.metaExtensions, undefined);
+  assert.equal(refreshedTarget.cargoContactSupports, undefined);
+  assert.equal(refreshedTarget.thumbnailUrl, undefined);
+  assert.deepEqual(refreshedTarget.cargoContact, { supportId: 's1' });
 });

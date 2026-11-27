@@ -17,9 +17,12 @@ test('碰撞代理池复用固定数量 Mesh，并按邻域查询启停代理', 
   assert.equal(pool.has(scene.meshes[0]), true);
   assert.equal(scene.meshes[0].checkCollisions, true);
   assert.equal(scene.meshes[0].isPickable, true);
+  assert.equal(scene.meshes[0].isVisible, false);
 
   pool.setDebugVisible(true);
-  assert.ok(scene.meshes.slice(0, 2).every((mesh) => mesh.visibility > 0));
+  assert.ok(scene.meshes.slice(0, 2).every((mesh) => mesh.isVisible === true && mesh.visibility > 0));
+  pool.setDebugVisible(false);
+  assert.ok(scene.meshes.slice(0, 2).every((mesh) => mesh.isVisible === false));
 
   pool.deactivate();
   assert.equal(pool.activeCount, 0);
@@ -37,13 +40,16 @@ test('代理池在节流时间和位移阈值内不会重复查询', () => {
   let queryCount = 0;
   const pool = new ManualRoamCollisionProxyPool(scene, () => {
     queryCount += 1;
-    return [];
+    return [{ id: 'rack-a', minimum: { x: 1, y: 0, z: 1 }, maximum: { x: 3, y: 2, z: 5 } }];
   }, { maxColliders: 1, refreshIntervalMs: 100, refreshDistanceMeters: 1 });
 
   assert.equal(pool.sync({ x: 0, y: 0, z: 0 }, 12, 0, true), true);
+  assert.equal(pool.lastSyncChanged, true);
   assert.equal(pool.sync({ x: 0.2, y: 0, z: 0 }, 12, 50), false);
   assert.equal(pool.sync({ x: 2, y: 0, z: 0 }, 12, 50), true);
+  assert.equal(pool.lastSyncChanged, false, '包围盒内容未变时不应重复标记变更');
   assert.equal(pool.sync({ x: 2, y: 0, z: 0 }, 12, 151), true);
+  assert.equal(pool.lastSyncChanged, false);
   assert.equal(pool.sync({ x: Number.NaN, y: 0, z: 0 }, 12, 200), false);
 
   assert.equal(queryCount, 3);

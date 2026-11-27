@@ -4,6 +4,7 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder.js';
 import type { AbstractMesh, Scene } from '@babylonjs/core';
 import type {
+  ManualRoamCollisionBounds,
   ManualRoamCollisionBoundsResolver,
   ManualRoamPoint,
 } from './manualRoamCollisionBounds';
@@ -26,14 +27,17 @@ export class ManualRoamCollisionProxyPool {
   private readonly resolveBounds: ManualRoamCollisionBoundsResolver;
   private readonly proxies: Mesh[] = [];
   private readonly proxySet = new Set<AbstractMesh>();
+  private readonly activeProxyById = new Map<string, Mesh>();
   private readonly material: StandardMaterial;
   private readonly maxColliders: number;
   private readonly refreshIntervalMs: number;
   private readonly refreshDistanceSquared: number;
+  private activeBounds: ManualRoamCollisionBounds[] = [];
   private lastPosition: ManualRoamPoint | null = null;
   private lastRefreshMs = Number.NEGATIVE_INFINITY;
   private debugVisible = false;
   private currentActiveCount = 0;
+  private lastSyncMutated = false;
 
   constructor(
     scene: Scene,
@@ -64,6 +68,10 @@ export class ManualRoamCollisionProxyPool {
     return this.currentActiveCount;
   }
 
+  get lastSyncChanged(): boolean {
+    return this.lastSyncMutated;
+  }
+
   has(mesh: AbstractMesh): boolean {
     return this.proxySet.has(mesh);
   }
@@ -71,6 +79,16 @@ export class ManualRoamCollisionProxyPool {
   /** 返回当前启用的 AABB 代理，供人物 surroundingMeshes 收窄碰撞扫描。 */
   getActiveMeshes(): readonly Mesh[] {
     return this.proxies.slice(0, this.currentActiveCount);
+  }
+
+  /** 返回当前激活的代理包围盒只读列表，供穿插检测与自动脱困使用。 */
+  getActiveBounds(): readonly ManualRoamCollisionBounds[] {
+    return this.activeBounds;
+  }
+
+  /** 按包围盒 ID 查找当前对应的代理 Mesh。 */
+  getActiveProxyById(id: string): Mesh | null {
+    return this.activeProxyById.get(id) ?? null;
   }
 
   sync(
@@ -85,6 +103,18 @@ export class ManualRoamCollisionProxyPool {
     if (!force && elapsed < this.refreshIntervalMs && movedSquared < this.refreshDistanceSquared) return false;
 
     const bounds = this.resolveBounds(position, radiusMeters).slice(0, this.maxColliders);
+    if (!force && haveSameCollisionBounds(this.activeBounds, bounds)) {
+      this.lastSyncMutated = false;
+      this.lastPosition = { ...position };
+      this.lastRefreshMs = nowMs;
+      return true;
+    }
+    this.activeProxyById.clear();
+    this.activeBounds = bounds.map((bound) => ({
+      id: bound.id,
+      minimum: { ...bound.minimum },
+      maximum: { ...bound.maximum },
+    }));
     for (let index = 0; index < bounds.length; index += 1) {
       const proxy = this.getOrCreateProxy(index);
       const bound = bounds[index];
@@ -98,14 +128,17 @@ export class ManualRoamCollisionProxyPool {
         (bound.minimum.z + bound.maximum.z) / 2,
       );
       proxy.scaling.copyFromFloats(sizeX, sizeY, sizeZ);
+      proxy.isVisible = this.debugVisible;
       proxy.visibility = this.debugVisible ? 0.25 : 0;
       proxy.setEnabled(true);
       proxy.computeWorldMatrix(true);
+      this.activeProxyById.set(bound.id, proxy);
     }
     for (let index = bounds.length; index < this.proxies.length; index += 1) {
       this.proxies[index].setEnabled(false);
     }
     this.currentActiveCount = bounds.length;
+    this.lastSyncMutated = true;
     this.lastPosition = { ...position };
     this.lastRefreshMs = nowMs;
     return true;
@@ -114,13 +147,18 @@ export class ManualRoamCollisionProxyPool {
   setDebugVisible(visible: boolean): void {
     this.debugVisible = visible;
     for (let index = 0; index < this.currentActiveCount; index += 1) {
-      this.proxies[index].visibility = visible ? 0.25 : 0;
+      const proxy = this.proxies[index];
+      proxy.isVisible = visible;
+      proxy.visibility = visible ? 0.25 : 0;
     }
   }
 
   deactivate(): void {
     for (const proxy of this.proxies) proxy.setEnabled(false);
     this.currentActiveCount = 0;
+    this.lastSyncMutated = false;
+    this.activeBounds = [];
+    this.activeProxyById.clear();
     this.lastPosition = null;
     this.lastRefreshMs = Number.NEGATIVE_INFINITY;
   }
@@ -129,6 +167,8 @@ export class ManualRoamCollisionProxyPool {
     for (const proxy of this.proxies) proxy.dispose(false, false);
     this.proxies.length = 0;
     this.proxySet.clear();
+    this.activeBounds = [];
+    this.activeProxyById.clear();
     this.material.dispose();
     this.currentActiveCount = 0;
   }
@@ -140,13 +180,37 @@ export class ManualRoamCollisionProxyPool {
     proxy.checkCollisions = true;
     proxy.isPickable = true;
     proxy.doNotSerialize = true;
-    proxy.visibility = 0;
+    proxy.isVisible = this.debugVisible;
+    proxy.visibility = this.debugVisible ? 0.25 : 0;
     proxy.material = this.material;
     proxy.metadata = { manualRoamCollisionProxy: true };
     this.proxies.push(proxy);
     this.proxySet.add(proxy);
     return proxy;
   }
+}
+
+function haveSameCollisionBounds(
+  left: readonly ManualRoamCollisionBounds[],
+  right: readonly ManualRoamCollisionBounds[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (
+      a.id !== b.id
+      || a.minimum.x !== b.minimum.x
+      || a.minimum.y !== b.minimum.y
+      || a.minimum.z !== b.minimum.z
+      || a.maximum.x !== b.maximum.x
+      || a.maximum.y !== b.maximum.y
+      || a.maximum.z !== b.maximum.z
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function squaredDistance(left: Readonly<ManualRoamPoint>, right: Readonly<ManualRoamPoint>): number {

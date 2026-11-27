@@ -15,10 +15,17 @@ export function LightingBakeManagerLighting({ scene, lighting, disabled, onChang
   const disabledLightIds = useMemo(() => new Set(lighting.disabledLightIds), [lighting.disabledLightIds]);
   const managed = lighting.main.source === 'managed';
   const environmentSource = lighting.environment?.source ?? 'scene';
+  const environmentPreset = lighting.environment?.preset ?? 'sandbox';
   const sceneSkybox = getSceneSkyboxSettings(scene);
   const changeEnvironmentSource = (source: 'scene' | 'sandbox') => onChange({ ...lighting, environment: { ...lighting.environment, source,
     rotationDegrees: source === 'sandbox' ? createGlbStandardPreviewLightingConfig(lighting).environment!.rotationDegrees
       : lighting.environment?.rotationDegrees ?? 0 } });
+  const changeEnvironmentPreset = (preset: 'sandbox' | 'warehouse-bright' | 'warehouse-dark') => {
+    const nextEnvironment = { ...lighting.environment, source: 'sandbox' as const, rotationDegrees: lighting.environment?.rotationDegrees ?? 0 };
+    if (preset === 'sandbox') delete nextEnvironment.preset;
+    else nextEnvironment.preset = preset;
+    onChange({ ...lighting, environment: nextEnvironment });
+  };
   const changeMain = (patch: Partial<SceneLightingConfig['main']>) => onChange({ ...lighting, main: { ...lighting.main, ...patch } });
   const changeFill = (patch: Partial<SceneLightingConfig['fill']>) => onChange({ ...lighting, fill: { ...lighting.fill, ...patch } });
   const lightLabels = { directional: '方向光', hemispheric: '半球光', point: '点光源', spot: '聚光灯', rectArea: '矩形面光' };
@@ -52,9 +59,15 @@ export function LightingBakeManagerLighting({ scene, lighting, disabled, onChang
       <option value="scene">场景天空盒</option><option value="sandbox">GLB 标准环境</option>
     </select></label>
     {environmentSource === 'sandbox' ? <>
+      <label className="lighting-manager-field"><span>内置环境</span><select aria-label="内置环境" value={environmentPreset} disabled={disabled}
+        onChange={event => changeEnvironmentPreset(event.target.value as 'sandbox' | 'warehouse-bright' | 'warehouse-dark')}>
+        <option value="sandbox">GLB 标准环境（Sandbox）</option>
+        <option value="warehouse-bright">明亮洁净仓（内置）</option>
+        <option value="warehouse-dark">科技暗黑仓（内置）</option>
+      </select></label>
       <LightingManagerNumberField label="环境旋转" value={lighting.environment?.rotationDegrees ?? 0} min={0} max={360} step={0.1} unit="°" disabled={disabled}
         onChange={rotationDegrees => onChange({ ...lighting, environment: { ...lighting.environment, source: 'sandbox', rotationDegrees } })} />
-      <p className="lighting-manager-note">当前选择：GLB 标准环境。应用后使用标准环境照明与反射；场景天空盒可在显示效果中单独开启，作为背景而不提供照明。</p>
+      <p className="lighting-manager-note">当前选择：内置环境贴图（随应用打包，无需联网）。应用后用于环境照明与反射；场景天空盒可在显示效果中单独开启作为背景。</p>
     </> : <p className="lighting-manager-note">{sceneSkybox?.sourceUrl
       ? '当前选择：场景天空盒。环境资源与旋转沿用场景天空盒配置。'
       : '当前选择：场景天空盒，但未配置场景天空盒，环境照明与反射尚无贴图来源。'}</p>}

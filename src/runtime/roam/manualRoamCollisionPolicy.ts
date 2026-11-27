@@ -19,6 +19,7 @@ export function isManualRoamCollisionExcludedMesh(mesh: AbstractMesh): boolean {
   const metadata = mesh.metadata as Record<string, unknown> | null;
   if (
     metadata?.manualRoamAvatar
+    || metadata?.manualRoamAvatarShadow
     || metadata?.manualRoamCollider
     || metadata?.manualRoamCollisionProxy
     || metadata?.manualRoamLocalTriangleCollider

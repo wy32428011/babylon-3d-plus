@@ -516,6 +516,8 @@ export type AssetEntry = {
   builtInSlotBindingConfig?: unknown;
   layerChangePlatformBindingConfig?: unknown;
   cargoContact?: Array<{ id: string; alias: string; nodes: string[] }>;
+  metaExtensions?: import('./shared/modelMetaExtensions.js').ModelMetaExtensions;
+  metadataSchemaVersion?: number;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
   dataPlatformResourceId?: string;

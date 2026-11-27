@@ -480,6 +480,7 @@ export const createProjectAssetsSlice: EditorSlice<
       asset.layerChangePlatformBindingConfig,
       asset.runtimeCapabilities,
       asset.deviceType,
+      asset.metaExtensions,
     );
     const modelIdentity = createModelTypeIdentityFromAsset(asset);
     if (modelIdentity && entity.components.modelAsset) entity.components.modelAsset.dataPlatformModel = modelIdentity;

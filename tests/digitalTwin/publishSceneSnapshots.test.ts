@@ -209,3 +209,51 @@ for (const version of [8, '7']) test(`发布快照与准备结果拒绝未支持
     assert.equal(await readFile(entry, 'utf8'), valid);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('发布实例守卫允许更新或清除 metaExtensions 与 cargoContactSupports，但拒绝篡改用户选中的 cargoContact', () => {
+  const previous: any = {
+    version: 5,
+    scene: {
+      entityIds: ['gen'],
+      entities: {
+        gen: {
+          id: 'gen',
+          components: {
+            modelAsset: { sourceUrl: 'old', assetCode: 'G-01', metaExtensions: { customDocking: { offset: 1 } } },
+            modelGenerator: {
+              defaultTarget: {
+                kind: 'model',
+                assetId: 'old',
+                displayName: '模板',
+                cargoContactSupports: [{ id: 's1', alias: '旧顶升', nodes: ['TM'] }],
+                cargoContact: { supportId: 's1' },
+                modelAsset: { sourceUrl: 'old', metaExtensions: { customDocking: { offset: 1 } } },
+              },
+              rules: [],
+            },
+          },
+        },
+      },
+    },
+  };
+  const updated = structuredClone(previous);
+  updated.scene.entities.gen.components.modelAsset.metaExtensions = { customDocking: { offset: 2 }, extra: 'v2' };
+  updated.scene.entities.gen.components.modelGenerator.defaultTarget.cargoContactSupports = [
+    { id: 's1', alias: '新顶升', nodes: ['TM', 'HJ'] },
+  ];
+  updated.scene.entities.gen.components.modelGenerator.defaultTarget.modelAsset.metaExtensions = { customDocking: { offset: 2 } };
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(JSON.stringify(previous), JSON.stringify(updated)));
+
+  const cleared = structuredClone(previous);
+  delete cleared.scene.entities.gen.components.modelAsset.metaExtensions;
+  delete cleared.scene.entities.gen.components.modelGenerator.defaultTarget.cargoContactSupports;
+  delete cleared.scene.entities.gen.components.modelGenerator.defaultTarget.modelAsset.metaExtensions;
+  assert.doesNotThrow(() => assertPublishSceneInstanceStatePreserved(JSON.stringify(previous), JSON.stringify(cleared)));
+
+  const tamperedSelection = structuredClone(updated);
+  tamperedSelection.scene.entities.gen.components.modelGenerator.defaultTarget.cargoContact.supportId = 'other';
+  assert.throws(
+    () => assertPublishSceneInstanceStatePreserved(JSON.stringify(previous), JSON.stringify(tamperedSelection)),
+    /cargoContact/,
+  );
+});

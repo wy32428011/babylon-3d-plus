@@ -21,6 +21,7 @@ import type { Entity } from '../../../editor/model/Entity';
 import { createSceneSkyboxSettingsFromEntity, getSceneSkyboxEntity, getSceneSkyboxSettings, type SceneDocument, type SceneEnvironmentSettings } from '../../../editor/model/SceneDocument';
 import { SceneSkyboxRuntime } from '../SceneSkyboxRuntime';
 import { SceneShadowRuntime } from '../SceneShadowRuntime';
+import { MobileBlobShadowRuntime } from '../MobileBlobShadowRuntime';
 import { SceneEnvironmentRuntime, type SceneEnvironmentApplyOptions } from '../SceneEnvironmentRuntime';
 import { waitForSceneRenderReady } from '../sceneRenderReadiness';
 import type { EnvironmentApplyResult, EnvironmentWorldBounds } from '../../../editor/model/environmentRuntime';
@@ -70,6 +71,7 @@ export class EnvironmentAndSkyboxController {
   public skyboxLightingSignature = '';
   public allowDayNightCycle: boolean | null = null;
   public shadowRuntime!: SceneShadowRuntime;
+  public mobileBlobShadowRuntime!: MobileBlobShadowRuntime;
   public lightingRuntime!: SceneLightingRuntime;
   /** 内部完整分类A/B诊断；不写入场景，不改变失效或业务输入。 */
   public lightingContextAssemblyMode: 'direct' | 'legacy' = 'direct';
@@ -112,6 +114,7 @@ export class EnvironmentAndSkyboxController {
     if (this.disposed) return;
     this.disposed = true;
     this.disposeEnvironment();
+    runSceneRuntimeCleanup(this.context, '移动底盘软影', () => this.mobileBlobShadowRuntime?.dispose());
     runSceneRuntimeCleanup(this.context, '场景阴影', () => this.shadowRuntime.dispose());
     runSceneRuntimeCleanup(this.context, '场景天空', () => this.skyboxRuntime.dispose());
     this.appearanceSignature = this.skyboxLightingSignature = '';
@@ -195,7 +198,8 @@ export class EnvironmentAndSkyboxController {
     if (signature === this.skyboxLightingSignature) return;
     this.skyboxLightingSignature = signature;
     this.skyboxRuntime.setLightingOverrides({ visible: appearance.skyboxVisible, intensity: lighting.environmentIntensity,
-      source: lighting.environment?.source ?? 'scene', rotationDegrees: lighting.environment?.rotationDegrees ?? 0 });
+      source: lighting.environment?.source ?? 'scene', rotationDegrees: lighting.environment?.rotationDegrees ?? 0,
+      ...(lighting.environment?.preset ? { preset: lighting.environment.preset } : {}) });
   }
 
   /** 统一光照是唯一参数来源；旧扁平字段仅在阴影算法边界临时派生。 */
@@ -224,6 +228,10 @@ export class EnvironmentAndSkyboxController {
     this.shadowRuntime.applySettings({ ...lighting.shadows, mode: 'hybrid', catcherEnabled: false,
       sunAzimuthDegrees: lighting.main.azimuthDegrees, sunElevationDegrees: lighting.main.elevationDegrees,
       sunIntensity: lighting.main.intensity, fillIntensity: lighting.fill.intensity, iblIntensityMax: lighting.environmentIntensity });
+    this.mobileBlobShadowRuntime?.sync(lighting.shadows.mobileBlobShadows === true, () => [
+      ...this.dependencies.assets.models.values(),
+      ...this.dependencies.outputs.spawnedDeviceModels.values(),
+    ]);
     return this.environmentRuntime.syncLighting(lighting.shadows);
   }
 
@@ -502,6 +510,7 @@ export class EnvironmentAndSkyboxController {
   initializeShadowRuntime(): void {
     this.shadowRuntime = new SceneShadowRuntime(this.context.scene);
     this.shadowRuntime.setCacheInvalidationMode(this.lightingOptimizationOptions.shadowCache);
+    this.mobileBlobShadowRuntime = new MobileBlobShadowRuntime(this.context.scene);
   }
 
   /** 按原构造顺序连接此领域的资源与回调。 */

@@ -37,7 +37,13 @@ type ActiveSkybox = {
 };
 type PendingSkybox = { token: number; entityKey: string; signature: string; controller: AbortController };
 export type SkyboxReadiness = { phase: 'idle' | 'loading' | 'ready' | 'error'; message: string | null; sourceUrl: string | null };
-export type SkyboxLightingOverrides = { visible: boolean; intensity: number; source?: 'scene' | 'sandbox'; rotationDegrees?: number };
+export type SkyboxLightingOverrides = {
+  visible: boolean;
+  intensity: number;
+  source?: 'scene' | 'sandbox';
+  rotationDegrees?: number;
+  preset?: 'warehouse-bright' | 'warehouse-dark';
+};
 type LoadStage = SkyboxEnvironmentLoadStage | 'preparing';
 const DEFAULT_ENVIRONMENT_INTENSITY = 1;
 const LEGACY_SKYBOX_ENTITY_KEY = '__legacy_scene_skybox';
@@ -105,11 +111,12 @@ export class SceneSkyboxRuntime {
   setLightingOverrides(value: SkyboxLightingOverrides | null): void {
     const neededBefore = this.requiresSkybox();
     const sourceChanged = (this.lightingOverrides?.source ?? 'scene') !== (value?.source ?? 'scene');
+    const presetChanged = (this.lightingOverrides?.preset ?? 'sandbox') !== (value?.preset ?? 'sandbox');
     const lightingChanged = this.lightingOverrides?.intensity !== value?.intensity;
     this.lightingOverrides = value;
-    this.sandboxEnvironment.sync(value?.source === 'sandbox', value?.rotationDegrees ?? 0);
+    this.sandboxEnvironment.sync(value?.source === 'sandbox', value?.rotationDegrees ?? 0, value?.preset ?? 'sandbox');
     if (this.active && this.desired) this.applyTarget(this.active, this.desired, false);
-    if ((sourceChanged || lightingChanged) && (sourceChanged || value?.source === 'sandbox' || (this.active && this.desired))) this.applyEnvironment(true);
+    if ((sourceChanged || presetChanged || lightingChanged) && (sourceChanged || presetChanged || value?.source === 'sandbox' || (this.active && this.desired))) this.applyEnvironment(true);
     if (this.desired && neededBefore !== this.requiresSkybox()) this.sync(this.desired);
   }
 

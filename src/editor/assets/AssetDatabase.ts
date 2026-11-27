@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
+import { modelMetaExtensionsField, type ModelMetaExtensions } from '../../../electron/shared/modelMetaExtensions.ts';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { ModelParameterConfig } from '../model/modelParameters';
@@ -46,6 +47,8 @@ export type AssetEntry = {
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
   cargoContact?: CargoContactSupport[];
+  metaExtensions?: ModelMetaExtensions;
+  metadataSchemaVersion?: number;
   libraryKind?: ModelAssetLibraryKind;
   source?: 'project' | 'data-platform';
   availability?: 'active' | 'stale' | 'unavailable' | 'deleted';
@@ -257,6 +260,7 @@ export function decodeModelAssetDragPayload(rawPayload: string): ProjectModelAss
     if (builtInSlotBindingConfig) asset.builtInSlotBindingConfig = builtInSlotBindingConfig;
     if (layerChangePlatformBindingConfig) asset.layerChangePlatformBindingConfig = layerChangePlatformBindingConfig;
     if (cargoContact?.length) asset.cargoContact = cargoContact;
+    Object.assign(asset, modelMetaExtensionsField(payload.metaExtensions));
     const source = payload.source === 'project' || payload.source === 'data-platform' ? payload.source : undefined;
     const availability = payload.availability === 'active' || payload.availability === 'stale'
       || payload.availability === 'unavailable' || payload.availability === 'deleted'

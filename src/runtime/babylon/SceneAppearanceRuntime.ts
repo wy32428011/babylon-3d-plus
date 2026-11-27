@@ -1,4 +1,5 @@
 import { refreshSceneLightingMaterialDrawCaches } from './refreshDetachedInstanceSourceMaterials.ts';
+import { SceneSsaoRuntime } from './SceneSsaoRuntime.ts';
 import { ImageProcessingConfiguration } from '@babylonjs/core/Materials/imageProcessingConfiguration.js';
 import { Color3 } from '@babylonjs/core/Maths/math.color.js';
 import { DefaultRenderingPipeline } from '@babylonjs/core/PostProcesses/RenderPipeline/Pipelines/defaultRenderingPipeline.js';
@@ -21,7 +22,10 @@ export class SceneAppearanceRuntime {
   private bloomMsaaContextObserver: Observer<AbstractEngine> | null = null;
   private bloomMsaaRequested = false;
   private bloomMsaaReason: 'inactive' | 'disabled' | 'configured' | 'unsupported-hardware' = 'inactive';
-  constructor(private readonly scene: Scene) {}
+  private readonly ssaoRuntime: SceneSsaoRuntime;
+  constructor(private readonly scene: Scene) {
+    this.ssaoRuntime = new SceneSsaoRuntime(scene);
+  }
 
   private capture() {
     const image = this.scene.imageProcessingConfiguration;
@@ -49,6 +53,7 @@ export class SceneAppearanceRuntime {
       this.pipeline.bloomWeight = appearance.bloomWeight; this.syncCamera();
       this.syncBloomMsaa(appearance.bloomMsaaEnabled === true);
     } else this.disposePipeline();
+    this.ssaoRuntime.sync(appearance.ssaoMode ?? 'off');
     if (previousImage !== this.imageSignature()) refreshSceneLightingMaterialDrawCaches(this.scene);
   }
 
@@ -78,6 +83,10 @@ export class SceneAppearanceRuntime {
       active: Boolean(this.pipeline), reason: this.bloomMsaaReason });
   }
 
+  getSsaoState() {
+    return this.ssaoRuntime.getState();
+  }
+
   private imageSignature(): string {
     const image = this.scene.imageProcessingConfiguration;
     return JSON.stringify([image.exposure, image.contrast, image.toneMappingEnabled, image.toneMappingType, image.applyByPostProcess]);
@@ -104,6 +113,7 @@ export class SceneAppearanceRuntime {
 
   dispose(): void {
     const previousImage = this.imageSignature();
+    this.ssaoRuntime.dispose();
     this.disposePipeline();
     const baseline = this.baseline;
     if (!baseline) return;

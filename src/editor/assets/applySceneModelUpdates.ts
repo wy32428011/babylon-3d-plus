@@ -1,4 +1,5 @@
 import { collectEffectModelReferences } from '../../../electron/shared/effectDeploymentReferences';
+import { modelMetaExtensionsField } from '../../../electron/shared/modelMetaExtensions.ts';
 import { matchesModelTypeReference } from '../../../electron/shared/modelTypeIdentity';
 import type { ProjectModelAssetEntry } from '../../../electron/types';
 import { getClickEventModelResourceKey } from '../../../electron/shared/clickEventModelIdentity';
@@ -26,7 +27,8 @@ function createUpdatedTemplate(asset: ProjectModelAssetEntry, sourceKey: string,
     || (asset.layerChangePlatformBindingConfig && !layerChangePlatformBindingConfig)) onWarning?.(`模型「${asset.name}」的部分新版参数或绑定配置无效，已忽略无效配置并应用新版模型。`);
   const target = createModelGeneratorTargetFromAsset({ ...asset, parameterConfig: parameterConfig ?? undefined,
     dataDrivenConfig: dataDrivenConfig ?? undefined, builtInSlotBindingConfig: builtInSlotBindingConfig ?? undefined,
-    layerChangePlatformBindingConfig: layerChangePlatformBindingConfig ?? undefined });
+    layerChangePlatformBindingConfig: layerChangePlatformBindingConfig ?? undefined,
+    ...modelMetaExtensionsField(asset.metaExtensions) });
   const key = getClickEventModelResourceKey(asset.sourceUrl);
   if (!target || !key) throw new Error('新版模型资源或身份无效，原场景保持不变。');
   const [kind, resourceId, modelPath] = key.split(':') as ['model' | 'combo', string, string];
@@ -73,7 +75,7 @@ export function applySceneModelUpdates(
     if (!asset) continue;
     const template = templates.get(asset) ?? createUpdatedTemplate(asset, sourceKey, warning => warnings.add(warning));
     templates.set(asset, template);
-    const before = JSON.stringify(reference.asset);
+    const before = JSON.stringify({ asset: reference.asset, target: reference.target });
     // 漫游人物只有资源引用；完整模型模板才参与参数与脚本契约合并。
     const merged = 'lengthUnit' in reference.asset
       ? mergeModelAssetUpdate(reference.asset as ModelAssetTemplate, template, String(reference.asset.assetCode ?? reference.target?.displayName ?? asset.name), warning => warnings.add(warning))
@@ -90,7 +92,7 @@ export function applySceneModelUpdates(
       if (asset.cargoContact) reference.target.cargoContactSupports = structuredClone(asset.cargoContact);
       else delete reference.target.cargoContactSupports;
     }
-    if (JSON.stringify(reference.asset) !== before) updatedCount++;
+    if (JSON.stringify({ asset: reference.asset, target: reference.target }) !== before) updatedCount++;
   }
   for (const device of devices) {
     const asset = byUrl.get(String(device.sourceUrl));

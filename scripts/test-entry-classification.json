@@ -4382,7 +4382,7 @@
     },
     {
       "file": "scripts/test-groups.mjs",
-      "sha256": "5aa9fad0e6e1cf3229bf4596ea01e6e8c78f07e9607e4948f143c2948bb1cb9d",
+      "sha256": "642d045a535bfceb86ee9c3210431d4e02f4f6f668213cb8609ae3b372d96c4e",
       "disposition": "tooling",
       "domain": null,
       "command": "node scripts/test-groups.mjs --check",
@@ -13074,7 +13074,7 @@
           "text": "assert.equal(metrics.textureBytes, metrics.cacheBytes, '整图复用没有独立深度副本');"
         }
       ],
-      "sha256": "6885a5e258987157ea1e783dbc057d2a446f8a86e28e3b243914dcb0e5c805a7"
+      "sha256": "2d2faec40713799e2b402df0b0cbaf0ad9e29b2e181a5f8bcf21fcac173db5f2"
     },
     {
       "file": "tests/runtime/lightingDraftPreviewController.test.mjs",

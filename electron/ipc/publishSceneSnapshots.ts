@@ -18,7 +18,8 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const RESOURCE_FIELDS = new Set(['id', 'name', 'displayName', 'sourceUrl', 'sourcePath', 'path', 'assetId', 'assetRevision',
   'dataPlatformModel', 'sourceSnapshot', 'packagePath', 'metadataPath', 'thumbnailPath', 'thumbnailUrl', 'scriptPaths', 'scriptAssets',
   'parameterConfig', 'parameterScriptMetadata', 'animationScriptMetadata', 'animationConfig', 'fileSizeBytes', 'deviceType', 'runtimeCapabilities',
-  'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig', 'cargoContact']);
+  'lengthUnit', 'unitScaleToMeters', 'dataDrivenConfig', 'builtInSlotBindingConfig', 'layerChangePlatformBindingConfig', 'cargoContactSupports',
+  'metaExtensions']);
 
 /** 只描述发布预检读取的 JSON 字段；解析边界与原有校验及拒绝顺序保持一致。 */
 type PublishSubDeviceDeclaration = { role?: unknown; device?: { devType?: unknown } };

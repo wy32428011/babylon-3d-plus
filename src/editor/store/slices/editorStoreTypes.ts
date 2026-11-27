@@ -4,6 +4,7 @@ import { type SceneOpeningConfig } from '../../model/sceneOpeningAnimation';
 import { type FailedSceneResources } from '../../assets/restoreFailedSceneResources';
 import { type AlarmManagerComponent } from '../../model/alarmManager';
 import { type EntityLightingSettings, type LightingNodeOverride, type LightingClassificationEntry, type SceneLightingBakeSettings, type SceneLightingBakeSnapshot } from '../../../../electron/shared/sceneLightingBakeContract';
+import type { SceneAppearanceConfig, SceneLightingConfig } from '../../../../electron/shared/sceneLightingConfig';
 import type { ManualRoamAvatar } from '../../model/components';
 import type { InspectionBinding } from '../../model/inspectionBinding';
 import { type LightingManagerTab, type LightingManagerFocus, type LightingManagementDraft, type LightingManagementResult } from '../lightingManagementState';
@@ -315,6 +316,14 @@ export type EditorState = {
   setLightingManagerTab: (tab: LightingManagerTab) => void;
   refreshLightingManagerPreview: () => void;
   applyLightingManagementDraft: (draft: LightingManagementDraft) => LightingManagementResult;
+  applyQuickLightingUpdate: (
+    label: string,
+    updater: (current: { lighting: SceneLightingConfig; appearance: SceneAppearanceConfig }) => {
+      lighting?: SceneLightingConfig;
+      appearance?: SceneAppearanceConfig;
+    },
+  ) => LightingManagementResult;
+  updateEntityQuickShadowOverride: (entityIds: string[], field: 'castShadows' | 'receiveShadows', value: boolean) => void;
   lightingBakeStatus: { phase: 'idle' | 'preparing' | 'baking' | 'applying' | 'error' | 'cancelled'; message: string | null; progress?: number; source?: 'runtime' };
   setLightingBakeRuntimeError: (message: string | null) => void;
   requestLightingBake: () => void;

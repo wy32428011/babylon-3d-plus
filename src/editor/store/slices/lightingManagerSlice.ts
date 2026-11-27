@@ -1,4 +1,6 @@
 import { normalizeEntityLightingSettings, normalizeSceneLightingBakeSettings, validateSceneLightingBakeSnapshot, getSceneLightingBakeSignature, requiresSceneLightingBake, isLightingLightmapRecipeCompatible, type EntityLightingSettings } from '../../../../electron/shared/sceneLightingBakeContract';
+import { getSceneAppearanceConfig, getSceneLightingConfig, normalizeSceneAppearanceConfig, normalizeSceneLightingConfig } from '../../../../electron/shared/sceneLightingConfig';
+import { LIGHTING_POLICY_FIELDS } from '../../../../electron/shared/sceneLightingPolicy';
 import { prepareLightingManagementDraft } from '../lightingManagementState';
 import { executeCommand } from '../../commands/CommandHistory';
 import { updateSceneDocumentCommand } from '../../commands/entityCommands';
@@ -23,6 +25,8 @@ export const createLightingManagerSlice: EditorSlice<
   "setLightingManagerTab" |
   "refreshLightingManagerPreview" |
   "applyLightingManagementDraft" |
+  "applyQuickLightingUpdate" |
+  "updateEntityQuickShadowOverride" |
   "lightingBakeStatus" |
   "setLightingBakeRuntimeError" |
   "lightingClassification" |
@@ -92,6 +96,97 @@ export const createLightingManagerSlice: EditorSlice<
     });
     return { ok: true, message: '集中光照配置已应用。' };
   },
+  applyQuickLightingUpdate: (label, updater) => {
+    const state = get();
+    if (isRuntimePreviewState(state)) return { ok: false, message: '请停止运行预览后再修改光照设置。' };
+    if (state.lightingBakeRequest
+      || ['preparing', 'baking', 'applying'].includes(state.lightingBakeStatus.phase)) {
+      return { ok: false, message: '烘焙任务正在进行，请等待完成或取消后再修改光照设置。' };
+    }
+    const currentLighting = getSceneLightingConfig(state.scene);
+    const currentAppearance = getSceneAppearanceConfig(state.scene);
+    let nextLighting: ReturnType<typeof normalizeSceneLightingConfig>;
+    let nextAppearance: ReturnType<typeof normalizeSceneAppearanceConfig>;
+    try {
+      const patch = updater({ lighting: structuredClone(currentLighting), appearance: structuredClone(currentAppearance) });
+      nextLighting = patch.lighting
+        ? normalizeSceneLightingConfig({ ...patch.lighting, result: currentLighting.result })
+        : currentLighting;
+      nextAppearance = patch.appearance ? normalizeSceneAppearanceConfig(patch.appearance) : currentAppearance;
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : '光照或显示配置无效。' };
+    }
+    if (
+      JSON.stringify(nextLighting) === JSON.stringify(currentLighting)
+      && JSON.stringify(nextAppearance) === JSON.stringify(currentAppearance)
+    ) {
+      return { ok: true, message: '配置没有变化。' };
+    }
+    set(current => {
+      if (current.scene !== state.scene || current.sceneSessionId !== state.sceneSessionId) return current;
+      const command = updateSceneDocumentCommand(label, scene => ({
+        ...scene,
+        sceneSettings: { ...scene.sceneSettings, lighting: nextLighting, appearance: nextAppearance },
+      }));
+      return {
+        ...executeCommand(current.scene, current.history, command),
+        lightingDraftPreview: null,
+        lightingManagerPreviewRequest: current.lightingManagerPreviewRequest + 1,
+      };
+    });
+    return { ok: true };
+  },
+  updateEntityQuickShadowOverride: (entityIds, field, value) => set(state => {
+    if (isRuntimePreviewState(state)) return guardRuntimePreviewMutation(state, '修改对象阴影设置');
+    const changes = new Map<string, EntityLightingSettings>();
+    for (const id of new Set(entityIds)) {
+      const entity = state.scene.entities[id];
+      if (!entity || entity.isFolder || isEntityEffectivelyLocked(state.scene.entities, entity)) continue;
+      const raw = entity.components.lighting;
+      const before = normalizeEntityLightingSettings(raw);
+      const inheritSource = raw
+        ? (Array.isArray(raw.inheritPolicy) ? raw.inheritPolicy : undefined)
+        : [...LIGHTING_POLICY_FIELDS];
+      const nextInherit = inheritSource ? inheritSource.filter(item => item !== field) : undefined;
+      const next = normalizeEntityLightingSettings({
+        ...before,
+        [field]: value,
+        ...(nextInherit !== undefined ? { inheritPolicy: nextInherit } : {}),
+      });
+      if (JSON.stringify(raw) !== JSON.stringify(next)) changes.set(id, next);
+    }
+    const currentLighting = getSceneLightingConfig(state.scene);
+    const enableOverrideFlag = currentLighting.shadows.managementMode === 'automatic'
+      && currentLighting.shadows.respectEntityShadowOverrides !== true;
+    if (!changes.size && !enableOverrideFlag) return state;
+    const label = field === 'castShadows' ? '切换投射阴影' : '切换接收阴影';
+    const command = updateSceneDocumentCommand(label, scene => {
+      const entities = changes.size ? { ...scene.entities } : scene.entities;
+      for (const [id, lighting] of changes) {
+        entities[id] = { ...entities[id], components: { ...entities[id].components, lighting } };
+      }
+      if (!enableOverrideFlag) return { ...scene, entities };
+      const sceneLighting = getSceneLightingConfig(scene);
+      return {
+        ...scene,
+        entities,
+        sceneSettings: {
+          ...scene.sceneSettings,
+          lighting: normalizeSceneLightingConfig({
+            ...sceneLighting,
+            shadows: { ...sceneLighting.shadows, respectEntityShadowOverrides: true },
+          }),
+        },
+      };
+    });
+    return {
+      ...executeCommand(state.scene, state.history, command),
+      ...(state.lightingBakeRequest ? {
+        lightingBakeRequest: null,
+        lightingBakeStatus: { phase: 'cancelled' as const, message: '阴影设置已更改，本次烘焙任务已取消。' },
+      } : {}),
+    };
+  }),
   lightingBakeStatus: { phase: 'idle', message: null },
   setLightingBakeRuntimeError: message => set(state => {
     if (state.lightingBakeRequest) return state;

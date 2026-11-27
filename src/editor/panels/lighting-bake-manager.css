@@ -359,3 +359,26 @@
 .lighting-manager-device-status { display: flex; align-items: flex-start; gap: 8px; margin-top: 7px; }
 .lighting-manager-device-status p { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .lighting-manager-device-status button { flex: 0 0 auto; font-size: 11px; padding: 4px 7px; }
+
+/* 日常实时光照与仓储阴影快捷面板样式 */
+.lighting-quick-section { display: grid; gap: 6px; }
+.lighting-quick-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: #cbd5dc; }
+.lighting-quick-muted { color: #96a4ae; font-size: 11px; }
+.lighting-quick-preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.lighting-quick-preset-btn, .lighting-quick-tier-btn {
+  min-height: 28px; padding: 4px 6px; border: 1px solid #4e585e; border-radius: 3px;
+  background: #2b3136; color: #dbe3e8; font-size: 11px; cursor: pointer; text-align: center;
+}
+.lighting-quick-preset-btn:hover:not(:disabled), .lighting-quick-tier-btn:hover:not(:disabled) {
+  background: #364047; border-color: #778791;
+}
+.lighting-quick-preset-btn:disabled, .lighting-quick-tier-btn:disabled { opacity: .48; cursor: not-allowed; }
+.lighting-quick-tier-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.lighting-quick-tier-btn.is-active { border-color: #16cde0; background: #124d58; color: #dcfaff; font-weight: 600; }
+.lighting-quick-toggles { display: grid; gap: 5px; padding-top: 4px; border-top: 1px solid #3c4348; }
+.lighting-quick-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #d6dfe4; cursor: pointer; }
+.lighting-quick-check input[type="checkbox"] { width: 14px; height: 14px; margin: 0; accent-color: #00d3e4; }
+.lighting-quick-sliders { display: grid; gap: 6px; padding-top: 4px; border-top: 1px solid #3c4348; }
+.lighting-quick-sliders .scene-slider-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) 38px; align-items: center; gap: 6px; font-size: 11px; color: #cad4db; }
+.lighting-quick-sliders .scene-slider-row output { text-align: right; font-variant-numeric: tabular-nums; color: #dce5eb; }
+.lighting-inspector-shadow-toggles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }

@@ -4,10 +4,10 @@
 
 ## 统计与证据边界
 
-- 候选文件总数：1012；测试/runner/smoke 候选：888；fixture/helper/治理工具：124。
-- npm 测试/smoke 入口：157；有静态入口的候选：722；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
+- 候选文件总数：1018；测试/runner/smoke 候选：894；fixture/helper/治理工具：124。
+- npm 测试/smoke 入口：159；有静态入口的候选：728；无静态 npm 入口：166（已登记定向命令与条件）；未分类：0。
 - P4 逐文件复核原始 301 项，分类注册表保留源码摘要、用途、执行命令、前置与证据行；完整性/摘要/证据漂移即失败。登记表示已识别如何运行，不等于运行成功。新增无静态入口的候选必须补分类。
-- CI 静态可达候选：167。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
+- CI 静态可达候选：170。这些数字不是测试执行数、断言数或通过数，不能宣称全仓单测已覆盖。
 - 范围为 tests/ 的全部文件及 scripts/ 中 含 test/smoke 分隔词或 run-*integration 命名的文件（排除清单生成器）；其他目录/自定义命名测试不在自动发现范围。
 - 解析 package.json 名称含 test/smoke 的入口（排除 test:inventory 工具）、npm run 递归、node/electron 的显式文件与 * / ** glob。构建/打包只记录前置，不运行。动态编译与 Electron runner 使用已核对的限定适配；其他动态调用保守标记待复核。
 - CI 只读取 workflow 单行 run；可达表示配置选中，不代表远端执行成功。平台为源码线索，未标 Windows 的文件也未证明跨平台。
@@ -411,6 +411,7 @@
 | tests/digitalTwin/viewerCapabilitiesBuild.test.mjs | 包含文件/源码断言候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/digitalTwin/viewerModelClick.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types；含服务/端口；复核端口与关闭流程 | .github/workflows/ci.yml: windows-latest |
 | tests/digitalTwin/viewerTemplateCapabilities.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit | 未证明跨平台 | Node 原生 transform-types | .github/workflows/ci.yml: windows-latest |
+| tests/digitalTwin/warehouseLightingPresets.test.ts | Node 测试候选 | test、test:ci、test:digital-twin、test:digital-twin:unit、test:warehouse-lighting | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/editor/agvMap.test.ts | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/agvSpawnerScene.test.mjs | Node 测试候选 | test:agv-spawner | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/alarmCustomProperty.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
@@ -447,6 +448,8 @@
 | tests/editor/conveyorArrowEffect.test.ts | Node 测试候选；node-contract/motion | test:contracts、test:contracts:motion | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/conveyorSurfaceArrowDrag.test.mjs | Node 测试候选；node-contract/motion | test:contracts、test:contracts:motion | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/conveyorSurfaceArrows.integration.test.mjs | Node 测试候选；node-contract/motion | test:contracts、test:contracts:motion | 未证明跨平台 | Vite 构建或 SSR；保留源码模块图、临时目录与 teardown；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/editor/crossSceneClipboard.test.ts | Node 测试候选 | test:cross-scene-clipboard | 含 Windows 路径/命令，需 Windows 复核 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/editor/crossSceneClipboardIpc.test.ts | 包含文件/源码断言候选 | test:cross-scene-clipboard | 未证明跨平台 | Node 原生 transform-types；含全局状态/环境变量；保留独立进程；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/dataPlatformSceneResourcePreparation.test.ts | 包含文件/源码断言候选 | test:scene-loading、test:scene-model-update | 未证明跨平台 | Node 原生 strip-types；Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/dataPlatformScreenBridge.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | P4 SSR helper一次预构建本文件全部真实入口模块图，共享Store/依赖单例；Babylon维持本项目外置原生Node单例，无watcher/transport/HMR，保留t.after/after/finally清理与原断言/阈值；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
 | tests/editor/dataPlatformScreenOverlay.test.ts | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | 使用 p4SsrTestModules 单次预构建真实模块图；2 条原始断言保持；无 watcher/HMR；after 清理本次目录；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
@@ -555,6 +558,7 @@
 | tests/editor/transformPreviewStore.test.ts | Node 测试候选 | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/unifiedModelAssetUpdate.test.ts | Node 测试候选 | test:unified-model-sync | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/editor/visibilityToggleEffectiveState.test.mjs | Node 测试候选；node-contract/effects | test:contracts、test:contracts:effects | 未证明跨平台 | P4 SSR helper一次预构建本文件全部真实入口模块图，共享Store/依赖单例；Babylon维持本项目外置原生Node单例，无watcher/transport/HMR，保留t.after/after/finally清理与原断言/阈值；包含模块 hook、全局状态或环境变量；禁止合并为共享测试进程；含全局状态/环境变量；保留独立进程；安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |
+| tests/editor/warehouseQuickLighting.integration.test.mjs | Node 测试候选 | test、test:ci、test:warehouse-lighting | 未证明跨平台 | Node 原生 strip-types；含全局状态/环境变量；保留独立进程；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/encoding/cadTextEncoding.test.ts | Node 测试候选 | test:encoding | 未证明跨平台 | Node 原生 strip-types | 否 / 未确认 |
 | tests/encoding/utf8Integrity.test.mjs | 包含文件/源码断言候选 | test:encoding | 未证明跨平台 | 含全局状态/环境变量；保留独立进程 | 否 / 未确认 |
 | tests/encoding/utf8Transport.test.ts | Node 测试候选 | test:encoding | 未证明跨平台 | Node 原生 strip-types | 否 / 未确认 |
@@ -611,6 +615,7 @@
 | tests/roam/manualRoamCollisionBounds.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCollisionPolicy.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCollisionProxyPool.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
+| tests/roam/manualRoamCollisionRecovery.test.ts | NullEngine | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；含服务/端口；复核端口与关闭流程；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamControlsContract.test.ts | 包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamCore.test.ts | Node 测试候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/roam/manualRoamFootIK.test.ts | NullEngine；包含文件/源码断言候选 | test:manual-roam | 未证明跨平台 | Node 原生 strip-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
@@ -843,6 +848,7 @@
 | tests/runtime/thinInstanceSparseUpdates.test.ts | NullEngine | test:babylon-optimization | 未证明跨平台 | Node 原生 transform-types；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/transformGizmoPreviewIsolation.test.mjs | NullEngine；包含文件/源码断言候选 | test:optimization-p2 | 未证明跨平台 | Node 原生 transform-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | 否 / 未确认 |
 | tests/runtime/virtualConveyorPackage.test.mjs | NullEngine；包含文件/源码断言候选 | test:virtual-conveyor | 未证明跨平台 | 未静态确认；保留当前运行方式 | 否 / 未确认 |
+| tests/runtime/warehouseShadowFilters.test.ts | NullEngine；包含文件/源码断言候选 | test、test:ci、test:warehouse-lighting | 未证明跨平台 | Node 原生 strip-types；模块加载 hook；保留进程隔离；该 node 命令 --test-concurrency=1 | .github/workflows/ci.yml: windows-latest |
 | tests/shared/appUpdate.test.ts | Node 测试候选 | test:app-update | 未证明跨平台 | Node 原生 strip-types | 否 / 未确认 |
 | tests/shared/devElectronStartup.test.mjs | 包含文件/源码断言候选 | test:dev-electron | 含 Windows 路径/命令，需 Windows 复核 | 含全局状态/环境变量；保留独立进程；含服务/端口；复核端口与关闭流程 | 否 / 未确认 |
 | tests/shared/randomUuid.test.ts | Node 测试候选；node-contract/editor | test:contracts、test:contracts:editor | 未证明跨平台 | 安装 package-lock.json 对应依赖；独立进程；记录真实 exit code，不把清单登记当作通过 | 否 / 未确认 |

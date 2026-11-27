@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../shared/modelDeviceType.ts';
+import { MODEL_METADATA_SCHEMA_VERSION } from '../shared/modelMetaExtensions.ts';
 import { replaceAsciiControlCharacters } from '../shared/asciiControlCharacters.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, promises as fs } from 'node:fs';
@@ -700,7 +701,6 @@ async function pinSceneModelVersion(
   const targetPackage = path.join(versionRoot, entry.runtimeRevision, 'Assets', 'Models', `${path.basename(sourcePackage)}-${layoutKey}`);
   assertPathInside(versionRoot, targetPackage, '固定模型版本目录');
   await assertRecoveryPathInsideRoot(versionRoot, targetPackage);
-  const pinned = relocateAssetEntry(asset, sourcePackage, targetPackage, entry);
   const verify = async (candidate: ProjectModelAssetEntry) => {
     assertNotAborted(signal);
     if (!candidate.metadataPath) throw new Error(`场景模型缺少元数据：${entry.displayName}`);
@@ -718,6 +718,10 @@ async function pinSceneModelVersion(
     }
   };
   await verify(asset);
+  const verifiedAsset = asset.metadataSchemaVersion === MODEL_METADATA_SCHEMA_VERSION
+    ? asset
+    : await rescanCachedModelAsset(asset, entry, sourcePackage);
+  const pinned = relocateAssetEntry(verifiedAsset, sourcePackage, targetPackage, entry);
   if (await pathExists(targetPackage)) {
     await verify(pinned);
     await persistPinnedModelScriptOrder(pinned, versionRoot, signal);
@@ -736,7 +740,7 @@ async function pinSceneModelVersion(
         return true;
       },
     });
-    await verify(relocateAssetEntry(asset, sourcePackage, stagingPackage, entry));
+    await verify(relocateAssetEntry(verifiedAsset, sourcePackage, stagingPackage, entry));
     assertNotAborted(signal);
     await renamePathWithWindowsRetry(stagingPackage, targetPackage);
     await persistPinnedModelScriptOrder(pinned, versionRoot, signal);
@@ -1063,13 +1067,31 @@ async function runDataPlatformModelSync(
     const runtimeChangedKeys = new Set(plan.removed.map(resourceKey));
     let reusedAfterDownloadCount = 0;
 
+    const rescannedReusedAssets = new Map<string, ProjectModelAssetEntry>();
+    const reusedToRescan = plan.reused.filter((reuse) => {
+      const currentAsset = currentAssetByKey.get(resourceKey(reuse.descriptor));
+      if (!currentAsset) throw new Error(`模型同步索引与资产索引不一致：缺少 ${resourceKey(reuse.descriptor)}`);
+      return currentAsset.metadataSchemaVersion !== MODEL_METADATA_SCHEMA_VERSION;
+    });
+    if (reusedToRescan.length > 0) {
+      await runWithConcurrency(reusedToRescan, MAX_CONCURRENT_PACKAGE_VALIDATIONS, async (reuse) => {
+        assertNotAborted(signal);
+        const key = resourceKey(reuse.descriptor);
+        const currentAsset = currentAssetByKey.get(key)!;
+        const packagePath = resolvePackageRelativePath(editorRoot, reuse.nextEntry.packageRelativePath);
+        rescannedReusedAssets.set(key, await rescanCachedModelAsset(currentAsset, reuse.nextEntry, packagePath));
+      });
+    }
     for (const reuse of plan.reused) {
       const key = resourceKey(reuse.descriptor);
       const currentAsset = currentAssetByKey.get(key);
       if (!currentAsset) throw new Error(`模型同步索引与资产索引不一致：缺少 ${key}`);
       finalEntries.push(reuse.nextEntry);
-      finalManagedAssets.push(refreshIndexedAssetMetadata(currentAsset, reuse.nextEntry));
-      if (currentAsset.deviceType !== reuse.nextEntry.deviceType) runtimeChangedKeys.add(key);
+      const nextAsset = rescannedReusedAssets.get(key) ?? refreshIndexedAssetMetadata(currentAsset, reuse.nextEntry);
+      finalManagedAssets.push(nextAsset);
+      if (hasRuntimeAssetMetadataChanged(currentAsset, nextAsset) || currentAsset.deviceType !== reuse.nextEntry.deviceType) {
+        runtimeChangedKeys.add(key);
+      }
     }
 
     for (const item of validated) {
@@ -1101,12 +1123,33 @@ async function runDataPlatformModelSync(
           targetPackagePath,
           nextEntry,
         ));
+        if (runtimeChanged || currentAsset?.deviceType !== nextEntry.deviceType) runtimeChangedKeys.add(key);
       } else if (currentAsset) {
-        reusedAfterDownloadCount += 1;
-        finalManagedAssets.push(refreshIndexedAssetMetadata(currentAsset, nextEntry));
+        const targetPackagePath = resolvePackageRelativePath(editorRoot, item.prepared.packageRelativePath);
+        const relocatedAsset = relocateAssetEntry(
+          item.stagedAsset,
+          item.prepared.packagePath,
+          targetPackagePath,
+          nextEntry,
+        );
+        const schemaUpgraded = currentAsset.metadataSchemaVersion !== MODEL_METADATA_SCHEMA_VERSION;
+        const metadataUpdated = hasRuntimeAssetMetadataChanged(currentAsset, relocatedAsset);
+        if (schemaUpgraded || metadataUpdated) {
+          finalManagedAssets.push({
+            ...relocatedAsset,
+            ...(currentAsset.thumbnailPath ? {
+              thumbnailPath: currentAsset.thumbnailPath,
+              thumbnailUrl: encodeAssetUrl(currentAsset.thumbnailPath),
+              thumbnailRevision: nextEntry.thumbnailRevision,
+            } : {}),
+          });
+          if (metadataUpdated || currentAsset.deviceType !== nextEntry.deviceType) runtimeChangedKeys.add(key);
+        } else {
+          reusedAfterDownloadCount += 1;
+          finalManagedAssets.push(refreshIndexedAssetMetadata(currentAsset, nextEntry));
+          if (currentAsset.deviceType !== nextEntry.deviceType) runtimeChangedKeys.add(key);
+        }
       }
-
-      if (runtimeChanged || currentAsset?.deviceType !== nextEntry.deviceType) runtimeChangedKeys.add(key);
     }
 
     // 定向恢复只对选中的稳定 ID 提交变化，其余共享模型和项目自有资源保持原样。
@@ -1776,6 +1819,79 @@ function refreshIndexedAssetMetadata(
   };
 }
 
+/** 仅用于资产索引升级时在本地重扫已校验包，避免重新下载未变化的模型与脚本。 */
+async function rescanCachedModelAsset(
+  currentAsset: ProjectModelAssetEntry,
+  entry: DataPlatformModelIndexEntry,
+  packagePath: string,
+): Promise<ProjectModelAssetEntry> {
+  const scanResult = await scanModelPackage(packagePath, { deviceType: entry.deviceType });
+  if (!scanResult.asset) {
+    throw new Error(`${modelKindLabel(entry.kind)}“${entry.displayName}”本地重扫失败：${scanResult.skipped?.reason ?? '无法扫描模型包。'}`);
+  }
+  const existingScriptPaths = (currentAsset.scriptPaths ?? []).filter((scriptPath) => isPathInsideDirectory(packagePath, scriptPath));
+  const scriptPaths = [...new Set([
+    ...existingScriptPaths,
+    ...(scanResult.asset.scriptPaths ?? []),
+  ])];
+  const mainPath = scanResult.asset.path;
+  const thumbnailPath = currentAsset.thumbnailPath && isPathInsideDirectory(packagePath, currentAsset.thumbnailPath)
+    ? currentAsset.thumbnailPath
+    : scanResult.asset.thumbnailPath;
+  return {
+    ...scanResult.asset,
+    id: mainPath,
+    path: mainPath,
+    sourceUrl: encodeAssetUrl(mainPath),
+    displayName: entry.displayName,
+    deviceType: entry.deviceType,
+    assetRevision: entry.runtimeRevision,
+    packagePath,
+    metadataPath: scanResult.asset.metadataPath ?? currentAsset.metadataPath,
+    thumbnailPath,
+    thumbnailUrl: thumbnailPath ? encodeAssetUrl(thumbnailPath) : undefined,
+    thumbnailRevision: thumbnailPath ? entry.thumbnailRevision : undefined,
+    scriptPaths,
+    scriptAssets: scriptPaths.map((scriptPath) => ({
+      path: scriptPath,
+      sourceUrl: encodeAssetUrl(scriptPath),
+      name: path.basename(scriptPath),
+    })),
+    kind: 'model',
+    libraryKind: 'model',
+    metadataSchemaVersion: MODEL_METADATA_SCHEMA_VERSION,
+  };
+}
+
+function stableRuntimeJson(value: unknown): string {
+  return JSON.stringify(value ?? null, (_key, item: unknown) => {
+    if (!isPlainObject(item)) return item;
+    return Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]]));
+  });
+}
+
+function hasRuntimeAssetMetadataChanged(
+  previous: ProjectModelAssetEntry,
+  next: ProjectModelAssetEntry,
+): boolean {
+  return previous.deviceType !== next.deviceType
+    || previous.assetRevision !== next.assetRevision
+    || previous.lengthUnit !== next.lengthUnit
+    || previous.unitScaleToMeters !== next.unitScaleToMeters
+    || (previous.defaultAssetCode ?? '') !== (next.defaultAssetCode ?? '')
+    || previous.fileSizeBytes !== next.fileSizeBytes
+    || stableRuntimeJson(previous.scriptAssets) !== stableRuntimeJson(next.scriptAssets)
+    || stableRuntimeJson(previous.runtimeCapabilities) !== stableRuntimeJson(next.runtimeCapabilities)
+    || stableRuntimeJson(previous.parameterScriptMetadata) !== stableRuntimeJson(next.parameterScriptMetadata)
+    || stableRuntimeJson(previous.animationScriptMetadata) !== stableRuntimeJson(next.animationScriptMetadata)
+    || stableRuntimeJson(previous.parameterConfig) !== stableRuntimeJson(next.parameterConfig)
+    || stableRuntimeJson(previous.dataDrivenConfig) !== stableRuntimeJson(next.dataDrivenConfig)
+    || stableRuntimeJson(previous.builtInSlotBindingConfig) !== stableRuntimeJson(next.builtInSlotBindingConfig)
+    || stableRuntimeJson(previous.layerChangePlatformBindingConfig) !== stableRuntimeJson(next.layerChangePlatformBindingConfig)
+    || stableRuntimeJson(previous.cargoContact) !== stableRuntimeJson(next.cargoContact)
+    || stableRuntimeJson(previous.metaExtensions) !== stableRuntimeJson(next.metaExtensions);
+}
+
 function mergeStableIndexEntry(
   previous: DataPlatformModelIndexEntry | undefined,
   next: DataPlatformModelIndexEntry,
@@ -1834,17 +1950,29 @@ async function collectExistingAssetAvailability(
       ...(asset.scriptAssets?.map((script) => script.path) ?? []),
     ])];
     if (!await arePackageFilesAvailable(expectedPackagePath, runtimePaths)) return;
-    runtimeKeys.add(key);
+    const hasThumbnail = Boolean(
+      entry.thumbnailFingerprint !== NO_THUMBNAIL_FINGERPRINT
+      && asset.thumbnailPath
+      && await arePackageFilesAvailable(expectedPackagePath, [asset.thumbnailPath]),
+    );
+    try {
+      const localRevision = await createDataPlatformModelRuntimeRevision({
+        modelPath: asset.path,
+        metadataPath: asset.metadataPath,
+        scriptPaths: asset.scriptPaths ?? asset.scriptAssets?.map((script) => script.path) ?? [],
+        thumbnailPath: hasThumbnail ? asset.thumbnailPath! : null,
+      });
+      if (localRevision.runtimeRevision !== entry.runtimeRevision) return;
+      runtimeKeys.add(key);
 
-    if (entry.thumbnailFingerprint === NO_THUMBNAIL_FINGERPRINT) {
-      thumbnailKeys.add(key);
+      if (
+        entry.thumbnailFingerprint === NO_THUMBNAIL_FINGERPRINT
+        || (hasThumbnail && localRevision.thumbnailRevision === entry.thumbnailRevision)
+      ) {
+        thumbnailKeys.add(key);
+      }
+    } catch {
       return;
-    }
-    if (
-      asset.thumbnailPath
-      && await arePackageFilesAvailable(expectedPackagePath, [asset.thumbnailPath])
-    ) {
-      thumbnailKeys.add(key);
     }
   });
   return { runtimeKeys, thumbnailKeys };

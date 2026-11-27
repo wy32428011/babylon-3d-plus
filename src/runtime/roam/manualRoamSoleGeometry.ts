@@ -60,21 +60,30 @@ function measureAutomaticSole(container: AssetContainer, foot: TransformNode): M
     if (points.length) groups.push({ mesh, points });
   }
   if (count < 3) throw new Error('无法从蒙皮找到可靠的足底轮廓，保留基础动作。');
+  const footInverse = Matrix.Identity();
+  const matrix = Matrix.Identity();
+  const blended = Matrix.Zero();
+  const toFoot = Matrix.Identity();
+  const skinned = Vector3.Zero();
   const sample = (): Vector3[] => {
-    const result: Vector3[] = [], footInverse = Matrix.Invert(foot.computeWorldMatrix(true));
-    const matrix = Matrix.Identity(), blended = Matrix.Zero();
+    const result: Vector3[] = [];
+    foot.computeWorldMatrix(true).invertToRef(footInverse);
     const prepared = new Set<object>();
     for (const { mesh, points } of groups) {
       const skeleton = mesh.skeleton!;
       if (!prepared.has(skeleton)) { skeleton.prepare(true); prepared.add(skeleton); }
-      const matrices = skeleton.getTransformMatrices(mesh), toFoot = mesh.computeWorldMatrix(true).multiply(footInverse);
+      const matrices = skeleton.getTransformMatrices(mesh);
+      mesh.computeWorldMatrix(true).multiplyToRef(footInverse, toFoot);
       for (const point of points) {
         blended.reset();
         for (const influence of point.influences) {
           Matrix.FromFloat32ArrayToRefScaled(matrices, influence.index * 16, influence.weight, matrix);
           blended.addToSelf(matrix);
         }
-        result.push(Vector3.TransformCoordinates(Vector3.TransformCoordinates(point.point, blended), toFoot));
+        Vector3.TransformCoordinatesToRef(point.point, blended, skinned);
+        const transformed = Vector3.Zero();
+        Vector3.TransformCoordinatesToRef(skinned, toFoot, transformed);
+        result.push(transformed);
       }
     }
     return result;
@@ -123,9 +132,43 @@ export function measureManualRoamSole(container: AssetContainer, foot: Transform
   const points=[...selected].map(point=>point.clone());
   // 默认人物每鞋不足512点。缓存权重及bind局部坐标后按当前关节求值，避免趾骨屈伸令刚性鞋底预测失真。
   if(samples.length>2048||samples.some(sample=>Math.abs(sample.influences.reduce((sum,item)=>sum+item.weight,0)-1)>1e-4))return {points,sample:()=>points};
+  const uniqueNodes: TransformNode[] = [];
+  const nodeIndexMap = new Map<TransformNode, number>();
+  const compiledSamples = samples.map((sample) => ({
+    influences: sample.influences.map((item) => {
+      let nodeIndex = nodeIndexMap.get(item.node);
+      if (nodeIndex === undefined) {
+        nodeIndex = uniqueNodes.length;
+        uniqueNodes.push(item.node);
+        nodeIndexMap.set(item.node, nodeIndex);
+      }
+      return { point: item.point, weight: item.weight, nodeIndex };
+    }),
+  }));
+  const nodeMatrices = uniqueNodes.map(() => Matrix.Identity());
+  const footInverse = Matrix.Identity();
+  const tempWorld = Vector3.Zero();
+  const tempSum = Vector3.Zero();
   return {points,sample:()=>{
-    const matrices=new Map<TransformNode,Matrix>(),footInverse=Matrix.Invert(foot.computeWorldMatrix(true));
-    for(const sample of samples)for(const item of sample.influences)if(!matrices.has(item.node))matrices.set(item.node,item.node.computeWorldMatrix(true).clone());
-    return samples.map(sample=>{const world=Vector3.Zero();for(const item of sample.influences)world.addInPlace(Vector3.TransformCoordinates(item.point,matrices.get(item.node)!).scale(item.weight));return Vector3.TransformCoordinates(world,footInverse);});
+    foot.computeWorldMatrix(true).invertToRef(footInverse);
+    for (let i = 0; i < uniqueNodes.length; i++) {
+      nodeMatrices[i].copyFrom(uniqueNodes[i].computeWorldMatrix(true));
+    }
+    const result: Vector3[] = new Array(compiledSamples.length);
+    for (let s = 0; s < compiledSamples.length; s++) {
+      const influences = compiledSamples[s].influences;
+      tempSum.setAll(0);
+      for (let k = 0; k < influences.length; k++) {
+        const item = influences[k];
+        Vector3.TransformCoordinatesToRef(item.point, nodeMatrices[item.nodeIndex], tempWorld);
+        tempSum.x += tempWorld.x * item.weight;
+        tempSum.y += tempWorld.y * item.weight;
+        tempSum.z += tempWorld.z * item.weight;
+      }
+      const out = Vector3.Zero();
+      Vector3.TransformCoordinatesToRef(tempSum, footInverse, out);
+      result[s] = out;
+    }
+    return result;
   }};
 }

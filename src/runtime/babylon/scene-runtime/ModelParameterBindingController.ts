@@ -80,8 +80,13 @@ export class ModelParameterBindingController {
 
     const previousMetadata = target.metadata ?? {};
     const previousModelAssetMetadata = isPlainRecord(previousMetadata.modelAsset)
-      ? previousMetadata.modelAsset
+      ? { ...previousMetadata.modelAsset }
       : {};
+    if (modelAsset.metaExtensions !== undefined) {
+      previousModelAssetMetadata.metaExtensions = this.cloneJsonValue(modelAsset.metaExtensions);
+    } else {
+      delete previousModelAssetMetadata.metaExtensions;
+    }
 
     target.metadata = {
       ...previousMetadata,

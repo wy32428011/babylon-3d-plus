@@ -482,3 +482,73 @@ test('碰撞阻止位移时保持待机，恢复移动后按实际位移驱动�
     if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
   }
 });
+
+test('漫游期间不全局监听新增网格、不调用全场景 pickWithRay，且第一人称跳过人物动画求值并管理脚底软影', async (t) => {
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const camera = new ArcRotateCamera('camera', 0, 1, 10, Vector3.Zero(), scene);
+  const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const savedDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { value: new EventTarget(), configurable: true });
+  Object.defineProperty(globalThis, 'document', { value: new EventTarget(), configurable: true });
+  MeshBuilder.CreateGround('floor', { width: 40, height: 40, subdivisions: 2 }, scene);
+  const avatar = createAvatar(scene, 'perf-avatar');
+  const group = new AnimationGroup('Idle', scene);
+  const animation = new Animation('idle-yaw', 'rotation.y', 30, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE);
+  animation.setKeys([{ frame: 0, value: 0 }, { frame: 60, value: 1 }]);
+  group.addTargetedAnimation(animation, avatar.mesh);
+  avatar.container.animationGroups.push(group);
+  avatar.container.removeAllFromScene();
+  t.mock.method(SceneLoader, 'LoadAssetContainerAsync', async () => avatar.container);
+  t.mock.method(engine, 'getDeltaTime', () => 100);
+
+  let scenePickCalls = 0;
+  t.mock.method(scene, 'pickWithRay', () => {
+    scenePickCalls += 1;
+    return null;
+  });
+
+  const runtime = new ManualRoamRuntime({
+    scene,
+    engine,
+    camera,
+    canvas: new EventTarget(),
+    avatarUrl: 'https://assets.test/perf.glb',
+    setOrbitControlsEnabled: () => {},
+    resolveSpawnPose: () => ({ position: { x: 0, y: 0, z: 0 }, yaw: 0 }),
+  });
+
+  try {
+    assert.equal(scene.onNewMeshAddedObservable.hasObservers(), false, '不能向 scene.onNewMeshAddedObservable 注册常驻监听');
+    await flush();
+    runtime.setEnabled(true);
+    scene.render();
+    assert.equal(scenePickCalls, 0, '贴地与第三人称防穿墙射线不得调用 scene.pickWithRay 扫描全场景');
+    const blob = scene.getMeshByName('__manual_roam_avatar_blob_shadow__');
+    assert.ok(blob && blob.isEnabled(), '第三人称地面漫游应启用人物脚底软影');
+
+    runtime.setViewMode('firstPerson');
+    assert.equal(blob.isEnabled(), false, '第一人称应关闭人物脚底软影');
+    const frameAtSwitch = group.getCurrentFrame();
+    const yawAtSwitch = avatar.mesh.rotation.y;
+    runtime.setVirtualMovement(0, 1);
+    scene.render();
+    scene.render();
+    assert.equal(group.getCurrentFrame(), frameAtSwitch, '第一人称应跳过隐藏人物动画推进');
+    assert.equal(avatar.mesh.rotation.y, yawAtSwitch);
+
+    runtime.setViewMode('thirdPerson');
+    assert.equal(blob.isEnabled(), true, '切回第三人称应恢复脚底软影');
+    scene.render();
+    assert.ok(group.getCurrentFrame() > frameAtSwitch, '切回第三人称后恢复人物动画');
+
+    runtime.setLocomotionMode('fly');
+    assert.equal(blob.isEnabled(), false, '飞行模式应隐藏脚底软影');
+  } finally {
+    runtime.dispose();
+    scene.dispose();
+    engine.dispose();
+    if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (savedDocument) Object.defineProperty(globalThis, 'document', savedDocument); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});

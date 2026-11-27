@@ -1,6 +1,7 @@
 import type { SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
 import type { EffectConfiguration } from './effectConfiguration';
 import type { CompositionResourceReference } from '../../../electron/shared/compositionTypes';
+import type { ModelMetaExtensions } from '../../../electron/shared/modelMetaExtensions.ts';
 import type { DigitalTwinEffectConfig, DigitalTwinEffectKind } from './digitalTwinEffect';
 import type { DataPlatformModelIdentity } from '../../../electron/shared/sceneModelUpdatePlan';
 import type { AlarmManagerComponent } from './alarmManager';
@@ -172,6 +173,8 @@ export type ModelAssetTemplate = {
   builtInSlotBindingConfig?: BuiltInSlotBindingConfig;
   /** 模型包声明的换层站台绑定映射；缺省表示该模型不支持换层站台。 */
   layerChangePlatformBindingConfig?: LayerChangePlatformBindingConfig;
+  /** 模型包 meta.json 中与 dataDriven 平级的扩展顶层字段。 */
+  metaExtensions?: ModelMetaExtensions;
 };
 
 /** 运行时模型资产组件，在模板基础上追加实例级资产编号。 */

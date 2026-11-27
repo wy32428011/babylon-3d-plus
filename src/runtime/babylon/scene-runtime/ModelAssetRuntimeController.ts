@@ -664,6 +664,10 @@ export class ModelAssetRuntimeController {
       })),
       parameterScripts: modelAsset.parameterScriptMetadata ?? [],
       animationScripts: modelAsset.animationScriptMetadata ?? [],
+      dataDrivenConfig: modelAsset.dataDrivenConfig ?? null,
+      builtInSlotBindingConfig: modelAsset.builtInSlotBindingConfig ?? null,
+      layerChangePlatformBindingConfig: modelAsset.layerChangePlatformBindingConfig ?? null,
+      metaExtensions: modelAsset.metaExtensions ?? null,
     });
 
     const runtimeMode = this.dependencies.telemetry.telemetryPreviewActive ? 'runtime' : 'edit';
@@ -789,6 +793,7 @@ export class ModelAssetRuntimeController {
       assetRevision: modelAsset.assetRevision ?? null,
       lengthUnit: modelAsset.lengthUnit,
       unitScaleToMeters: modelAsset.unitScaleToMeters,
+      metaExtensions: modelAsset.metaExtensions ?? null,
       instancingMode: resolveModelAssetSharedInstancingPolicy(modelAsset).mode,
       ...(modelAsset.runtimeCapabilities ? { runtimeCapabilities: modelAsset.runtimeCapabilities,
         capabilityConfiguration: modelRuntimeConfigurationKey(modelAsset),

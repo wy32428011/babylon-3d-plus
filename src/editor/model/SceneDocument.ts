@@ -1,4 +1,5 @@
 import { modelDeviceTypeField } from '../../../electron/shared/modelDeviceType.ts';
+import { modelMetaExtensionsField } from '../../../electron/shared/modelMetaExtensions.ts';
 import { normalizeHistoryReplaySettings, type HistoryReplaySettings } from '../../runtime/history/historyReplayContract';
 import { modelRuntimeCapabilitiesField } from '../../../electron/shared/modelRuntimeCapabilities.ts';
 import { normalizeSkyboxEnvironmentResource, skyboxEnvironmentMatchesSource, type SkyboxEnvironmentResource } from '../../../electron/shared/sceneSkyboxContract.ts';
@@ -1460,6 +1461,7 @@ export function createModelEntity(
   layerChangePlatformBindingConfig?: unknown,
   runtimeCapabilities?: unknown,
   deviceType?: string,
+  metaExtensions?: unknown,
 ): Entity {
   const id = createId('entity');
   const trimmedName = displayName.trim();
@@ -1507,6 +1509,7 @@ export function createModelEntity(
         ...(normalizedDataDrivenConfig ? { dataDrivenConfig: normalizedDataDrivenConfig } : {}),
         ...(normalizedBuiltInSlotBindingConfig ? { builtInSlotBindingConfig: normalizedBuiltInSlotBindingConfig } : {}),
         ...(normalizedLayerChangePlatformBindingConfig ? { layerChangePlatformBindingConfig: normalizedLayerChangePlatformBindingConfig } : {}),
+        ...modelMetaExtensionsField(metaExtensions),
       },
       ...(telemetryBinding ? { telemetryBinding } : {}),
     },

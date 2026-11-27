@@ -95,6 +95,8 @@ function hasNonShadowAncestor(mesh: AbstractMesh): boolean {
 /** 编辑器辅助网格、天空盒和阴影接收地面不应写入阴影贴图。 */
 export function isShadowCaster(mesh: AbstractMesh): boolean {
   if (mesh.name === SCENE_SHADOW_CATCHER_NAME) return false;
+  const metadata = mesh.metadata as Record<string, unknown> | null | undefined;
+  if (metadata?.manualRoamAvatar === true) return false;
   return isShadowSurface(mesh);
 }
 
@@ -157,7 +159,12 @@ function isShadowSurface(mesh: AbstractMesh): boolean {
     && metadata?.runtimeSkybox !== true
     && metadata?.editorChartMarker !== true
     && metadata?.editorAutoPatrolMarker !== true
-    && metadata?.editorShadowCatcher !== true;
+    && metadata?.editorShadowCatcher !== true
+    && metadata?.manualRoamCollider !== true
+    && metadata?.manualRoamCollisionProxy !== true
+    && metadata?.manualRoamLocalTriangleCollider !== true
+    && metadata?.manualRoamFallbackGround !== true
+    && metadata?.manualRoamAvatarShadow !== true;
 }
 
 function engineSupportsCascadedShadows(scene: Scene): boolean {
@@ -1090,7 +1097,11 @@ export class SceneShadowRuntime {
     // CSM 的 setter 拒绝越界值。maxZ=0 表示无限远，仍为分级保留非零深度区间。
     const far = camera.maxZ === 0 ? Infinity : camera.maxZ;
     generator.shadowMaxZ = Math.min(far, Math.max(distance, camera.minZ + 0.001));
-    if (this.cascadeCameraMinZ !== camera.minZ || this.cascadeCameraMaxZ !== camera.maxZ) {
+    if (
+      !Number.isFinite(this.cascadeCameraMinZ)
+      || Math.abs(this.cascadeCameraMinZ - camera.minZ) > 0.015
+      || this.cascadeCameraMaxZ !== camera.maxZ
+    ) {
       generator.splitFrustum();
       this.cascadeCameraMinZ = camera.minZ;
       this.cascadeCameraMaxZ = camera.maxZ;
