@@ -184,7 +184,7 @@ export const dataDriven = { device: { devType: 'conveyor' }, cargo: { travel: { 
 
 货物接触原点默认取整体可见网格的包围盒底部中心。模型包可用 `meta.json` 的 `cargoContact[]` 声明多个支撑位，每项格式为 `{ id, alias, nodes }`：`id` 是场景选择使用的稳定标识，`alias` 是生成器下拉框的显示名称，`nodes` 是该支撑位的节点集合。拖入生成器后，定义数组复制到对应目标，默认模板和每条规则分别保存 `cargoContact.supportId`；修改别名不会使既有选择失效。
 
-生成目标选择支撑位后，直接按所选支撑位全部节点及其子网格的合并底部中心归一化，载货设备不需要二次选择；任一节点缺失、重名或无有效网格时回退整体包围盒。同一模型需要多种接触方式时，可创建不同模型生成器分别选择支撑位并绑定设备。`AGV工装架` 声明 `agv-latent / 潜伏式 AGV 顶升面 / [TM]`，使用 `TM` 底面与潜伏式 AGV 顶升面接触。接触配置不改变共享几何。AGV 使用 `signalBits` 管理货物生命周期，并通过模型包 `dataDriven.cargo.nodes` 提供设备侧载货台面，详见 [AGV 产生器与地图数据接口](agv-map.md)。
+生成目标选择支撑位后，直接按所选支撑位全部节点及其子网格的合并底部中心归一化，载货设备不需要二次选择；任一节点缺失、重名或无有效网格时回退整体包围盒。同一模型需要多种接触方式时，可创建不同模型生成器分别选择支撑位并绑定设备。`AGV工装架` 声明 `agv-latent / 潜伏式 AGV 顶升面 / [TM]`，使用 `TM` 底面与潜伏式 AGV 顶升面接触。接触配置不改变共享几何。AGV 使用 `signalBits` 确认台上货物，并以 `command` 驱动取放货阶段；模型包 `dataDriven.cargo.deckNodes` 提供设备侧载货台面，`dataDriven.cargo.lift` 提供随动升降结构和行程参数，详见 [AGV 产生器与地图数据接口](agv-map.md)。
 
 ### 5.2 各设备货箱独立
 
