@@ -88,6 +88,16 @@ export function createUniqueEntityName(existingNames: Set<string>, baseName: str
   return fallbackName;
 }
 
+/** 跨场景粘贴时若目标场景无同名对象则保留原名，有冲突再生成副本名称。 */
+export function createCrossSceneEntityName(existingNames: Set<string>, baseName: string): string {
+  const trimmedBaseName = sanitizeEntityName(baseName) || '对象';
+  if (!existingNames.has(trimmedBaseName)) {
+    existingNames.add(trimmedBaseName);
+    return trimmedBaseName;
+  }
+  return createUniqueEntityName(existingNames, trimmedBaseName);
+}
+
 /** 阵列副本资产编号覆盖目标，避免混合组件实体同时改写两套业务编号。 */
 type EntityAssetNumberOverride = {
   kind: 'modelAsset' | 'locator';
@@ -138,13 +148,48 @@ export function createNextModelGeneratorName(scene: SceneDocument): string {
   return createNextEntityName(scene, '模型生成器');
 }
 
+/** 若阵列子副本的源模型未一同纳入剪贴板，则沿源链固化其完整模型模板并解除悬空阵列引用。 */
+function solidifyOrphanedModelArrayInstance(
+  scene: SceneDocument,
+  entity: Entity,
+  components: Entity['components'],
+  allIncludedIdSet: ReadonlySet<string>,
+): void {
+  const sourceEntityId = components.modelArrayInstance?.sourceEntityId;
+  if (!sourceEntityId || allIncludedIdSet.has(sourceEntityId)) return;
+
+  const visited = new Set<string>([entity.id]);
+  let cursor: Entity | undefined = scene.entities[sourceEntityId];
+  while (cursor && !visited.has(cursor.id)) {
+    visited.add(cursor.id);
+    if (!cursor.components.modelArrayInstance) break;
+    cursor = scene.entities[cursor.components.modelArrayInstance.sourceEntityId];
+  }
+
+  if (cursor?.components.modelAsset && components.modelAsset) {
+    components.modelAsset = {
+      ...cloneModelAsset(cursor.components.modelAsset),
+      ...cloneModelAsset(components.modelAsset),
+    };
+  }
+  delete components.modelArrayInstance;
+}
+
 /** 创建与场景实体隔离的剪贴板快照，并按当前子树归一化层级字段。 */
-function cloneEntityForClipboard(entity: Entity, parentId: string | null, childrenIds: string[]): Entity {
+function cloneEntityForClipboard(
+  scene: SceneDocument,
+  entity: Entity,
+  parentId: string | null,
+  childrenIds: string[],
+  allIncludedIdSet: ReadonlySet<string>,
+): Entity {
+  const components = cloneEntityComponents(entity);
+  solidifyOrphanedModelArrayInstance(scene, entity, components, allIncludedIdSet);
   return {
     ...entity,
     parentId,
     childrenIds: [...childrenIds],
-    components: cloneEntityComponents(entity),
+    components,
   };
 }
 
@@ -160,9 +205,8 @@ type EntityClipboardSnapshot = {
  */
 export function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds: string[]): EntityClipboardSnapshot {
   const rootIds = getTopLevelHierarchyEntityIds(scene.entities, selectedIds);
-  const entries: EntityClipboardEntry[] = [];
-  let folderCount = 0;
-  let entityCount = 0;
+  const rawRoots: Array<{ rootId: string; includedIds: string[]; includedIdSet: Set<string> }> = [];
+  const allIncludedIdSet = new Set<string>();
 
   for (const rootId of rootIds) {
     const subtreeIds = collectEntitySubtreeIds(scene.entities, rootId);
@@ -178,6 +222,15 @@ export function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds:
         includedIdSet.add(entity.id);
       }
     }
+    for (const entityId of includedIds) allIncludedIdSet.add(entityId);
+    rawRoots.push({ rootId, includedIds, includedIdSet });
+  }
+
+  const entries: EntityClipboardEntry[] = [];
+  let folderCount = 0;
+  let entityCount = 0;
+
+  for (const { rootId, includedIds, includedIdSet } of rawRoots) {
     const snapshotEntities = includedIds.flatMap((entityId) => {
       const entity = scene.entities[entityId];
       if (!entity) return [];
@@ -187,7 +240,7 @@ export function createEntityClipboardSnapshot(scene: SceneDocument, selectedIds:
       const childrenIds = entity.isFolder
         ? entity.childrenIds.filter((childId) => includedIdSet.has(childId))
         : [];
-      return [cloneEntityForClipboard(entity, parentId, childrenIds)];
+      return [cloneEntityForClipboard(scene, entity, parentId, childrenIds, allIncludedIdSet)];
     });
 
     entries.push({ rootId, entities: snapshotEntities });
@@ -322,7 +375,70 @@ type PreparedEntityClipboardPaste = {
   folderCount: number;
   entityCount: number;
   duplicatedIdBySourceId: Map<string, string>;
+  warnings: string[];
 };
+
+export type CrossScenePasteOptions = {
+  crossScene?: boolean;
+  sourceProjectId?: string | null;
+  targetProjectId?: string | null;
+};
+
+function collectExistingAssetNumbers(scene: SceneDocument): Set<string> {
+  const existing = new Set<string>();
+  for (const entity of Object.values(scene.entities)) {
+    const modelCode = entity.components.modelAsset?.assetCode?.trim();
+    if (modelCode) existing.add(modelCode);
+    const locatorId = entity.components.locator?.assetId?.trim();
+    if (locatorId) existing.add(locatorId);
+  }
+  return existing;
+}
+
+function allocateUniqueAssetNumber(existing: Set<string>, prefixSource: string | undefined, entityId: string): string {
+  const prefix = extractModelAssetCodePrefix(prefixSource);
+  const candidate = createModelAssetCode(prefix, entityId);
+  if (!existing.has(candidate)) {
+    existing.add(candidate);
+    return candidate;
+  }
+  for (let index = 2; index < 1000; index += 1) {
+    const indexed = `${candidate}-${index}`;
+    if (!existing.has(indexed)) {
+      existing.add(indexed);
+      return indexed;
+    }
+  }
+  const fallback = `${candidate}-${Date.now()}`;
+  existing.add(fallback);
+  return fallback;
+}
+
+function collectEntityScreenProjectIds(entity: Entity): string[] {
+  const projectIds: string[] = [];
+  const push = (value: string | undefined) => {
+    const trimmed = value?.trim();
+    if (trimmed) projectIds.push(trimmed);
+  };
+  push(entity.components.dataPlatformScreen?.projectId);
+  for (const event of entity.components.chartMarker?.clickEvents ?? []) {
+    for (const action of event.actions) {
+      if (action.type === 'theme') push(action.screen?.projectId);
+    }
+  }
+  for (const event of entity.components.clickEventBinding?.events ?? []) {
+    push(event.chart?.projectId);
+  }
+  const alarm = entity.components.alarmManager;
+  push(alarm?.theme?.projectId);
+  push(alarm?.markerScreen?.projectId);
+  push(alarm?.warehouseTheme?.projectId);
+  return projectIds;
+}
+
+function isCrossProjectScreenEntity(entity: Entity): boolean {
+  return collectEntityScreenProjectIds(entity).length > 0;
+}
 
 /** 为一次粘贴生成全新的子树 ID，并在两阶段处理中重建任意深度父子关系。 */
 export function prepareEntityClipboardPaste(
@@ -330,13 +446,17 @@ export function prepareEntityClipboardPaste(
   clipboard: EntityClipboard,
   parentId: string | null,
   arrayOptions?: { existingNames: Set<string>; rootName: string },
+  pasteOptions?: CrossScenePasteOptions,
 ): PreparedEntityClipboardPaste {
+  const crossScene = Boolean(pasteOptions?.crossScene);
   const existingNames = arrayOptions?.existingNames ?? new Set(Object.values(scene.entities).map((entity) => entity.name));
+  const existingAssetNumbers = crossScene ? collectExistingAssetNumbers(scene) : null;
   const entities: Entity[] = [];
   const rootEntityIds: string[] = [];
   const duplicatedIdBySourceId = new Map<string, string>();
   let folderCount = 0;
   let entityCount = 0;
+  let renamedAssetCodeCount = 0;
 
   for (const entry of clipboard.entries) {
     const sourceById = new Map(entry.entities.map((entity) => [entity.id, entity]));
@@ -358,11 +478,16 @@ export function prepareEntityClipboardPaste(
           : parentId;
 
       if (source.isFolder) {
+        const folderName = source.id === entry.rootId && arrayOptions
+          ? arrayOptions.rootName
+          : crossScene
+            ? createCrossSceneEntityName(existingNames, source.name)
+            : createUniqueEntityName(existingNames, source.name);
         const folder: Entity = {
           ...source,
           id: duplicatedId,
           ...(source.composition ? { composition: { ...source.composition, instanceId: createId('composition') } } : {}),
-          name: source.id === entry.rootId && arrayOptions ? arrayOptions.rootName : createUniqueEntityName(existingNames, source.name),
+          name: folderName,
           isFolder: true,
           parentId: duplicatedParentId,
           childrenIds: source.childrenIds.flatMap((childId) => {
@@ -375,12 +500,53 @@ export function prepareEntityClipboardPaste(
         entities.push(folder);
         folderCount += 1;
       } else {
+        const entityOverrides: EntityDuplicateOverrides = { id: duplicatedId };
+        if (crossScene) {
+          entityOverrides.name = createCrossSceneEntityName(existingNames, source.name);
+          if (existingAssetNumbers) {
+            if (source.components.modelAsset) {
+              const sourceCode = source.components.modelAsset.assetCode?.trim();
+              if (sourceCode && !existingAssetNumbers.has(sourceCode)) {
+                existingAssetNumbers.add(sourceCode);
+                entityOverrides.assetNumber = { kind: 'modelAsset', value: sourceCode };
+              } else {
+                const allocated = allocateUniqueAssetNumber(
+                  existingAssetNumbers,
+                  source.components.modelAsset.assetCode,
+                  duplicatedId,
+                );
+                entityOverrides.assetNumber = { kind: 'modelAsset', value: allocated };
+                if (sourceCode) renamedAssetCodeCount += 1;
+              }
+            } else if (source.components.locator) {
+              const boundToCopiedHost = Boolean(
+                source.components.locator.builtInBinding?.hostEntityId
+                && copyableIdSet.has(source.components.locator.builtInBinding.hostEntityId),
+              );
+              if (!boundToCopiedHost) {
+                const sourceAssetId = source.components.locator.assetId?.trim();
+                if (sourceAssetId && !existingAssetNumbers.has(sourceAssetId)) {
+                  existingAssetNumbers.add(sourceAssetId);
+                  entityOverrides.assetNumber = { kind: 'locator', value: sourceAssetId };
+                } else {
+                  const allocated = allocateUniqueAssetNumber(
+                    existingAssetNumbers,
+                    source.components.locator.assetId,
+                    duplicatedId,
+                  );
+                  entityOverrides.assetNumber = { kind: 'locator', value: allocated };
+                  if (sourceAssetId) renamedAssetCodeCount += 1;
+                }
+              }
+            }
+          }
+        }
         const duplicated = createDuplicatedRuntimeEntity(
           source,
           duplicatedParentId,
           null,
           existingNames,
-          { id: duplicatedId },
+          entityOverrides,
         );
         if (arrayOptions) {
           const renderSourceId = source.components.modelArrayInstance?.sourceEntityId;
@@ -412,49 +578,199 @@ export function prepareEntityClipboardPaste(
     if (duplicatedRootId) rootEntityIds.push(duplicatedRootId);
   }
 
+  const pastedIdSet = new Set(duplicatedIdBySourceId.values());
+  const remapIfPasted = (id: string): string | null => duplicatedIdBySourceId.get(id) ?? (pastedIdSet.has(id) ? id : null);
+  let cleanedRefCount = 0;
+
   // 所有剪贴板根条目均生成 ID 后再处理引用，支持跨根对象及指向自身的动作。
-  // 未随本批复制的目标仍引用场景中的原对象。
+  // 同场景粘贴未随本批复制的目标仍引用场景原对象；跨场景粘贴则清理悬空引用避免指向不存在的 ID。
   for (const entity of entities) {
-    for (const slot of entity.components.alarmManager?.targets ?? []) {
-      slot.entityId = duplicatedIdBySourceId.get(slot.entityId) ?? slot.entityId;
+    if (entity.components.alarmManager) {
+      if (crossScene) {
+        const nextTargets = entity.components.alarmManager.targets.flatMap((slot) => {
+          if (!slot.entityId) return [slot];
+          const remapped = remapIfPasted(slot.entityId);
+          if (!remapped) {
+            cleanedRefCount += 1;
+            return [];
+          }
+          slot.entityId = remapped;
+          return [slot];
+        });
+        entity.components.alarmManager.targets = nextTargets;
+      } else {
+        for (const slot of entity.components.alarmManager.targets) {
+          slot.entityId = duplicatedIdBySourceId.get(slot.entityId) ?? slot.entityId;
+        }
+      }
     }
+
     const effectTarget = entity.components.poiEffect?.configuration?.target;
-    if (effectTarget?.entityId) effectTarget.entityId = duplicatedIdBySourceId.get(effectTarget.entityId) ?? effectTarget.entityId;
-    if (effectTarget?.entityIds) effectTarget.entityIds = effectTarget.entityIds.map(id => duplicatedIdBySourceId.get(id) ?? id);
-    if (effectTarget?.generatorId) effectTarget.generatorId = duplicatedIdBySourceId.get(effectTarget.generatorId) ?? effectTarget.generatorId;
-    if (effectTarget?.model?.entityIds) effectTarget.model.entityIds = effectTarget.model.entityIds.map(id => duplicatedIdBySourceId.get(id) ?? id);
+    if (effectTarget) {
+      if (effectTarget.entityId) {
+        const remapped = crossScene ? remapIfPasted(effectTarget.entityId) : (duplicatedIdBySourceId.get(effectTarget.entityId) ?? effectTarget.entityId);
+        if (remapped) effectTarget.entityId = remapped;
+        else {
+          effectTarget.entityId = null;
+          cleanedRefCount += 1;
+        }
+      }
+      if (effectTarget.entityIds) {
+        const before = effectTarget.entityIds.length;
+        effectTarget.entityIds = crossScene
+          ? effectTarget.entityIds.flatMap((id) => {
+              const remapped = remapIfPasted(id);
+              return remapped ? [remapped] : [];
+            })
+          : effectTarget.entityIds.map((id) => duplicatedIdBySourceId.get(id) ?? id);
+        cleanedRefCount += before - effectTarget.entityIds.length;
+        if (crossScene && effectTarget.entityIds.length === 0) delete effectTarget.entityIds;
+      }
+      if (effectTarget.generatorId) {
+        const remapped = crossScene ? remapIfPasted(effectTarget.generatorId) : (duplicatedIdBySourceId.get(effectTarget.generatorId) ?? effectTarget.generatorId);
+        if (remapped) effectTarget.generatorId = remapped;
+        else {
+          effectTarget.generatorId = null;
+          cleanedRefCount += 1;
+        }
+      }
+      if (effectTarget.model?.entityIds) {
+        const before = effectTarget.model.entityIds.length;
+        effectTarget.model.entityIds = crossScene
+          ? effectTarget.model.entityIds.flatMap((id) => {
+              const remapped = remapIfPasted(id);
+              return remapped ? [remapped] : [];
+            })
+          : effectTarget.model.entityIds.map((id) => duplicatedIdBySourceId.get(id) ?? id);
+        cleanedRefCount += before - effectTarget.model.entityIds.length;
+        if (crossScene && effectTarget.model.entityIds.length === 0) delete effectTarget.model.entityIds;
+      }
+    }
+
     const effectVisual = entity.components.poiEffect?.visual;
     if (effectVisual?.targetEntityId) {
-      effectVisual.targetEntityId = duplicatedIdBySourceId.get(effectVisual.targetEntityId) ?? effectVisual.targetEntityId;
+      const remapped = crossScene ? remapIfPasted(effectVisual.targetEntityId) : (duplicatedIdBySourceId.get(effectVisual.targetEntityId) ?? effectVisual.targetEntityId);
+      if (remapped) effectVisual.targetEntityId = remapped;
+      else {
+        effectVisual.targetEntityId = null;
+        cleanedRefCount += 1;
+      }
     }
-    if (arrayOptions) {
-      // 每份组合独立重建业务对象引用；未随组合复制的目标继续引用场景原对象。
+
+    if (arrayOptions || crossScene) {
       const remap = (id: string) => duplicatedIdBySourceId.get(id) ?? id;
       const marker = entity.components.chartMarker;
-      if (marker?.dataSourceEntityId) marker.dataSourceEntityId = remap(marker.dataSourceEntityId);
+      if (marker?.dataSourceEntityId) {
+        if (crossScene) {
+          const remapped = remapIfPasted(marker.dataSourceEntityId);
+          if (remapped) marker.dataSourceEntityId = remapped;
+          else {
+            delete marker.dataSourceEntityId;
+            cleanedRefCount += 1;
+          }
+        } else {
+          marker.dataSourceEntityId = remap(marker.dataSourceEntityId);
+        }
+      }
       const spawner = entity.components.deviceSpawner;
-      if (spawner?.templateEntityId) spawner.templateEntityId = remap(spawner.templateEntityId);
+      if (spawner?.templateEntityId) {
+        if (crossScene) {
+          const remapped = remapIfPasted(spawner.templateEntityId);
+          if (remapped) spawner.templateEntityId = remapped;
+          else {
+            spawner.templateEntityId = null;
+            cleanedRefCount += 1;
+          }
+        } else {
+          spawner.templateEntityId = remap(spawner.templateEntityId);
+        }
+      }
       for (const rule of spawner?.templateRules ?? []) {
-        if (rule.templateEntityId) rule.templateEntityId = remap(rule.templateEntityId);
+        if (rule.templateEntityId) {
+          if (crossScene) {
+            const remapped = remapIfPasted(rule.templateEntityId);
+            if (remapped) rule.templateEntityId = remapped;
+            else {
+              rule.templateEntityId = null;
+              cleanedRefCount += 1;
+            }
+          } else {
+            rule.templateEntityId = remap(rule.templateEntityId);
+          }
+        }
       }
       const telemetry = entity.components.telemetryBinding;
-      if (telemetry?.cargoGeneratorId) telemetry.cargoGeneratorId = remap(telemetry.cargoGeneratorId);
+      if (telemetry?.cargoGeneratorId) {
+        if (crossScene) {
+          const remapped = remapIfPasted(telemetry.cargoGeneratorId);
+          if (remapped) telemetry.cargoGeneratorId = remapped;
+          else {
+            delete telemetry.cargoGeneratorId;
+            cleanedRefCount += 1;
+          }
+        } else {
+          telemetry.cargoGeneratorId = remap(telemetry.cargoGeneratorId);
+        }
+      }
       for (const field of ['columnBindings', 'incomingLayerBindings', 'outgoingLayerBindings'] as const) {
-        if (telemetry?.[field]) telemetry[field] = Object.fromEntries(
-          Object.entries(telemetry[field]!).map(([key, ids]) => [key, ids.map(remap)]),
-        );
+        if (telemetry?.[field]) {
+          telemetry[field] = Object.fromEntries(
+            Object.entries(telemetry[field]!).flatMap(([key, ids]) => {
+              if (!crossScene) return [[key, ids.map(remap)]];
+              const mapped = ids.flatMap((id) => {
+                const remapped = remapIfPasted(id);
+                if (!remapped) cleanedRefCount += 1;
+                return remapped ? [remapped] : [];
+              });
+              return mapped.length > 0 ? [[key, mapped]] : [];
+            }),
+          );
+        }
       }
       const fetchDrive = entity.components.locator?.fetchDrive;
-      if (fetchDrive?.cargoGeneratorId) fetchDrive.cargoGeneratorId = remap(fetchDrive.cargoGeneratorId);
+      if (fetchDrive?.cargoGeneratorId) {
+        if (crossScene) {
+          const remapped = remapIfPasted(fetchDrive.cargoGeneratorId);
+          if (remapped) fetchDrive.cargoGeneratorId = remapped;
+          else {
+            delete fetchDrive.cargoGeneratorId;
+            cleanedRefCount += 1;
+          }
+        } else {
+          fetchDrive.cargoGeneratorId = remap(fetchDrive.cargoGeneratorId);
+        }
+      }
       for (const event of entity.components.autoPatrol?.events ?? []) {
-        if (event.targetEntityId) event.targetEntityId = remap(event.targetEntityId);
+        if (event.targetEntityId) {
+          if (crossScene) {
+            const remapped = remapIfPasted(event.targetEntityId);
+            if (remapped) event.targetEntityId = remapped;
+            else {
+              event.targetEntityId = null;
+              cleanedRefCount += 1;
+            }
+          } else {
+            event.targetEntityId = remap(event.targetEntityId);
+          }
+        }
       }
     }
+
     const events = entity.components.chartMarker?.clickEvents;
     if (!events) continue;
     for (const event of events) {
-      for (const action of event.actions) {
-        if (action.type === 'focus' || action.type === 'select') action.targetEntityId = duplicatedIdBySourceId.get(action.targetEntityId) ?? action.targetEntityId;
+      if (crossScene) {
+        event.actions = event.actions.flatMap((action) => {
+          if (action.type !== 'focus' && action.type !== 'select') return [action];
+          const remapped = remapIfPasted(action.targetEntityId);
+          if (remapped) return [{ ...action, targetEntityId: remapped }];
+          cleanedRefCount += 1;
+          return [];
+        });
+      } else {
+        for (const action of event.actions) {
+          if (action.type === 'focus' || action.type === 'select') action.targetEntityId = duplicatedIdBySourceId.get(action.targetEntityId) ?? action.targetEntityId;
+        }
       }
     }
   }
@@ -480,18 +796,105 @@ export function prepareEntityClipboardPaste(
   for (let index = 0; index < entities.length; index += 1) {
     const entity = entities[index];
     const sourceEntityId = entity.components.modelArrayInstance?.sourceEntityId;
-    const duplicatedSourceId = sourceEntityId ? duplicatedIdBySourceId.get(sourceEntityId) : null;
-    if (!duplicatedSourceId) continue;
-    entities[index] = {
-      ...entity,
-      components: {
-        ...entity.components,
-        modelArrayInstance: { sourceEntityId: duplicatedSourceId },
-      },
-    };
+    if (!sourceEntityId) continue;
+    const duplicatedSourceId = duplicatedIdBySourceId.get(sourceEntityId);
+    if (duplicatedSourceId) {
+      entities[index] = {
+        ...entity,
+        components: {
+          ...entity.components,
+          modelArrayInstance: { sourceEntityId: duplicatedSourceId },
+        },
+      };
+    } else if (crossScene && !pastedIdSet.has(sourceEntityId)) {
+      const nextComponents = { ...entity.components };
+      delete nextComponents.modelArrayInstance;
+      entities[index] = {
+        ...entity,
+        components: nextComponents,
+      };
+      cleanedRefCount += 1;
+    }
   }
 
-  return { entities, rootEntityIds, folderCount, entityCount, duplicatedIdBySourceId };
+  const warnings: string[] = [];
+  if (renamedAssetCodeCount > 0) {
+    warnings.push(`有 ${renamedAssetCodeCount} 个对象的资产编号与目标场景冲突，已自动重新编号。`);
+  }
+  if (cleanedRefCount > 0) {
+    warnings.push(`已自动清理 ${cleanedRefCount} 处指向原场景未复制对象的关联引用。`);
+  }
+  const targetProjectId = pasteOptions?.targetProjectId ?? null;
+  const sourceProjectId = pasteOptions?.sourceProjectId ?? null;
+  const hasMismatchedScreenBinding = crossScene && entities.some((entity) => {
+    const screenProjectIds = collectEntityScreenProjectIds(entity);
+    if (screenProjectIds.some((projectId) => projectId !== targetProjectId)) return true;
+    return isCrossProjectScreenEntity(entity)
+      && Boolean(sourceProjectId || targetProjectId)
+      && sourceProjectId !== targetProjectId;
+  });
+  if (hasMismatchedScreenBinding) {
+    warnings.push('部分图表立标或大屏绑定属于原项目，请在属性面板检查并重新关联当前项目大屏。');
+  }
+
+  return { entities, rootEntityIds, folderCount, entityCount, duplicatedIdBySourceId, warnings };
+}
+
+/** 收集本次复制到系统剪贴板的文件夹所关联的光照分组规则。 */
+export function collectLightingGroupRulesForClipboard(
+  scene: SceneDocument,
+  entries: readonly EntityClipboardEntry[],
+): Record<string, unknown>[] {
+  const policy = scene.sceneSettings.lighting.policy;
+  if (!policy || policy.rules.length === 0) return [];
+  const copiedFolderIds = new Set<string>();
+  for (const entry of entries) {
+    for (const entity of entry.entities) {
+      if (entity.isFolder) copiedFolderIds.add(entity.id);
+    }
+  }
+  if (copiedFolderIds.size === 0) return [];
+  return policy.rules
+    .filter((rule) => rule.target.kind === 'group' && copiedFolderIds.has(rule.target.folderId))
+    .map((rule) => structuredClone(rule) as unknown as Record<string, unknown>);
+}
+
+/** 跨场景粘贴文件夹时，把随剪贴板携带的分组光照规则映射并合并进目标场景。 */
+export function mergeCrossSceneLightingGroupRules(
+  scene: SceneDocument,
+  rules: readonly Record<string, unknown>[] | undefined,
+  mapping: ReadonlyMap<string, string>,
+): SceneDocument {
+  if (!rules?.length || !mapping.size) return scene;
+  const existingPolicy = scene.sceneSettings.lighting.policy;
+  const copiedRules: NonNullable<typeof existingPolicy>['rules'] = [];
+  for (const rawRule of rules) {
+    const target = rawRule.target;
+    if (!target || typeof target !== 'object' || Array.isArray(target)) continue;
+    const record = target as Record<string, unknown>;
+    if (record.kind !== 'group' || typeof record.folderId !== 'string') continue;
+    const copiedFolderId = mapping.get(record.folderId);
+    if (!copiedFolderId || !scene.entities[copiedFolderId]?.isFolder) continue;
+    const clonedRule = structuredClone(rawRule) as unknown as NonNullable<typeof existingPolicy>['rules'][number];
+    clonedRule.id = createId('lighting_rule');
+    clonedRule.target = { kind: 'group', folderId: copiedFolderId };
+    copiedRules.push(clonedRule);
+  }
+  if (copiedRules.length === 0) return scene;
+  const basePolicy = existingPolicy ?? { version: 1 as const, defaults: {}, rules: [] };
+  return {
+    ...scene,
+    sceneSettings: {
+      ...scene.sceneSettings,
+      lighting: {
+        ...scene.sceneSettings.lighting,
+        policy: {
+          ...basePolicy,
+          rules: [...basePolicy.rules, ...copiedRules],
+        },
+      },
+    },
+  };
 }
 
 /** 分组是规则的持久化作用域，复制分组时随同复制其规则，不展开为每个实体的例外。 */

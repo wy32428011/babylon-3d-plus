@@ -231,6 +231,7 @@ export type EditorState = {
   selectedSpawnedDeviceId: string | null;
   entityClipboard: EntityClipboard | null;
   entityArrayRequest: EntityArrayRequest | null;
+  projectAssetsRefreshVersion: number;
   sceneFocusRequest: SceneFocusRequest | null;
   environmentApplyRequest: EnvironmentApplyRequest | null;
   environmentRuntimeOverride: SceneEnvironmentSettings | null;
@@ -434,6 +435,7 @@ export type EditorState = {
   lockSelectedEntities: () => void;
   copySelectedEntities: () => void;
   pasteEntityClipboard: (targetFolderId?: string | null) => void;
+  pasteEntityClipboardFromSystem: (targetFolderId?: string | null) => Promise<void>;
   requestEntityArray: (copyCount: number, direction: EntityArrayDirection, spacingMeters: number, assetNumberRule: string) => void;
   resolveEntityArrayRequest: (requestId: string, selectionSpanMeters: number | null) => void;
   commitResolvedEntityArray: (input: ResolvedEntityArrayInput) => EntityArrayCommitResult;

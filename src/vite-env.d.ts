@@ -729,5 +729,9 @@ interface Window {
     downloadAppUpdate?: () => Promise<import('../electron/shared/appUpdate').AppUpdateState>;
     installAppUpdate?: () => Promise<boolean>;
     onAppUpdateState?: (handler: (state: import('../electron/shared/appUpdate').AppUpdateState) => void) => () => void;
+    openNewEditorInstance?: () => Promise<import('../electron/types').OpenNewEditorInstanceResult>;
+    writeEntityClipboard?: (request: import('../electron/types').WriteEntityClipboardRequest) => Promise<import('../electron/types').WriteEntityClipboardResult>;
+    hasEntityClipboard?: () => Promise<boolean>;
+    readEntityClipboard?: () => Promise<import('../electron/types').ReadEntityClipboardResult>;
   };
 }

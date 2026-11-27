@@ -86,6 +86,7 @@ export function ProjectPanel(props: ProjectPanelProps) {
   const sceneResourcePolicy = useEditorStore((state) => state.sceneResourcePolicy);
   const publishingSceneSessionId = useSyncExternalStore(subscribeSceneModelPublishOperation, getSceneModelPublishSession, getSceneModelPublishSession);
   const latestSceneResourceTransaction = useEditorStore((state) => state.latestSceneResourceTransaction);
+  const projectAssetsRefreshVersion = useEditorStore((state) => state.projectAssetsRefreshVersion);
   const [isPreparingSceneResources, setIsPreparingSceneResources] = useState(false);
   const [localResourceRetry, setLocalResourceRetry] = useState(0);
   const localResourcePreparingRef = useRef(false);
@@ -808,6 +809,18 @@ export function ProjectPanel(props: ProjectPanelProps) {
       projectAssetsLoadRequestRef.current += 1;
     };
   }, [loadProjectAssets, loadSyncedImages, sceneResourcePolicy, sceneSessionId]);
+
+  const handledProjectAssetsRefreshVersionRef = useRef(projectAssetsRefreshVersion);
+
+  useEffect(() => {
+    if (projectAssetsRefreshVersion === handledProjectAssetsRefreshVersionRef.current) return;
+    handledProjectAssetsRefreshVersionRef.current = projectAssetsRefreshVersion;
+    void loadProjectAssets({
+      refreshModels: false,
+      refreshEnvironment: false,
+      refreshSkybox: false,
+    });
+  }, [loadProjectAssets, projectAssetsRefreshVersion]);
 
   useEffect(() => {
     if (sceneResourcePolicy === 'preserve-snapshot') return;

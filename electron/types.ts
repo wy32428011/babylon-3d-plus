@@ -771,3 +771,14 @@ export type CancelDeploymentExportRequest = DeploymentExportCancelRequest;
 
 /** 兼容按动作在前命名的定位请求类型。 */
 export type RevealDeploymentExportRequest = DeploymentExportRevealRequest;
+
+export type { OpenNewEditorInstanceResult } from './shared/editorInstanceLaunch.js';
+export type {
+  ClipboardMissingResourceIssue,
+  CrossSceneClipboardSourceContext,
+  CrossSceneEntityClipboardEntry,
+  CrossSceneEntityClipboardPayload,
+  ReadEntityClipboardResult,
+  WriteEntityClipboardRequest,
+  WriteEntityClipboardResult,
+} from './shared/entityClipboardTransfer.js';

@@ -1,5 +1,6 @@
 import { COMPOSITION_SELECTION_DRAG } from '../composition/composition';
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -93,7 +94,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const hideSelectedEntities = useEditorStore((state) => state.hideSelectedEntities);
   const lockSelectedEntities = useEditorStore((state) => state.lockSelectedEntities);
   const copySelectedEntities = useEditorStore((state) => state.copySelectedEntities);
-  const pasteEntityClipboard = useEditorStore((state) => state.pasteEntityClipboard);
+  const pasteEntityClipboardFromSystem = useEditorStore((state) => state.pasteEntityClipboardFromSystem);
   const requestEntityArray = useEditorStore((state) => state.requestEntityArray);
   const groupSelectedEntities = useEditorStore((state) => state.groupSelectedEntities);
   const ungroupSelectedEntities = useEditorStore((state) => state.ungroupSelectedEntities);
@@ -105,6 +106,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => new Set());
   const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<HierarchyContextMenuState | null>(null);
+  const [hasSystemClipboard, setHasSystemClipboard] = useState(false);
   const [renamingEntityId, setRenamingEntityId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [arrayDialog, setArrayDialog] = useState<ArrayDialogState | null>(null);
@@ -154,7 +156,28 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
   ) && !hasManualRoamSpawnSelection;
   const canRenameSelection = activeSelectionIds.length === 1 && canMutateSelection;
   const canLibraryFocus = Boolean(contextEntity?.components.modelAsset);
-  const canPaste = !props.readOnly && Boolean(entityClipboard && entityClipboard.entries.length > 0);
+  const canPaste = !props.readOnly && (Boolean(entityClipboard && entityClipboard.entries.length > 0) || hasSystemClipboard);
+
+  const refreshSystemClipboard = useCallback(() => {
+    const checkSystemClipboard = window.editorApi?.hasEntityClipboard;
+    if (!checkSystemClipboard) return;
+    void checkSystemClipboard()
+      .then((available) => setHasSystemClipboard(available))
+      .catch(() => setHasSystemClipboard(false));
+  }, []);
+
+  useEffect(() => {
+    if (!window.editorApi?.hasEntityClipboard) return undefined;
+    refreshSystemClipboard();
+    window.addEventListener('focus', refreshSystemClipboard);
+    return () => {
+      window.removeEventListener('focus', refreshSystemClipboard);
+    };
+  }, [refreshSystemClipboard]);
+
+  useEffect(() => {
+    if (contextMenu) refreshSystemClipboard();
+  }, [contextMenu, refreshSystemClipboard]);
   const canUngroup = !props.readOnly && activeSelectionEntities.some((entity) => (
     (entity.isFolder || Boolean(entity.parentId))
     && !isEntityEffectivelyLocked(entities, entity)
@@ -710,7 +733,7 @@ export function HierarchyPanel(props: HierarchyPanelProps) {
           <button
             className="hierarchy-context-menu-item"
             disabled={!canPaste}
-            onClick={() => runContextMenuAction(() => pasteEntityClipboard(getContextPasteFolderId()))}
+            onClick={() => runContextMenuAction(() => { void pasteEntityClipboardFromSystem(getContextPasteFolderId()); })}
             role="menuitem"
             type="button"
           >

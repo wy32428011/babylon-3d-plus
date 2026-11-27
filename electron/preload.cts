@@ -51,8 +51,10 @@ import type {
   MqttIpcEvent,
   MqttIpcStatus,
   OpenDataPlatformProjectRequest,
+  OpenNewEditorInstanceResult,
   OpenRecentProjectRequest,
   ProjectListAssetsResult,
+  ReadEntityClipboardResult,
   ReadTextFileRequest,
   ReadTextFileResult,
   RecentWorkspacesResult,
@@ -61,6 +63,8 @@ import type {
   SaveSceneRequest,
   SaveSceneResult,
   SelectProjectDirectoryResult,
+  WriteEntityClipboardRequest,
+  WriteEntityClipboardResult,
 } from './types.js';
 import type {
   DataPlatformChartLibrarySnapshot,
@@ -363,4 +367,9 @@ if (isTrustedPreloadPage()) contextBridge.exposeInMainWorld('editorApi', {
     ipcRenderer.on('app-update:state', listener);
     return () => ipcRenderer.removeListener('app-update:state', listener);
   },
+  openNewEditorInstance: (): Promise<OpenNewEditorInstanceResult> => ipcRenderer.invoke('app:openNewEditorInstance'),
+  writeEntityClipboard: (request: WriteEntityClipboardRequest): Promise<WriteEntityClipboardResult> =>
+    ipcRenderer.invoke('clipboard:writeEntities', request),
+  hasEntityClipboard: (): Promise<boolean> => ipcRenderer.invoke('clipboard:hasEntities'),
+  readEntityClipboard: (): Promise<ReadEntityClipboardResult> => ipcRenderer.invoke('clipboard:readEntities'),
 });
