@@ -17,8 +17,8 @@ import { readIntegerField, readNumberField, readStringField, type DeviceTelemetr
 import type { ModelRuntimeEntry } from '../../SceneRuntime';
 import type { AgvMapPlacement } from '../../scene-runtime/sceneRuntimeTypes';
 import { AgvTaskRouteHighlight } from '../../agv/AgvTaskRouteHighlight';
-import { findModelNodesByName, getNodesWorldBounds } from '../../runtimeNodeGeometry';
-import { readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
+import { findModelNodesByName, getNodesWorldBounds, worldDeltaToParentLocalDelta } from '../../runtimeNodeGeometry';
+import { isPlainRecord, readStringArrayPath, sanitizeBabylonName } from '../../runtimeValueUtils';
 import { normalizeCargoTask, type GeneratedCargoRuntimeEntry, type SpecializedTelemetryDriverContext } from './types';
 
 export type AgvModelForwardAxis = NonNullable<TelemetryBindingComponent['modelForwardAxis']>;
@@ -108,6 +108,20 @@ function readTaskRouteKey(snapshot: DeviceTelemetrySnapshot): string | null {
   return start && end ? `${start}\0${end}` : null;
 }
 
+type AgvLiftState = {
+  nodes: TransformNode[];
+  baselines: Map<TransformNode, Vector3>;
+  offset: number;
+  targetOffset: number;
+};
+
+type AgvCargoConfig = {
+  deckNodes: string[];
+  liftNodes: string[];
+  liftDistance: number;
+  liftSpeed: number;
+};
+
 type AgvMotionState = {
   lastSnapshot: DeviceTelemetrySnapshot;
   lastSampleTimeMs: number;
@@ -125,9 +139,14 @@ type AgvMotionState = {
   taskRouteHighlight: AgvTaskRouteHighlight | null;
 };
 
+const AGV_CARGO_LIFT_DISTANCE_DEFAULT = 0.1;
+const AGV_CARGO_LIFT_SPEED_DEFAULT = 0.2;
+
 /** 动态 AGV 按产生器地图原点、轴映射和比例尺定位；静态 AGV 保持世界坐标驱动。 */
 export class AgvTelemetryDriver {
   private motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();
+  private liftStates = new WeakMap<ModelRuntimeEntry, AgvLiftState>();
+  private readonly liftStateSet = new Set<AgvLiftState>();
   private readonly routeHighlights = new Set<AgvTaskRouteHighlight>();
   private readonly reportedCargoIssues = new Set<string>();
 
@@ -146,7 +165,7 @@ export class AgvTelemetryDriver {
     let state = this.motionStates.get(model);
     if (!state) {
       if (x === null && y === null && heading === null) {
-        this.updateCargo(model, snapshot);
+        this.updateCargo(model, snapshot, deltaSeconds);
         return;
       }
       const targetYaw = heading === null ? null : this.resolveModelYaw(model, heading);
@@ -178,7 +197,7 @@ export class AgvTelemetryDriver {
       });
       this.updateTaskRoute(model, snapshot, state);
       this.updateTaskRouteHighlight(model, state, 0);
-      this.updateCargo(model, snapshot);
+      this.updateCargo(model, snapshot, deltaSeconds);
       return;
     }
 
@@ -215,13 +234,14 @@ export class AgvTelemetryDriver {
       }
     }
     this.updateTaskRouteHighlight(model, state, deltaSeconds);
-    this.updateCargo(model, snapshot);
+    this.updateCargo(model, snapshot, deltaSeconds);
   }
 
   public hasPendingMotion(model: ModelRuntimeEntry): boolean {
     const state = this.motionStates.get(model);
-    if (!state) return false;
-    return state.elapsedSeconds < state.durationSeconds;
+    const liftState = this.liftStates.get(model);
+    return (state ? state.elapsedSeconds < state.durationSeconds : false)
+      || (liftState ? Math.abs(liftState.targetOffset - liftState.offset) > 1e-9 : false);
   }
 
   public getTaskRoute(model: ModelRuntimeEntry, startNodeId?: string, endNodeId?: string): AgvMapRoute | null {
@@ -239,10 +259,12 @@ export class AgvTelemetryDriver {
     this.context.state.agvCargoMeshes.delete(assetCode);
   }
 
-  private updateCargo(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot): void {
+  private updateCargo(model: ModelRuntimeEntry, snapshot: DeviceTelemetrySnapshot, deltaSeconds: number): void {
     if (!this.context) return;
     const signalBits = readIntegerField(snapshot.fields, 'signalBits');
-    if (signalBits === 0) {
+    const command = readIntegerField(snapshot.fields, 'command');
+    this.updateLift(model, snapshot, command, signalBits, deltaSeconds);
+    if (signalBits === 0 || command === 6) {
       this.disposeCargoForAssetCode(model.assetCode);
       return;
     }
@@ -290,8 +312,51 @@ export class AgvTelemetryDriver {
     return cargo;
   }
 
+  private updateLift(
+    model: ModelRuntimeEntry,
+    snapshot: DeviceTelemetrySnapshot,
+    command: number | null,
+    signalBits: number | null,
+    deltaSeconds: number,
+  ): void {
+    const config = this.readCargoConfig(model);
+    if (config.liftNodes.length === 0) return;
+    const nodes = findModelNodesByName(model, this.context!.scene, config.liftNodes);
+    if (nodes.length !== new Set(config.liftNodes).size) return;
+
+    let state = this.liftStates.get(model);
+    if (!state) {
+      state = {
+        nodes,
+        baselines: new Map(nodes.map(node => [node, node.position.clone()])),
+        offset: 0,
+        targetOffset: 0,
+      };
+      this.liftStates.set(model, state);
+      this.liftStateSet.add(state);
+    }
+
+    if (command === 3) state.targetOffset = config.liftDistance;
+    else if (command === 1 || command === 2 || command === 4 || command === 5 || command === 6) {
+      state.targetOffset = 0;
+    } else if (command === 0 || command === null) {
+      state.targetOffset = signalBits === 1 ? config.liftDistance : 0;
+    }
+
+    const elapsed = Number.isFinite(deltaSeconds) && deltaSeconds > 0 ? deltaSeconds : 0;
+    const remaining = state.targetOffset - state.offset;
+    const step = Math.sign(remaining) * Math.min(Math.abs(remaining), config.liftSpeed * elapsed);
+    state.offset += step;
+    const worldOffset = new Vector3(0, state.offset, 0);
+    for (const node of state.nodes) {
+      const baseline = state.baselines.get(node)!;
+      node.position = baseline.add(worldDeltaToParentLocalDelta(node, worldOffset));
+      node.computeWorldMatrix(true);
+    }
+  }
+
   private resolveCargoSupportPosition(model: ModelRuntimeEntry): Vector3 | null {
-    const nodeNames = this.readCargoPlatformNodeNames(model);
+    const nodeNames = this.readCargoConfig(model).deckNodes;
     const nodes = findModelNodesByName(model, this.context!.scene, nodeNames);
     if (nodeNames.length > 0 && nodes.length === new Set(nodeNames).size) {
       const bounds = getNodesWorldBounds(nodes);
@@ -306,13 +371,13 @@ export class AgvTelemetryDriver {
     if (!this.reportedCargoIssues.has(issueKey)) {
       this.reportedCargoIssues.add(issueKey);
       this.context!.host.pushLog(
-        `AGV ${model.assetCode} 无法生成货物：请完整配置 dataDriven.cargo.nodes 载货节点，并确认节点存在。`,
+        `AGV ${model.assetCode} 无法生成货物：请完整配置 dataDriven.cargo.deckNodes 载货节点，并确认节点存在。`,
       );
     }
     return null;
   }
 
-  private readCargoPlatformNodeNames(model: ModelRuntimeEntry): string[] {
+  private readCargoConfig(model: ModelRuntimeEntry): AgvCargoConfig {
     const documentConfig = model.resolvedModelAsset?.dataDrivenConfig
       ?? model.entitySnapshot?.components.modelAsset?.dataDrivenConfig;
     const configs = [
@@ -320,13 +385,46 @@ export class AgvTelemetryDriver {
       ...(model.externalScriptRuntime?.getDataDrivenConfigs() ?? []),
     ];
     for (const dataDriven of configs) {
-      const nodes = readStringArrayPath(dataDriven, ['cargo', 'nodes']);
-      if (nodes.length > 0) return nodes;
+      const declaredDeckNodes = readStringArrayPath(dataDriven, ['cargo', 'deckNodes']);
+      const deckNodes = declaredDeckNodes.length > 0
+        ? declaredDeckNodes
+        : readStringArrayPath(dataDriven, ['cargo', 'nodes']);
+      if (deckNodes.length === 0) continue;
+      const cargo = isPlainRecord(dataDriven) && isPlainRecord(dataDriven.cargo) ? dataDriven.cargo : {};
+      const lift = isPlainRecord(cargo.lift) ? cargo.lift : {};
+      const declaredLiftNodes = readStringArrayPath(lift, ['followNodes']);
+      const configuredLiftNodes = declaredLiftNodes.length > 0
+        ? declaredLiftNodes
+        : readStringArrayPath(lift, ['nodes']);
+      const rawDistance = typeof lift.distance === 'number' ? lift.distance : Number(lift.distance);
+      const rawSpeed = typeof lift.speed === 'number' ? lift.speed : Number(lift.speed);
+      return {
+        deckNodes,
+        liftNodes: configuredLiftNodes.length > 0 ? configuredLiftNodes : deckNodes,
+        liftDistance: Number.isFinite(rawDistance) && rawDistance >= 0
+          ? rawDistance
+          : AGV_CARGO_LIFT_DISTANCE_DEFAULT,
+        liftSpeed: Number.isFinite(rawSpeed) && rawSpeed > 0
+          ? rawSpeed
+          : AGV_CARGO_LIFT_SPEED_DEFAULT,
+      };
     }
-    return [];
+    return {
+      deckNodes: [],
+      liftNodes: [],
+      liftDistance: AGV_CARGO_LIFT_DISTANCE_DEFAULT,
+      liftSpeed: AGV_CARGO_LIFT_SPEED_DEFAULT,
+    };
   }
 
   public resetMotionStates(): void {
+    for (const state of this.liftStateSet) {
+      for (const [node, baseline] of state.baselines) {
+        if (!node.isDisposed()) node.position.copyFrom(baseline);
+      }
+    }
+    this.liftStateSet.clear();
+    this.liftStates = new WeakMap<ModelRuntimeEntry, AgvLiftState>();
     for (const highlight of this.routeHighlights) highlight.dispose();
     this.routeHighlights.clear();
     this.motionStates = new WeakMap<ModelRuntimeEntry, AgvMotionState>();

@@ -22,7 +22,7 @@ import { BUILT_IN_AGV_MAPS } from '../../src/editor/model/agvMapLibrary';
 import { createDefaultAgvRouteHighlightConfig } from '../../src/editor/model/agvMap';
 import { isAgvRuntimeModel } from '../../src/runtime/babylon/telemetry/specialized/specializedModelAssets';
 import { SpecializedTelemetryRuntime } from '../../src/runtime/babylon/telemetry/specialized/SpecializedTelemetryRuntime';
-import type { SpecializedTelemetryHost } from '../../src/runtime/babylon/telemetry/specialized/types';
+import { createSpecializedTelemetrySharedState, type SpecializedTelemetryHost } from '../../src/runtime/babylon/telemetry/specialized/types';
 import type { ModelRuntimeEntry } from '../../src/runtime/babylon/SceneRuntime';
 import { spawnedDeviceInspectorStore } from '../../src/runtime/mqtt/spawnedDeviceInspectorStore';
 import { useEditorStore } from '../../src/editor/store/editorStore';
@@ -771,4 +771,86 @@ test('AGV signalBits=1 按模板生成器刷货并跟随载货节点集合，缺
   runtime.applyFrame(0.016);
   assert.equal(runtime.state.agvCargoMeshes.size, 0);
   assert.equal(cargo.root.isDisposed(), true);
+});
+
+
+test('AGV command 驱动载货台及伴随结构升降，货物同步并在放货完成后清理', t => {
+  const deckNodeNames = ['Box001', 'Box002'];
+  const liftNodeNames = [...deckNodeNames, 'Box003', 'Cylinder005'];
+  const entity = createAgvEntity({
+    device: { devType: 'agv', modelForwardAxis: 'x' },
+    cargo: { deckNodes: deckNodeNames, lift: { followNodes: liftNodeNames, distance: 0.1, speed: 0.2 } },
+    fixedNodes: [],
+  });
+  const engine = new NullEngine();
+  const scene = new Scene(engine);
+  const root = new TransformNode('agv-lift-runtime', scene);
+  const contentRoot = new TransformNode('agv-lift-content', scene);
+  contentRoot.parent = root;
+  const nodes = new Map<string, import('@babylonjs/core').Mesh>();
+  for (const name of liftNodeNames) {
+    const mesh = MeshBuilder.CreateBox(name, { size: 0.2 }, scene);
+    mesh.parent = contentRoot;
+    mesh.position.y = 0.2;
+    nodes.set(name, mesh);
+  }
+  const model = {
+    root,
+    contentRoot,
+    meshes: [...nodes.values()],
+    assetCode: 'AGV-01',
+    telemetryBinding: entity.components.telemetryBinding,
+    resolvedModelAsset: entity.components.modelAsset,
+    entitySnapshot: entity,
+    externalScriptRuntime: null,
+  } as unknown as ModelRuntimeEntry;
+  const state = createSpecializedTelemetrySharedState();
+  const host = {
+    pushLog: () => undefined,
+    resolveCargoGeneratorForModel: () => null,
+    syncGeneratedCargoVisual: () => undefined,
+    setGeneratedCargoRootPose: (cargo: { root: TransformNode }, position: Vector3, rotation: import('@babylonjs/core').Quaternion) => {
+      cargo.root.position.copyFrom(position);
+      cargo.root.rotationQuaternion = rotation.clone();
+    },
+    disposeGeneratedCargo: (cargo: { root: TransformNode }) => cargo.root.dispose(),
+  } as unknown as SpecializedTelemetryHost;
+  const driver = new AgvTelemetryDriver({ scene, state, host } as import('../../src/runtime/babylon/telemetry/specialized/types').SpecializedTelemetryDriverContext);
+  t.after(() => {
+    driver.resetMotionStates();
+    scene.dispose();
+    engine.dispose();
+  });
+
+  const apply = (command: number, deltaSeconds: number) => {
+    driver.applyToModel(model, createSnapshot({
+      x: 0, y: 0, r: 0, mode: 2, command, signalBits: 1, containerCode: 'CTN-005', task: 3005,
+    }), deltaSeconds);
+  };
+  apply(1, 0);
+  const cargo = state.agvCargoMeshes.get('AGV-01');
+  assert.ok(cargo);
+  assert.ok(Math.abs(cargo.root.position.y - 0.3) < 1e-6, '取货中保持低位');
+
+  apply(3, 0.25);
+  assert.ok(Math.abs(cargo.root.position.y - 0.35) < 1e-6, '取货完成抬升一半');
+  assert.ok(Math.abs(nodes.get('Box003')!.position.y - 0.25) < 1e-6, '伴随结构同步抬升');
+  assert.equal(driver.hasPendingMotion(model), true);
+
+  apply(0, 0.25);
+  assert.ok(Math.abs(cargo.root.position.y - 0.4) < 1e-6, '运输保持全抬升');
+  assert.equal(driver.hasPendingMotion(model), false);
+
+  apply(4, 0.25);
+  assert.ok(Math.abs(cargo.root.position.y - 0.35) < 1e-6, '放货中下降一半');
+  apply(6, 0.25);
+  assert.equal(state.agvCargoMeshes.size, 0, '放货完成后即使光电仍有货也清货');
+  assert.ok(Math.abs(nodes.get('Cylinder005')!.position.y - 0.2) < 1e-6, '放货完成结构回低位');
+
+  apply(3, 0.5);
+  assert.ok(Math.abs(nodes.get('Box003')!.position.y - 0.3) < 1e-6);
+  driver.resetMotionStates();
+  for (const name of liftNodeNames) {
+    assert.ok(Math.abs(nodes.get(name)!.position.y - 0.2) < 1e-6, `${name} 应恢复编辑基线`);
+  }
 });
